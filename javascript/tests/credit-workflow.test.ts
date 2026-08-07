@@ -40,7 +40,7 @@ function makeService(
 }
 
 describe("credit lease workflow", () => {
-  it("records child workflow usage in the shared journal without another debit", async () => {
+  it("records externally billed usage without another debit", async () => {
     const recordUsage = vi.fn().mockResolvedValue({
       usageId: "usage-1",
       userId: "user-1",
@@ -62,27 +62,25 @@ describe("credit lease workflow", () => {
     const result = await service.recordUsage(
       "user-1",
       {
-        operation: "roadmap_gen",
-        measures: { jobs: 0 },
+        operation: "external_inference",
+        measures: { calls: 1 },
         dimensions: { model: "linkup" },
       },
-      "roadmap:usage:outline",
+      "external:usage:1",
       {
-        usageKind: "workflow_step",
-        workflowKey: "roadmap-1",
+        providerRequestId: "request-1",
       },
     );
 
     expect(result.usageId).toBe("usage-1");
     expect(recordUsage).toHaveBeenCalledWith(
       "user-1",
-      "roadmap_gen",
+      "external_inference",
       new Decimal(12),
       expect.objectContaining({
-        idempotencyKey: "roadmap:usage:outline",
+        idempotencyKey: "external:usage:1",
         metadata: expect.objectContaining({
-          usageKind: "workflow_step",
-          workflowKey: "roadmap-1",
+          providerRequestId: "request-1",
           breakdownTotal: "12",
         }),
       }),

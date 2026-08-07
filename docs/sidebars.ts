@@ -6,7 +6,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Getting started',
       link: {type: 'generated-index', description: 'What bursar is and the fastest way to a working credit ledger.'},
-      items: ['intro', 'quickstart'],
+      items: ['intro', 'quickstart', 'agent-skills'],
     },
     {
       type: 'category',

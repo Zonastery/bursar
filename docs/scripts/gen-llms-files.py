@@ -20,38 +20,42 @@ STATIC_DIR = DOCS_DIR / "static"
 
 SITE_URL = "https://zonastery.github.io/bursar"
 
-# Section title -> list of (slug_or_url, fallback_description, display_name).
-# A slug maps to a page under docs/docs/; anything else is treated as an
-# external URL (Optional section only) and is not inlined in llms-full.txt.
-# display_name is optional; when omitted it is derived from the slug.
-MANIFEST: list[tuple[str, list[tuple[str, str | None, str | None]]]] = [
+# Section title -> list of (slug_or_url, fallback_description, display_name,
+# index_description_override). A slug maps to a page under docs/docs/;
+# anything else is treated as an external URL (Optional section only) and is
+# not inlined in llms-full.txt. display_name is optional; when omitted it is
+# derived from the slug. index_description_override, when given, replaces the
+# page's frontmatter description in llms.txt (frontmatter descriptions are
+# written for SEO and can exceed the ~120-char llms.txt guidance).
+MANIFEST: list[tuple[str, list[tuple[str, str | None, str | None, str | None]]]] = [
     (
         "Getting Started",
         [
-            ("intro", None, "Introduction"),
-            ("quickstart", None, "Quickstart"),
+            ("intro", None, "Introduction", "Reusable credit ledger and billing engine for AI SaaS — one config, two SDKs, exact money on one PostgreSQL schema."),
+            ("quickstart", None, "Quickstart", "Ten minutes to a working credit ledger — install the schema, publish a config, grant credits, and charge for usage."),
+            ("agent-skills", None, "Agent Skills", "Install the bursar skill for coding agents in one command — metering, credits, plans, quotas, and billing done right."),
         ],
     ),
     (
         "Core Concepts",
         [
-            ("concepts/data-model", None, "Data model"),
-            ("concepts/configuration", None, "Configuration"),
-            ("concepts/pricing", None, "Pricing"),
-            ("concepts/expressions", None, "Expressions"),
-            ("concepts/plans", None, "Plans"),
-            ("concepts/billing", None, "Billing"),
-            ("concepts/architecture", None, "Architecture"),
+            ("concepts/data-model", None, "Data model", "Accounts, the append-only ledger, lots, leases, and allowances — mapped to tables on one PostgreSQL schema."),
+            ("concepts/configuration", None, "Configuration", "The strict, versioned BursarConfig document — operations, rate cards, credits, plans, and validation."),
+            ("concepts/pricing", None, "Pricing", None),
+            ("concepts/expressions", None, "Expressions", "The safe expression language for pricing formulas — allowlisted functions and operators, shared by both SDKs."),
+            ("concepts/plans", None, "Plans", "What a paid tier gets — allowed operations, rate cards, free credit allowances, features, and quotas."),
+            ("concepts/billing", None, "Billing", "How billing connects the credit ledger to a payment provider — offers, events, and auto-recharge guardrails."),
+            ("concepts/architecture", None, "Architecture", "The Bursar facade and its capabilities — credits, catalog, accounts, billing, and commerce over the Postgres schema."),
         ],
     ),
     (
         "Guides",
         [
-            ("guides/credit-lifecycle", None, "Credit lifecycle"),
+            ("guides/credit-lifecycle", None, "Credit lifecycle", "Follow one user's credits from signup to ledger — grants, purchases, charges, refunds, expiry, and revocation."),
             ("guides/financial-safety", None, "Financial safety"),
             ("guides/multitenancy", None, "Multitenancy"),
             ("guides/subscription-integration", None, "Subscription integration"),
-            ("guides/storage-backends", None, "Storage backends"),
+            ("guides/storage-backends", None, "Storage backends", "PostgreSQL is the production credit store; ClickHouse and S3 adapters ingest high-cardinality data through the outbox."),
         ],
     ),
     (
@@ -64,8 +68,8 @@ MANIFEST: list[tuple[str, list[tuple[str, str | None, str | None]]]] = [
         "Python API",
         [
             ("python-api/index", None, "Overview"),
-            ("python-api/pricing-engine", None, "PricingEngine"),
-            ("python-api/credit-manager", None, "Credit manager"),
+            ("python-api/pricing-engine", None, "PricingEngine", "The bursar PricingEngine — database-free pricing from a canonical config, with UsageMetrics and CostBreakdown results."),
+            ("python-api/credit-manager", None, "Credit manager", "The bursar credits service — balances, metered charging, leases, plans, ledger history, analytics, and teams."),
             ("python-api/stores", None, "Stores"),
         ],
     ),
@@ -73,8 +77,8 @@ MANIFEST: list[tuple[str, list[tuple[str, str | None, str | None]]]] = [
         "JavaScript API",
         [
             ("javascript-api/index", None, "Overview"),
-            ("javascript-api/pricing-engine", None, "PricingEngine"),
-            ("javascript-api/credit-manager", None, "Credit manager"),
+            ("javascript-api/pricing-engine", None, "PricingEngine", "The bursar PricingEngine — database-free pricing from a canonical config, with UsageMetrics and CostBreakdown results."),
+            ("javascript-api/credit-manager", None, "Credit manager", "The async bursar credits service — balances, metered charging, leases, plans, ledger history, analytics, teams."),
             ("javascript-api/stores", None, "Stores"),
         ],
     ),
@@ -154,24 +158,35 @@ def clean_mdx(text: str) -> str:
     text = re.sub(r"^import .*?;\s*\n?", "", text, flags=re.M)
     # Code fences with titles: ```bash title="Terminal" -> ```bash
     text = re.sub(r"^(```\w*)\s+title=\"[^\"]*\"", r"\1", text, flags=re.M)
-    # Tabs components: drop the wrapper, keep the inner content
-    text = re.sub(r"<Tabs[^>]*>\s*\n?", "", text)
-    text = re.sub(r"</Tabs>\s*\n?", "", text)
+    # JSX images: useBaseUrl() and className are meaningless outside Docusaurus.
+    # The src is not resolvable in plain markdown, so fall back to the alt text.
+    text = re.sub(
+        r"<img\b[^>]*?>",
+        lambda m: f"*{a.group(1)}*\n" if (a := re.search(r'alt="([^"]*)"', m.group(0))) else "",
+        text,
+        flags=re.S,
+    )
+    # Tabs components: drop the wrapper, keep the inner content. Component tags
+    # may be indented in the source; consume the indentation so following lines
+    # (e.g. admonitions) stay at column 0.
+    text = re.sub(r"^[ \t]*<Tabs[^>]*>[ \t]*\n?", "", text, flags=re.M)
+    text = re.sub(r"^[ \t]*</Tabs>[ \t]*\n?", "", text, flags=re.M)
     # TabItem: keep content, label it so the language split stays readable
     text = re.sub(
-        r"<TabItem[^>]*label=\"([^\"]+)\"[^>]*>\s*\n?",
+        r"^[ \t]*<TabItem[^>]*label=\"([^\"]+)\"[^>]*>[ \t]*\n?",
         r"**\1:**\n",
         text,
+        flags=re.M,
     )
-    text = re.sub(r"</TabItem>\s*\n?", "", text)
-    # Docusaurus admonitions (::note / :::info Title ... :::) -> bold labels
+    text = re.sub(r"^[ \t]*</TabItem>[ \t]*\n?", "", text, flags=re.M)
+    # Docusaurus admonitions (:::note / :::info Title ... :::) -> bold labels
     text = re.sub(
-        r"^:::(note|tip|info|warning|caution|danger)(.*)$",
+        r"^[ \t]*:::(note|tip|info|warning|caution|danger)(.*)$",
         lambda m: f"**{m.group(1).title()}:**{m.group(2).rstrip()}\n",
         text,
         flags=re.M,
     )
-    text = re.sub(r"^:::+$", "", text, flags=re.M)
+    text = re.sub(r"^[ \t]*:::+[ \t]*$", "", text, flags=re.M)
     # Collapse runs of blank lines left by removed markup
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip() + "\n"
@@ -192,9 +207,11 @@ def entry_name(entry: str, name: str | None) -> str:
     return entry.rsplit("/", 1)[-1]
 
 
-def describe(entry: str, fallback: str | None) -> str:
-    """Page description: frontmatter description, else manifest fallback,
-    else the page's frontmatter title."""
+def describe(entry: str, fallback: str | None, override: str | None) -> str:
+    """Page description for llms.txt. Precedence: manifest override, frontmatter
+    description, manifest fallback, page title."""
+    if override:
+        return override
     if entry.startswith("http"):
         return fallback or entry
     path = page_file(entry)
@@ -212,6 +229,11 @@ def describe(entry: str, fallback: str | None) -> str:
     if fields.get("title"):
         return fields["title"]
     raise SystemExit(f"gen-llms-files: no description available for {entry!r}")
+
+
+def _pad(entry: tuple[str, ...]) -> tuple[str, str | None, str | None, str | None]:
+    """Pad a manifest entry to the 4-tuple (slug, fallback, name, override)."""
+    return (entry + (None,) * (4 - len(entry)))[:4]  # type: ignore[return-value]
 
 
 def render_index() -> str:
@@ -233,8 +255,8 @@ def render_index() -> str:
     for section, entries in MANIFEST:
         lines.append(f"## {section}")
         lines.append("")
-        for entry, fallback, name in entries:
-            lines.append(f"- [{entry_name(entry, name)}]({entry_url(entry)}): {describe(entry, fallback)}")
+        for entry, fallback, name, override in map(_pad, entries):
+            lines.append(f"- [{entry_name(entry, name)}]({entry_url(entry)}): {describe(entry, fallback, override)}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -256,7 +278,7 @@ def render_full() -> tuple[str, int]:
     for section, entries in MANIFEST:
         if section == "Optional":
             continue
-        for entry, _fallback, _name in entries:
+        for entry, _fallback, _name, _override in map(_pad, entries):
             path = page_file(entry)
             if path is None:
                 raise SystemExit(f"gen-llms-files: missing page for slug {entry!r}")
@@ -321,11 +343,19 @@ def main() -> int:
     for section, entries in MANIFEST:
         if section == "Optional":
             continue
-        for entry, _fallback, _name in entries:
+        for entry, _fallback, _name, _override in map(_pad, entries):
             source_line = f"> Source: {entry_url(entry)}"
             if source_line not in full:
                 print(f"ERROR: {source_line} missing from llms-full.txt", file=sys.stderr)
                 return 1
+
+    # Non-fatal best-practice check: llms.txt descriptions should be brief.
+    for section, entries in MANIFEST:
+        for entry, fallback, name, override in map(_pad, entries):
+            desc = describe(entry, fallback, override)
+            if len(desc) > 120:
+                print(f"WARNING: description for {name or entry} is {len(desc)} chars "
+                      "(>120, llmstxt.org asks for brief descriptions)", file=sys.stderr)
 
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     (STATIC_DIR / "llms.txt").write_text(index, encoding="utf-8")

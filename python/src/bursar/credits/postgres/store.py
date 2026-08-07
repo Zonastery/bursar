@@ -509,6 +509,7 @@ class PostgresStore(CreditStore):
 
         return DeductionResult(
             entry_id=str(result.entry_id or ""),
+            usage_charge_id=result.charge_id,
             user_id=user_id,
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
@@ -732,6 +733,7 @@ class PostgresStore(CreditStore):
             )
         return DeductionResult(
             entry_id=str(getattr(result, "entry_id", "")),
+            usage_charge_id=result.charge_id,
             user_id=user_id,
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),

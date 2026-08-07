@@ -1,5 +1,6 @@
 /**
- * Vitest global setup — starts a disposable Postgres 16 + pg_partman 5
+ * Vitest global setup — starts disposable PostgreSQL 17 with pg_partman 5
+ * and pg_jsonschema 0.3
  * testcontainer when `DATABASE_URL` isn't already set, so `bun run test`
  * exercises the real PostgresStore integration/concurrency suite by default
  * (Docker permitting) instead of silently skipping it. CI sets `DATABASE_URL`
@@ -23,7 +24,7 @@ declare module "vitest" {
 }
 
 let container: StartedPostgreSqlContainer | undefined;
-const DEFAULT_POSTGRES_IMAGE = "ghcr.io/dbsystel/postgresql-partman:16-5";
+const DEFAULT_POSTGRES_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.156";
 
 export async function setup(project: TestProject): Promise<void> {
   if (process.env.DATABASE_URL) {

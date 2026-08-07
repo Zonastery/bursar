@@ -54,6 +54,26 @@ COMMENT ON FUNCTION bursar.uuid_v7()
 IS 'Generate an RFC 9562 UUIDv7 with millisecond time locality for database row identifiers.';
 COMMENT ON FUNCTION bursar.is_nonempty_bounded_text(text, integer)
 IS 'Validate trimmed non-empty text against an explicit character limit.';
+COMMENT ON FUNCTION bursar.catalog_document_shape_schema() IS
+'Canonical versioned JSON Schema for the complete Bursar pricing catalog.';
+COMMENT ON FUNCTION bursar.matches_catalog_fragment(jsonb, jsonb) IS
+'Validates a projected catalog fragment against a canonical sub-schema with the catalog definitions in scope.';
+COMMENT ON FUNCTION bursar.matches_catalog_definitions(jsonb, VARIADIC text []) IS
+'Validates a catalog projection against one or more named definitions from the canonical catalog JSON Schema.';
+COMMENT ON FUNCTION bursar.entitlement_value_schema(jsonb) IS
+'Builds the JSON Schema for a value from a validated boolean, integer, string, or enum entitlement definition.';
+COMMENT ON FUNCTION bursar.measure_object_schema() IS
+'JSON Schema for an open set of named numeric usage and job measures.';
+COMMENT ON FUNCTION bursar.dimension_object_schema() IS
+'JSON Schema for an open set of named scalar usage and job dimensions.';
+COMMENT ON FUNCTION bursar.usage_pricing_snapshot_schema() IS
+'JSON Schema for immutable usage-charge pricing snapshots.';
+COMMENT ON FUNCTION bursar.valid_measure_object(jsonb, integer) IS
+'Validates measure structure with pg_jsonschema and enforces PostgreSQL numeric finiteness, sign, and byte limits.';
+COMMENT ON FUNCTION bursar.valid_dimension_object(jsonb, integer) IS
+'Validates scalar dimension structure with pg_jsonschema and enforces byte limits.';
+COMMENT ON FUNCTION bursar.catalog_plan_rollout_schema() IS
+'JSON Schema for plan rollout overrides supplied during catalog activation.';
 COMMENT ON TABLE bursar.event_outbox IS
 'Claimable versioned events for optional sinks; delivered payloads are '
 'retention-bounded while required undelivered events remain replayable.';

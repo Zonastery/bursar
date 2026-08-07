@@ -77,6 +77,15 @@ TO bursar_runtime;
 GRANT EXECUTE
 ON FUNCTION extensions.gen_random_bytes(integer)
 TO bursar_runtime;
+GRANT EXECUTE
+ON FUNCTION extensions.jsonb_matches_schema(json, jsonb)
+TO bursar_runtime;
+GRANT EXECUTE
+ON FUNCTION extensions.jsonschema_is_valid(json)
+TO bursar_runtime;
+GRANT EXECUTE
+ON FUNCTION extensions.jsonschema_validation_errors(json, json)
+TO bursar_runtime;
 
 DO $$
 DECLARE

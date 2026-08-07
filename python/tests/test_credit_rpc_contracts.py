@@ -552,7 +552,7 @@ def test_deduction_repository_records_child_usage_without_a_ledger_debit() -> No
             feature=None,
             model=None,
             region=None,
-            metadata='{"usage_kind":"workflow_step"}',
+            metadata='{"usage_kind":"job_event"}',
             measures='{"jobs":0}',
             dimensions='{"model":"linkup"}',
         )
@@ -571,7 +571,7 @@ def test_deduction_repository_records_child_usage_without_a_ledger_debit() -> No
             None,
             None,
             None,
-            '{"usage_kind":"workflow_step"}',
+            '{"usage_kind":"job_event"}',
             '{"jobs":0}',
             '{"model":"linkup"}',
         ],

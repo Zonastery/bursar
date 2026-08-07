@@ -316,10 +316,7 @@ BEGIN
         SET plan_id = v_to.id,
             catalog_revision_id = v_to.catalog_revision_id,
             allowance = v_to.credit_allowance_amount,
-            policy_snapshot = COALESCE(
-                v_to.definition->'credit_allowance',
-                '{}'::jsonb
-            )
+            policy_snapshot = v_to.definition->'credit_allowance'
         WHERE allowance.account_id = p_account_id
           AND allowance.plan_id = v_from.id
           AND allowance.catalog_revision_id = v_from.catalog_revision_id
@@ -352,6 +349,41 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION bursar.catalog_plan_rollout_schema()
+RETURNS json
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $function$
+    SELECT $schema$
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plans": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "effective": {
+                "enum": [
+                  "immediate",
+                  "next_renewal",
+                  "new_assignments_only"
+                ]
+              },
+              "include_pinned": {"type": "boolean"}
+            },
+            "required": ["effective"]
+          }
+        }
+      }
+    }
+    $schema$::json
+$function$;
+
 CREATE FUNCTION bursar.schedule_catalog_plan_rollout(
     p_catalog_revision_id uuid,
     p_rollout jsonb DEFAULT '{"plans": {}}'::jsonb
@@ -379,15 +411,12 @@ BEGIN
     END IF;
 
     IF p_rollout IS NULL
-       OR jsonb_typeof(p_rollout) <> 'object'
-       OR EXISTS (
-           SELECT 1
-           FROM jsonb_object_keys(p_rollout) AS field(field_name)
-           WHERE field.field_name <> 'plans'
-       )
-       OR (
-           p_rollout ? 'plans'
-           AND jsonb_typeof(p_rollout->'plans') <> 'object'
+       OR NOT COALESCE(
+           extensions.jsonb_matches_schema(
+               bursar.catalog_plan_rollout_schema(),
+               p_rollout
+           ),
+           false
        )
     THEN
         RAISE EXCEPTION 'invalid catalog rollout manifest'
@@ -399,28 +428,7 @@ BEGIN
         FROM jsonb_each(COALESCE(p_rollout->'plans', '{}'::jsonb))
             AS entry(key, value)
     LOOP
-        IF jsonb_typeof(override_row.policy) <> 'object'
-           OR override_row.policy->>'effective' NOT IN (
-               'immediate',
-               'next_renewal',
-               'new_assignments_only'
-           )
-           OR EXISTS (
-               SELECT 1
-               FROM jsonb_object_keys(override_row.policy)
-                   AS field(field_name)
-               WHERE field.field_name NOT IN (
-                   'effective',
-                   'include_pinned'
-               )
-           )
-           OR (
-               override_row.policy ? 'include_pinned'
-               AND jsonb_typeof(
-                   override_row.policy->'include_pinned'
-               ) <> 'boolean'
-           )
-           OR NOT EXISTS (
+        IF NOT EXISTS (
                SELECT 1
                FROM bursar.catalog_plans AS plan
                WHERE plan.catalog_revision_id = p_catalog_revision_id

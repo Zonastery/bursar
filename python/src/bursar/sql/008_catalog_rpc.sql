@@ -26,8 +26,6 @@ DECLARE
 BEGIN
     IF p_activate IS NULL
        OR p_yaml_schema_version <> 1
-       OR jsonb_typeof(p_source_document) <> 'object'
-       OR p_source_document->>'version' IS DISTINCT FROM '1'
     THEN
         RAISE EXCEPTION 'invalid_catalog' USING ERRCODE = '22023';
     END IF;
@@ -51,46 +49,12 @@ BEGIN
         true
     );
 
-    IF EXISTS (
-        SELECT 1
-        FROM jsonb_object_keys(p_source_document) AS key_name(key)
-        WHERE key NOT IN (
-            'version',
-            'catalog',
-            'pricing',
-            'credits',
-            'entitlements',
-            'admission',
-            'plans',
-            'commerce'
-        )
-    )
-    THEN
-        RAISE EXCEPTION 'unknown_catalog_field' USING ERRCODE = '22023';
-    END IF;
-
-    PERFORM bursar.require_json_object(
-        p_source_document->'credits',
-        'credits'
-    );
-    PERFORM bursar.require_json_object(
-        p_source_document #> '{credits,accounting}',
-        'credits.accounting'
-    );
-
     IF p_source_document #>> '{credits,accounting,unit}' <> 'credit'
        OR p_source_document #>> '{credits,accounting,scale}' <> '6'
        OR p_source_document #>> '{credits,accounting,rounding}' <> 'half_up'
     THEN
         RAISE EXCEPTION 'unsupported_credit_accounting'
             USING ERRCODE = '22023';
-    END IF;
-
-    IF p_source_document #> '{credits,buckets}' IS NOT NULL THEN
-        PERFORM bursar.require_json_object(
-            p_source_document #> '{credits,buckets}',
-            'credits.buckets'
-        );
     END IF;
 
     v_default_bucket := p_source_document #>> '{credits,default_bucket}';
@@ -167,11 +131,7 @@ BEGIN
             COALESCE(p_source_document->'plans', '{}'::jsonb)
         ) AS plan_entry(key, value)
         WHERE plan_entry.value ? 'rank'
-          AND (
-              jsonb_typeof(plan_entry.value->'rank') <> 'number'
-              OR (plan_entry.value->>'rank')::numeric < 0
-              OR mod((plan_entry.value->>'rank')::numeric, 1) <> 0
-          )
+          AND (plan_entry.value->>'rank')::numeric < 0
     )
     THEN
         RAISE EXCEPTION 'plans.*.rank must be a non-negative integer'
@@ -213,64 +173,6 @@ BEGIN
         RAISE EXCEPTION
             'next_renewal default rollout requires a subscription offer'
             USING ERRCODE = '22023';
-    END IF;
-
-    IF p_source_document #> '{commerce,subscription_changes}' IS NOT NULL THEN
-        PERFORM bursar.require_json_object(
-            p_source_document #> '{commerce,subscription_changes}',
-            'commerce.subscription_changes'
-        );
-
-        IF EXISTS (
-            SELECT 1
-            FROM jsonb_each(
-                p_source_document #> '{commerce,subscription_changes}'
-            ) AS change_policy(key, value)
-            WHERE change_policy.key NOT IN (
-                'upgrade',
-                'downgrade',
-                'lateral',
-                'cadence_change'
-            )
-               OR jsonb_typeof(change_policy.value) <> 'object'
-               OR change_policy.value->>'effective' IS NULL
-               OR change_policy.value->>'effective' NOT IN (
-                   'immediate',
-                   'renewal'
-               )
-               OR change_policy.value->>'proration' IS NULL
-               OR change_policy.value->>'proration' NOT IN (
-                   'prorated',
-                   'none'
-               )
-               OR COALESCE(
-                   change_policy.value->>'payment_failure',
-                   'prevent_change'
-               ) NOT IN (
-                   'prevent_change',
-                   'apply_change'
-               )
-               OR EXISTS (
-                   SELECT 1
-                   FROM jsonb_object_keys(
-                       CASE
-                           WHEN jsonb_typeof(change_policy.value) = 'object'
-                           THEN change_policy.value
-                           ELSE '{}'::jsonb
-                       END
-                   )
-                       AS policy_field(field_name)
-                   WHERE policy_field.field_name NOT IN (
-                       'effective',
-                       'proration',
-                       'payment_failure'
-                   )
-               )
-        )
-        THEN
-            RAISE EXCEPTION 'invalid commerce subscription change policy'
-                USING ERRCODE = '22023';
-        END IF;
     END IF;
 
     IF p_source_document #> '{commerce,auto_recharge}' IS NOT NULL

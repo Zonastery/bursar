@@ -4,6 +4,7 @@ import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
 
 export const DeductionRowSchema = z
   .object({
+    charge_id: z.string().nullable().optional(),
     entry_id: z.string().nullable().optional(),
     amount: z
       .union([z.string(), z.number()] as const)

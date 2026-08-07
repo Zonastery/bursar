@@ -47,16 +47,16 @@ uv run pytest                 # full suite
 uv run pytest -q              # quiet
 ```
 
-Store/manager/SQL **integration tests run against a real Postgres with
-pg_partman 5**. They read the connection string from `DATABASE_URL` (falling
-back to the legacy `BURSAR_TEST_PG_URL`) or start a disposable Postgres 16 +
-pg_partman 5 testcontainer when Docker is available. Without either, database
-tests skip with a visible reason. To run everything locally:
+Store/manager/SQL **integration tests run against real PostgreSQL with
+pg_partman 5 and pg_jsonschema 0.3**. They read the connection string from
+`DATABASE_URL` (falling back to the legacy `BURSAR_TEST_PG_URL`) or start a
+disposable PostgreSQL 17 testcontainer when Docker is available. Without
+either, database tests skip with a visible reason. To run everything locally:
 
 ```bash
 docker run -d --name bursar-pg -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=bursar -p 5432:5432 \
-  ghcr.io/dbsystel/postgresql-partman:16-5
+  public.ecr.aws/supabase/postgres:17.6.1.156
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar uv run pytest
 ```
 
@@ -125,7 +125,8 @@ authoritative gate.** Install them with `lefthook install`.
 4. Ensure all tests pass and there are no new type errors.
 5. Open a PR against `main`.
 6. CI runs lint → typecheck → test (Python 3.12–3.13, Node 22/24, both
-   against PostgreSQL 16 + pg_partman 5) and the cross-SDK parity gate.
+   against PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3) and the
+   cross-SDK parity gate.
 
 ## Adding Storage Backends (Python)
 

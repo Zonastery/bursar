@@ -1,26 +1,107 @@
 -- Regression coverage for the irreversible data-model decisions in the clean-slate schema.
+BEGIN;
+
+SELECT bursar.create_tenant(
+    '00000000-0000-0000-0000-000000000888'::uuid,
+    'redesign-regression',
+    'Redesign regression'
+);
+SELECT set_config(
+    'bursar.tenant_id',
+    '00000000-0000-0000-0000-000000000888',
+    false
+);
+
 DO $$
 DECLARE
     v_schema jsonb := bursar.catalog_document_shape_schema();
-    v_error text;
 BEGIN
-    v_error := bursar.catalog_shape_error(
-        '{"version":1,"credits":{},"catalog":{"activation":{"mode":"on_publish"}}}'::jsonb,
-        v_schema,
-        v_schema->'$defs'
-    );
-    IF v_error NOT LIKE '%.catalog.activation is not allowed' THEN
-        RAISE EXCEPTION 'legacy catalog.activation was not rejected: %', v_error;
+    IF NOT extensions.jsonschema_is_valid(v_schema::json) THEN
+        RAISE EXCEPTION 'canonical catalog JSON Schema is invalid';
     END IF;
 
-    v_error := bursar.catalog_shape_error(
-        '{"max_purchases":1,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_charge_minor":100,"cooldown":{"unit":"hour","count":1},"max_failures":3}'::jsonb,
-        v_schema #> '{$defs,AutoRechargeLimits}',
-        v_schema->'$defs',
-        '$.commerce.auto_recharge.limits'
-    );
-    IF v_error NOT LIKE '%.max_failures is not allowed' THEN
-        RAISE EXCEPTION 'legacy max_failures was not rejected: %', v_error;
+    IF NOT extensions.jsonschema_is_valid(bursar.measure_object_schema())
+       OR NOT extensions.jsonschema_is_valid(bursar.dimension_object_schema())
+       OR NOT extensions.jsonschema_is_valid(
+           bursar.usage_pricing_snapshot_schema()
+       )
+       OR NOT extensions.jsonschema_is_valid(
+           bursar.catalog_plan_rollout_schema()
+       )
+    THEN
+        RAISE EXCEPTION 'a Bursar-owned JSON Schema document is invalid';
+    END IF;
+
+    IF NOT bursar.valid_measure_object(
+        '{"input_tokens":12,"cost_usd":"0.0042"}'::jsonb
+    ) OR bursar.valid_measure_object(
+        '{"input_tokens":-1}'::jsonb
+    ) OR bursar.valid_measure_object(
+        '{"input_tokens":{"value":12}}'::jsonb
+    ) THEN
+        RAISE EXCEPTION 'measure-map JSON Schema contract was not enforced';
+    END IF;
+
+    IF NOT bursar.valid_dimension_object(
+        '{"provider":"openrouter","cached":false,"attempt":2}'::jsonb
+    ) OR bursar.valid_dimension_object(
+        '{"provider":{"name":"openrouter"}}'::jsonb
+    ) THEN
+        RAISE EXCEPTION 'dimension-map JSON Schema contract was not enforced';
+    END IF;
+
+    IF NOT bursar.matches_catalog_definitions(
+        '{"amount":"10","window":{"type":"calendar","unit":"month"}}'::jsonb,
+        'CreditAllowance'
+    ) OR bursar.matches_catalog_definitions(
+        '{"amount":"10","window":{"type":"calendar","unit":"month"},"legacy":true}'::jsonb,
+        'CreditAllowance'
+    ) THEN
+        RAISE EXCEPTION 'credit-allowance snapshot schema was not enforced';
+    END IF;
+
+    IF NOT bursar.matches_catalog_definitions(
+        '{"type":"boolean","default":true}'::jsonb,
+        'BooleanFeature'
+    ) THEN
+        RAISE EXCEPTION 'valid catalog schema definition was rejected';
+    END IF;
+
+    IF bursar.matches_catalog_definitions(
+        '{"type":"boolean","default":true,"legacy":true}'::jsonb,
+        'BooleanFeature'
+    ) THEN
+        RAISE EXCEPTION 'unknown catalog definition property was accepted';
+    END IF;
+
+    IF NOT extensions.jsonschema_is_valid(
+        bursar.entitlement_value_schema(
+            '{"type":"integer","default":2,"minimum":1,"maximum":3}'::jsonb
+        )
+    ) OR extensions.jsonb_matches_schema(
+        bursar.entitlement_value_schema(
+            '{"type":"integer","default":2,"minimum":1,"maximum":3}'::jsonb
+        ),
+        '4'::jsonb
+    ) THEN
+        RAISE EXCEPTION 'dynamic entitlement JSON Schema did not enforce its bounds';
+    END IF;
+
+    IF extensions.jsonb_matches_schema(
+        v_schema::json,
+        '{"version":1,"credits":{},"catalog":{"activation":{"mode":"on_publish"}}}'::jsonb
+    ) THEN
+        RAISE EXCEPTION 'legacy catalog.activation was not rejected';
+    END IF;
+
+    IF extensions.jsonb_matches_schema(
+        jsonb_build_object(
+            '$defs', v_schema->'$defs',
+            '$ref', '#/$defs/AutoRechargeLimits'
+        )::json,
+        '{"max_purchases":1,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_charge_minor":100,"cooldown":{"unit":"hour","count":1},"max_failures":3}'::jsonb
+    ) THEN
+        RAISE EXCEPTION 'legacy max_failures was not rejected';
     END IF;
 END $$;
 
@@ -71,8 +152,8 @@ DO $$
 DECLARE
     v_revision uuid;
     v_plan uuid;
-    v_direct_subject uuid := '00000000-0000-0000-0000-000000000556';
-    v_lease_subject uuid := '00000000-0000-0000-0000-000000000557';
+    v_direct_subject uuid := '00000000-0000-0000-0000-000000000124';
+    v_lease_subject uuid := '00000000-0000-0000-0000-000000000125';
     v_charge record;
     v_lease record;
     v_settlement record;
@@ -290,7 +371,7 @@ DO $$
 DECLARE
     v_revision uuid;
     v_plan uuid;
-    v_subject uuid := '00000000-0000-0000-0000-000000000558';
+    v_subject uuid := '00000000-0000-0000-0000-000000000126';
     v_charge record;
     v_gifted_consumed numeric;
 BEGIN
@@ -377,7 +458,7 @@ DECLARE
 BEGIN
     SELECT revision_id INTO v_revision FROM bursar.publish_and_activate_catalog(
         1,
-        '{"version":1,"pricing":{"operations":{"chat":{"measures":{"tokens":{"unit":"token"}},"dimensions":{}}},"rate_cards":{"standard":{"operations":{"chat":{"rules":[],"unmatched":{"action":"charge","charge":{"type":"per_unit","measure":"tokens","rate":"1"}}}}}}},"credits":{"accounting":{"unit":"credit","scale":6,"rounding":"half_up"},"buckets":{"expiring":{"priority":10,"expiry":{"type":"after_grant","interval":{"unit":"month","count":2},"timezone":"Asia/Kolkata"}}},"default_bucket":"expiring"},"plans":{"p":{"display_name":"P","rate_card":"standard","credit_allowance":{"amount":"3","window":{"type":"plan_assignment","interval":{"unit":"month","count":1},"timezone":"Asia/Kolkata"}}}},"commerce":{"providers":{"stripe":{"type":"stripe"},"vendor":{"type":"custom","adapter":"tests.vendor"}},"offers":{"o":{"type":"subscription","display_name":"O","price":{"amount_minor":1000,"currency":"USD"},"providers":{"stripe":{"type":"stripe_price","price_id":"price_1"}},"plan":"p","billing_interval":{"unit":"year","count":1}},"pack":{"type":"topup","display_name":"Pack","price":{"amount_minor":1000,"currency":"USD"},"providers":{"vendor":{"type":"custom_object","object_kind":"one_time","external_id":"pack_1"}},"credits_per_unit":"10","bucket":"expiring","quantity":{"minimum":1,"maximum":3,"default":2}}},"auto_recharge":{"eligible_topups":["pack"],"balance_below":{"minimum":"0","maximum":"2","default":"2"},"rearm_above":"3","quantity":{"minimum":1,"maximum":3,"default":2},"limits":{"max_purchases":3,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_consecutive_failures":3}}}}'::jsonb,
+        '{"version":1,"pricing":{"operations":{"chat":{"measures":{"tokens":{"unit":"token"}},"dimensions":{}}},"rate_cards":{"standard":{"operations":{"chat":{"rules":[],"unmatched":{"action":"charge","charge":{"type":"per_unit","measure":"tokens","rate":"1"}}}}}}},"credits":{"accounting":{"unit":"credit","scale":6,"rounding":"half_up"},"buckets":{"expiring":{"priority":10,"expiry":{"type":"after_grant","interval":{"unit":"month","count":2},"timezone":"Asia/Kolkata"}}},"default_bucket":"expiring"},"plans":{"p":{"display_name":"P","rate_card":"standard","credit_allowance":{"amount":"3","window":{"type":"plan_assignment","interval":{"unit":"month","count":1},"timezone":"Asia/Kolkata"}}}},"commerce":{"providers":{"stripe":{"type":"stripe"},"vendor":{"type":"custom","adapter":"tests.vendor"}},"offers":{"o":{"type":"subscription","display_name":"O","price":{"amount_minor":1000,"currency":"USD"},"providers":{"stripe":{"type":"stripe_price","price_id":"price_1"}},"plan":"p","billing_interval":{"unit":"year","count":1}},"pack":{"type":"topup","display_name":"Pack","price":{"amount_minor":1000,"currency":"USD"},"providers":{"vendor":{"type":"custom_object","object_kind":"one_time","external_id":"pack_1"}},"credits_per_unit":"10","bucket":"expiring","quantity":{"minimum":1,"maximum":3,"default":2}}},"auto_recharge":{"eligible_topups":["pack"],"balance_below":{"minimum":"0","maximum":"2","default":"2"},"rearm_above":"3","quantity":{"minimum":1,"maximum":3,"default":2},"limits":{"max_purchases":3,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_charge_minor":10000,"cooldown":{"unit":"hour","count":1},"max_consecutive_failures":3}}}}'::jsonb,
         'regression'
     );
     IF NOT EXISTS (SELECT 1 FROM bursar.catalog_buckets WHERE catalog_revision_id=v_revision AND expires_after_unit='month' AND expires_after_count=2 AND expires_after_timezone='Asia/Kolkata') THEN
@@ -404,7 +485,7 @@ END $$;
 
 DO $$
 DECLARE
-    v_subject uuid := '00000000-0000-0000-0000-000000000555';
+    v_subject uuid := '00000000-0000-0000-0000-000000000127';
     v_plan uuid;
     v_result record;
 BEGIN
@@ -438,3 +519,89 @@ BEGIN
         RAISE EXCEPTION 'plan quota was not enforced atomically';
     END IF;
 END $$;
+
+DO $$
+DECLARE
+    v_subject uuid := '00000000-0000-0000-0000-000000000128';
+    v_result record;
+BEGIN
+    SELECT *
+    INTO v_result
+    FROM bursar.charge_usage(
+        v_subject,
+        'chat',
+        0,
+        'normalized-null-metadata',
+        p_metadata => NULL
+    );
+    IF v_result.error_code IS NOT NULL OR v_result.replayed THEN
+        RAISE EXCEPTION 'initial null-metadata charge failed: %', row_to_json(v_result);
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.charge_usage(
+        v_subject,
+        'chat',
+        0,
+        'normalized-null-metadata',
+        p_metadata => '{}'::jsonb
+    );
+    IF v_result.error_code IS NOT NULL OR NOT v_result.replayed THEN
+        RAISE EXCEPTION 'normalized null metadata did not replay: %', row_to_json(v_result);
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.record_usage(
+        v_subject,
+        'chat',
+        0,
+        'oversized-record-model',
+        p_model => repeat('m', 256)
+    );
+    IF v_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'record_usage accepted an oversized model';
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.charge_usage_for_operation(
+        v_subject,
+        'chat',
+        0,
+        'oversized-charge-feature',
+        p_feature => repeat('f', 256)
+    );
+    IF v_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'charge_usage_for_operation accepted an oversized feature';
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.create_lease(
+        v_subject,
+        'chat',
+        0,
+        'oversized-lease-feature',
+        p_feature => repeat('f', 256)
+    );
+    IF v_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'create_lease accepted an oversized feature';
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.settle_lease(
+        v_subject,
+        '00000000-0000-0000-0000-000000000001',
+        0,
+        'oversized-settlement-region',
+        p_region => repeat('r', 256)
+    );
+    IF v_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'settle_lease accepted an oversized region';
+    END IF;
+END $$;
+
+ROLLBACK;

@@ -87,6 +87,27 @@ reverses every deduction of a given entry type, and
 | `revokeCreditsByEntryType` | `userId: string`, `entryType: string` | `Promise<Record<string, unknown>>` |
 | `sweepExpiredCredits` | `dryRun = false` | `Promise<SweepResult>` |
 
+## AI and batch usage accounting
+
+Bursar records financial events, not workflow execution state. Charge a
+fixed-price workload once with `deductFlatJob`; keep its stages, retries,
+latency, model calls, and parent/child trace structure in your workflow store
+and OpenTelemetry backend. For dynamically priced inference, use `deduct` when
+the amount is known up front or a lease when the final provider usage is known
+only after completion.
+
+Each deduction or lease settlement creates a canonical `credit_usage_charges`
+receipt. Put only bounded values needed for pricing and reconciliation in its
+measures, dimensions, and metadata. Use `recordUsage` only when you
+intentionally need a priced receipt without another account debit, such as
+usage billed by an external system; it is not a tracing API.
+
+Detailed receipt payloads use monthly PostgreSQL partitions by default and
+follow the configured retention policy. When ClickHouse is enabled, those
+payloads and usage analytics are projected there instead. Operational AI
+telemetry—including prompts, completions, latency, retries, errors, and router
+decisions—belongs in OpenTelemetry/Langfuse.
+
 ## Leases
 
 When the final cost is only known after the work runs, reserve the estimate,

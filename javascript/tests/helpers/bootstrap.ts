@@ -55,7 +55,16 @@ LANGUAGE SQL STABLE AS $$
   )::uuid
 $$;
 
-ALTER ROLE service_role BYPASSRLS;
+DO $$
+BEGIN
+  IF NOT COALESCE(
+    (SELECT rolbypassrls FROM pg_roles WHERE rolname = 'service_role'),
+    FALSE
+  ) THEN
+    ALTER ROLE service_role BYPASSRLS;
+  END IF;
+END
+$$;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public

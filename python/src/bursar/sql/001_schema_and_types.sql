@@ -3,6 +3,34 @@ CREATE SCHEMA IF NOT EXISTS bursar;
 CREATE SCHEMA IF NOT EXISTS extensions;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_jsonschema WITH SCHEMA extensions;
+
+DO $$
+DECLARE
+    v_schema text;
+BEGIN
+    SELECT namespace_info.nspname
+    INTO v_schema
+    FROM pg_extension AS extension_info
+    JOIN pg_namespace AS namespace_info
+      ON namespace_info.oid = extension_info.extnamespace
+    WHERE extension_info.extname = 'pg_jsonschema';
+
+    IF v_schema <> 'extensions' THEN
+        RAISE EXCEPTION
+            'Bursar requires pg_jsonschema in schema extensions, not %',
+            COALESCE(v_schema, '<missing>')
+            USING ERRCODE = '3F000';
+    END IF;
+END
+$$;
+
+REVOKE ALL
+ON FUNCTION extensions.json_matches_schema(json, json),
+            extensions.jsonb_matches_schema(json, jsonb),
+            extensions.jsonschema_is_valid(json),
+            extensions.jsonschema_validation_errors(json, json)
+FROM PUBLIC;
 
 -- pg_partman owns the generic creation and retirement of Bursar's monthly
 -- payload partitions. Keep its configuration and operator API isolated from
@@ -114,24 +142,6 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path TO '' AS $$
     END
 $$;
 
-CREATE FUNCTION bursar.require_json_object(
-    p_value jsonb,
-    p_name text
-) RETURNS jsonb
-LANGUAGE plpgsql
-IMMUTABLE
-SET search_path TO ''
-AS $$
-BEGIN
-    IF p_value IS NULL OR jsonb_typeof(p_value) <> 'object' THEN
-        RAISE EXCEPTION '% must be a JSON object', p_name
-            USING ERRCODE = '22023';
-    END IF;
-
-    RETURN p_value;
-END
-$$;
-
 -- BEGIN GENERATED CATALOG SHAPE SCHEMA
 CREATE FUNCTION bursar.catalog_document_shape_schema()
 RETURNS jsonb
@@ -144,155 +154,6 @@ AS $function$
 $function$;
 -- END GENERATED CATALOG SHAPE SCHEMA
 
-CREATE FUNCTION bursar.catalog_shape_error(
-    p_value jsonb,
-    p_schema jsonb,
-    p_definitions jsonb,
-    p_path text DEFAULT '$'
-) RETURNS text
-LANGUAGE plpgsql
-IMMUTABLE
-SET search_path TO ''
-AS $$
-DECLARE
-    v_schema jsonb := p_schema;
-    v_reference text;
-    v_expected_type text;
-    v_candidate jsonb;
-    v_error text;
-    v_first_error text;
-    v_key text;
-    v_child jsonb;
-    v_additional jsonb;
-    v_required text;
-    v_index bigint;
-BEGIN
-    IF jsonb_typeof(v_schema) = 'boolean' THEN
-        RETURN CASE WHEN v_schema = 'true'::jsonb THEN NULL ELSE p_path || ' is not allowed' END;
-    END IF;
-
-    WHILE v_schema ? '$ref' LOOP
-        v_reference := v_schema->>'$ref';
-        IF v_reference !~ '^#/\$defs/[A-Za-z0-9_]+$' THEN
-            RETURN p_path || ' uses an unsupported schema reference';
-        END IF;
-        v_schema := p_definitions->substring(v_reference FROM 9);
-        IF v_schema IS NULL THEN
-            RETURN p_path || ' uses an unknown schema reference';
-        END IF;
-    END LOOP;
-
-    IF v_schema ? 'anyOf' OR v_schema ? 'oneOf' THEN
-        FOR v_candidate IN
-            SELECT value
-            FROM jsonb_array_elements(COALESCE(v_schema->'anyOf', v_schema->'oneOf'))
-        LOOP
-            v_error := bursar.catalog_shape_error(
-                p_value,
-                v_candidate,
-                p_definitions,
-                p_path
-            );
-            IF v_error IS NULL THEN
-                RETURN NULL;
-            END IF;
-            v_first_error := COALESCE(v_first_error, v_error);
-        END LOOP;
-        RETURN COALESCE(v_first_error, p_path || ' does not match an allowed shape');
-    END IF;
-
-    IF v_schema ? 'const' AND p_value IS DISTINCT FROM v_schema->'const' THEN
-        RETURN p_path || ' has an unsupported value';
-    END IF;
-
-    IF v_schema ? 'enum'
-       AND NOT EXISTS (
-           SELECT 1
-           FROM jsonb_array_elements(v_schema->'enum') AS allowed(value)
-           WHERE allowed.value = p_value
-       )
-    THEN
-        RETURN p_path || ' has an unsupported value';
-    END IF;
-
-    v_expected_type := v_schema->>'type';
-    IF v_expected_type IS NOT NULL
-       AND NOT (
-           CASE v_expected_type
-               WHEN 'object' THEN jsonb_typeof(p_value) = 'object'
-               WHEN 'array' THEN jsonb_typeof(p_value) = 'array'
-               WHEN 'string' THEN jsonb_typeof(p_value) = 'string'
-               WHEN 'boolean' THEN jsonb_typeof(p_value) = 'boolean'
-               WHEN 'number' THEN jsonb_typeof(p_value) = 'number'
-               WHEN 'integer' THEN jsonb_typeof(p_value) = 'number'
-                   AND (p_value #>> '{}')::numeric = trunc((p_value #>> '{}')::numeric)
-               WHEN 'null' THEN jsonb_typeof(p_value) = 'null'
-               ELSE false
-           END
-       )
-    THEN
-        RETURN format('%s must be %s', p_path, v_expected_type);
-    END IF;
-
-    IF jsonb_typeof(p_value) = 'object' THEN
-        FOR v_required IN
-            SELECT value
-            FROM jsonb_array_elements_text(COALESCE(v_schema->'required', '[]'::jsonb))
-        LOOP
-            IF NOT p_value ? v_required THEN
-                RETURN format('%s.%s is required', p_path, v_required);
-            END IF;
-        END LOOP;
-
-        FOR v_key, v_child IN SELECT key, value FROM jsonb_each(p_value)
-        LOOP
-            IF COALESCE(v_schema->'properties', '{}'::jsonb) ? v_key THEN
-                v_child := v_schema->'properties'->v_key;
-            ELSE
-                v_additional := v_schema->'additionalProperties';
-                IF v_additional = 'false'::jsonb THEN
-                    RETURN format('%s.%s is not allowed', p_path, v_key);
-                ELSIF jsonb_typeof(v_additional) = 'object' THEN
-                    v_child := v_additional;
-                ELSE
-                    CONTINUE;
-                END IF;
-            END IF;
-
-            v_error := bursar.catalog_shape_error(
-                p_value->v_key,
-                v_child,
-                p_definitions,
-                format('%s.%s', p_path, v_key)
-            );
-            IF v_error IS NOT NULL THEN
-                RETURN v_error;
-            END IF;
-        END LOOP;
-    ELSIF jsonb_typeof(p_value) = 'array' AND v_schema ? 'items' THEN
-        v_index := 0;
-        FOR v_child IN SELECT value FROM jsonb_array_elements(p_value)
-        LOOP
-            v_error := bursar.catalog_shape_error(
-                v_child,
-                v_schema->'items',
-                p_definitions,
-                format('%s[%s]', p_path, v_index)
-            );
-            IF v_error IS NOT NULL THEN
-                RETURN v_error;
-            END IF;
-            v_index := v_index + 1;
-        END LOOP;
-    END IF;
-
-    RETURN NULL;
-EXCEPTION
-    WHEN invalid_text_representation OR numeric_value_out_of_range THEN
-        RETURN format('%s has an invalid %s value', p_path, v_expected_type);
-END
-$$;
-
 CREATE FUNCTION bursar.require_catalog_document_shape(
     p_document jsonb
 ) RETURNS void
@@ -301,19 +162,135 @@ IMMUTABLE
 SET search_path TO ''
 AS $$
 DECLARE
-    v_schema jsonb := bursar.catalog_document_shape_schema();
-    v_error text;
+    v_schema json := bursar.catalog_document_shape_schema()::json;
+    v_errors text[];
 BEGIN
-    v_error := bursar.catalog_shape_error(
-        p_document,
-        v_schema,
-        v_schema->'$defs'
-    );
-    IF v_error IS NOT NULL THEN
-        RAISE EXCEPTION 'invalid_catalog: %', v_error
+    IF p_document IS NULL
+       OR NOT COALESCE(
+           extensions.jsonb_matches_schema(v_schema, p_document),
+           false
+       )
+    THEN
+        v_errors := extensions.jsonschema_validation_errors(
+            v_schema,
+            p_document::json
+        );
+        RAISE EXCEPTION 'invalid_catalog: %',
+            COALESCE(v_errors[1], 'document does not match its JSON Schema')
             USING ERRCODE = '22023';
     END IF;
 END
+$$;
+
+CREATE FUNCTION bursar.matches_catalog_fragment(
+    p_value jsonb,
+    p_fragment_schema jsonb
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    WITH composed AS (
+        SELECT
+            jsonb_build_object(
+                '$defs',
+                bursar.catalog_document_shape_schema()->'$defs'
+            ) || p_fragment_schema AS schema
+    )
+    SELECT COALESCE(
+        CASE
+            WHEN p_value IS NULL OR p_fragment_schema IS NULL THEN false
+            WHEN NOT extensions.jsonschema_is_valid(composed.schema::json)
+                THEN false
+            ELSE extensions.jsonb_matches_schema(
+                composed.schema::json,
+                p_value
+            )
+        END,
+        false
+    )
+    FROM composed
+$$;
+
+CREATE FUNCTION bursar.matches_catalog_definitions(
+    p_value jsonb,
+    VARIADIC p_definition_names text []
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    WITH catalog AS (
+        SELECT bursar.catalog_document_shape_schema() AS schema
+    ),
+    requested AS (
+        SELECT
+            count(*) > 0
+                AND bool_and(catalog.schema->'$defs' ? definition_name)
+                AS definitions_exist,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        '$ref',
+                        '#/$defs/' || definition_name
+                    )
+                    ORDER BY definition_name
+                ),
+                '[]'::jsonb
+            ) AS alternatives
+        FROM catalog
+        CROSS JOIN LATERAL unnest(p_definition_names) AS requested_definition(
+            definition_name
+        )
+    )
+    SELECT COALESCE(
+        CASE
+            WHEN p_value IS NULL OR NOT requested.definitions_exist THEN false
+            ELSE extensions.jsonb_matches_schema(
+                jsonb_build_object(
+                    '$defs', catalog.schema->'$defs',
+                    'anyOf', requested.alternatives
+                )::json,
+                p_value
+            )
+        END,
+        false
+    )
+    FROM catalog
+    CROSS JOIN requested
+$$;
+
+CREATE FUNCTION bursar.entitlement_value_schema(
+    p_definition jsonb
+) RETURNS json
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT CASE p_definition->>'type'
+        WHEN 'boolean' THEN
+            jsonb_build_object('type', 'boolean')
+        WHEN 'integer' THEN
+            jsonb_strip_nulls(jsonb_build_object(
+                'type', 'integer',
+                'minimum', p_definition->'minimum',
+                'maximum', p_definition->'maximum'
+            ))
+        WHEN 'string' THEN
+            jsonb_strip_nulls(jsonb_build_object(
+                'type', 'string',
+                'pattern', p_definition->'pattern'
+            ))
+        WHEN 'enum' THEN
+            jsonb_build_object(
+                'type', 'string',
+                'enum', p_definition->'values'
+            )
+        ELSE NULL
+    END::json
 $$;
 
 CREATE FUNCTION bursar.is_bounded_json_object(
@@ -327,7 +304,13 @@ SET search_path TO ''
 AS $$
     SELECT p_value IS NOT NULL
        AND p_max_bytes > 0
-       AND jsonb_typeof(p_value) = 'object'
+       AND COALESCE(
+           extensions.jsonb_matches_schema(
+               '{"type":"object"}'::json,
+               p_value
+           ),
+           false
+       )
        AND octet_length(p_value::text) <= p_max_bytes
 $$;
 
@@ -374,11 +357,12 @@ DECLARE
     v_count bigint;
     v_unit_seconds bigint;
 BEGIN
-    IF p_policy IS NULL
-       OR jsonb_typeof(p_policy) <> 'object'
-       OR p_policy->>'type' <> 'rolling'
-    THEN
+    IF p_policy IS NULL OR p_policy->>'type' <> 'rolling' THEN
         RETURN 0;
+    END IF;
+
+    IF NOT bursar.matches_catalog_definitions(p_policy, 'RollingWindow') THEN
+        RETURN NULL;
     END IF;
 
     v_unit := p_policy #>> '{duration,unit}';

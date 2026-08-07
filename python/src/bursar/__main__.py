@@ -13,11 +13,12 @@ import difflib
 import json
 import os
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+from bursar.retry import BursarRetryOptions, retry_bursar_operation
 
 if TYPE_CHECKING:
     from bursar.credits.store import CreditStore
@@ -77,7 +78,7 @@ def _require_extra(extra: str) -> None:
             raise SystemExit(1) from None
 
 
-def _is_transient(exc: Exception) -> bool:
+def _is_transient(exc: BaseException) -> bool:
     """True only for the PostgREST schema-cache / connection errors worth retrying."""
     from bursar.credits.store import StoreError
 
@@ -94,23 +95,26 @@ def _retry_transient[T](op: Callable[[], T], *, what: str) -> T:
     is surfaced immediately so we never create a duplicate immutable pricing
     version by blind-retrying a non-idempotent write.
     """
-    delay = _RETRY_INITIAL_DELAY
-    for attempt in range(_RETRIES):
-        try:
-            return op()
-        except Exception as exc:
-            last = attempt == _RETRIES - 1
-            if last or not _is_transient(exc):
-                print(f"Failed to {what}: {exc}", file=sys.stderr)
-                if _is_transient(exc):
-                    print(
-                        "Tip: run 'bursar migrate' and wait for the PostgREST schema cache to refresh.",
-                        file=sys.stderr,
-                    )
-                raise SystemExit(1) from exc
-            time.sleep(delay)
-            delay = min(delay * 2, _RETRY_MAX_DELAY)
-    raise AssertionError("unreachable")  # pragma: no cover
+    try:
+        return retry_bursar_operation(
+            op,
+            retry_options=BursarRetryOptions(
+                max_attempts=_RETRIES,
+                base_delay_seconds=_RETRY_INITIAL_DELAY,
+                max_delay_seconds=_RETRY_MAX_DELAY,
+                factor=2,
+                jitter=False,
+                should_retry=_is_transient,
+            ),
+        )
+    except Exception as exc:
+        print(f"Failed to {what}: {exc}", file=sys.stderr)
+        if _is_transient(exc):
+            print(
+                "Tip: run 'bursar migrate' and wait for the PostgREST schema cache to refresh.",
+                file=sys.stderr,
+            )
+        raise SystemExit(1) from exc
 
 
 def _store_from_env(

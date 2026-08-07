@@ -6,26 +6,27 @@ Bursar gives AI applications one place to meter usage, sell prepaid credits, run
 
 ## Getting Started
 
-- [Introduction](https://zonastery.github.io/bursar/docs/intro): Bursar is a reusable credit ledger and billing engine for AI SaaS — one config, two SDKs (Python and JavaScript), exact money on a single PostgreSQL schema.
-- [Quickstart](https://zonastery.github.io/bursar/docs/quickstart): Ten minutes to a working credit ledger — install the schema, publish a pricing config, grant credits, and charge for usage from Python or TypeScript.
+- [Introduction](https://zonastery.github.io/bursar/docs/intro): Reusable credit ledger and billing engine for AI SaaS — one config, two SDKs, exact money on one PostgreSQL schema.
+- [Quickstart](https://zonastery.github.io/bursar/docs/quickstart): Ten minutes to a working credit ledger — install the schema, publish a config, grant credits, and charge for usage.
+- [Agent Skills](https://zonastery.github.io/bursar/docs/agent-skills): Install the bursar skill for coding agents in one command — metering, credits, plans, quotas, and billing done right.
 
 ## Core Concepts
 
-- [Data model](https://zonastery.github.io/bursar/docs/concepts/data-model): Accounts, the append-only ledger, lots, leases, and allowances — every concept mapped to tables on one PostgreSQL schema.
-- [Configuration](https://zonastery.github.io/bursar/docs/concepts/configuration): The strict, versioned BursarConfig document — operations, rate cards, credits, plans, and validation — shared by both SDKs.
+- [Data model](https://zonastery.github.io/bursar/docs/concepts/data-model): Accounts, the append-only ledger, lots, leases, and allowances — mapped to tables on one PostgreSQL schema.
+- [Configuration](https://zonastery.github.io/bursar/docs/concepts/configuration): The strict, versioned BursarConfig document — operations, rate cards, credits, plans, and validation.
 - [Pricing](https://zonastery.github.io/bursar/docs/concepts/pricing): How usage becomes money — operations, measures, rate cards, and price rules with exact decimal charges.
-- [Expressions](https://zonastery.github.io/bursar/docs/concepts/expressions): The safe expression language for pricing formulas — allowlisted functions and operators, identical in Python and JavaScript.
-- [Plans](https://zonastery.github.io/bursar/docs/concepts/plans): What a paid tier gets — allowed operations, rate cards, free credit allowances, features, quotas, and admission policies.
-- [Billing](https://zonastery.github.io/bursar/docs/concepts/billing): How billing connects the credit ledger to a payment provider — offer catalog, normalized events, and auto-recharge guardrails.
-- [Architecture](https://zonastery.github.io/bursar/docs/concepts/architecture): The Bursar facade and its capabilities — credits, catalog, accounts, billing, and commerce — over the Postgres schema, with migrations and tenant isolation.
+- [Expressions](https://zonastery.github.io/bursar/docs/concepts/expressions): The safe expression language for pricing formulas — allowlisted functions and operators, shared by both SDKs.
+- [Plans](https://zonastery.github.io/bursar/docs/concepts/plans): What a paid tier gets — allowed operations, rate cards, free credit allowances, features, and quotas.
+- [Billing](https://zonastery.github.io/bursar/docs/concepts/billing): How billing connects the credit ledger to a payment provider — offers, events, and auto-recharge guardrails.
+- [Architecture](https://zonastery.github.io/bursar/docs/concepts/architecture): The Bursar facade and its capabilities — credits, catalog, accounts, billing, and commerce over the Postgres schema.
 
 ## Guides
 
-- [Credit lifecycle](https://zonastery.github.io/bursar/docs/guides/credit-lifecycle): Follow one user's credits from signup to ledger — grants, purchases, usage charges, refunds, expiry, and revocation as canonical ledger entries.
+- [Credit lifecycle](https://zonastery.github.io/bursar/docs/guides/credit-lifecycle): Follow one user's credits from signup to ledger — grants, purchases, charges, refunds, expiry, and revocation.
 - [Financial safety](https://zonastery.github.io/bursar/docs/guides/financial-safety): The financial invariants Bursar enforces at the account boundary — exact money, atomic leases, and idempotent mutations.
 - [Multitenancy](https://zonastery.github.io/bursar/docs/guides/multitenancy): One PostgreSQL schema for every tenant — mandatory tenant_id columns, row-level security, and composite foreign keys.
 - [Subscription integration](https://zonastery.github.io/bursar/docs/guides/subscription-integration): Turn provider lifecycle events into canonical credit mutations — subscriptions, invoices, offers, and auto-recharge.
-- [Storage backends](https://zonastery.github.io/bursar/docs/guides/storage-backends): PostgreSQL is the production credit store; optional ClickHouse and S3 adapters route high-cardinality data through a transactional outbox.
+- [Storage backends](https://zonastery.github.io/bursar/docs/guides/storage-backends): PostgreSQL is the production credit store; ClickHouse and S3 adapters ingest high-cardinality data through the outbox.
 
 ## CLI
 
@@ -34,15 +35,15 @@ Bursar gives AI applications one place to meter usage, sell prepaid credits, run
 ## Python API
 
 - [Overview](https://zonastery.github.io/bursar/docs/python-api/index): The bursar Python SDK — Bursar facade, credit manager, pricing engine, and pluggable stores.
-- [PricingEngine](https://zonastery.github.io/bursar/docs/python-api/pricing-engine): The bursar PricingEngine — database-free pricing from a canonical config document, pricing UsageMetrics, and CostBreakdown results.
-- [Credit manager](https://zonastery.github.io/bursar/docs/python-api/credit-manager): The bursar credits service — balances and adjustments, metered charging, the lease lifecycle, plans, ledger history, analytics, and team charging.
+- [PricingEngine](https://zonastery.github.io/bursar/docs/python-api/pricing-engine): The bursar PricingEngine — database-free pricing from a canonical config, with UsageMetrics and CostBreakdown results.
+- [Credit manager](https://zonastery.github.io/bursar/docs/python-api/credit-manager): The bursar credits service — balances, metered charging, leases, plans, ledger history, analytics, and teams.
 - [Stores](https://zonastery.github.io/bursar/docs/python-api/stores): bursar stores — PostgresStore, PostgresBillingStore, and the CreditStore contract for custom backends.
 
 ## JavaScript API
 
 - [Overview](https://zonastery.github.io/bursar/docs/javascript-api/index): The bursar JavaScript SDK — Bursar facade, credit manager, pricing engine, and pluggable stores.
-- [PricingEngine](https://zonastery.github.io/bursar/docs/javascript-api/pricing-engine): The bursar PricingEngine — database-free pricing from a canonical config document, pricing UsageMetrics, and CostBreakdown results.
-- [Credit manager](https://zonastery.github.io/bursar/docs/javascript-api/credit-manager): The async bursar credits service — balances and adjustments, metered charging, the lease lifecycle, plans, ledger history, analytics, and team charging.
+- [PricingEngine](https://zonastery.github.io/bursar/docs/javascript-api/pricing-engine): The bursar PricingEngine — database-free pricing from a canonical config, with UsageMetrics and CostBreakdown results.
+- [Credit manager](https://zonastery.github.io/bursar/docs/javascript-api/credit-manager): The async bursar credits service — balances, metered charging, leases, plans, ledger history, analytics, teams.
 - [Stores](https://zonastery.github.io/bursar/docs/javascript-api/stores): bursar stores — PostgresStore, PostgresBillingStore, and the CreditStore contract for custom backends.
 
 ## Examples

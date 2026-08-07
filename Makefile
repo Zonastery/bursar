@@ -16,7 +16,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 TEST_PG_NAME ?= bursar-test-pg
-TEST_PG_IMAGE ?= ghcr.io/dbsystel/postgresql-partman:16-5
+TEST_PG_IMAGE ?= public.ecr.aws/supabase/postgres:17.6.1.156
 TEST_PG_PORT ?= 55432
 TEST_PG_DATABASE ?= bursar
 TEST_PG_USER ?= postgres
@@ -66,7 +66,8 @@ test-integration:                  ## Run Python and JS tests against an isolate
 
 # Both suites resolve a real Postgres via DATABASE_URL (CI's service
 # container / an already-running instance) or, failing that, via
-# testcontainers — a disposable Postgres 16 + pg_partman 5 instance spun up
+# testcontainers — disposable PostgreSQL 17 with pg_partman 5 and
+# pg_jsonschema 0.3, spun up
 # automatically for the duration of the run (Docker permitting). No manual
 # container orchestration needed; see python/tests/conftest.py and
 # javascript/tests/global-setup.ts.

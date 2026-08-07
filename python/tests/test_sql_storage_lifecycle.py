@@ -650,7 +650,7 @@ def test_outbox_claim_acknowledgement_and_payload_bounds(
                 'oversized-metadata',
                 p_metadata => jsonb_build_object(
                     'value',
-                    repeat('x', 17000)
+                        repeat('x', 1100000)
                 )
             )
             """,
@@ -787,8 +787,8 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
                 )
                 VALUES (
                     1,
-                    '{}'::jsonb,
-                    extensions.digest('{}', 'sha256')
+                    '{"version":1,"credits":{}}'::jsonb,
+                    extensions.digest('{"version":1,"credits":{}}', 'sha256')
                 )
                 RETURNING id
                 """
@@ -808,7 +808,10 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
                     'completion',
                     '{"calls":{"unit":"call"}}'::jsonb,
                     '{}'::jsonb,
-                    '{}'::jsonb
+                    '{
+                        "measures":{"calls":{"unit":"call"}},
+                        "dimensions":{}
+                    }'::jsonb
                 )
                 """,
                 (revision_id,),
@@ -821,7 +824,12 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
                     display_name,
                     definition
                 )
-                VALUES (%s::uuid, 'pro', 'Pro', '{}'::jsonb)
+                VALUES (
+                    %s::uuid,
+                    'pro',
+                    'Pro',
+                    '{"display_name":"Pro"}'::jsonb
+                )
                 """,
                 (revision_id,),
             )
@@ -855,7 +863,16 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
                             "duration":{"unit":"day","count":30}
                         }'::jsonb,
                         'block',
-                        '{}'::jsonb
+                        '{
+                            "operation":"completion",
+                            "measure":"calls",
+                            "limit":"100",
+                            "window":{
+                                "type":"rolling",
+                                "duration":{"unit":"day","count":30}
+                            },
+                            "enforcement":"block"
+                        }'::jsonb
                     )
                     """,
                     (revision_id,),

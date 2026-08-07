@@ -512,6 +512,7 @@ export class CreditsService {
       allowanceConsumed: new Decimal(0),
       balanceAfter: result.newBalance,
       idempotent: result.idempotent ?? false,
+      usageChargeId: null,
     });
     return result;
   }
@@ -769,9 +770,8 @@ export class CreditsService {
   /**
    * Record priced usage for a workflow without debiting the account again.
    *
-   * This is intended for child work inside a fixed-price operation. The
-   * parent operation remains the only customer debit; the returned usage row
-   * preserves the child cost and metadata in Bursar's usage journal.
+   * This supports priced usage receipts that should be retained without
+   * affecting the account balance, such as externally billed usage.
    */
   async recordUsage(
     userId: string,

@@ -48,6 +48,7 @@ class GrantProgramAwardRow(BaseModel):
 
 class DeductionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    charge_id: str | None = None
     # Allowance-only and zero-cost usage has no monetary ledger entry.
     entry_id: str | None = None
     amount: str | Decimal | None = None

@@ -39,10 +39,33 @@ BEGIN
     IF NOT bursar.is_finite_numeric(p_requested)
        OR p_requested < 0
        OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_measures, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_dimensions, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR (
+           p_feature IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_feature, 255)
+       )
+       OR (
+           p_model IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_model, 255)
+       )
+       OR (
+           p_region IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_region, 255)
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           1048576
+       )
+       OR NOT bursar.valid_measure_object(
+           COALESCE(p_measures, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.valid_dimension_object(
+           COALESCE(p_dimensions, '{}'::jsonb),
+           65536
+       )
     THEN
         RETURN QUERY
         SELECT
@@ -109,7 +132,8 @@ BEGIN
         p.credit_allowance_reset_count,
         p.credit_allowance_reset_anchor,
         p.credit_allowance_reset_timezone,
-        p.allowed_operations
+        p.allowed_operations,
+        p.definition->'credit_allowance' AS credit_allowance_policy
     INTO v_assignment
     FROM bursar.account_plan_assignments AS a
     JOIN bursar.catalog_plans AS p
@@ -231,7 +255,8 @@ BEGIN
                 period_count,
                 period_anchor,
                 period_timezone,
-                allowance
+                allowance,
+                policy_snapshot
             )
             VALUES(
                 v_account,
@@ -244,7 +269,8 @@ BEGIN
                 v_assignment.credit_allowance_reset_count,
                 v_assignment.credit_allowance_reset_anchor,
                 v_assignment.credit_allowance_reset_timezone,
-                v_assignment.credit_allowance_amount
+                v_assignment.credit_allowance_amount,
+                v_assignment.credit_allowance_policy
             )
             ON CONFLICT (
                 account_id,
@@ -371,7 +397,10 @@ BEGIN
             v_result.charge_id,
             p_idempotency_key,
             v_event_at,
-            p_metadata
+            jsonb_build_object(
+                'usage_charge_id', v_result.charge_id,
+                'source', 'usage_charge'
+            )
         );
     END IF;
 

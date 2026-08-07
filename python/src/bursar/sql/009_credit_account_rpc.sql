@@ -126,7 +126,10 @@ BEGIN
        )
        OR NOT bursar.is_nonempty_text(p_program_key)
        OR NOT bursar.is_nonempty_text(p_event_key)
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
        OR (
            p_trigger_type = 'referral_completed'
            AND p_referrer_subject_id IS NULL
@@ -662,7 +665,10 @@ BEGIN
        OR p_amount = 0
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
-       OR jsonb_typeof(COALESCE(p_request, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_request, '{}'::jsonb),
+           16384
+       )
        OR (
            p_amount > 0
            AND p_kind NOT IN (

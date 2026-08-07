@@ -10,6 +10,9 @@ export interface CreditMetadata {
   referenceType?: string | null;
   referenceId?: string | null;
   idempotencyKey?: string | null;
+  providerRequestId?: string | null;
+  traceId?: string | null;
+  spanId?: string | null;
   [key: string]: unknown;
 }
 
@@ -54,6 +57,8 @@ export interface AddCreditsResult {
 
 export interface DeductionResult {
   entryId: string;
+  /** Canonical usage receipt, including zero-cost or allowance-only charges. */
+  usageChargeId: string | null;
   userId: string;
   amount: Decimal;
   allowanceConsumed: Decimal;

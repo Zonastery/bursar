@@ -1652,11 +1652,10 @@ class CreditsService:
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> UsageRecordResult:
-        """Record priced child-work usage without debiting the account again.
+        """Record priced usage without debiting the account again.
 
-        Fixed-price workflows use this for their nested provider calls. The
-        parent fixed operation remains the only customer debit, while each
-        child gets an immutable Bursar usage-journal row.
+        This supports priced usage receipts that should be retained without
+        affecting the account balance, such as externally billed usage.
         """
         engine = self._engine_for_user(user_id)
         plan = self._store.get_user_plan(user_id)

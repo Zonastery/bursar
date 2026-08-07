@@ -307,7 +307,14 @@ CREATE TABLE bursar.billing_credit_grants (
     quantity integer NOT NULL DEFAULT 1 CHECK (quantity > 0),
     expiry_policy_snapshot jsonb CHECK (
         expiry_policy_snapshot IS NULL
-        OR octet_length(expiry_policy_snapshot::text) <= 32768
+        OR (
+            octet_length(expiry_policy_snapshot::text) <= 32768
+            AND bursar.matches_catalog_fragment(
+                expiry_policy_snapshot,
+                bursar.catalog_document_shape_schema()
+                    ->'$defs'->'BucketDefinition'->'properties'->'expiry'
+            )
+        )
     ),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
     billing_event_id uuid REFERENCES bursar.billing_events (id),
@@ -534,7 +541,13 @@ CREATE TABLE bursar.catalog_auto_recharge_policies (
     period_anchor text NOT NULL CHECK (period_anchor IN ('calendar', 'rolling')),
     period_timezone text NOT NULL,
     definition jsonb NOT NULL
-    CHECK (bursar.is_bounded_json_object(definition, 262144)),
+    CHECK (
+        bursar.is_bounded_json_object(definition, 262144)
+        AND bursar.matches_catalog_definitions(
+            definition,
+            'AutoRechargeGuardrails'
+        )
+    ),
     FOREIGN KEY (catalog_revision_id, default_topup_key)
     REFERENCES bursar.catalog_topups (catalog_revision_id, topup_key)
 );

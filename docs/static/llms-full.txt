@@ -10,6 +10,8 @@ This file concatenates the full text of every page linked from the main sections
 
 # Introduction
 
+*Bursar logo: a smiling orange wallet holding credit cards and coins*
+
 Bursar is a reusable credit ledger and billing engine for AI SaaS. It gives
 your application one place to meter usage, sell prepaid credits, run plans and
 allowances, and orchestrate subscriptions — over a single PostgreSQL schema,
@@ -76,7 +78,7 @@ flowchart TB
 | --- | --- | --- |
 | Python | Python 3.12+ | `pip install bursar[postgres]` |
 | JavaScript | Node.js 22+ | `npm install @zonastery/bursar` |
-| Database | PostgreSQL 16 + pg_partman 5.x | one `bursar` schema, one migration runner |
+| Database | PostgreSQL 16+ + pg_partman 5.x + pg_jsonschema 0.3+ | one `bursar` schema, one migration runner |
 
 ## Next
 
@@ -97,8 +99,9 @@ and wire Bursar to meter completions, hold balances, and charge users.
 
 - Python 3.12+ with `pip install bursar[postgres]`, or Node.js 22+ with
   `npm install @zonastery/bursar`
-- PostgreSQL 16 reachable from `DATABASE_URL`, with pg_partman 5.x available
-  to the migration role (Bursar installs it in the `partman` schema)
+- PostgreSQL 16+ reachable from `DATABASE_URL`, with pg_partman 5.x and
+  pg_jsonschema 0.3+ available to the migration role (Bursar installs them in
+  the `partman` and `extensions` schemas)
 
 ## 1. Install the schema
 
@@ -190,26 +193,29 @@ Check with `bursar config list`.
 Connect the store to your tenant and build the facade:
 
 **Python:**
-```python
+
+  ```python
   from bursar import Bursar, PostgresStore
 
   store = PostgresStore(database_url, tenant_id=tenant_id)
   bursar = Bursar.create(credit_store=store)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { Bursar, PostgresStore } from "@zonastery/bursar";
 
   const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
   const bursar = new Bursar({ creditStore: store });
   ```
 
-  Register Ada and give her an account, a plan, and some credits. The free plan
+Register Ada and give her an account, a plan, and some credits. The free plan
 carries a 10,000-credit monthly allowance:
 
 **Python:**
-```python
+
+  ```python
   ada = "11111111-1111-4111-8111-111111111111"
 
   bursar.accounts.on_account_created(ada, event_key="signup")
@@ -219,8 +225,9 @@ carries a 10,000-credit monthly allowance:
   print(balance.balance, balance.lifetime_purchased)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const ada = "11111111-1111-4111-8111-111111111111";
 
   await bursar.accounts.onAccountCreated({ accountId: ada, eventKey: "signup" });
@@ -230,7 +237,7 @@ carries a 10,000-credit monthly allowance:
   console.log(balance.balance, balance.lifetimePurchased);
   ```
 
-  `on_account_created` assigns the default plan and runs eligible signup grants;
+`on_account_created` assigns the default plan and runs eligible signup grants;
 `add_credits` with `entry_type="purchase"` grants into the default bucket and
 appends a `purchase` ledger entry.
 
@@ -241,7 +248,8 @@ This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
 `0.0025` credits per million tokens: `800 / 1,000,000 × 0.0025 = 0.000002`.
 
 **Python:**
-```python
+
+  ```python
   from decimal import Decimal
   from bursar.metrics import UsageMetrics
 
@@ -254,8 +262,9 @@ This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
   print(result.amount, result.allowance_consumed, result.balance_after)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const result = await bursar.credits.deduct(
     ada,
     {
@@ -268,7 +277,7 @@ This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
   console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
   ```
 
-  The `DeductionResult` reports the split between allowance and balance:
+The `DeductionResult` reports the split between allowance and balance:
 
 | Field | Meaning |
 | --- | --- |
@@ -286,20 +295,22 @@ Every mutation is visible in the append-only ledger. Each ledger entry
 exposes its entry id, type, exact amount, and creation time:
 
 **Python:**
-```python
+
+  ```python
   for entry in bursar.credits.list_ledger_entries(ada, limit=50).items:
       print(entry.entry_id, entry.entry_type, entry.amount, entry.created_at)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const page = await bursar.credits.listLedgerEntries(ada, { limit: 50 });
   for (const entry of page.items) {
     console.log(entry.entryId, entry.entryType, entry.amount, entry.createdAt);
   }
   ```
 
-  ## 5. Next steps
+## 5. Next steps
 
 - [The data model](./concepts/data-model.mdx) — accounts, ledger, lots, leases.
 - [Canonical configuration](./concepts/configuration.mdx) — the full config
@@ -310,6 +321,85 @@ exposes its entry id, type, exact amount, and creation time:
 - Notebooks: [Your first pricing config](/docs/notebooks/first_pricing_config) and
   [The credit lifecycle](/docs/notebooks/credit_lifecycle) walk the same story
   end to end.
+
+---
+
+> Source: https://zonastery.github.io/bursar/docs/agent-skills
+
+# Agent Skills
+
+Agent skills are folders of instructions, scripts, and resources that coding
+agents load on demand to do real work more reliably. Bursar ships one —
+`skills/bursar/` in the [repository](https://github.com/zonastery/bursar) — so
+agents integrate bursar into AI SaaS apps the way its authors intended: correct
+credit, ledger, and billing patterns, without guessing.
+
+## Installing the skill
+
+Install all of bursar's skills with the skills CLI:
+
+```bash
+npx skills add zonastery/bursar
+```
+
+To install just the bursar skill:
+
+```bash
+npx skills add zonastery/bursar --skill bursar
+```
+
+**Note:**
+
+Skills install at project scope by default, committed to your repository so
+contributors and cloud agents share the same setup. Pass `--global` to install
+across all your projects instead, and `--all` to install to every detected
+agent at once. The CLI supports OpenCode, Claude Code, Codex, Cursor, and many
+more — see the [skills CLI](https://github.com/vercel-labs/skills) for options.
+
+## Using the skill without installing
+
+Not ready to commit a skill? `npx skills use` runs a skill without installing
+it. To have your agent load the bursar skill:
+
+```bash
+npx skills use zonastery/bursar --skill bursar --agent opencode
+```
+
+Omit `--agent` to print the skill's prompt and read it yourself.
+
+## What the skill covers
+
+The bursar skill fires whenever an agent works on billing for AI SaaS apps:
+metering usage, prepaid credits, plans and allowances, subscriptions, quotas,
+spend caps, the credit ledger, leases, idempotent billing, pricing configs and
+rate cards, auto-recharge, and billing events.
+
+When the skill fires, the agent reads `SKILL.md` and loads only the
+references it needs, so prompts stay small and answers stay grounded in
+bursar's actual schema, config, and SDKs rather than the agent's guesswork.
+
+The skill bundles:
+
+| File | What it's for |
+| --- | --- |
+| `SKILL.md` | Core instructions — when the skill fires and how to integrate bursar safely |
+| `references/getting-started.md` | First integration: install the schema, build the facade, and charge for a first completion |
+| `references/pricing-config.md` | Authoring the strict, versioned pricing config: operations, rate cards, buckets, plans |
+| `references/credit-lifecycle.md` | Balances, the append-only ledger, and atomic reserve/settle leases |
+| `references/billing-integration.md` | Subscriptions, billing events, and auto-recharge guardrails |
+| `references/financial-safety.md` | Idempotency keys, exact decimals, and audit invariants that keep money state correct |
+| `assets/pricing.config.example.yaml` | A complete, annotated example config to adapt |
+
+## Related links
+
+- [bursar repository](https://github.com/zonastery/bursar) — the skill lives in
+  `skills/bursar/`
+- [Agent Skills specification](https://agentskills.io) — the open spec the
+  skill follows
+- [skills CLI](https://github.com/vercel-labs/skills) — install, update, and
+  manage skills
+- [bursar documentation](./intro.mdx) — start with the Quickstart once the
+  skill has you up to speed
 
 ---
 
@@ -403,7 +493,8 @@ Balance reads are cheap — one locked row. Availability subtracts active
 holds; buckets break the balance into tiers:
 
 **Python:**
-```python
+
+  ```python
   balance = bursar.credits.get_balance(ada)
   available = bursar.credits.get_available(ada)
   buckets = bursar.credits.get_bucket_balances(ada)
@@ -414,8 +505,9 @@ holds; buckets break the balance into tiers:
       print(bucket.bucket_key, bucket.priority, bucket.balance)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const balance = await bursar.credits.getBalance(ada);
   const available = await bursar.credits.getAvailable(ada);
   const buckets = await bursar.credits.getBucketBalances(ada);
@@ -427,7 +519,7 @@ holds; buckets break the balance into tiers:
   }
   ```
 
-  `get_available` is advisory (UI only) — only `reserve` is authoritative for
+`get_available` is advisory (UI only) — only `reserve` is authoritative for
 admission. See [Architecture](./architecture.mdx) for the full schema layout,
 or [Canonical configuration](./configuration.mdx) for the document that shapes
 it.
@@ -791,7 +883,8 @@ tier's rate to the whole amount.
 construct it from the same canonical document:
 
 **Python:**
-```python
+
+  ```python
   from bursar.engine import PricingEngine
   from bursar.metrics import UsageMetrics
 
@@ -806,8 +899,9 @@ construct it from the same canonical document:
   )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { PricingEngine } from "@zonastery/bursar";
 
   const engine = PricingEngine.fromDict(config);
@@ -821,7 +915,7 @@ construct it from the same canonical document:
   );
   ```
 
-  The engine:
+The engine:
 
 - validates measures and dimensions against the operation definition —
   undeclared names, missing required dimensions, and wrong dimension types
@@ -1594,7 +1688,8 @@ Setup first: publish the canonical configuration (see
 [canonical configuration](../concepts/configuration.mdx)) and bind a facade.
 
 **Python:**
-```python
+
+  ```python
   from bursar import Bursar, PostgresStore
   from shared import USER_ADA, base_config, publish_config
 
@@ -1605,8 +1700,9 @@ Setup first: publish the canonical configuration (see
   user_id = USER_ADA
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { Bursar, PostgresStore } from "@zonastery/bursar";
   import { USER_ADA, baseConfig, publishConfig } from "./shared";
 
@@ -1617,21 +1713,23 @@ Setup first: publish the canonical configuration (see
   const userId = USER_ADA;
   ```
 
-  ## 1. Signup
+## 1. Signup
 
 Ada creates an account. The signup handler assigns the catalog's default plan
 and runs any `account_created` grant programs in one call:
 
 **Python:**
-```python
+
+  ```python
   result = bursar.accounts.on_account_created(
       user_id, event_key="signup", region="us-east-1"
   )
   print(result["plan_key"], result["plan_assigned"], result["grants"])
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const result = await bursar.accounts.onAccountCreated({
     accountId: userId,
     eventKey: "signup",
@@ -1640,7 +1738,7 @@ and runs any `account_created` grant programs in one call:
   console.log(result.planKey, result.planAssigned, result.grants);
   ```
 
-  The result reports the assigned plan (`free`, from `catalog.default_plan`) and
+The result reports the assigned plan (`free`, from `catalog.default_plan`) and
 any grant-program awards. The free plan carries a 10,000-credit monthly
 allowance, so Ada can use the product before she pays. The call is idempotent:
 a second signup event with the same key does not re-anchor the plan or
@@ -1655,7 +1753,8 @@ idempotency key so a redelivered webhook replays the same entry instead of
 double-granting:
 
 **Python:**
-```python
+
+  ```python
   grant = bursar.credits.add_credits(
       user_id,
       50000,
@@ -1665,8 +1764,9 @@ double-granting:
   print(grant.entry_id, grant.new_balance, grant.bucket, grant.idempotent)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const grant = await bursar.credits.addCredits(userId, new Decimal(50000), {
     type: "purchase",
     idempotencyKey: "checkout:cs_123456",
@@ -1674,7 +1774,7 @@ double-granting:
   console.log(grant.entryId, grant.newBalance, grant.bucket, grant.idempotent);
   ```
 
-  In the database this creates a credit lot: the `purchase` ledger entry plus a
+In the database this creates a credit lot: the `purchase` ledger entry plus a
 `credit_lots` row that tracks `granted - consumed`. Pass `expires_at` (or
 `expiresAt`) to give the lot an expiry date — expiring lots are handled by
 the sweep in step 5. TypeScript amounts are `decimal.js` `Decimal` values.
@@ -1686,7 +1786,8 @@ rate card (input 0.0025 / output 0.01 / cache 0.00125 per 1M tokens, all
 exact `Decimal`), then charges in one atomic transaction:
 
 **Python:**
-```python
+
+  ```python
   from bursar.metrics import UsageMetrics
 
   charge = bursar.credits.deduct(
@@ -1705,8 +1806,9 @@ exact `Decimal`), then charges in one atomic transaction:
   print(charge.amount, charge.allowance_consumed, charge.balance_after)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const charge = await bursar.credits.deduct(userId, {
     operation: "completion",
     measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
@@ -1715,7 +1817,7 @@ exact `Decimal`), then charges in one atomic transaction:
   console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
   ```
 
-  The charge costs 0.000030 credits (the 6dp `ROUND_HALF_UP` total), and the
+The charge costs 0.000030 credits (the 6dp `ROUND_HALF_UP` total), and the
 free plan's allowance absorbs it: `allowance_consumed` is 0.000030 and the
 balance stays at 50000. Deductions draw allowance first, then debits from
 the balance in bucket priority order — `promotional` (1) before `purchased`
@@ -1730,7 +1832,8 @@ Ada's request returned a broken completion. Refund the charge by its entry
 id; pass an `amount` for a partial refund:
 
 **Python:**
-```python
+
+  ```python
   refund = bursar.credits.refund_credits(
       charge.entry_id,
       amount=0.000030,
@@ -1739,8 +1842,9 @@ id; pass an `amount` for a partial refund:
   print(refund.refund_entry_id, refund.new_balance)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const refund = await bursar.credits.refundCredits(
     charge.entryId,
     new Decimal("0.000030"),
@@ -1749,7 +1853,7 @@ id; pass an `amount` for a partial refund:
   console.log(refund.refundEntryId, refund.newBalance);
   ```
 
-  A refund never rewrites the original entry. It posts a new `refund` ledger
+A refund never rewrites the original entry. It posts a new `refund` ledger
 entry that restores the balance, linked back to the original via
 `reference_entry_id` / `originalEntryId`. The store rejects over-refunds,
 duplicates, and refunds of the wrong entry type with `RefundError`.
@@ -1760,7 +1864,8 @@ Promotional credits can carry an expiry. First inspect what a sweep would
 expire, then run it:
 
 **Python:**
-```python
+
+  ```python
   dry = bursar.credits.sweep_expired_credits(dry_run=True)
   print(dry.expired_count, dry.expired_amount)
 
@@ -1768,8 +1873,9 @@ expire, then run it:
   print(result.expired_count, result.expired_amount)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const dry = await bursar.credits.sweepExpiredCredits(true);
   console.log(dry.expiredCount, dry.expiredAmount);
 
@@ -1777,7 +1883,7 @@ expire, then run it:
   console.log(result.expiredCount, result.expiredAmount);
   ```
 
-  Each expired lot posts an `expiry` ledger entry and the amount leaves the
+Each expired lot posts an `expiry` ledger entry and the amount leaves the
 balance — expiry is an accounting event, not a read filter. Run the sweep on
 a schedule (for example hourly) or enable lazy expiry so a user's own next
 operation clears their due lots first.
@@ -1788,18 +1894,20 @@ If a purchase is fraudulent or violates your ToS, revoke all credits of an
 entry type rather than adjusting the balance by hand:
 
 **Python:**
-```python
+
+  ```python
   revoked = bursar.credits.revoke_credits_by_entry_type(user_id, "purchase")
   print(revoked["amount"], revoked["new_balance"])
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const revoked = await bursar.credits.revokeCreditsByEntryType(userId, "purchase");
   console.log(revoked.amount, revoked.new_balance);
   ```
 
-  Revocation walks the `purchase` lots LIFO across tiers and posts `revocation`
+Revocation walks the `purchase` lots LIFO across tiers and posts `revocation`
 ledger entries, so the audit trail shows exactly what was taken back and why.
 
 ## 7. Reading the ledger
@@ -1808,7 +1916,8 @@ The ledger is the pricing evidence. Walk it with the cursor loop — pages are
 stable, ordered by `(created_at, entry_id)`:
 
 **Python:**
-```python
+
+  ```python
   page = bursar.credits.list_ledger_entries(user_id, limit=50)
   while True:
       for entry in page.items:
@@ -1820,8 +1929,9 @@ stable, ordered by `(created_at, entry_id)`:
       )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   let page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
   while (true) {
     for (const entry of page.items) {
@@ -1835,7 +1945,7 @@ stable, ordered by `(created_at, entry_id)`:
   }
   ```
 
-  `list_usage_charges` is the same loop against metered usage — each row shows
+`list_usage_charges` is the same loop against metered usage — each row shows
 the operation, the measures, the `charged` amount, and how much the allowance
 covered. Filter by entry type or date range in either call; offset pagination
 is not supported.
@@ -1879,7 +1989,8 @@ same request replays the original entry — the result is returned with
 `idempotent=True` and no second ledger row is created:
 
 **Python:**
-```python
+
+  ```python
   first = bursar.credits.add_credits(
       user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
   )
@@ -1889,8 +2000,9 @@ same request replays the original entry — the result is returned with
   assert first.entry_id == replay.entry_id and replay.idempotent
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const first = await bursar.credits.addCredits(userId, 100, {
     type: "purchase",
     idempotencyKey: "checkout:42",
@@ -1902,7 +2014,7 @@ same request replays the original entry — the result is returned with
   console.assert(first.entryId === replay.entryId && replay.idempotent);
   ```
 
-  Reusing a key with a different request is a conflict, not a silent pass:
+Reusing a key with a different request is a conflict, not a silent pass:
 the store rejects it, because two different payloads cannot share one ledger
 row. Use provider event ids as keys in webhook handlers so redelivery is a
 no-op — never a double charge. Keys are scoped per account.
@@ -1928,7 +2040,8 @@ lease instead of guessing at admission:
    an unused hold on failure.
 
 **Python:**
-```python
+
+  ```python
   lease = bursar.credits.reserve(user_id, estimate_metrics)
   try:
       actual = run_completion()
@@ -1938,8 +2051,9 @@ lease instead of guessing at admission:
       raise
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const lease = await bursar.credits.reserve(userId, estimateMetrics);
   try {
     const actual = await runCompletion();
@@ -1950,7 +2064,7 @@ lease instead of guessing at admission:
   }
   ```
 
-  The lease captures its `minimum_balance` and pricing snapshot at admission.
+The lease captures its `minimum_balance` and pricing snapshot at admission.
 Settlement honors that captured policy even if the user changes plans while
 the work is in flight, so a plan change can never strand approved work — or
 let it bypass the policy it was admitted under. A lease settles exactly once;
@@ -1962,7 +2076,8 @@ with a bounded attempt count because the outcome of a failed settle may be
 unknown:
 
 **Python:**
-```python
+
+  ```python
   outcome = bursar.credits.run_billed(
       user_id,
       RunBilledOptions(
@@ -1972,15 +2087,16 @@ unknown:
   )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const outcome = await bursar.credits.runBilled(userId, {
     estimate: estimateMetrics,
     doWork: runCompletion,
   });
   ```
 
-  A crashed worker leaves the lease to expire: the TTL plus the store's
+A crashed worker leaves the lease to expire: the TTL plus the store's
 `expire_leases` reaper reclaims the hold without ever charging it.
 
 ## Refund bounds
@@ -1992,20 +2108,22 @@ kinds. Sources are preserved — the refund entry carries the original entry
 id — so the audit trail always shows which charge a refund reverses.
 
 **Python:**
-```python
+
+  ```python
   charge = bursar.credits.deduct_credits(user_id, 10, idempotency_key="operation:42")
   refund = bursar.credits.refund_credits(charge.entry_id, amount=5)
   print(refund.amount, refund.new_balance)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const charge = await bursar.credits.deductCredits(userId, 10);
   const refund = await bursar.credits.refundCredits(charge.entryId, 5);
   console.log(refund.amount, refund.newBalance);
   ```
 
-  ## Invariant checklist
+## Invariant checklist
 
 | Invariant | Enforcement |
 | --- | --- |
@@ -2081,7 +2199,8 @@ package top level; the optional runtime composition root lives in
 (JavaScript):
 
 **Python:**
-```python
+
+  ```python
   from bursar import PostgresStore
   from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 
@@ -2095,8 +2214,9 @@ package top level; the optional runtime composition root lives in
   )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { PostgresStore } from "@zonastery/bursar";
   import { createBursarRuntime } from "@zonastery/bursar/node";
 
@@ -2108,7 +2228,7 @@ package top level; the optional runtime composition root lives in
   });
   ```
 
-  Each SDK checks out one pooled connection, starts a transaction, sets
+Each SDK checks out one pooled connection, starts a transaction, sets
 `bursar.tenant_id` with transaction-local scope, performs the RPC, then
 commits or rolls back before releasing the connection. Never set a
 session-scoped tenant value on a pooled connection — it would leak into the
@@ -2181,7 +2301,8 @@ credit mutations. Construct the facade with a billing store and commerce
 options when an application needs subscriptions, top-ups, or auto-recharge:
 
 **Python:**
-```python
+
+  ```python
   import os
 
   from bursar import Bursar, CommerceOptions, PostgresBillingStore, PostgresStore
@@ -2204,8 +2325,9 @@ options when an application needs subscriptions, top-ups, or auto-recharge:
   )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
   import { StripeProvider } from "@zonastery/bursar/providers";
 
@@ -2224,7 +2346,8 @@ options when an application needs subscriptions, top-ups, or auto-recharge:
   });
   ```
 
-  :::note
+**Note:**
+
 `commerce_options` is a plain value in both SDKs: Python takes the
 `CommerceOptions` model, TypeScript takes a plain object literal with the same
 fields (`providers`, optional `defaultProvider`).
@@ -2242,7 +2365,8 @@ it through the facade. `ingest_billing_event` claims each event on
 and subscription grants never double-post:
 
 **Python:**
-```python
+
+  ```python
   from datetime import UTC, datetime
 
   from bursar.billing.types import (
@@ -2272,8 +2396,9 @@ and subscription grants never double-post:
   )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import {
     BillingCustomerInfo,
     BillingEvent,
@@ -2299,7 +2424,7 @@ and subscription grants never double-post:
   });
   ```
 
-  Events that identify the user only through the customer or subscription are
+Events that identify the user only through the customer or subscription are
 resolved from persisted billing state before handling.
 
 ## Subscription-driven plan assignment
@@ -2371,7 +2496,8 @@ prorates. Scheduled changes are persisted as billing subscription changes and
 can be cancelled before they take effect.
 
 **Python:**
-```python
+
+  ```python
   preview = await bursar.commerce.preview_plan_change(user_id, offer_key="pro_monthly")
   confirmed = await bursar.commerce.confirm_plan_change(
       user_id,
@@ -2381,8 +2507,9 @@ can be cancelled before they take effect.
   )
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const preview = await bursar.commerce.previewPlanChange({
     accountId: userId,
     offerKey: "pro_monthly",
@@ -2420,32 +2547,36 @@ Import `PostgresStore` and the `CreditStore` abstract base from the package
 top level:
 
 **Python:**
-```python
+
+  ```python
   from bursar import CreditStore, PostgresStore
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { CreditStore, PostgresStore } from "@zonastery/bursar";
   ```
 
-  ## PostgresStore
+## PostgresStore
 
 The store is tenant-bound: pass the provisioned tenant UUID when constructing
 it. In Python `tenant_id` is a keyword argument; in JavaScript it is the
 second positional argument.
 
 **Python:**
-```python
+
+  ```python
   store = PostgresStore(database_url, tenant_id=tenant_id)
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   const store = new PostgresStore(databaseUrl, tenantId);
   ```
 
-  No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
+No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
 provision the tenant before constructing a store — see
 [CLI and deployment](../cli.mdx) and [multi-tenancy](./multitenancy.mdx).
 Bursar owns the schema, migrations, and tenant lifecycle; host migrations
@@ -2471,6 +2602,13 @@ the `s3` extra); in JavaScript they are exported from the Node-only
 | `ClickHouseUsageStore` | Usage history and analytics — skips PostgreSQL detail and rollup rows when enabled |
 | `S3BillingArchive` | Billing payload archive — skips PostgreSQL raw envelope rows when enabled |
 
+High-cardinality usage details follow the usage backend: monthly PostgreSQL
+partitions with retention cleanup by default, or the ClickHouse usage
+projection when configured. Canonical billable usage receipts remain
+permanent; expired record-only receipts and PostgreSQL detail payloads are
+cleaned with the configured usage-retention horizon. S3 continues to own
+unbounded billing webhook envelopes, independently of the usage backend.
+
 A transactional outbox carries the complete external payload in the same
 transaction as the canonical receipt or billing claim. An `OutboxWorker`
 delivers `usage.charge_recorded` to ClickHouse and
@@ -2488,7 +2626,8 @@ The runtime composition root wires the Postgres stores, the optional
 adapters, and the outbox worker onto one connection pool:
 
 **Python:**
-```python
+
+  ```python
   from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
 
   runtime = create_bursar_runtime(
@@ -2503,8 +2642,9 @@ adapters, and the outbox worker onto one connection pool:
   runtime.start(BursarRuntimeStartOptions(load_catalog=True))
   ```
 
-  **TypeScript:**
-```ts
+**TypeScript:**
+
+  ```ts
   import { createBursarRuntime } from "@zonastery/bursar/node";
 
   const runtime = await createBursarRuntime({
@@ -2517,7 +2657,7 @@ adapters, and the outbox worker onto one connection pool:
   await runtime.start({ loadCatalog: true });
   ```
 
-  The runtime exposes the composed `bursar` facade plus the underlying
+The runtime exposes the composed `bursar` facade plus the underlying
 `creditStore` and `billingStore`. SDK runtimes claim outbox events through
 the tenant-filtered overload, so one runtime can never take another tenant's
 work. When ClickHouse is configured, analytics and usage-history methods route
@@ -2957,6 +3097,27 @@ and `sweep_expired_credits(dry_run=False)` expires eligible credit lots.
 | `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str` | `dict[str, Any]` |
 | `sweep_expired_credits` | `dry_run=False` | `SweepResult` |
 
+## AI and batch usage accounting
+
+Bursar records financial events, not workflow execution state. Charge a
+fixed-price workload once with `deduct_flat_job`; keep its stages, retries,
+latency, model calls, and parent/child trace structure in your workflow store
+and OpenTelemetry backend. For dynamically priced inference, use `deduct` when
+the amount is known up front or a lease when the final provider usage is known
+only after completion.
+
+Each deduction or lease settlement creates a canonical `credit_usage_charges`
+receipt. Put only bounded values needed for pricing and reconciliation in its
+measures, dimensions, and metadata. Use `record_usage` only when you
+intentionally need a priced receipt without another account debit, such as
+usage billed by an external system; it is not a tracing API.
+
+Detailed receipt payloads use monthly PostgreSQL partitions by default and
+follow the configured retention policy. When ClickHouse is enabled, those
+payloads and usage analytics are projected there instead. Operational AI
+telemetry—including prompts, completions, latency, retries, errors, and router
+decisions—belongs in OpenTelemetry/Langfuse.
+
 ## Leases
 
 When the final cost is only known after the work runs, reserve the estimate,
@@ -3240,12 +3401,12 @@ budgets, and cancellation. The default classifier retries only errors marked
 
 ## Entry points
 
-| Subpath | Contents |
-| --- | --- |
-| `@zonastery/bursar` | The application API: facade, stores, `PricingEngine`, config, errors |
-| `@zonastery/bursar/node` | Node-only: `loadPricingFile`, `BursarRuntime`/`createBursarRuntime`, `OutboxWorker`, `ClickHouseUsageStore`, `S3BillingArchive` |
-| `@zonastery/bursar/browser` | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`) |
-| `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock) |
+| Subpath                         | Contents                                                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `@zonastery/bursar`             | The application API: facade, stores, `PricingEngine`, config, errors                                                            |
+| `@zonastery/bursar/node`        | Node-only: `loadPricingFile`, `BursarRuntime`/`createBursarRuntime`, `OutboxWorker`, `ClickHouseUsageStore`, `S3BillingArchive` |
+| `@zonastery/bursar/browser`     | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`)                             |
+| `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock)                                                                                  |
 
 The `node` entry point depends on Node built-ins (`crypto`, `fs`) and is not
 compatible with Edge Runtime environments; `browser` contains no database
@@ -3506,6 +3667,27 @@ reverses every deduction of a given entry type, and
 | `revokeCreditsByEntryType` | `userId: string`, `entryType: string` | `Promise<Record<string, unknown>>` |
 | `sweepExpiredCredits` | `dryRun = false` | `Promise<SweepResult>` |
 
+## AI and batch usage accounting
+
+Bursar records financial events, not workflow execution state. Charge a
+fixed-price workload once with `deductFlatJob`; keep its stages, retries,
+latency, model calls, and parent/child trace structure in your workflow store
+and OpenTelemetry backend. For dynamically priced inference, use `deduct` when
+the amount is known up front or a lease when the final provider usage is known
+only after completion.
+
+Each deduction or lease settlement creates a canonical `credit_usage_charges`
+receipt. Put only bounded values needed for pricing and reconciliation in its
+measures, dimensions, and metadata. Use `recordUsage` only when you
+intentionally need a priced receipt without another account debit, such as
+usage billed by an external system; it is not a tracing API.
+
+Detailed receipt payloads use monthly PostgreSQL partitions by default and
+follow the configured retention policy. When ClickHouse is enabled, those
+payloads and usage analytics are projected there instead. Operational AI
+telemetry—including prompts, completions, latency, retries, errors, and router
+decisions—belongs in OpenTelemetry/Langfuse.
+
 ## Leases
 
 When the final cost is only known after the work runs, reserve the estimate,
@@ -3661,12 +3843,12 @@ Connects through `pg` and runs every mutation as a canonical SQL function
 (RPC). `tenantId` is a required positional argument that scopes every
 transaction to one tenant.
 
-| Parameter | Type | Meaning |
-| --- | --- | --- |
-| `databaseUrl` | `string` | Postgres connection string |
-| `tenantId` | `string` | Required tenant UUID scoping every transaction |
+| Parameter             | Type                                                           | Meaning                                                               |
+| --------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `databaseUrl`         | `string`                                                       | Postgres connection string                                            |
+| `tenantId`            | `string`                                                       | Required tenant UUID scoping every transaction                        |
 | `poolOrCtorOrOptions` | `Pool \| PoolConstructor \| PostgresStoreOptions \| undefined` | Reuse a pool, pass a pool constructor, or configure an SDK-owned pool |
-| `storageOptions` | `PostgresStoreOptions \| undefined` | Options when the third argument is a pool or constructor |
+| `storageOptions`      | `PostgresStoreOptions \| undefined`                            | Options when the third argument is a pool or constructor              |
 
 The store owns a pool it creates from `databaseUrl`: call `await store.close()`
 to drain it. A supplied pool is borrowed and is never ended by the store.
@@ -3675,14 +3857,15 @@ to drain it. A supplied pool is borrowed and is never ended by the store.
 
 `PostgresStoreOptions` and `PostgresBillingStoreOptions` share these controls:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `connectionTimeoutMs` | `10_000` | Maximum connection establishment or pool-acquisition time for an SDK-owned pool |
-| `statementTimeoutMs` | `30_000` | Per-transaction PostgreSQL statement deadline; `0` disables it |
-| `idleTimeoutMs` | `pg` default | Idle lifetime for connections in an SDK-owned pool |
-| `maxConnections` | `pg` default | Maximum connections in an SDK-owned pool |
-| `applicationName` | `bursar-js` | Value reported as PostgreSQL `application_name` |
-| `onPoolError` | no-op | Observer for typed errors emitted by idle pool clients |
+| Option                     | Default      | Meaning                                                                         |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------- |
+| `connectionTimeoutMs`      | `10_000`     | Maximum connection establishment or pool-acquisition time for an SDK-owned pool |
+| `statementTimeoutMs`       | `30_000`     | Per-transaction PostgreSQL statement deadline; `0` disables it                  |
+| `idleTransactionTimeoutMs` | `30_000`     | Deadline for an abandoned idle transaction; `0` disables it                     |
+| `idleTimeoutMs`            | `pg` default | Idle lifetime for connections in an SDK-owned pool                              |
+| `maxConnections`           | `pg` default | Maximum connections in an SDK-owned pool                                        |
+| `applicationName`          | `bursar-js`  | Value reported as PostgreSQL `application_name`                                 |
+| `onPoolError`              | no-op        | Observer for typed errors emitted by idle pool clients                          |
 
 The statement deadline is applied with transaction-local PostgreSQL settings,
 so it also protects operations that use a borrowed pool. Connection, SQLSTATE,

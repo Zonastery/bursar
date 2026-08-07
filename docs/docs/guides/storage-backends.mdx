@@ -92,6 +92,13 @@ the `s3` extra); in JavaScript they are exported from the Node-only
 | `ClickHouseUsageStore` | Usage history and analytics — skips PostgreSQL detail and rollup rows when enabled |
 | `S3BillingArchive` | Billing payload archive — skips PostgreSQL raw envelope rows when enabled |
 
+High-cardinality usage details follow the usage backend: monthly PostgreSQL
+partitions with retention cleanup by default, or the ClickHouse usage
+projection when configured. Canonical billable usage receipts remain
+permanent; expired record-only receipts and PostgreSQL detail payloads are
+cleaned with the configured usage-retention horizon. S3 continues to own
+unbounded billing webhook envelopes, independently of the usage backend.
+
 A transactional outbox carries the complete external payload in the same
 transaction as the canonical receipt or billing claim. An `OutboxWorker`
 delivers `usage.charge_recorded` to ClickHouse and

@@ -40,6 +40,7 @@ DECLARE v_account uuid;
  v_revision uuid;
  v_plan uuid;
  v_rate_card text;
+ v_ledger_metadata jsonb;
 
 BEGIN
   v_account:=bursar.account_for_subject(p_subject_id);
@@ -52,18 +53,30 @@ BEGIN
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR (
+           p_feature IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_feature, 255)
+       )
+       OR (
+           p_model IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_model, 255)
+       )
+       OR (
+           p_region IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_region, 255)
+       )
        OR p_event_at IS NULL
        OR (p_plan_id IS NOT NULL AND p_catalog_revision_id IS NULL)
        OR (p_plan_id IS NULL AND p_rate_card_key IS NOT NULL)
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
-           16384
+           1048576
        )
-       OR NOT bursar.is_bounded_json_object(
+       OR NOT bursar.valid_measure_object(
            COALESCE(p_measures, '{}'::jsonb),
            16384
        )
-       OR NOT bursar.is_bounded_json_object(
+       OR NOT bursar.valid_dimension_object(
            COALESCE(p_dimensions, '{}'::jsonb),
            65536
        )
@@ -72,7 +85,7 @@ BEGIN
         RETURN;
     END IF;
 
-    v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',p_metadata)::text,'UTF8'),'sha256');
+    v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',COALESCE(p_metadata,'{}'::jsonb))::text,'UTF8'),'sha256');
 
   SELECT account.tenant_id, account.subject_id
   INTO v_tenant, v_subject
@@ -155,6 +168,17 @@ BEGIN
           AND (assignment.ends_at IS NULL OR assignment.ends_at>now());
     END IF;
 
+    v_id := bursar.uuid_v7();
+    v_ledger_metadata := jsonb_strip_nulls(jsonb_build_object(
+        'usage_charge_id', v_id,
+        'billing_disposition', 'billable',
+        'feature', p_feature,
+        'model', p_model,
+        'region', p_region,
+        'plan_id', v_plan,
+        'rate_card_key', v_rate_card
+    ));
+
     IF p_requested-p_allowance > 0 THEN
         SELECT *
         INTO v_post
@@ -164,7 +188,7 @@ BEGIN
             -(p_requested-p_allowance),
             p_operation,
             p_idempotency_key||':ledger',
-            p_metadata,
+            v_ledger_metadata,
             'default',
             v_revision,
             NULL,
@@ -182,18 +206,17 @@ BEGIN
     PERFORM set_config('bursar.mutation_context','internal',true);
 
     INSERT INTO bursar.credit_usage_charges(
-        account_id,operation,event_at,requested,charged,
+        id,account_id,operation,event_at,requested,charged,
         allowance_requested,allowance_covered,billing_disposition,
         catalog_revision_id,plan_id,rate_card_key,ledger_entry_id,idempotency_key,
         request_digest
     )
     VALUES(
-        v_account,p_operation,p_event_at,
+        v_id,v_account,p_operation,p_event_at,
         p_requested,p_requested-p_allowance,
         p_allowance_requested,p_allowance,'billable',v_revision,v_plan,v_rate_card,
         v_ledger_entry,p_idempotency_key,v_digest
-    )
-    RETURNING id INTO v_id;
+    );
 
     IF bursar.current_usage_backend() = 'postgres' THEN
         INSERT INTO bursar.usage_charge_payloads(
@@ -341,15 +364,27 @@ BEGIN
        OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
-       OR NOT bursar.is_bounded_json_object(
-           COALESCE(p_metadata, '{}'::jsonb),
-           16384
+       OR (
+           p_feature IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_feature, 255)
+       )
+       OR (
+           p_model IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_model, 255)
+       )
+       OR (
+           p_region IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_region, 255)
        )
        OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           1048576
+       )
+       OR NOT bursar.valid_measure_object(
            COALESCE(p_measures, '{}'::jsonb),
            16384
        )
-       OR NOT bursar.is_bounded_json_object(
+       OR NOT bursar.valid_dimension_object(
            COALESCE(p_dimensions, '{}'::jsonb),
            65536
        )

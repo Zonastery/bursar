@@ -441,11 +441,6 @@ class ClickHouseUsageStore:
             ORDER BY (tenant_id, event_at, charge_id){ttl}
             """
         )
-        self._client.command(
-            f"ALTER TABLE {self._quoted_table} "
-            "ADD COLUMN IF NOT EXISTS billing_disposition "
-            "LowCardinality(String) DEFAULT 'billable'"
-        )
 
     def _spend_rows(
         self,
@@ -515,6 +510,18 @@ class ClickHouseUsageStore:
             parsed = json.loads(value)
             return parsed if isinstance(parsed, dict) else {}
         return {}
+
+    @classmethod
+    def _decimal_object(cls, value: Any) -> dict[str, Decimal]:
+        return {
+            key: Decimal(str(item))
+            for key, item in cls._json_object(value).items()
+            if isinstance(item, (int, float, str)) and not isinstance(item, bool)
+        }
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        return str(value) if value not in (None, "") else None
 
     @staticmethod
     def _read_timestamp(value: str) -> datetime:

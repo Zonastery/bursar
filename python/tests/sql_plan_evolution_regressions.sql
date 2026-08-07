@@ -164,7 +164,12 @@ BEGIN
         'UTC',
         100,
         70,
-        '{}'::jsonb
+        (
+            SELECT plan.definition->'credit_allowance'
+            FROM bursar.catalog_plans AS plan
+            WHERE plan.id = v_seeker_plan_1
+              AND plan.catalog_revision_id = v_revision_1
+        )
     );
 
     INSERT INTO bursar.quota_windows(
@@ -192,7 +197,13 @@ BEGIN
         10,
         7,
         'block',
-        '{}'::jsonb
+        (
+            SELECT quota.definition
+            FROM bursar.catalog_plan_quotas AS quota
+            WHERE quota.catalog_revision_id = v_revision_1
+              AND quota.plan_key = 'seeker'
+              AND quota.quota_key = 'requests'
+        )
     );
 
     v_doc_2 := jsonb_set(

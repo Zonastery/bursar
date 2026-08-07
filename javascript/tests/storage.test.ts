@@ -206,7 +206,7 @@ describe("ClickHouseUsageStore", () => {
     expect(second).toBe(first);
     await expect(first).rejects.toBe(failure);
     await expect(store.initialize()).resolves.toBeUndefined();
-    expect(command).toHaveBeenCalledTimes(3);
+    expect(command).toHaveBeenCalledTimes(2);
   });
 
   it("writes a replay-safe usage projection and serves analytics", async () => {
@@ -238,7 +238,7 @@ describe("ClickHouseUsageStore", () => {
       region: null,
       measures: { tokens: 10 },
       dimensions: { workspace: "one" },
-      metadata: {},
+      metadata: { accountingContext: { source: "openrouter" } },
       requested: "15.000000",
       charged: "12.500000",
       allowanceRequested: "2.500000",
@@ -266,6 +266,7 @@ describe("ClickHouseUsageStore", () => {
             outbox_event_id: "99",
             charge_id: usage.chargeId,
             charged: "12.500000",
+            metadata: JSON.stringify(usage.metadata),
           }),
         ],
       }),

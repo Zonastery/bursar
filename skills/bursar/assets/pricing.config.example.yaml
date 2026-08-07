@@ -1,0 +1,251 @@
+# BursarConfig example — "prompta", a fictional AI assistant.
+#
+# One strict, versioned document drives pricing, credit buckets, plans, and
+# commerce. Validates with:  bursar config validate pricing.config.example.yaml
+# Publish with:              bursar config set pricing.config.example.yaml
+#
+# Rules of thumb:
+#   - Every exact decimal value is a STRING ("0.0025", "10000"). Floats are
+#     rejected.
+#   - Offer prices are integer minor units with an explicit currency.
+#   - Unknown keys anywhere are rejected (additionalProperties: false).
+#   - `credits.accounting` is fixed v1 (unit: credit, scale: 6,
+#     rounding: half_up) and may be omitted — it is shown here commented out.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# catalog — catalog-wide publication settings
+# ---------------------------------------------------------------------------
+catalog:
+  default_plan: free # signup plan; falls back to the lowest-rank plan
+
+# ---------------------------------------------------------------------------
+# pricing — usage operations (measures + dimensions) and reusable rate cards
+# ---------------------------------------------------------------------------
+pricing:
+  operations:
+    completion: # one named billable action
+      measures: # numeric quantities, each with a unit
+        input_tokens: { unit: token }
+        output_tokens: { unit: token }
+        cache_read_tokens: { unit: token }
+      dimensions: # typed selectors that pick price rules, not priced
+        model: { type: string }
+        batch: { type: boolean, required: false } # optional; must be present when a rule matches on it
+    execution:
+      measures:
+        jobs: { unit: job }
+        compute_seconds: { unit: second }
+      dimensions:
+        model: { type: string }
+
+  rate_cards:
+    # Per-million-token rates: `rate` is the price of `unit_size` units.
+    standard:
+      operations:
+        completion:
+          rules: # ordered — first matching rule wins
+            - when:
+                model: { op: in, values: [gpt-4o, gpt-4o-mini] }
+              charge:
+                type: sum
+                components:
+                  - {
+                      type: per_unit,
+                      measure: input_tokens,
+                      rate: "0.0025",
+                      unit_size: "1000000",
+                    }
+                  - {
+                      type: per_unit,
+                      measure: output_tokens,
+                      rate: "0.0100",
+                      unit_size: "1000000",
+                    }
+                  - {
+                      type: per_unit,
+                      measure: cache_read_tokens,
+                      rate: "0.00125",
+                      unit_size: "1000000",
+                    }
+          unmatched: # required for every operation on a card
+            action: charge
+            charge: # expression charges reference declared measures only
+              type: expression
+              formula: input_tokens * 0.005 + output_tokens * 0.015
+        execution:
+          rules:
+            - when:
+                model: { op: eq, value: gpt-4o }
+              charge: { type: per_unit, measure: jobs, rate: "0.04" }
+          unmatched: { action: reject } # unmetered models are refused
+
+    # A second card demonstrating `extends` (inherits unpriced operations from
+    # `standard`) and the `prefix` matcher.
+    batch:
+      extends: standard
+      operations:
+        completion:
+          rules:
+            - when:
+                model: { op: prefix, value: gpt-4o }
+                batch: { op: eq, value: true }
+              charge:
+                type: per_unit
+                measure: input_tokens
+                rate: "0.00125"
+                unit_size: "1000000"
+          unmatched: { action: reject }
+
+# ---------------------------------------------------------------------------
+# credits — buckets, spending policies, grants, display conversion
+# ---------------------------------------------------------------------------
+credits:
+  # accounting:                # fixed v1 convention — omit to use the defaults
+  #   unit: credit
+  #   scale: 6
+  #   rounding: half_up
+  buckets:
+    promotional:
+      { priority: 1, expiry: { type: fixed_at, at: "2026-12-31T23:59:59Z" } }
+    purchased: { priority: 10 } # lower priority spends first
+  default_bucket: purchased
+  policies: # floors applied to deductions
+    prepaid: { type: prepaid } # floor at zero — structural zero debt
+    credit_line: { type: credit_line, limit: "500.000000" } # bounded overdraft
+  display: # optional credit-to-currency conversion
+    currency: USD
+    units_per_major: "100.000000"
+  grant_programs:
+    welcome: # 5,000 free credits on signup, 30-day expiry
+      trigger: account_created
+      awards:
+        - amount: "5000.000000"
+          bucket: promotional
+          expiry: { type: after_grant, interval: { unit: day, count: 30 } }
+      max_awards_per_subject: 1
+      idempotency_scope: subject
+
+# ---------------------------------------------------------------------------
+# entitlements — typed product features referenced by plan feature values
+# ---------------------------------------------------------------------------
+entitlements:
+  features:
+    voice_mode: { type: boolean, default: false }
+    max_context:
+      { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
+    support_tier:
+      { type: enum, values: [none, standard, priority], default: none }
+    locale: { type: string, default: en, pattern: "^[a-z]{2}$" }
+
+# ---------------------------------------------------------------------------
+# admission — reusable concurrency policies (reserve enforces max_in_flight)
+# ---------------------------------------------------------------------------
+admission:
+  policies:
+    default:
+      max_in_flight: 4
+      operations:
+        completion: { max_in_flight: 8 } # per-operation override
+
+# ---------------------------------------------------------------------------
+# plans — access bundles: allowed operations, rate card, allowance, features,
+# quotas, policy references
+# ---------------------------------------------------------------------------
+plans:
+  free:
+    display_name: Free
+    rank: 0
+    description: "Free plan with a monthly credit allowance"
+    rate_card: standard
+    allowed_operations: [completion]
+    features:
+      voice_mode: false
+      max_context: 128000
+      support_tier: none
+      locale: en
+    credit_allowance: # free credits that reset on a window
+      amount: "10000.000000"
+      priority: 5 # shares the priority namespace with
+      window: { type: calendar, unit: month, count: 1 } # buckets; no collisions
+  pro:
+    display_name: Pro
+    rank: 1
+    description: "Pro plan with metered completion and execution"
+    rate_card: standard
+    allowed_operations: [completion, execution]
+    features:
+      voice_mode: true
+      max_context: 200000
+      support_tier: priority
+      locale: en
+    quotas:
+      daily_tokens:
+        operation: completion
+        measure: output_tokens
+        limit: "500000"
+        window: { type: calendar, unit: day, count: 1 }
+        enforcement: block # block | allow
+        emit_at_percent: [80, 100] # credits.quota_threshold events
+    admission_policy: default
+    credit_policy: prepaid
+    evolution: # when a new catalog version activates
+      default_rollout: next_renewal # immediate | next_renewal | new_assignments_only
+
+# ---------------------------------------------------------------------------
+# commerce — providers, offers, plan-change policies, auto-recharge
+# ---------------------------------------------------------------------------
+commerce:
+  providers:
+    stripe: { type: stripe } # stripe | dodo | custom (with adapter)
+  offers:
+    pro_monthly: # subscription offer: plan + interval + cycle grant
+      type: subscription
+      display_name: Pro Monthly
+      description: "Pro plan, billed monthly"
+      sort_order: 1
+      price: { amount_minor: 2000, currency: USD, tax_behavior: inclusive }
+      providers:
+        stripe: { type: stripe_price, price_id: price_pro_monthly }
+      plan: pro
+      billing_interval: { unit: month, count: 1 }
+      trial: { unit: day, count: 7 } # optional trial
+      cycle_grant: # 50,000 credits per cycle
+        amount: "50000"
+        bucket: purchased
+        renewal: replace_previous # expires last cycle's leftover first
+        expiry: { type: subscription_end }
+    credits_10k: # topup offer: sells credit packs
+      type: topup
+      display_name: "10,000 Credits"
+      price: { amount_minor: 500, currency: USD }
+      providers:
+        stripe: { type: stripe_price, price_id: price_credits_10k }
+      credits_per_unit: "10000"
+      quantity: { minimum: 1, maximum: 10, default: 1 }
+      bucket: purchased
+      lot_behavior: separate_lots # separate_lots | merge_and_refresh
+      expiry: { type: never } # topups cannot use subscription_end
+  subscription_changes: # per-direction plan-change policies
+    upgrade:
+      {
+        effective: immediate,
+        proration: prorated,
+        payment_failure: prevent_change,
+      }
+    downgrade: { effective: renewal, proration: none }
+    lateral: { effective: immediate, proration: prorated }
+    cadence_change: { effective: renewal, proration: none }
+  auto_recharge: # low balance -> topup purchase, bounded
+    eligible_topups: [credits_10k]
+    balance_below: { minimum: "1000", maximum: "5000", default: "2000" }
+    rearm_above: "20000" # must exceed balance_below.maximum
+    quantity: { minimum: 1, maximum: 10, default: 1 } # must fit the offer's bounds
+    limits:
+      max_purchases: 5
+      window: { type: calendar, unit: day, count: 1 }
+      max_charge_minor: 5000
+      cooldown: { unit: hour, count: 1 }
+      max_consecutive_failures: 3
+      failure_action: pause

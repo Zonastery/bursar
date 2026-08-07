@@ -58,6 +58,11 @@ CREATE TABLE bursar.credit_lots (
     expiry_policy_snapshot jsonb NOT NULL DEFAULT '{"type":"never"}'::jsonb
     CHECK (
         bursar.is_bounded_json_object(expiry_policy_snapshot, 32768)
+        AND bursar.matches_catalog_fragment(
+            expiry_policy_snapshot,
+            bursar.catalog_document_shape_schema()
+                ->'$defs'->'BucketDefinition'->'properties'->'expiry'
+        )
     ),
     source_type text NOT NULL DEFAULT 'ledger'
     CHECK (source_type IN (
@@ -164,6 +169,157 @@ CREATE TABLE bursar.credit_debt_repayments (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE FUNCTION bursar.measure_object_schema()
+RETURNS json
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $function$
+    SELECT $schema$
+    {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "number"},
+          {"type": "string"}
+        ]
+      }
+    }
+    $schema$::json
+$function$;
+
+CREATE FUNCTION bursar.dimension_object_schema()
+RETURNS json
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $function$
+    SELECT $schema$
+    {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {"type": "string"},
+          {"type": "number"},
+          {"type": "boolean"}
+        ]
+      }
+    }
+    $schema$::json
+$function$;
+
+CREATE FUNCTION bursar.usage_pricing_snapshot_schema()
+RETURNS json
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $function$
+    SELECT $schema$
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requested": {
+          "type": "string",
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+        },
+        "allowance_covered": {
+          "type": "string",
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+        },
+        "charged": {
+          "type": "string",
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+        },
+        "billing_disposition": {
+          "enum": ["billable", "record_only"]
+        }
+      },
+      "required": [
+        "requested",
+        "allowance_covered",
+        "charged",
+        "billing_disposition"
+      ]
+    }
+    $schema$::json
+$function$;
+
+CREATE FUNCTION bursar.valid_measure_object(
+    p_value jsonb,
+    p_max_bytes integer DEFAULT 65536
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path TO ''
+AS $$
+DECLARE
+    v_key text;
+    v_value jsonb;
+    v_number numeric;
+BEGIN
+    IF NOT bursar.is_bounded_json_object(
+        COALESCE(p_value, '{}'::jsonb),
+        p_max_bytes
+    ) OR NOT extensions.jsonb_matches_schema(
+        bursar.measure_object_schema(),
+        COALESCE(p_value, '{}'::jsonb)
+    ) THEN
+        RETURN false;
+    END IF;
+
+    FOR v_key, v_value IN
+        SELECT entry.key, entry.value
+        FROM jsonb_each(COALESCE(p_value, '{}'::jsonb)) AS entry
+    LOOP
+        BEGIN
+            v_number := btrim(v_value #>> '{}')::numeric;
+        EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+            RETURN false;
+        END;
+
+        IF NOT bursar.is_finite_numeric(v_number) OR v_number < 0 THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+
+    RETURN true;
+END
+$$;
+
+CREATE FUNCTION bursar.valid_dimension_object(
+    p_value jsonb,
+    p_max_bytes integer DEFAULT 65536
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT bursar.is_bounded_json_object(
+        COALESCE(p_value, '{}'::jsonb),
+        p_max_bytes
+    ) AND extensions.jsonb_matches_schema(
+        bursar.dimension_object_schema(),
+        COALESCE(p_value, '{}'::jsonb)
+    )
+$$;
+
 CREATE TABLE bursar.credit_usage_charges (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
@@ -231,7 +387,7 @@ CREATE TABLE bursar.usage_charge_payloads (
     REFERENCES bursar.credit_usage_charges (id) ON DELETE CASCADE,
     event_at timestamptz NOT NULL,
     measures jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(measures, 16384)),
+    CHECK (bursar.valid_measure_object(measures, 16384)),
     feature text CHECK (
         feature IS NULL OR bursar.is_bounded_text(feature, 255)
     ),
@@ -242,11 +398,19 @@ CREATE TABLE bursar.usage_charge_payloads (
         region IS NULL OR bursar.is_bounded_text(region, 255)
     ),
     dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(dimensions, 65536)),
+    CHECK (bursar.valid_dimension_object(dimensions, 65536)),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(metadata, 16384)),
-    pricing_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(pricing_snapshot, 32768)),
+    -- Provider reconciliation receipts and other high-cardinality details are
+    -- retained only here (or in ClickHouse), never in permanent ledger rows.
+    CHECK (bursar.is_bounded_json_object(metadata, 1048576)),
+    pricing_snapshot jsonb NOT NULL
+    CHECK (
+        bursar.is_bounded_json_object(pricing_snapshot, 32768)
+        AND extensions.jsonb_matches_schema(
+            bursar.usage_pricing_snapshot_schema(),
+            pricing_snapshot
+        )
+    ),
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (event_at, charge_id)
 ) PARTITION BY RANGE (event_at);
@@ -450,8 +614,14 @@ CREATE TABLE bursar.allowance_windows (
     CHECK (bursar.is_finite_numeric(reserved) AND reserved >= 0),
     consumed numeric(20, 6) NOT NULL DEFAULT 0
     CHECK (bursar.is_finite_numeric(consumed) AND consumed >= 0),
-    policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
+    policy_snapshot jsonb NOT NULL
+    CHECK (
+        bursar.is_bounded_json_object(policy_snapshot, 32768)
+        AND bursar.matches_catalog_definitions(
+            policy_snapshot,
+            'CreditAllowance'
+        )
+    ),
     CHECK (window_end > window_start),
     UNIQUE (
         account_id,
@@ -485,7 +655,13 @@ CREATE TABLE bursar.quota_windows (
     CHECK (bursar.is_finite_numeric(consumed) AND consumed >= 0),
     enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
     policy_snapshot jsonb NOT NULL
-    CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
+    CHECK (
+        bursar.is_bounded_json_object(policy_snapshot, 32768)
+        AND bursar.matches_catalog_definitions(
+            policy_snapshot,
+            'QuotaDefinition'
+        )
+    ),
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK (window_end > window_start),
     UNIQUE (
@@ -584,9 +760,9 @@ CREATE TABLE bursar.credit_leases (
         feature IS NULL OR bursar.is_bounded_text(feature, 255)
     ),
     measures jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(measures, 16384)),
+    CHECK (bursar.valid_measure_object(measures, 16384)),
     dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(dimensions, 65536)),
+    CHECK (bursar.valid_dimension_object(dimensions, 65536)),
     policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb

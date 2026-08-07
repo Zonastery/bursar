@@ -72,8 +72,8 @@ new Bursar({ creditStore, creditsOptions?, billingStore?, billingOptions? })
 | `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles |
 
 Run: `bun run test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own
-service container) or, failing that, a testcontainers-managed PostgreSQL 16 +
-pg_partman 5 instance (Docker permitting) started automatically in
+service container) or, failing that, a testcontainers-managed PostgreSQL 17 +
+pg_partman 5 + pg_jsonschema 0.3 instance (Docker permitting) started automatically in
 `tests/global-setup.ts` — so a bare `bun run test` with Docker available
 exercises them too, not just CI.
 Typecheck: `bun run typecheck`.

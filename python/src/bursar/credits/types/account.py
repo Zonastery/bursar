@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CreditMetadata(BaseModel, extra="allow"):
@@ -17,6 +17,9 @@ class CreditMetadata(BaseModel, extra="allow"):
     reference_type: str | None = None
     reference_id: str | None = None
     idempotency_key: str | None = None
+    provider_request_id: str | None = Field(default=None, max_length=512)
+    trace_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    span_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
 
 
 class BalanceResult(BaseModel):
@@ -44,6 +47,7 @@ class AvailableResult(BaseModel):
 
 class DeductionResult(BaseModel):
     entry_id: str
+    usage_charge_id: str | None = None
     user_id: str
     amount: Decimal
     balance_after: Decimal

@@ -206,6 +206,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect(persistedUsage.rows[0]?.dimensions).toMatchObject({
       model: "premium-x",
     });
+    expect(result.usageChargeId).toBeTruthy();
     await expect(
       service.deduct(
         USER_ID,

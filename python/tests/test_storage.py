@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import ModuleType
 from typing import Any
 from unittest.mock import Mock
 from uuid import UUID
@@ -154,7 +156,7 @@ def _usage_export() -> UsageChargeExport:
         region=None,
         measures={"tokens": 10},
         dimensions={"workspace": "one"},
-        metadata={},
+        metadata={"accounting_context": {"source": "openrouter"}},
         requested="15.000000",
         charged="12.500000",
         allowance_requested="2.500000",
@@ -237,7 +239,14 @@ def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
     client = Mock()
     client.put_object.return_value = {"VersionId": "v1"}
     boto3_client = Mock(return_value=client)
-    monkeypatch.setattr("boto3.client", boto3_client)
+    boto3 = ModuleType("boto3")
+    boto3.client = boto3_client  # type: ignore[attr-defined]
+    botocore = ModuleType("botocore")
+    botocore_config = ModuleType("botocore.config")
+    botocore_config.Config = Mock  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setitem(sys.modules, "botocore", botocore)
+    monkeypatch.setitem(sys.modules, "botocore.config", botocore_config)
     archive = S3BillingArchive(
         S3BillingArchiveOptions(
             bucket="billing-archive",
@@ -303,6 +312,7 @@ def test_clickhouse_writes_projection_and_serves_analytics() -> None:
     assert projected["outbox_event_id"] == 99
     assert str(projected["charge_id"]) == usage.charge_id
     assert str(projected["charged"]) == usage.charged
+    assert json.loads(str(projected["metadata"])) == usage.metadata
 
     analytics = store.spend_by_user(
         datetime(2026, 7, 1, tzinfo=UTC),

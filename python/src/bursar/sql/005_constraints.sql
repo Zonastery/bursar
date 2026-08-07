@@ -858,50 +858,39 @@ LANGUAGE plpgsql
 SET search_path TO ''
 AS $$
 DECLARE
-    v_default_text text := NEW.default_value #>> '{}';
+    v_value_schema json;
+    v_definition_name text := CASE NEW.value_type
+        WHEN 'boolean' THEN 'BooleanFeature'
+        WHEN 'integer' THEN 'IntegerFeature'
+        WHEN 'string' THEN 'StringFeature'
+        WHEN 'enum' THEN 'EnumFeature'
+    END;
 BEGIN
-    IF NEW.definition->>'type' IS DISTINCT FROM NEW.value_type
+    IF v_definition_name IS NULL
+       OR NOT bursar.matches_catalog_definitions(
+           NEW.definition,
+           v_definition_name
+       )
+       OR NEW.definition->>'type' IS DISTINCT FROM NEW.value_type
        OR NEW.definition->'default' IS DISTINCT FROM NEW.default_value
     THEN
         RAISE EXCEPTION 'invalid entitlement feature definition'
             USING ERRCODE = '23514';
     END IF;
 
-    IF NEW.value_type = 'boolean'
-       AND jsonb_typeof(NEW.default_value) <> 'boolean'
+    v_value_schema := bursar.entitlement_value_schema(NEW.definition);
+    IF v_value_schema IS NULL
+       OR NOT extensions.jsonschema_is_valid(v_value_schema)
     THEN
-        RAISE EXCEPTION 'invalid boolean entitlement default'
+        RAISE EXCEPTION 'invalid entitlement value schema'
             USING ERRCODE = '23514';
-    ELSIF NEW.value_type = 'integer' THEN
-        IF jsonb_typeof(NEW.default_value) <> 'number' THEN
-            RAISE EXCEPTION 'integer entitlement default must be numeric'
-                USING ERRCODE = '23514';
-        END IF;
+    END IF;
 
-        IF v_default_text::numeric <> trunc(v_default_text::numeric)
-           OR (
-               NEW.definition->>'minimum' IS NOT NULL
-               AND v_default_text::numeric
-                   < (NEW.definition->>'minimum')::numeric
-           )
-           OR (
-               NEW.definition->>'maximum' IS NOT NULL
-               AND v_default_text::numeric
-                   > (NEW.definition->>'maximum')::numeric
-           )
-        THEN
-            RAISE EXCEPTION 'invalid integer entitlement default'
-                USING ERRCODE = '23514';
-        END IF;
-    ELSIF NEW.value_type IN ('string', 'enum')
-          AND jsonb_typeof(NEW.default_value) <> 'string'
-    THEN
-        RAISE EXCEPTION 'invalid string entitlement default'
-            USING ERRCODE = '23514';
-    ELSIF NEW.value_type = 'enum'
-          AND NOT (NEW.definition->'values' ? v_default_text)
-    THEN
-        RAISE EXCEPTION 'enum entitlement default is outside values'
+    IF NOT extensions.jsonb_matches_schema(
+        v_value_schema,
+        NEW.default_value
+    ) THEN
+        RAISE EXCEPTION 'invalid entitlement default'
             USING ERRCODE = '23514';
     END IF;
 
@@ -916,7 +905,7 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_feature bursar.catalog_entitlement_features;
-    v_value_text text := NEW.feature_value #>> '{}';
+    v_value_schema json;
 BEGIN
     SELECT *
     INTO v_feature
@@ -929,41 +918,18 @@ BEGIN
             USING ERRCODE = '23503';
     END IF;
 
-    IF v_feature.value_type = 'boolean'
-       AND jsonb_typeof(NEW.feature_value) <> 'boolean'
-    THEN
-        RAISE EXCEPTION 'invalid plan entitlement value'
+    v_value_schema := bursar.entitlement_value_schema(v_feature.definition);
+    IF v_value_schema IS NULL
+       OR NOT extensions.jsonschema_is_valid(v_value_schema) THEN
+        RAISE EXCEPTION 'invalid entitlement value schema'
             USING ERRCODE = '23514';
-    ELSIF v_feature.value_type = 'integer' THEN
-        IF jsonb_typeof(NEW.feature_value) <> 'number' THEN
-            RAISE EXCEPTION 'plan integer entitlement must be numeric'
-                USING ERRCODE = '23514';
-        END IF;
+    END IF;
 
-        IF v_value_text::numeric <> trunc(v_value_text::numeric)
-           OR (
-               v_feature.definition->>'minimum' IS NOT NULL
-               AND v_value_text::numeric
-                   < (v_feature.definition->>'minimum')::numeric
-           )
-           OR (
-               v_feature.definition->>'maximum' IS NOT NULL
-               AND v_value_text::numeric
-                   > (v_feature.definition->>'maximum')::numeric
-           )
-        THEN
-            RAISE EXCEPTION 'invalid plan integer entitlement value'
-                USING ERRCODE = '23514';
-        END IF;
-    ELSIF v_feature.value_type IN ('string', 'enum')
-          AND jsonb_typeof(NEW.feature_value) <> 'string'
-    THEN
-        RAISE EXCEPTION 'invalid plan string entitlement value'
-            USING ERRCODE = '23514';
-    ELSIF v_feature.value_type = 'enum'
-          AND NOT (v_feature.definition->'values' ? v_value_text)
-    THEN
-        RAISE EXCEPTION 'plan enum entitlement value is outside values'
+    IF NOT extensions.jsonb_matches_schema(
+        v_value_schema,
+        NEW.feature_value
+    ) THEN
+        RAISE EXCEPTION 'invalid plan entitlement value'
             USING ERRCODE = '23514';
     END IF;
 

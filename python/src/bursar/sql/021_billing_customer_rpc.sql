@@ -350,8 +350,7 @@ BEGIN
     IF p_provider_updated_at IS NULL
        OR (p_provider_invoice_id IS NOT NULL
            AND NOT bursar.is_nonempty_text(p_provider_invoice_id))
-       OR p_metadata IS NULL
-       OR jsonb_typeof(p_metadata) <> 'object'
+       OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
     THEN
         RAISE EXCEPTION 'invalid billing payment' USING ERRCODE='22023';
     END IF;

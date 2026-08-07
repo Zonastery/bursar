@@ -68,7 +68,7 @@ BillingService
 | `tests/test_security_rls.py` | RLS/privilege lockdown against real Postgres roles (`anon`/`authenticated`/`service_role`) — the REVOKE/RLS checks the rest of the suite bypasses by connecting as a superuser |
 | `tests/test_store_integration.py` | Real Postgres tests, incl. facade-owned credit capability end-to-end tier coverage. The 7 real-Postgres concurrency tests are `@pytest.mark.repeat(5)` — money-critical races, rerun to surface rare interleavings |
 
-Run: `pytest python/tests/`. Real-Postgres tests resolve a DSN from `DATABASE_URL` → `BURSAR_TEST_PG_URL` → a testcontainers-managed PostgreSQL 16 + pg_partman 5 instance (Docker permitting) → skip; see `tests/conftest.py`.
+Run: `pytest python/tests/`. Real-Postgres tests resolve a DSN from `DATABASE_URL` → `BURSAR_TEST_PG_URL` → a testcontainers-managed PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3 instance (Docker permitting) → skip; see `tests/conftest.py`.
 
 Linting: `ruff check python/src/ python/tests/` — max line length 120, complexity ≤ 15.
 Types: `pyright python/src/`.

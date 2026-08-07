@@ -230,7 +230,10 @@ BEGIN
     IF NOT bursar.is_finite_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
     THEN
         RETURN QUERY
         SELECT NULL::uuid, NULL::numeric, false, 'invalid_request';
@@ -1019,7 +1022,10 @@ BEGIN
     IF p_original_entry_id IS NULL
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR (p_reason IS NOT NULL AND NOT bursar.is_nonempty_text(p_reason))
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
        OR (p_amount IS NOT NULL AND (
            NOT bursar.is_finite_numeric(p_amount) OR p_amount <= 0
        ))

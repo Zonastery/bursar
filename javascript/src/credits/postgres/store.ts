@@ -323,6 +323,7 @@ export class PostgresStore extends CreditStore {
     if ("error" in row && row.error) {
       return {
         entryId: "",
+        usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
         userId,
         amount: ZERO,
         allowanceConsumed: ZERO,
@@ -334,6 +335,7 @@ export class PostgresStore extends CreditStore {
 
     return {
       entryId: String(row.entry_id ?? ""),
+      usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
@@ -461,6 +463,7 @@ export class PostgresStore extends CreditStore {
     if (!row || Object.keys(row).length === 0) {
       return {
         entryId: "",
+        usageChargeId: null,
         userId,
         amount: ZERO,
         allowanceConsumed: ZERO,
@@ -472,6 +475,7 @@ export class PostgresStore extends CreditStore {
     if ("error" in row && row.error) {
       return {
         entryId: "",
+        usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
         userId,
         amount: ZERO,
         allowanceConsumed: ZERO,
@@ -482,6 +486,7 @@ export class PostgresStore extends CreditStore {
     }
     return {
       entryId: String(row.entry_id ?? ""),
+      usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),

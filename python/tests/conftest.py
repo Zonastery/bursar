@@ -1,7 +1,8 @@
 """Fixtures for integration tests — one canonical Postgres source.
 
 The ``pg_database_url`` fixture resolves a connection string to a **real
-Postgres 16 with pg_partman 5** from a single, consistent mechanism
+PostgreSQL 17 with pg_partman 5 and pg_jsonschema 0.3** from a single,
+consistent mechanism
 (resolution order):
 
 1. ``DATABASE_URL`` — the env var CI and the JS (vitest) suite already use
@@ -16,10 +17,11 @@ Postgres 16 with pg_partman 5** from a single, consistent mechanism
 
        docker run -d --name bursar-pg-test -e POSTGRES_PASSWORD=bursar \
            -e POSTGRES_DB=bursar -p 55432:5432 \
-           ghcr.io/dbsystel/postgresql-partman:16-5
+           public.ecr.aws/supabase/postgres:17.6.1.156
        BURSAR_TEST_PG_URL=postgresql://postgres:bursar@localhost:55432/bursar uv run pytest
 
-3. **testcontainers** — a disposable Postgres 16 + pg_partman 5 container,
+3. **testcontainers** — disposable PostgreSQL 17 with pg_partman 5 and
+   pg_jsonschema 0.3,
    started once per test session (requires only a reachable Docker daemon; no
    manual setup, no ``ephemeralpg``/``pg_tmp`` install). This is the default
    local path: a bare ``pytest`` run with Docker available exercises the real
@@ -53,7 +55,7 @@ from bursar.credits.postgres.store import PostgresStore, run_migrations
 
 TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 TEST_TENANT_SLUG = "bursar-tests"
-DEFAULT_POSTGRES_IMAGE = "ghcr.io/dbsystel/postgresql-partman:16-5"
+DEFAULT_POSTGRES_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.156"
 
 
 def _pg2_conn(dsn: str) -> Generator[Any, None, None]:
@@ -193,7 +195,10 @@ def _preseed_supabase_objects(dsn: str) -> None:
             # access Supabase grants them by default; bursar's RLS policies
             # (not the absence of a GRANT) are what's supposed to restrict
             # their rows to `auth.uid() = user_id`.
-            cur.execute("ALTER ROLE service_role BYPASSRLS")
+            cur.execute("SELECT rolbypassrls FROM pg_roles WHERE rolname = 'service_role'")
+            service_role = cur.fetchone()
+            if service_role is None or service_role[0] is not True:
+                cur.execute("ALTER ROLE service_role BYPASSRLS")
             cur.execute("GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role")
             # Real Supabase also grants schema access on `auth` to these roles
             # (app/RPC code calls `auth.uid()`/`auth.jwt()` directly, not just
@@ -310,7 +315,7 @@ _container_dsn: str | object | None = None
 
 
 def _testcontainers_dsn() -> str | None:
-    """Return a DSN for a Postgres 16 + pg_partman 5 testcontainer.
+    """Return a DSN for a PostgreSQL testcontainer with required extensions.
 
     Returns ``None`` if Docker itself is unavailable (e.g. no daemon
     reachable) so the caller can skip with a clear reason instead of erroring.
@@ -353,7 +358,7 @@ def pg_database_url() -> Iterator[str]:
     """Yield a connection URL to a real Postgres, or skip if none is available.
 
     Resolution order: ``DATABASE_URL`` → ``BURSAR_TEST_PG_URL`` →
-    testcontainers-managed Postgres 16 + pg_partman 5 → skip.
+    testcontainers-managed PostgreSQL with pg_partman and pg_jsonschema → skip.
     """
     # 1 & 2: a persistent, already-running Postgres (DATABASE_URL or legacy override).
     persistent = _resolve_persistent_dsn()
@@ -367,7 +372,7 @@ def pg_database_url() -> Iterator[str]:
         if dsn is None:
             pytest.skip(
                 "No real Postgres available: set DATABASE_URL or "
-                "BURSAR_TEST_PG_URL to a pg_partman 5-enabled database, or "
+                "BURSAR_TEST_PG_URL to a pg_partman 5 and pg_jsonschema-enabled database, or "
                 "make Docker available for testcontainers."
             )
 

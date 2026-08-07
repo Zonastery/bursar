@@ -1,0 +1,81 @@
+---
+title: Agent Skills
+description: One install command gives your coding agent the bursar skill — metering usage, prepaid credits, plans and allowances, quotas, leases, and billing, integrated the way bursar intends.
+---
+
+# Agent Skills
+
+Agent skills are folders of instructions, scripts, and resources that coding
+agents load on demand to do real work more reliably. Bursar ships one —
+`skills/bursar/` in the [repository](https://github.com/zonastery/bursar) — so
+agents integrate bursar into AI SaaS apps the way its authors intended: correct
+credit, ledger, and billing patterns, without guessing.
+
+## Installing the skill
+
+Install all of bursar's skills with the skills CLI:
+
+```bash title="Terminal"
+npx skills add zonastery/bursar
+```
+
+To install just the bursar skill:
+
+```bash title="Terminal"
+npx skills add zonastery/bursar --skill bursar
+```
+
+:::note
+
+Skills install at project scope by default, committed to your repository so
+contributors and cloud agents share the same setup. Pass `--global` to install
+across all your projects instead, and `--all` to install to every detected
+agent at once. The CLI supports OpenCode, Claude Code, Codex, Cursor, and many
+more — see the [skills CLI](https://github.com/vercel-labs/skills) for options.
+
+:::
+
+## Using the skill without installing
+
+Not ready to commit a skill? `npx skills use` runs a skill without installing
+it. To have your agent load the bursar skill:
+
+```bash title="Terminal"
+npx skills use zonastery/bursar --skill bursar --agent opencode
+```
+
+Omit `--agent` to print the skill's prompt and read it yourself.
+
+## What the skill covers
+
+The bursar skill fires whenever an agent works on billing for AI SaaS apps:
+metering usage, prepaid credits, plans and allowances, subscriptions, quotas,
+spend caps, the credit ledger, leases, idempotent billing, pricing configs and
+rate cards, auto-recharge, and billing events.
+
+When the skill fires, the agent reads `SKILL.md` and loads only the
+references it needs, so prompts stay small and answers stay grounded in
+bursar's actual schema, config, and SDKs rather than the agent's guesswork.
+
+The skill bundles:
+
+| File                                 | What it's for                                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `SKILL.md`                           | Core instructions — when the skill fires and how to integrate bursar safely                |
+| `references/getting-started.md`      | First integration: install the schema, build the facade, and charge for a first completion |
+| `references/pricing-config.md`       | Authoring the strict, versioned pricing config: operations, rate cards, buckets, plans     |
+| `references/credit-lifecycle.md`     | Balances, the append-only ledger, and atomic reserve/settle leases                         |
+| `references/billing-integration.md`  | Subscriptions, billing events, and auto-recharge guardrails                                |
+| `references/financial-safety.md`     | Idempotency keys, exact decimals, and audit invariants that keep money state correct       |
+| `assets/pricing.config.example.yaml` | A complete, annotated example config to adapt                                              |
+
+## Related links
+
+- [bursar repository](https://github.com/zonastery/bursar) — the skill lives in
+  `skills/bursar/`
+- [Agent Skills specification](https://agentskills.io) — the open spec the
+  skill follows
+- [skills CLI](https://github.com/vercel-labs/skills) — install, update, and
+  manage skills
+- [bursar documentation](./intro.mdx) — start with the Quickstart once the
+  skill has you up to speed

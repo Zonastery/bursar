@@ -40,8 +40,8 @@ accounting and identical bills.
 
 ## Quick start
 
-Requirements: Python 3.12+ or Node.js 22+, PostgreSQL 16, and pg_partman 5.x
-available to the database migration role.
+Requirements: Python 3.12+ or Node.js 22+, PostgreSQL 16+, pg_partman 5.x,
+and pg_jsonschema 0.3+ available to the database migration role.
 
 ```bash
 pip install bursar[postgres]

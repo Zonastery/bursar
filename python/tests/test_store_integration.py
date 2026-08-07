@@ -101,31 +101,31 @@ def test_catalog_shape_validator_rejects_removed_nested_fields(
             WITH schema AS (
                 SELECT bursar.catalog_document_shape_schema() AS document
             )
-            SELECT bursar.catalog_shape_error(
-                '{"version":1,"credits":{},"catalog":{"activation":{"mode":"on_publish"}}}'::jsonb,
-                schema.document,
-                schema.document->'$defs'
+            SELECT extensions.jsonb_matches_schema(
+                schema.document::json,
+                '{"version":1,"credits":{},"catalog":{"activation":{"mode":"on_publish"}}}'::jsonb
             )
             FROM schema
             """
         )
-        assert cursor.fetchone()[0] == "$.catalog.activation is not allowed"  # type: ignore[reportOptionalSubscript]
+        assert cursor.fetchone()[0] is False  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             """
             WITH schema AS (
                 SELECT bursar.catalog_document_shape_schema() AS document
             )
-            SELECT bursar.catalog_shape_error(
-                '{"max_purchases":1,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_charge_minor":100,"cooldown":{"unit":"hour","count":1},"max_failures":3}'::jsonb,
-                schema.document #> '{$defs,AutoRechargeLimits}',
-                schema.document->'$defs',
-                '$.commerce.auto_recharge.limits'
+            SELECT extensions.jsonb_matches_schema(
+                jsonb_build_object(
+                    '$defs', schema.document->'$defs',
+                    '$ref', '#/$defs/AutoRechargeLimits'
+                )::json,
+                '{"max_purchases":1,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_charge_minor":100,"cooldown":{"unit":"hour","count":1},"max_failures":3}'::jsonb
             )
             FROM schema
             """
         )
-        assert cursor.fetchone()[0] == "$.commerce.auto_recharge.limits.max_failures is not allowed"  # type: ignore[reportOptionalSubscript]
+        assert cursor.fetchone()[0] is False  # type: ignore[reportOptionalSubscript]
 
 
 def test_migrations_are_idempotent_and_detect_checksum_mismatch(
@@ -301,7 +301,7 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     assert loaded.config["pricing"]["operations"]["completion"]
 
 
-def test_record_usage_appends_to_the_common_journal_without_debiting(store: PostgresStore) -> None:
+def test_record_usage_appends_external_usage_without_debiting(store: PostgresStore) -> None:
     service = CreditsService(store=store)
     service.publish_pricing_from_dict(CONFIG)
     service.add_credits(
@@ -319,11 +319,9 @@ def test_record_usage_appends_to_the_common_journal_without_debiting(store: Post
     )
     metadata = CreditMetadata.model_validate(
         {
-            "reference_type": "fixed_workflow",
-            "reference_id": "roadmap-1",
-            "usage_kind": "workflow_step",
-            "workflow_key": "roadmap-1",
-            "workflow_step": "outline",
+            "reference_type": "provider_request",
+            "reference_id": "request-1",
+            "provider_request_id": "request-1",
         }
     )
 
@@ -355,7 +353,7 @@ def test_record_usage_appends_to_the_common_journal_without_debiting(store: Post
     assert recorded[0].allowance_requested == Decimal("0")
     assert recorded[0].allowance_covered == Decimal("0")
     assert recorded[0].metadata is not None
-    assert recorded[0].metadata["workflow_key"] == "roadmap-1"
+    assert recorded[0].metadata["provider_request_id"] == "request-1"
     now = datetime.now(UTC)
     assert service.spend_by_user(now - timedelta(minutes=5), now + timedelta(minutes=5)) == []
 
@@ -494,6 +492,13 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
         SettleOptions(
             feature="tutor_chat",
             idempotency_key="lease-contract-settle",
+            metadata=CreditMetadata.model_validate(
+                {
+                    "audit_context": {
+                        "future_provider_extension": "y" * 32768,
+                    }
+                }
+            ),
         ),
     )
     refund = service.refund_credits(
@@ -520,6 +525,29 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
         cursor.execute(
             """
             SELECT
+                length(
+                    payload.metadata
+                    -> 'audit_context'
+                    ->> 'future_provider_extension'
+                ),
+                ledger.metadata ? 'audit_context',
+                quota.metadata ? 'audit_context'
+            FROM bursar.usage_charge_payloads AS payload
+            JOIN bursar.credit_usage_charges AS charge
+              ON charge.id = payload.charge_id
+             AND charge.event_at = payload.event_at
+            JOIN bursar.credit_ledger_entries AS ledger
+              ON ledger.id = charge.ledger_entry_id
+            LEFT JOIN bursar.quota_usage_events AS quota
+              ON quota.usage_charge_id = charge.id
+            WHERE charge.ledger_entry_id = %s
+            """,
+            [deduction.entry_id],
+        )
+        provider_extension_length, ledger_has_raw, quota_has_raw = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+        cursor.execute(
+            """
+            SELECT
                 COALESCE(sum(event.amount), 0),
                 COALESCE(max(quota_window.consumed), 0)
             FROM bursar.credit_accounts AS account
@@ -537,6 +565,9 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
 
     assert usage_total == Decimal("0")
     assert cached_consumed == Decimal("0")
+    assert provider_extension_length == 32768
+    assert ledger_has_raw is False
+    assert quota_has_raw is False
 
 
 def test_bucket_priority_is_applied_by_postgres_store(store: PostgresStore) -> None:

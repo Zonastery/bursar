@@ -387,11 +387,6 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       PARTITION BY toYYYYMM(event_at)
       ORDER BY (tenant_id, event_at, charge_id)${ttl}`,
     });
-    await this.client.command({
-      query:
-        `ALTER TABLE ${this.quotedTable} ` +
-        "ADD COLUMN IF NOT EXISTS billing_disposition LowCardinality(String) DEFAULT 'billable'",
-    });
   }
 
   private async spendRows(

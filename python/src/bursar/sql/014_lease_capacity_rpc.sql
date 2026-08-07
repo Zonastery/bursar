@@ -13,7 +13,13 @@ DECLARE
     v_value numeric;
 BEGIN
     IF p_value IS NULL
-       OR jsonb_typeof(p_value) NOT IN ('number', 'string')
+       OR NOT COALESCE(
+           extensions.jsonb_matches_schema(
+               '{"anyOf":[{"type":"number"},{"type":"string"}]}'::json,
+               p_value
+           ),
+           false
+       )
     THEN
         RETURN NULL;
     END IF;
@@ -940,15 +946,33 @@ DECLARE
 BEGIN
     IF p_subject_id IS NULL
        OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_finite_numeric(p_estimate)
        OR p_estimate < 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR (
+           p_feature IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_feature, 255)
+       )
        OR p_ttl <= interval '0'
        OR (p_max_concurrent IS NOT NULL AND p_max_concurrent < 1)
-       OR jsonb_typeof(COALESCE(p_policy_snapshot, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_measures, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_dimensions, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_policy_snapshot, '{}'::jsonb),
+           32768
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.valid_measure_object(
+           COALESCE(p_measures, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.valid_dimension_object(
+           COALESCE(p_dimensions, '{}'::jsonb),
+           65536
+       )
     THEN
         RETURN QUERY
         SELECT
@@ -1118,6 +1142,7 @@ BEGIN
             plan.credit_allowance_reset_count,
             plan.credit_allowance_reset_anchor,
             plan.credit_allowance_reset_timezone,
+            plan.definition->'credit_allowance' AS credit_allowance_policy,
             assignment.starts_at
         INTO v_plan
         FROM bursar.catalog_plans AS plan
@@ -1242,7 +1267,8 @@ BEGIN
                     period_count,
                     period_anchor,
                     period_timezone,
-                    allowance
+                    allowance,
+                    policy_snapshot
                 )
                 VALUES(
                     v_account,
@@ -1255,7 +1281,8 @@ BEGIN
                     v_plan.credit_allowance_reset_count,
                     v_plan.credit_allowance_reset_anchor,
                     v_plan.credit_allowance_reset_timezone,
-                    v_plan.credit_allowance_amount
+                    v_plan.credit_allowance_amount,
+                    v_plan.credit_allowance_policy
                 )
                 ON CONFLICT (
                     account_id,
@@ -1483,9 +1510,31 @@ BEGIN
     IF NOT bursar.is_finite_numeric(p_actual)
        OR p_actual < 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
-       OR jsonb_typeof(COALESCE(p_measures, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_dimensions, '{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR (
+           p_feature IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_feature, 255)
+       )
+       OR (
+           p_model IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_model, 255)
+       )
+       OR (
+           p_region IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_region, 255)
+       )
+       OR NOT bursar.valid_measure_object(
+           COALESCE(p_measures, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.valid_dimension_object(
+           COALESCE(p_dimensions, '{}'::jsonb),
+           65536
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           524288
+       )
     THEN
         RETURN QUERY
         SELECT NULL::uuid, 0::numeric, false, 'invalid_request';
@@ -1758,7 +1807,10 @@ BEGIN
         v_post.charge_id,
         p_idempotency_key,
         v_event_at,
-        v_metadata
+        jsonb_build_object(
+            'usage_charge_id', v_post.charge_id,
+            'source', 'lease_settlement'
+        )
     );
 
     IF v_lease.allowance_window_id IS NOT NULL THEN

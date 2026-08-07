@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: ghcr.io/dbsystel/postgresql-partman:16-5
+        image: public.ecr.aws/supabase/postgres:17.6.1.156
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

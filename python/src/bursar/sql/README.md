@@ -13,10 +13,11 @@ These files are the canonical database contract shared by the Python and
 JavaScript SDKs. The migration runner applies every `NNN_*.sql` file in numeric
 order and records its SHA-256 checksum in `bursar.schema_migrations`.
 
-The baseline requires PostgreSQL 16 and pg_partman 5.x. The server package for
-pg_partman must be available before migration; the migration creates the
-extension in the dedicated `partman` schema and fails loudly for another major
-version or schema. `pg_cron`, S3, and ClickHouse remain optional.
+The baseline requires PostgreSQL 16+, pg_partman 5.x, and pg_jsonschema 0.3+.
+Both server extension packages must be available before migration; the
+migration installs them in dedicated `partman` and `extensions` schemas and
+fails loudly when their contracts are unavailable. `pg_cron`, S3, and
+ClickHouse remain optional.
 
 ## File boundaries
 
@@ -113,7 +114,8 @@ uv run --with sqlfluff sqlfluff lint python/src/bursar/sql --dialect postgres
 ```
 
 The SQL regression files in `python/tests/sql*.sql` must pass against a clean
-Postgres 16 instance with pg_partman 5 after every baseline change.
+PostgreSQL instance with pg_partman 5 and pg_jsonschema after every baseline
+change.
 
 ## PostgreSQL-first storage lifecycle
 
