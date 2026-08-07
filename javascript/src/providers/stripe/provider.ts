@@ -7,6 +7,7 @@ import {
 } from "../types.js";
 import type {
   CheckoutParams,
+  CheckoutSessionResult,
   PortalParams,
   UpdatePaymentMethodParams,
   PaymentMethodSetupParams,
@@ -23,6 +24,76 @@ import type {
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleStripeWebhook } from "./event-mapper.js";
+
+function scopedIdempotencyKey(key: string | undefined, scope: string): string | undefined {
+  if (!key) return undefined;
+  const suffix = `:${scope}`;
+  return `${key.slice(0, 255 - suffix.length)}${suffix}`;
+}
+
+function requestOptions(idempotencyKey: string | undefined): Stripe.RequestOptions | undefined {
+  return idempotencyKey ? { idempotencyKey } : undefined;
+}
+
+function expandableId(value: string | { id: string } | null | undefined): string | undefined {
+  if (!value) return undefined;
+  return typeof value === "string" ? value : value.id;
+}
+
+function mapPaymentIntentStatus(intent: Stripe.PaymentIntent | null): CheckoutPaymentStatus {
+  switch (intent?.status) {
+    case "succeeded":
+      return "succeeded";
+    case "processing":
+      return "processing";
+    case "requires_action":
+      return "requires_customer_action";
+    case "requires_payment_method":
+      return "requires_payment_method";
+    case "requires_confirmation":
+      return "requires_confirmation";
+    case "requires_capture":
+      return "requires_capture";
+    case "canceled":
+      return "cancelled";
+    default:
+      return null;
+  }
+}
+
+function schedulePhaseParams(
+  phase: Stripe.SubscriptionSchedule.Phase,
+): Stripe.SubscriptionScheduleUpdateParams.Phase {
+  return {
+    items: phase.items.map((item) => ({
+      price: expandableId(item.price),
+      quantity: item.quantity,
+      ...(item.metadata ? { metadata: item.metadata } : {}),
+      ...(item.tax_rates
+        ? { tax_rates: item.tax_rates.map((taxRate) => expandableId(taxRate)!) }
+        : {}),
+    })),
+    start_date: phase.start_date,
+    end_date: phase.end_date,
+    ...(phase.automatic_tax ? { automatic_tax: { enabled: phase.automatic_tax.enabled } } : {}),
+    ...(phase.billing_cycle_anchor ? { billing_cycle_anchor: phase.billing_cycle_anchor } : {}),
+    ...(phase.collection_method ? { collection_method: phase.collection_method } : {}),
+    ...(phase.currency ? { currency: phase.currency } : {}),
+    ...(expandableId(phase.default_payment_method)
+      ? { default_payment_method: expandableId(phase.default_payment_method) }
+      : {}),
+    ...(phase.description != null ? { description: phase.description } : {}),
+    ...(phase.metadata ? { metadata: phase.metadata } : {}),
+    ...(phase.proration_behavior ? { proration_behavior: phase.proration_behavior } : {}),
+    ...(phase.trial_end != null ? { trial_end: phase.trial_end } : {}),
+  };
+}
+
+function stripeProrationBehavior(
+  mode: ChangePlanParams["prorationBillingMode"],
+): Stripe.SubscriptionUpdateParams.ProrationBehavior {
+  return mode === "do_not_bill" ? "none" : "always_invoice";
+}
 
 export interface StripeProviderOptions {
   getClient: () => Stripe;
@@ -46,9 +117,7 @@ export class StripeProvider implements PaymentProvider {
     this.logger = normalizeProviderLogger(options.logger);
   }
 
-  async createCheckoutSession(
-    params: CheckoutParams,
-  ): Promise<{ url: string; customerId?: string }> {
+  async createCheckoutSession(params: CheckoutParams): Promise<CheckoutSessionResult> {
     this.logger.info("[StripeProvider] createCheckoutSession", {
       productId: params.productId,
       type: params.type,
@@ -59,9 +128,13 @@ export class StripeProvider implements PaymentProvider {
 
     let customerId = params.customerId;
     if (!customerId) {
-      const customer = await stripe.customers.create({
-        metadata: { userId: params.userId },
-      });
+      const customer = await stripe.customers.create(
+        {
+          ...(params.email ? { email: params.email } : {}),
+          metadata: { userId: params.userId },
+        },
+        requestOptions(scopedIdempotencyKey(params.idempotencyKey, "customer")),
+      );
       customerId = customer.id;
     }
 
@@ -80,23 +153,29 @@ export class StripeProvider implements PaymentProvider {
     };
     const session = await stripe.checkout.sessions.create(
       sessionOpts,
-      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+      requestOptions(params.idempotencyKey),
     );
 
     if (!session.url) throw new Error("Stripe checkout session returned no URL");
-    return { url: session.url, customerId };
+    return { url: session.url, customerId, providerSessionId: session.id };
   }
 
   async getCheckoutSessionStatus(providerSessionId: string): Promise<{
     paymentStatus: CheckoutPaymentStatus;
   } | null> {
-    const session = await this.getStripe().checkout.sessions.retrieve(providerSessionId);
+    const session = await this.getStripe().checkout.sessions.retrieve(providerSessionId, {
+      expand: ["payment_intent"],
+    });
     if (session.status === "expired") return { paymentStatus: "cancelled" };
     if (session.payment_status === "paid" || session.payment_status === "no_payment_required") {
       return { paymentStatus: "succeeded" };
     }
-    if (session.payment_status === "unpaid") return { paymentStatus: "requires_payment_method" };
-    return { paymentStatus: null };
+    if (session.status === "open") return { paymentStatus: "processing" };
+    const intent =
+      session.payment_intent && typeof session.payment_intent !== "string"
+        ? session.payment_intent
+        : null;
+    return { paymentStatus: mapPaymentIntentStatus(intent) ?? "processing" };
   }
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {
@@ -253,7 +332,7 @@ export class StripeProvider implements PaymentProvider {
         payment_method: params.paymentMethodId,
         confirm: true,
         off_session: true,
-        metadata: params.metadata,
+        metadata: { ...params.metadata, price_id: params.productId },
       },
       { idempotencyKey: params.idempotencyKey },
     );
@@ -297,26 +376,41 @@ export class StripeProvider implements PaymentProvider {
     const item = subscription.items.data[0];
     if (!item) throw new Error("Stripe subscription has no billing item");
     if (params.effectiveAt === "next_billing_date") {
-      const schedule = await stripe.subscriptionSchedules.create({
-        from_subscription: params.providerSubscriptionId,
-      });
-      await stripe.subscriptionSchedules.update(schedule.id, {
-        phases: [
-          {
-            items: [{ price: item.price.id, quantity: item.quantity ?? 1 }],
-            start_date: schedule.phases?.[0]?.start_date,
-            end_date: item.current_period_end,
-          },
-          { items: [{ price: params.productId, quantity: params.quantity ?? 1 }] },
-        ],
-      });
+      const schedule = await stripe.subscriptionSchedules.create(
+        { from_subscription: params.providerSubscriptionId },
+        requestOptions(scopedIdempotencyKey(params.idempotencyKey, "schedule-create")),
+      );
+      const currentPhase = schedule.phases[0];
+      if (!currentPhase) throw new Error("Stripe subscription schedule has no current phase");
+      await stripe.subscriptionSchedules.update(
+        schedule.id,
+        {
+          phases: [
+            schedulePhaseParams(currentPhase),
+            {
+              items: [{ price: params.productId, quantity: params.quantity ?? 1 }],
+              start_date: currentPhase.end_date,
+              proration_behavior: "none",
+              ...(params.metadata ? { metadata: params.metadata } : {}),
+            },
+          ],
+          proration_behavior: "none",
+        },
+        requestOptions(scopedIdempotencyKey(params.idempotencyKey, "schedule-update")),
+      );
       return { providerOperationId: schedule.id };
     }
-    const updated = await stripe.subscriptions.update(params.providerSubscriptionId, {
-      items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
-      proration_behavior: "always_invoice",
-      payment_behavior: "pending_if_incomplete",
-    });
+    const updated = await stripe.subscriptions.update(
+      params.providerSubscriptionId,
+      {
+        items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
+        proration_behavior: stripeProrationBehavior(params.prorationBillingMode),
+        payment_behavior:
+          params.onPaymentFailure === "apply_change" ? "allow_incomplete" : "pending_if_incomplete",
+        ...(params.metadata ? { metadata: params.metadata } : {}),
+      },
+      requestOptions(scopedIdempotencyKey(params.idempotencyKey, "subscription-update")),
+    );
     return {
       providerOperationId: updated.latest_invoice ? String(updated.latest_invoice) : undefined,
     };
@@ -332,7 +426,10 @@ export class StripeProvider implements PaymentProvider {
       subscription: params.providerSubscriptionId,
       subscription_details: {
         items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
-        proration_behavior: params.effectiveAt === "next_billing_date" ? "none" : "always_invoice",
+        proration_behavior:
+          params.effectiveAt === "next_billing_date"
+            ? "none"
+            : stripeProrationBehavior(params.prorationBillingMode),
       },
     });
     const price = await stripe.prices.retrieve(params.productId);
@@ -340,16 +437,19 @@ export class StripeProvider implements PaymentProvider {
       totalAmount: invoice.total ?? 0,
       settlementAmount: invoice.amount_due ?? 0,
       currency: invoice.currency,
-      lineItems: invoice.lines.data.map((line) => ({
-        productId: params.productId,
-        name: line.description ?? "Subscription change",
-        unitPrice: line.amount ?? 0,
-        quantity: line.quantity ?? 1,
-        prorationFactor: 1,
-        currency: line.currency ?? invoice.currency,
-        tax: 0,
-        subtotal: line.amount ?? 0,
-      })),
+      lineItems: invoice.lines.data.map((line) => {
+        const tax = line.taxes?.reduce((total, item) => total + item.amount, 0) ?? 0;
+        return {
+          productId: params.productId,
+          name: line.description ?? "Subscription change",
+          unitPrice: line.amount ?? 0,
+          quantity: line.quantity ?? 1,
+          prorationFactor: 1,
+          currency: line.currency ?? invoice.currency,
+          tax,
+          subtotal: line.amount ?? 0,
+        };
+      }),
       effectiveAt:
         params.effectiveAt === "next_billing_date"
           ? new Date(item.current_period_end * 1000).toISOString()
@@ -357,6 +457,7 @@ export class StripeProvider implements PaymentProvider {
       recurringAmount: price.unit_amount ?? 0,
       recurringCurrency: price.currency,
       nextBillingDate: new Date(item.current_period_end * 1000).toISOString(),
+      taxAmount: invoice.total_taxes?.reduce((total, item) => total + item.amount, 0) ?? 0,
     };
   }
 }

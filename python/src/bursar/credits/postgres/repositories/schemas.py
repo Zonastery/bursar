@@ -12,28 +12,36 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class BalanceRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    user_id: str = ""
-    balance: str | Decimal | None = None
-    lifetime_purchased: str | Decimal | None = None
+    user_id: str
+    balance: str | Decimal
+    lifetime_purchased: str | Decimal
 
 
 class AddCreditsRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     entry_id: str | None = None
-    user_id: str = ""
-    amount: str | Decimal | None = None
+    user_id: str
+    amount: str | Decimal
     new_balance: str | Decimal | None = None
     lifetime_purchased: str | Decimal | None = None
-    bucket: str = "default"
-    idempotent: bool = False
+    bucket: str
+    idempotent: bool
     error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_success(self) -> Self:
+        if self.error is None and (
+            self.entry_id is None or self.new_balance is None or self.lifetime_purchased is None
+        ):
+            raise ValueError("successful credit postings require entry and balance fields")
+        return self
 
 
 class AvailableRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    balance: str | Decimal | None = None
-    reserved: str | Decimal | None = None
-    available: str | Decimal | None = None
+    balance: str | Decimal
+    reserved: str | Decimal
+    available: str | Decimal
 
 
 class GrantProgramAwardRow(BaseModel):
@@ -52,54 +60,82 @@ class DeductionRow(BaseModel):
     charge_id: str | None = None
     # Allowance-only and zero-cost usage has no monetary ledger entry.
     entry_id: str | None = None
-    amount: str | Decimal | None = None
+    amount: str | Decimal
     balance_after: str | Decimal | None = None
-    allowance_consumed: str | Decimal | None = None
-    idempotent: bool = False
+    allowance_consumed: str | Decimal
+    idempotent: bool
     bucket_breakdown: dict[str, str | Decimal] | None = None
     error: str | None = None
-    user_id: str = ""
+    user_id: str
+
+    @model_validator(mode="after")
+    def validate_success(self) -> Self:
+        if self.error is None and (self.charge_id is None or self.balance_after is None):
+            raise ValueError("successful usage charges require a receipt and committed balance")
+        return self
 
 
 class UsageRecordRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     charge_id: str | None = None
-    requested: str | Decimal | None = None
-    replayed: bool = False
+    requested: str | Decimal
+    replayed: bool
     error_code: str | None = None
+
+    @model_validator(mode="after")
+    def validate_success(self) -> Self:
+        if self.error_code is None and self.charge_id is None:
+            raise ValueError("successful usage records require a charge receipt")
+        return self
 
 
 class RefundRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    refund_entry_id: str = ""
-    user_id: str = ""
+    refund_entry_id: str | None = None
+    user_id: str | None = None
     amount: str | Decimal | None = None
     new_balance: str | Decimal | None = None
     bucket_breakdown: dict[str, str | Decimal] | None = None
     error: str | None = None
 
+    @model_validator(mode="after")
+    def validate_success(self) -> Self:
+        if self.error is None and (
+            self.refund_entry_id is None or self.user_id is None or self.amount is None or self.new_balance is None
+        ):
+            raise ValueError("successful refunds require identity and balance fields")
+        return self
+
 
 class RevokeRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    user_id: str = ""
-    amount: str | Decimal | None = None
-    new_balance: str | Decimal | None = None
+    user_id: str
+    amount: str | Decimal
+    new_balance: str | Decimal
     bucket: str | None = None
     error: str | None = None
 
 
 class LeaseRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    lease_id: str = ""
-    user_id: str = ""
+    lease_id: str | None = None
+    user_id: str
     amount: str | Decimal | None = None
     available: str | Decimal | None = None
     reserved: str | Decimal | None = None
-    billing_mode: str = "strict"
+    billing_mode: str | None = None
     minimum_balance: str | Decimal | None = None
     expires_at: datetime | None = None
     error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_success(self) -> Self:
+        if self.error is None and (
+            self.lease_id is None or self.amount is None or self.minimum_balance is None or self.expires_at is None
+        ):
+            raise ValueError("successful lease acquisition requires lease and policy fields")
+        return self
 
 
 class LeasePricingContextRow(BaseModel):

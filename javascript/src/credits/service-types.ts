@@ -7,6 +7,7 @@ import type {
   BillingMode,
   CreditMetadata,
   DeductionResult,
+  DeductionSuccess,
   UsageAnalyticsStore,
   UsageChargeStore,
 } from "./types/index.js";
@@ -17,7 +18,7 @@ export type MetricsOrAmount = UsageMetrics | Decimal | number;
 export interface PostDeductionContext {
   userId: string;
   source: "deduct" | "settle" | "raw";
-  deduction: DeductionResult;
+  deduction: DeductionSuccess;
 }
 
 export interface LowBalanceConfig {

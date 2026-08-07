@@ -3,7 +3,7 @@ import { LRUCache } from "lru-cache";
 
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEvent, CreditEventType } from "./events.js";
-import type { DeductionResult } from "./types/index.js";
+import type { DeductionSuccess } from "./types/index.js";
 import type { LowBalanceConfig } from "./service-types.js";
 
 const DEFAULT_MAX_TRACKED_USERS = 100_000;
@@ -56,7 +56,7 @@ export class LowBalanceMonitor {
     }
   }
 
-  async afterCharge(userId: string, result: DeductionResult): Promise<void> {
+  async afterCharge(userId: string, result: DeductionSuccess): Promise<void> {
     if (result.idempotent) return;
     if (result.balanceAfter.lt(0)) {
       this.emit("credits.overdraft", userId, {

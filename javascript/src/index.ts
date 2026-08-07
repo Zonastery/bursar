@@ -107,6 +107,8 @@ export type {
   CreditMetadata,
   DailySpendRow,
   DeductionResult,
+  DeductionFailure,
+  DeductionSuccess,
   DeductWithAllowanceOptions,
   ExecuteGrantProgramRequest,
   GetUserPlanResult,

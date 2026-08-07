@@ -39,6 +39,8 @@ def _subscription(status: BillingSubscriptionStatus, subscription_id: str) -> Bi
         provider="stripe",
         provider_subscription_id=subscription_id,
         status=status,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
     )
 
 
@@ -98,6 +100,8 @@ def test_expire_past_due_grace_periods_matches_javascript_cas_flow() -> None:
         provider_subscription_id="sub_grace",
         status=BillingSubscriptionStatus.past_due,
         grace_ends_at="2026-07-29T00:00:00+00:00",
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
     )
     store.get_user_subscription.return_value = store.get_billing_subscription.return_value
     store.mark_subscription_grace_expired.return_value = True
@@ -228,37 +232,47 @@ def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -
     )
 
 
-def test_get_user_subscription_uses_subsecond_timestamps_and_puts_invalid_last() -> None:
+def test_get_user_subscription_uses_subsecond_timestamps() -> None:
+    base_subscription = {
+        "subject_id": "00000000-0000-0000-0000-000000000001",
+        "provider": "stripe",
+        "provider_customer_id": "cus_1",
+        "offer_id": "00000000-0000-0000-0000-000000000021",
+        "catalog_revision_id": "00000000-0000-0000-0000-000000000022",
+        "status": "active",
+        "cancel_at_period_end": False,
+        "metadata": {},
+    }
     rows = [
         {
-            "subject_id": "00000000-0000-0000-0000-000000000001",
-            "provider": "stripe",
-            "provider_subscription_id": "sub_invalid",
-            "status": "active",
-            "offer_key": "pro_monthly",
-            "interval": "month",
-            "provider_updated_at": "not-a-date",
-        },
-        {
-            "subject_id": "00000000-0000-0000-0000-000000000001",
-            "provider": "stripe",
+            **base_subscription,
+            "id": "00000000-0000-0000-0000-000000000011",
             "provider_subscription_id": "sub_older",
-            "status": "active",
-            "offer_key": "pro_monthly",
-            "interval": "month",
             "provider_updated_at": datetime(2026, 7, 29, 12, 0, 0, 100_000, tzinfo=UTC),
         },
         {
-            "subject_id": "00000000-0000-0000-0000-000000000001",
-            "provider": "stripe",
+            **base_subscription,
+            "id": "00000000-0000-0000-0000-000000000012",
             "provider_subscription_id": "sub_newer",
-            "status": "active",
-            "offer_key": "pro_monthly",
-            "interval": "month",
             "provider_updated_at": datetime(2026, 7, 29, 12, 0, 0, 900_000, tzinfo=UTC),
         },
     ]
-    repository = BillingSubscriptionRepository(MagicMock(return_value=rows))
+    repository = BillingSubscriptionRepository(
+        MagicMock(
+            side_effect=[
+                rows,
+                [
+                    {
+                        "offer_key": "pro_monthly",
+                        "plan_id": "00000000-0000-0000-0000-000000000023",
+                        "plan_key": "pro",
+                        "billing_unit": "month",
+                        "billing_count": 1,
+                    }
+                ],
+            ]
+        )
+    )
 
     result = repository.get_user_subscription(
         "00000000-0000-0000-0000-000000000001",
@@ -269,15 +283,32 @@ def test_get_user_subscription_uses_subsecond_timestamps_and_puts_invalid_last()
     assert result.provider_subscription_id == "sub_newer"
 
 
-def test_deactivate_other_providers_selects_newest_valid_replacement() -> None:
+def test_get_user_subscription_rejects_invalid_provider_timestamp() -> None:
+    repository = BillingSubscriptionRepository(
+        MagicMock(
+            return_value=[
+                {
+                    "subject_id": "00000000-0000-0000-0000-000000000001",
+                    "provider": "stripe",
+                    "provider_subscription_id": "sub_invalid",
+                    "status": "active",
+                    "offer_key": "pro_monthly",
+                    "interval": "month",
+                    "provider_updated_at": "not-a-date",
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(StoreError, match="invalid provider_updated_at"):
+        repository.get_user_subscription(
+            "00000000-0000-0000-0000-000000000001",
+            ["active"],
+        )
+
+
+def test_deactivate_other_providers_selects_newest_replacement() -> None:
     rows = [
-        {
-            "id": "00000000-0000-0000-0000-000000000011",
-            "provider": "stripe",
-            "provider_subscription_id": "sub_invalid",
-            "status": "active",
-            "provider_updated_at": "not-a-date",
-        },
         {
             "id": "00000000-0000-0000-0000-000000000012",
             "provider": "stripe",
@@ -502,6 +533,8 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
         plan="monk",
         status=BillingSubscriptionStatus.active,
         metadata={"pendingPlanChange": {"to": "sage"}},
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
     )
     store.resolve_billing_offer.return_value = BillingOfferResult(
         offer_id="00000000-0000-0000-0000-000000000013",
@@ -608,17 +641,17 @@ def test_subscription_repository_uses_current_catalog_and_lifecycle_rpc_shape() 
     repository = BillingSubscriptionRepository(execute)
 
     repository.upsert(
-        {
-            "provider": "stripe",
-            "provider_subscription_id": "sub_1",
-            "offer_key": "monk_monthly",
-            "status": "active",
-            "trial_end": "2026-08-01T00:00:00+00:00",
-            "cancel_at": "2026-09-01T00:00:00+00:00",
-            "ended_at": None,
-            "provider_updated_at": "2026-07-29T00:00:00+00:00",
-            "grace_ends_at": None,
-        }
+        BillingSubscriptionState(
+            user_id="00000000-0000-0000-0000-000000000001",
+            provider="stripe",
+            provider_subscription_id="sub_1",
+            offer_key="monk_monthly",
+            status=BillingSubscriptionStatus.active,
+            trial_end="2026-08-01T00:00:00+00:00",
+            cancel_at="2026-09-01T00:00:00+00:00",
+            provider_updated_at="2026-07-29T00:00:00+00:00",
+            cancel_at_period_end=False,
+        )
     )
 
     assert "get_billing_subscription_by_provider" in execute.call_args_list[0].args[0]

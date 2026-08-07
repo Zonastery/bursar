@@ -89,25 +89,26 @@ from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOpti
 from bursar.sql import _get_sql_files
 
 
-def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
+def _dec(value: Any) -> Decimal:
     """Coerce a NUMERIC or JSON value to ``Decimal``.
 
     psycopg2 already returns NUMERIC columns as ``Decimal``; this guards the
-    ``None``/``int``/``str`` cases (and a stray ``float``, routed through ``str``
-    to avoid binary-float error) so no money value is ever truncated via ``int``.
+    ``int``/``str`` cases (and a stray ``float``, routed through ``str`` to avoid
+    binary-float error) so no money value is ever truncated via ``int``. Missing,
+    boolean, NaN, and infinite values are rejected instead of becoming zero.
     """
-    if value is None:
-        return default
+    if value is None or isinstance(value, bool):
+        raise StoreError(f"PostgreSQL returned a missing or invalid Decimal value: {value!r}")
     if isinstance(value, Decimal):
-        return value
-    try:
-        if isinstance(value, bool):
-            return default
-        if isinstance(value, float):
-            return Decimal(str(value))
-        return Decimal(value)
-    except (InvalidOperation, ArithmeticError, ValueError) as e:
-        raise StoreError(f"Failed to parse Decimal value: {value!r}") from e
+        parsed = value
+    else:
+        try:
+            parsed = Decimal(str(value)) if isinstance(value, float) else Decimal(value)
+        except (InvalidOperation, ArithmeticError, TypeError, ValueError) as e:
+            raise StoreError(f"Failed to parse Decimal value: {value!r}") from e
+    if not parsed.is_finite():
+        raise StoreError(f"Decimal value must be finite: {value!r}")
+    return parsed
 
 
 def _text(value: Any) -> str:
@@ -424,7 +425,7 @@ class PostgresStore(CreditStore):
         return AddCreditsResult(
             entry_id=_require_text(result.entry_id, "post_credit"),
             user_id=str(getattr(result, "user_id", user_id)),
-            amount=_dec(result.amount, amount),
+            amount=_dec(result.amount),
             new_balance=_dec(result.new_balance),
             lifetime_purchased=_dec(result.lifetime_purchased),
             bucket=str(getattr(result, "bucket", "default")),
@@ -468,17 +469,19 @@ class PostgresStore(CreditStore):
             raise StoreError("charge_usage_for_operation returned no result")
         if result.error is not None:
             return DeductionResult(
-                entry_id="",
+                entry_id=None,
                 user_id=user_id,
-                amount=Decimal(0),
-                allowance_consumed=Decimal(0),
-                balance_after=_dec(result.balance_after),
+                amount=_dec(result.amount),
+                allowance_consumed=_dec(result.allowance_consumed),
+                balance_after=_dec(result.balance_after) if result.balance_after is not None else None,
                 idempotent=False,
                 error=str(result.error),
             )
 
         return DeductionResult(
-            entry_id=str(result.entry_id or ""),
+            entry_id=(
+                _require_text(result.entry_id, "charge_usage_for_operation") if result.entry_id is not None else None
+            ),
             usage_charge_id=_require_text(result.charge_id, "charge_usage_for_operation"),
             user_id=user_id,
             amount=_dec(result.amount),
@@ -529,7 +532,7 @@ class PostgresStore(CreditStore):
         return UsageRecordResult(
             usage_id=usage_id,
             user_id=user_id,
-            requested=_dec(result.requested, requested),
+            requested=_dec(result.requested),
             idempotent=bool(result.replayed),
             error=result.error_code,
         )
@@ -607,7 +610,7 @@ class PostgresStore(CreditStore):
                 expires_at="",
                 error=str(result.error),
             )
-        minimum_balance = _dec(result.minimum_balance, floor)
+        minimum_balance = _dec(result.minimum_balance)
         return LeaseResult(
             lease_id=_require_text(result.lease_id, "create_lease_for_operation"),
             user_id=user_id,
@@ -671,16 +674,16 @@ class PostgresStore(CreditStore):
             raise StoreError("settle_lease returned no result")
         if result.error is not None:
             return DeductionResult(
-                entry_id="",
+                entry_id=None,
                 user_id=user_id,
-                amount=Decimal(0),
+                amount=_dec(result.amount),
                 allowance_consumed=Decimal(0),
-                balance_after=_dec(result.balance_after),
+                balance_after=_dec(result.balance_after) if result.balance_after is not None else None,
                 idempotent=False,
                 error=str(result.error),
             )
         return DeductionResult(
-            entry_id=str(getattr(result, "entry_id", "")),
+            entry_id=_require_text(result.entry_id, "settle_lease") if result.entry_id is not None else None,
             usage_charge_id=_require_text(result.charge_id, "settle_lease"),
             user_id=user_id,
             amount=_dec(result.amount),
@@ -1211,8 +1214,8 @@ class PostgresStore(CreditStore):
             raise StoreError("revoke_subject_credits_by_operation returned no result")
         return {
             "user_id": str(getattr(result, "user_id", user_id)),
-            "amount": str(_dec(getattr(result, "amount", 0))),
-            "new_balance": str(_dec(getattr(result, "new_balance", 0))),
+            "amount": str(_dec(result.amount)),
+            "new_balance": str(_dec(result.new_balance)),
             "bucket": getattr(result, "bucket", None) if hasattr(result, "bucket") else None,
         }
 
@@ -1602,7 +1605,7 @@ class PostgresStore(CreditStore):
             entry_id=_require_text(result.entry_id, "deduct_team"),
             team_id=str(getattr(result, "team_id", team_id)),
             user_id=str(getattr(result, "user_id", user_id)),
-            amount=_dec(result.amount, -amount),
+            amount=_dec(result.amount),
             team_balance_after=_dec(result.team_balance_after),
         )
 

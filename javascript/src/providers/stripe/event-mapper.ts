@@ -1,6 +1,12 @@
 import Stripe from "stripe";
 import type { BillingEventSink } from "../../bursar.js";
-import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/types/index.js";
+import type {
+  BillingCustomerInfo,
+  BillingPaymentInfo,
+  ProviderRef,
+  BillingSubscriptionInfo,
+  BillingSubscriptionStatus,
+} from "../../billing/types/index.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import {
   callBillingEventSink,
@@ -11,18 +17,26 @@ import {
 
 const STRIPE_CHECKOUT_EXPAND = ["line_items"] as const;
 
+function timestamp(value: number | null | undefined): string | null {
+  return value == null ? null : new Date(value * 1000).toISOString();
+}
+
+function subscriptionPeriodValue(
+  subscription: Stripe.Subscription,
+  field: "current_period_start" | "current_period_end",
+): number | null {
+  const itemValue = subscription.items?.data?.[0]?.[field];
+  if (itemValue != null) return itemValue;
+  // Compatibility for accounts deliberately pinned before 2025-03-31.basil.
+  return (subscription as unknown as Record<string, number | undefined>)[field] ?? null;
+}
+
 function buildEnd(subscription: Stripe.Subscription): string | null {
-  const raw = (subscription as { current_period_end?: number }).current_period_end;
-  return raw ? new Date(raw * 1000).toISOString() : null;
+  return timestamp(subscriptionPeriodValue(subscription, "current_period_end"));
 }
 
 function buildStart(subscription: Stripe.Subscription): string | null {
-  const raw = (subscription as { current_period_start?: number }).current_period_start;
-  return raw ? new Date(raw * 1000).toISOString() : null;
-}
-
-function timestamp(value: number | null | undefined): string | null {
-  return value == null ? null : new Date(value * 1000).toISOString();
+  return timestamp(subscriptionPeriodValue(subscription, "current_period_start"));
 }
 
 function subscriptionRefs(subscription: Stripe.Subscription) {
@@ -34,19 +48,123 @@ function subscriptionRefs(subscription: Stripe.Subscription) {
   };
 }
 
+function subscriptionInfo(
+  subscription: Stripe.Subscription,
+  refs: ProviderRef | undefined = subscriptionRefs(subscription),
+): BillingSubscriptionInfo {
+  return {
+    providerSubscriptionId: subscription.id,
+    status: subscription.status as BillingSubscriptionStatus,
+    cancelAtPeriodEnd: subscription.cancel_at_period_end,
+    periodStart: buildStart(subscription),
+    periodEnd: buildEnd(subscription),
+    trialEnd: timestamp(subscription.trial_end),
+    cancelAt: timestamp(subscription.cancel_at),
+    endedAt: timestamp(subscription.ended_at),
+    refs,
+  };
+}
+
 function buildEndFromInvoice(invoice: Stripe.Invoice): string | null {
-  return invoice.period_end ? new Date(invoice.period_end * 1000).toISOString() : null;
+  return timestamp(invoice.period_end);
 }
 
 function buildStartFromInvoice(invoice: Stripe.Invoice): string | null {
-  return invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : null;
+  return timestamp(invoice.period_start);
+}
+
+function expandableId(value: string | { id: string } | null | undefined): string | null {
+  if (!value) return null;
+  return typeof value === "string" ? value : value.id;
 }
 
 function customerId(
   customer: string | Stripe.Customer | Stripe.DeletedCustomer | null,
 ): string | null {
-  if (!customer) return null;
-  return typeof customer === "string" ? customer : customer.id;
+  return expandableId(customer);
+}
+
+function checkoutCustomer(session: Stripe.Checkout.Session): BillingCustomerInfo | undefined {
+  const customer =
+    session.customer && typeof session.customer !== "string" ? session.customer : null;
+  const providerCustomerId = customerId(session.customer);
+  const email =
+    (customer && !customer.deleted ? customer.email : null) ??
+    session.customer_details?.email ??
+    null;
+  return providerCustomerId || email ? { providerCustomerId, email } : undefined;
+}
+
+function checkoutMetadata(session: Stripe.Checkout.Session): Record<string, string> {
+  return session.metadata ?? {};
+}
+
+function checkoutPaymentInfo(
+  session: Stripe.Checkout.Session,
+  expandedSession: Stripe.Checkout.Session,
+  status: "succeeded" | "failed",
+): BillingPaymentInfo {
+  const lineItem = expandedSession.line_items?.data[0];
+  const price = lineItem?.price;
+  const productId = price?.product;
+  const paymentIntentId = expandableId(session.payment_intent);
+  const taxMinor = requireMinorUnits(
+    session.total_details?.amount_tax ?? 0,
+    "Stripe checkout session.total_details.amount_tax",
+  );
+
+  return {
+    providerPaymentId: requireProviderString(
+      paymentIntentId ?? session.id,
+      "Stripe checkout session payment identifier",
+    ),
+    // BillingPaymentInfo represents the pre-tax amount; tax is recorded separately.
+    amountMinor: requireMinorUnits(
+      session.amount_subtotal ?? Math.max(0, (session.amount_total ?? 0) - taxMinor),
+      "Stripe checkout session.amount_subtotal",
+    ),
+    taxMinor,
+    currency: requireCurrency(session.currency, "Stripe checkout session.currency"),
+    purpose: session.mode === "subscription" ? "subscription" : "credit_topup",
+    status,
+    refs: price
+      ? {
+          productId: productId ? (expandableId(productId) ?? undefined) : undefined,
+          priceId: price.id,
+        }
+      : undefined,
+  };
+}
+
+function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+  const current = invoice.parent?.subscription_details?.subscription;
+  if (current) return expandableId(current);
+  // Compatibility for accounts deliberately pinned before 2025-03-31.basil.
+  return expandableId(
+    (invoice as unknown as { subscription?: string | Stripe.Subscription | null }).subscription,
+  );
+}
+
+function invoiceMetadata(invoice: Stripe.Invoice): Record<string, string> {
+  return {
+    ...(invoice.parent?.subscription_details?.metadata ?? {}),
+    ...(invoice.metadata ?? {}),
+  };
+}
+
+function invoicePaymentId(invoice: Stripe.Invoice): string {
+  for (const invoicePayment of invoice.payments?.data ?? []) {
+    const paymentIntentId = expandableId(invoicePayment.payment.payment_intent);
+    if (paymentIntentId) return paymentIntentId;
+  }
+  return invoice.id;
+}
+
+function invoiceTaxMinor(invoice: Stripe.Invoice): number {
+  return requireMinorUnits(
+    invoice.total_taxes?.reduce((total, item) => total + item.amount, 0) ?? 0,
+    "Stripe invoice.total_taxes",
+  );
 }
 
 export async function handleStripeWebhook(
@@ -62,124 +180,99 @@ export async function handleStripeWebhook(
   const occurredAt = new Date(event.created * 1000).toISOString();
   try {
     switch (event.type) {
-      case "checkout.session.completed": {
+      case "checkout.session.completed":
+      case "checkout.session.async_payment_succeeded":
+      case "checkout.session.async_payment_failed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        const userId = session.client_reference_id;
-        if (!userId) {
-          log.warn("Webhook: no client_reference_id", { sessionId: session.id });
-          break;
-        }
+        const failed = event.type === "checkout.session.async_payment_failed";
 
-        let expandedSession: Stripe.Checkout.Session;
-        try {
-          expandedSession = await stripe.checkout.sessions.retrieve(session.id, {
-            expand: [...STRIPE_CHECKOUT_EXPAND],
+        if (event.type === "checkout.session.completed" && session.payment_status === "unpaid") {
+          log.debug("Stripe Checkout completed with a delayed payment", {
+            sessionId: session.id,
           });
-        } catch (err) {
-          log.error("Failed to retrieve expanded session", { sessionId: session.id, err });
           break;
         }
 
-        const customer =
-          typeof session.customer === "string"
-            ? null
-            : (session.customer as Stripe.Customer | null);
-        const customerInfo = {
-          providerCustomerId: customerId(session.customer),
-          email: customer?.email ?? null,
-        };
+        const expandedSession = await stripe.checkout.sessions.retrieve(session.id, {
+          expand: [...STRIPE_CHECKOUT_EXPAND],
+        });
+        const metadata = checkoutMetadata(session);
+        const userId = session.client_reference_id ?? metadata.userId;
+        const customer = checkoutCustomer(session);
 
-        if (session.mode === "subscription" && session.subscription) {
-          const subId =
-            typeof session.subscription === "string"
-              ? session.subscription
-              : session.subscription.id;
-          try {
-            const sub = await stripe.subscriptions.retrieve(subId);
-            const end = buildEnd(sub);
-            const currentPeriodStart = buildStart(sub);
-            const planSlug = session.metadata?.plan_slug as string | undefined;
-
-            await callBillingEventSink(sink, {
-              provider: "stripe",
-              eventId: event.id,
-              eventType: "checkout.completed",
-              occurredAt,
-              userId,
-              customer: customerInfo,
-              subscription: {
-                providerSubscriptionId: subId,
-                status: sub.status as BillingSubscriptionStatus,
-                cancelAtPeriodEnd: sub.cancel_at_period_end,
-                periodEnd: end,
-                periodStart: currentPeriodStart,
-                trialEnd: timestamp(sub.trial_end),
-                cancelAt: timestamp(sub.cancel_at),
-                endedAt: timestamp(sub.ended_at),
-                refs: planSlug ? { lookupKey: planSlug } : subscriptionRefs(sub),
-              },
-            });
-          } catch (err) {
-            log.error("Failed to process subscription", {
-              userId,
-              subscriptionId: subId,
-              err,
-            });
+        if (failed) {
+          let subscription: BillingSubscriptionInfo | undefined;
+          const subscriptionId = expandableId(session.subscription);
+          if (subscriptionId) {
+            subscription = subscriptionInfo(await stripe.subscriptions.retrieve(subscriptionId));
           }
-        } else {
-          const priceId = expandedSession.line_items?.data[0]?.price?.id;
-          const productId = expandedSession.line_items?.data[0]?.price?.product;
-          const providerPaymentId =
-            typeof session.payment_intent === "string"
-              ? session.payment_intent
-              : session.payment_intent?.id;
-          const payment: BillingPaymentInfo = {
-            providerPaymentId: requireProviderString(
-              providerPaymentId,
-              "Stripe checkout session.payment_intent",
-            ),
-            amountMinor: requireMinorUnits(
-              session.amount_total,
-              "Stripe checkout session.amount_total",
-            ),
-            taxMinor: 0,
-            currency: requireCurrency(session.currency, "Stripe checkout session.currency"),
-            purpose: "credit_topup",
-            status: "succeeded",
-            refs: {
-              productId: productId ? String(productId) : undefined,
-              priceId: priceId ?? undefined,
-            },
-          };
+          await callBillingEventSink(sink, {
+            provider: "stripe",
+            eventId: event.id,
+            eventType: "payment.failed",
+            occurredAt,
+            userId,
+            customer,
+            subscription,
+            payment: checkoutPaymentInfo(session, expandedSession, "failed"),
+            metadata,
+          });
+          break;
+        }
 
+        const subscriptionId = expandableId(session.subscription);
+        if (session.mode === "subscription" && subscriptionId) {
+          const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+          const planSlug = metadata.plan_slug;
+          await callBillingEventSink(sink, {
+            provider: "stripe",
+            eventId: event.id,
+            eventType: "checkout.completed",
+            occurredAt,
+            userId,
+            customer,
+            subscription: subscriptionInfo(
+              subscription,
+              planSlug ? { lookupKey: planSlug } : subscriptionRefs(subscription),
+            ),
+            metadata,
+          });
+        } else {
           await callBillingEventSink(sink, {
             provider: "stripe",
             eventId: event.id,
             eventType: "payment.succeeded",
             occurredAt,
             userId,
-            customer: customerInfo,
-            payment,
+            customer,
+            payment: checkoutPaymentInfo(session, expandedSession, "succeeded"),
+            metadata,
           });
         }
         break;
       }
 
-      case "customer.subscription.updated": {
-        const sub = event.data.object as Stripe.Subscription;
-        const userId = sub.metadata?.userId;
-        if (!userId) {
-          log.debug("customer.subscription.updated: no userId in metadata", {
-            subscriptionId: sub.id,
-          });
-          break;
-        }
+      case "checkout.session.expired": {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const metadata = checkoutMetadata(session);
+        await callBillingEventSink(sink, {
+          provider: "stripe",
+          eventId: event.id,
+          eventType: "checkout.expired",
+          occurredAt,
+          userId: session.client_reference_id ?? metadata.userId,
+          customer: checkoutCustomer(session),
+          metadata,
+        });
+        break;
+      }
 
-        const end = buildEnd(sub);
+      case "customer.subscription.updated": {
+        const subscription = event.data.object as Stripe.Subscription;
         const eventType =
-          sub.status === "canceled"
+          subscription.status === "canceled"
             ? "subscription.canceled"
-            : sub.cancel_at_period_end
+            : subscription.cancel_at_period_end
               ? "subscription.cancellation_scheduled"
               : "subscription.updated";
 
@@ -188,45 +281,33 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType,
           occurredAt,
-          userId,
+          userId: subscription.metadata?.userId,
           customer: {
-            providerCustomerId: customerId(sub.customer),
+            providerCustomerId: customerId(subscription.customer),
           },
-          subscription: {
-            providerSubscriptionId: sub.id,
-            status: sub.status as BillingSubscriptionStatus,
-            cancelAtPeriodEnd: sub.cancel_at_period_end,
-            periodStart: buildStart(sub),
-            periodEnd: end,
-            trialEnd: timestamp(sub.trial_end),
-            cancelAt: timestamp(sub.cancel_at),
-            endedAt: timestamp(sub.ended_at),
-            refs: subscriptionRefs(sub),
-          },
+          subscription: subscriptionInfo(subscription),
+          metadata: subscription.metadata,
         });
         break;
       }
 
       case "customer.subscription.deleted": {
-        const sub = event.data.object as Stripe.Subscription;
+        const subscription = event.data.object as Stripe.Subscription;
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
           eventType: "subscription.canceled",
           occurredAt,
+          userId: subscription.metadata?.userId,
           customer: {
-            providerCustomerId: customerId(sub.customer),
+            providerCustomerId: customerId(subscription.customer),
           },
           subscription: {
-            providerSubscriptionId: sub.id,
+            ...subscriptionInfo(subscription),
             status: "canceled",
-            periodStart: buildStart(sub),
-            periodEnd: buildEnd(sub),
-            trialEnd: timestamp(sub.trial_end),
-            cancelAt: timestamp(sub.cancel_at),
-            endedAt: timestamp(sub.ended_at) ?? occurredAt,
-            refs: subscriptionRefs(sub),
+            endedAt: timestamp(subscription.ended_at) ?? occurredAt,
           },
+          metadata: subscription.metadata,
         });
         break;
       }
@@ -256,72 +337,37 @@ export async function handleStripeWebhook(
           occurredAt,
           userId: metadata.userId,
           payment,
+          metadata,
         });
         break;
       }
 
       case "invoice.paid": {
         const invoice = event.data.object as Stripe.Invoice;
-        const subscriptionId = (invoice as { subscription?: string }).subscription;
+        const subscriptionId = invoiceSubscriptionId(invoice);
         if (!subscriptionId) {
           log.debug("invoice.paid: no subscription reference", { invoiceId: invoice.id });
           break;
         }
 
-        let userId: string | undefined;
-
-        if (invoice.metadata?.userId) {
-          userId = invoice.metadata.userId;
-        }
-
-        if (!userId && invoice.parent?.subscription_details?.metadata) {
-          userId = invoice.parent.subscription_details.metadata.userId;
-        }
-
-        let stripeSub: Stripe.Subscription | undefined;
-        try {
-          stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
-          if (!userId) {
-            userId = stripeSub.metadata?.userId;
-          }
-        } catch (err) {
-          if (!userId) {
-            log.error("invoice.paid: failed to retrieve subscription", {
-              subscriptionId,
-              err,
-            });
-            break;
-          }
-        }
-        if (!userId) {
-          log.warn("invoice.paid: no userId", { subscriptionId });
-          break;
-        }
-
-        const subStatus =
-          stripeSub?.status ??
-          (invoice.collection_method === "send_invoice" ? "active" : "incomplete");
-        const periodEnd = stripeSub ? buildEnd(stripeSub) : buildEndFromInvoice(invoice);
-        const periodStart = stripeSub ? buildStart(stripeSub) : buildStartFromInvoice(invoice);
+        const metadata = invoiceMetadata(invoice);
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        const periodEnd = buildEnd(subscription) ?? buildEndFromInvoice(invoice);
+        const periodStart = buildStart(subscription) ?? buildStartFromInvoice(invoice);
 
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
           eventType: "invoice.paid",
           occurredAt,
-          userId,
+          userId: metadata.userId ?? subscription.metadata?.userId,
           customer: {
             providerCustomerId: customerId(invoice.customer),
           },
           subscription: {
-            providerSubscriptionId: subscriptionId,
-            status: subStatus as BillingSubscriptionStatus,
+            ...subscriptionInfo(subscription),
             periodEnd,
             periodStart,
-            trialEnd: timestamp(stripeSub?.trial_end),
-            cancelAt: timestamp(stripeSub?.cancel_at),
-            endedAt: timestamp(stripeSub?.ended_at),
-            refs: stripeSub ? subscriptionRefs(stripeSub) : undefined,
           },
           invoice: {
             providerInvoiceId: invoice.id,
@@ -332,6 +378,40 @@ export async function handleStripeWebhook(
             periodStart,
             periodEnd,
           },
+          metadata,
+        });
+        break;
+      }
+
+      case "invoice.payment_failed": {
+        const invoice = event.data.object as Stripe.Invoice;
+        const subscriptionId = invoiceSubscriptionId(invoice);
+        if (!subscriptionId) {
+          log.debug("invoice.payment_failed: no subscription reference", { invoiceId: invoice.id });
+          break;
+        }
+        const metadata = invoiceMetadata(invoice);
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        await callBillingEventSink(sink, {
+          provider: "stripe",
+          eventId: event.id,
+          eventType: "payment.failed",
+          occurredAt,
+          userId: metadata.userId ?? subscription.metadata?.userId,
+          customer: {
+            providerCustomerId: customerId(invoice.customer),
+          },
+          subscription: subscriptionInfo(subscription),
+          payment: {
+            providerPaymentId: invoicePaymentId(invoice),
+            amountMinor: requireMinorUnits(invoice.subtotal, "Stripe invoice.subtotal"),
+            taxMinor: invoiceTaxMinor(invoice),
+            currency: requireCurrency(invoice.currency, "Stripe invoice.currency"),
+            purpose: "subscription",
+            status: "failed",
+            refs: subscriptionRefs(subscription),
+          },
+          metadata,
         });
         break;
       }
@@ -346,10 +426,7 @@ export async function handleStripeWebhook(
           refund.status === "canceled"
             ? refund.status
             : "pending";
-        const providerPaymentId =
-          typeof refund.payment_intent === "string"
-            ? refund.payment_intent
-            : refund.payment_intent?.id;
+        const providerPaymentId = expandableId(refund.payment_intent);
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
@@ -372,6 +449,7 @@ export async function handleStripeWebhook(
             reason: refund.reason,
             status,
           },
+          metadata: refund.metadata,
         });
         break;
       }

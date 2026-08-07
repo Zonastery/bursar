@@ -1146,6 +1146,9 @@ class CreditsService:
                 self._emit("credits.lease_expired", user_id, {"lease_id": lease_id})
             self._raise_lease_error(result.error, user_id, amount)
 
+        if result.balance_after is None:
+            raise StoreError("settle_lease succeeded without a committed balance")
+
         self._emit(
             "credits.deducted",
             user_id,
@@ -1414,6 +1417,9 @@ class CreditsService:
         if result.idempotent:
             return
 
+        if result.balance_after is None:
+            raise StoreError("credit deduction succeeded without a committed balance")
+
         if result.balance_after < 0:
             self._emit("credits.overdraft", user_id, {"balance": result.balance_after, "amount": result.amount})
 
@@ -1594,6 +1600,9 @@ class CreditsService:
             if result.error == "quota_exceeded":
                 self._emit_quota_events(user_id, effective_idempotency_key)
             self._raise_deduct_error(result.error, user_id, cost, metrics, feature)
+
+        if result.balance_after is None:
+            raise StoreError("credit deduction succeeded without a committed balance")
 
         # 5) Success path.
         self._emit(

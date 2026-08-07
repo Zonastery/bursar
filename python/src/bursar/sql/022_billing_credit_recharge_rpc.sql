@@ -167,12 +167,12 @@ CREATE FUNCTION bursar.upsert_billing_refund(
     p_payment_id uuid,
     p_provider_refund_id text,
     p_amount_minor bigint,
-    p_status text DEFAULT 'pending',
-    p_reason text DEFAULT NULL,
-    p_provider_updated_at timestamptz DEFAULT now(),
-    p_expected_subject_id uuid DEFAULT NULL,
-    p_expected_currency text DEFAULT NULL,
-    p_metadata jsonb DEFAULT '{}'::jsonb
+    p_status text,
+    p_reason text,
+    p_provider_updated_at timestamptz,
+    p_expected_subject_id uuid,
+    p_expected_currency text,
+    p_metadata jsonb
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$

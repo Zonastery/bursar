@@ -6,11 +6,21 @@ import type { CatalogRevision, LedgerEntry, UsageCharge } from "../types/index.j
 
 export const ZERO = new Decimal(0);
 
-export function decimalValue(value: unknown, fallback: Decimal = ZERO): Decimal {
-  if (value === null || value === undefined) return fallback;
-  if (value instanceof Decimal) return value;
+export function decimalValue(value: unknown): Decimal {
+  if (value === null || value === undefined || typeof value === "boolean") {
+    throw new StoreError("PostgreSQL returned a missing or invalid Decimal value", {
+      details: { valueType: typeof value },
+    });
+  }
   try {
-    return new Decimal(typeof value === "string" ? value : String(value));
+    const parsed =
+      value instanceof Decimal
+        ? value
+        : new Decimal(typeof value === "string" ? value : String(value));
+    if (!parsed.isFinite()) {
+      throw new Error("Decimal value must be finite");
+    }
+    return parsed;
   } catch (cause) {
     throw new StoreError(`Failed to parse Decimal value: ${String(value)}`, {
       cause,

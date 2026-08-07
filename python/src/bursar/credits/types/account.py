@@ -46,11 +46,11 @@ class AvailableResult(BaseModel):
 
 
 class DeductionResult(BaseModel):
-    entry_id: str
+    entry_id: str | None
     usage_charge_id: str | None = None
     user_id: str
     amount: Decimal
-    balance_after: Decimal
+    balance_after: Decimal | None
     allowance_consumed: Decimal
     idempotent: bool
     error: str | None = None

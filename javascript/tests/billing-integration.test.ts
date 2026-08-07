@@ -302,6 +302,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       status: "active",
       currentPeriodStart: "2025-01-01T00:00:00Z",
       currentPeriodEnd: "2025-02-01T00:00:00Z",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     };
     await bs.upsertBillingSubscription(state);
     const result = await bs.getBillingSubscription(PROVIDER, SUB_ID);
@@ -324,6 +326,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       providerSubscriptionId: SUB_ID,
       offerKey: "pro_monthly",
       status: "active",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     await bs.upsertBillingSubscription({
       userId: USER_ID,
@@ -331,6 +335,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       providerSubscriptionId: SUB_ID,
       offerKey: "pro_monthly",
       status: "canceled",
+      providerUpdatedAt: "2025-01-02T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     const sub = await bs.getBillingSubscription(PROVIDER, SUB_ID);
     expect(sub!.status).toBe("canceled");
@@ -534,6 +540,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       userId: USER_ID3,
       offerKey: "pro_monthly",
       status: "active",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     await cm.setUserPlan(USER_ID3, "pro");
 
@@ -1209,6 +1217,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       providerSubscriptionId: SUB_ID,
       offerKey: "pro_monthly",
       status: "active",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     await bs.upsertBillingPayment({
       provider: PROVIDER,
@@ -2001,6 +2011,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       providerSubscriptionId: "sub_list_1",
       offerKey: "pro_monthly",
       status: "active",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     await bs.upsertBillingSubscription({
       userId: listUid,
@@ -2008,6 +2020,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       providerSubscriptionId: "sub_list_2",
       offerKey: "pro_monthly",
       status: "active",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     const subs = await bs.getUserSubscriptions(listUid);
     expect(subs.length).toBeGreaterThanOrEqual(2);
@@ -2022,6 +2036,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       providerSubscriptionId: "sub_status_1",
       offerKey: "pro_monthly",
       status: "canceled",
+      providerUpdatedAt: "2025-01-01T00:00:00Z",
+      cancelAtPeriodEnd: false,
     });
     const activeSub = await bs.getUserSubscription(statusUid, ["active"]);
     expect(activeSub).toBeNull();

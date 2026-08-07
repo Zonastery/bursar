@@ -335,9 +335,9 @@ CREATE FUNCTION bursar.upsert_billing_payment(
     p_currency text,
     p_purpose text,
     p_status bursar.billing_payment_status,
-    p_provider_updated_at timestamptz DEFAULT now(),
-    p_provider_invoice_id text DEFAULT NULL,
-    p_metadata jsonb DEFAULT '{}'::jsonb
+    p_provider_updated_at timestamptz,
+    p_provider_invoice_id text,
+    p_metadata jsonb
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$

@@ -84,10 +84,10 @@ CREATE FUNCTION bursar.upsert_billing_invoice(
     p_amount_due_minor bigint,
     p_amount_paid_minor bigint,
     p_currency text,
-    p_period_start timestamptz DEFAULT NULL,
-    p_period_end timestamptz DEFAULT NULL,
-    p_metadata jsonb DEFAULT '{}'::jsonb,
-    p_provider_updated_at timestamptz DEFAULT now()
+    p_period_start timestamptz,
+    p_period_end timestamptz,
+    p_metadata jsonb,
+    p_provider_updated_at timestamptz
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
@@ -216,9 +216,9 @@ CREATE FUNCTION bursar.upsert_billing_dispute(
     p_provider_dispute_id text,
     p_payment_id uuid,
     p_status text,
-    p_reason text DEFAULT NULL,
-    p_metadata jsonb DEFAULT '{}'::jsonb,
-    p_provider_updated_at timestamptz DEFAULT now()
+    p_reason text,
+    p_metadata jsonb,
+    p_provider_updated_at timestamptz
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$

@@ -25,6 +25,7 @@ import type {
   CanAffordResult,
   CreditMetadata,
   DeductionResult,
+  DeductionSuccess,
   LeaseResult,
   ReleaseResult,
 } from "./types/index.js";
@@ -46,7 +47,7 @@ export class CreditLeaseWorkflow {
     ) => void,
     private readonly emitQuotaEvents: (userId: string, idempotencyKey: string) => Promise<void>,
     private readonly maybeLazyExpire: (userId: string) => Promise<void>,
-    private readonly afterDeduction: (userId: string, result: DeductionResult) => Promise<void>,
+    private readonly afterDeduction: (userId: string, result: DeductionSuccess) => Promise<void>,
   ) {}
 
   private async expectedAdmissionPolicy(
@@ -230,7 +231,7 @@ export class CreditLeaseWorkflow {
       metadata: txMeta as CreditMetadata,
     });
 
-    if (result.error) {
+    if (result.error !== null) {
       this.emit("credits.deduct_failed", userId, {
         error: result.error,
         amount,

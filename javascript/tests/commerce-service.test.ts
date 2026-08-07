@@ -330,6 +330,7 @@ function activeSubscription(
     plan: "basic",
     interval: "month",
     status: "active" as const,
+    providerUpdatedAt: "2025-01-01T00:00:00Z",
     cancelAtPeriodEnd: false,
     ...overrides,
   };

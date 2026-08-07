@@ -275,7 +275,7 @@ export class PostgresStore extends CreditStore {
     return {
       entryId: requireText(row.entry_id, "post_credit"),
       userId: String(row.user_id ?? userId),
-      amount: dec(row.amount, amount),
+      amount: dec(row.amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
       bucket: String(row.bucket ?? "default"),
@@ -314,25 +314,28 @@ export class PostgresStore extends CreditStore {
 
     if ("error" in row && row.error) {
       return {
-        entryId: "",
+        entryId: null,
         usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
         userId,
-        amount: ZERO,
-        allowanceConsumed: ZERO,
-        balanceAfter: dec(row.balance_after),
+        amount: dec(row.amount),
+        allowanceConsumed: dec(row.allowance_consumed),
+        balanceAfter: row.balance_after == null ? null : dec(row.balance_after),
         idempotent: false,
         error: String(row.error),
+        bucketBreakdown: null,
       };
     }
 
     return {
-      entryId: String(row.entry_id ?? ""),
+      entryId:
+        row.entry_id == null ? null : requireText(row.entry_id, "charge_usage_for_operation"),
       usageChargeId: requireText(row.charge_id, "charge_usage_for_operation"),
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
+      error: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
@@ -436,24 +439,26 @@ export class PostgresStore extends CreditStore {
 
     if ("error" in row && row.error) {
       return {
-        entryId: "",
+        entryId: null,
         usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
         userId,
-        amount: ZERO,
-        allowanceConsumed: ZERO,
-        balanceAfter: dec(row.balance_after),
+        amount: dec(row.amount),
+        allowanceConsumed: dec(row.allowance_consumed),
+        balanceAfter: row.balance_after == null ? null : dec(row.balance_after),
         idempotent: false,
         error: String(row.error),
+        bucketBreakdown: null,
       };
     }
     return {
-      entryId: String(row.entry_id ?? ""),
+      entryId: row.entry_id == null ? null : requireText(row.entry_id, "settle_lease"),
       usageChargeId: requireText(row.charge_id, "settle_lease"),
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
+      error: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
@@ -1060,7 +1065,7 @@ export class PostgresStore extends CreditStore {
       entryId: requireText(row.entry_id, "deduct_team"),
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
-      amount: dec(row.amount, amount),
+      amount: dec(row.amount),
       teamBalanceAfter: dec(row.team_balance_after),
     };
   }

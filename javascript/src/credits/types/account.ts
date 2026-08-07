@@ -55,18 +55,34 @@ export interface AddCreditsResult {
   idempotent: boolean;
 }
 
-export interface DeductionResult {
-  entryId: string;
-  /** Canonical usage receipt, including zero-cost or allowance-only charges. */
-  usageChargeId: string | null;
+interface DeductionResultBase {
   userId: string;
   amount: Decimal;
   allowanceConsumed: Decimal;
-  balanceAfter: Decimal;
   idempotent: boolean;
-  error?: string | null;
-  bucketBreakdown?: Record<string, Decimal> | null;
 }
+
+/** A committed usage charge. Allowance-only charges legitimately have no ledger entry. */
+export interface DeductionSuccess extends DeductionResultBase {
+  error: null;
+  entryId: string | null;
+  /** Canonical usage receipt, including zero-cost or allowance-only charges. */
+  usageChargeId: string | null;
+  balanceAfter: Decimal;
+  bucketBreakdown: Record<string, Decimal> | null;
+}
+
+/** An expected database rejection. Nullable fields were not committed and are not fabricated. */
+export interface DeductionFailure extends DeductionResultBase {
+  error: string;
+  entryId: null;
+  usageChargeId: string | null;
+  balanceAfter: Decimal | null;
+  idempotent: false;
+  bucketBreakdown: null;
+}
+
+export type DeductionResult = DeductionSuccess | DeductionFailure;
 
 export interface DeductWithAllowanceOptions {
   idempotencyKey?: string | null;

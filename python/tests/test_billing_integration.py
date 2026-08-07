@@ -610,16 +610,20 @@ class TestAutoRechargeProfile:
                     provider_subscription_id,
                     offer_id,
                     catalog_revision_id,
-                    status
+                    status,
+                    provider_updated_at,
+                    status_changed_at
                 )
                 VALUES
                     (
                         %s::uuid, %s, 'live', 'sub-live',
-                        %s::uuid, %s::uuid, 'active'
+                        %s::uuid, %s::uuid, 'active',
+                        '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
                     ),
                     (
                         %s::uuid, %s, 'test', 'sub-test',
-                        %s::uuid, %s::uuid, 'active'
+                        %s::uuid, %s::uuid, 'active',
+                        '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
                     )
                 RETURNING id, provider_environment
                 """,
@@ -708,6 +712,8 @@ class TestSubscriptionCrud:
             status=BillingSubscriptionStatus.active,
             current_period_start="2025-01-01T00:00:00Z",
             current_period_end="2025-02-01T00:00:00Z",
+            provider_updated_at="2025-01-01T00:00:00Z",
+            cancel_at_period_end=False,
         )
         bs.upsert_billing_subscription(state)
         result = bs.get_billing_subscription(PROVIDER, SUB_ID)
@@ -729,6 +735,8 @@ class TestSubscriptionCrud:
                 provider_subscription_id=SUB_ID,
                 offer_key="pro_monthly",
                 status=BillingSubscriptionStatus.active,
+                provider_updated_at="2025-01-01T00:00:00Z",
+                cancel_at_period_end=False,
             )
         )
         bs.upsert_billing_subscription(
@@ -737,6 +745,8 @@ class TestSubscriptionCrud:
                 provider=PROVIDER,
                 provider_subscription_id=SUB_ID,
                 status=BillingSubscriptionStatus.canceled,
+                provider_updated_at="2025-01-02T00:00:00Z",
+                cancel_at_period_end=False,
             )
         )
         sub = bs.get_billing_subscription(PROVIDER, SUB_ID)

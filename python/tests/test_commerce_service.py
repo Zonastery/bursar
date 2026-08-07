@@ -261,7 +261,7 @@ class FakeAutoRecharge:
     ) -> BillingAutoRechargeStatus:
         self.calls.append(("enable", user_id, balance, return_url))
         if self.fail_payment_method:
-            raise ValueError("payment_method_missing")
+            raise PaymentMethodRequiredError
         return self.status
 
     def disable(self, user_id: str) -> None:
@@ -277,7 +277,7 @@ class FakeAutoRecharge:
     ) -> AutoRechargeProcessResult:
         self.calls.append(("retry", user_id, balance, return_url))
         if self.fail_payment_method:
-            raise ValueError("payment_method_missing")
+            raise PaymentMethodRequiredError
         return AutoRechargeProcessResult(outcome="submitted")
 
     async def process_if_needed(
@@ -574,6 +574,7 @@ def active_subscription(**overrides: Any) -> BillingSubscriptionState:
         "interval_count": 1,
         "status": BillingSubscriptionStatus.active,
         "cancel_at_period_end": False,
+        "provider_updated_at": "2026-01-01T00:00:00Z",
     }
     values.update(overrides)
     return BillingSubscriptionState(**values)

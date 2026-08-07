@@ -519,6 +519,8 @@ export class CreditsService {
         balanceAfter: result.newBalance,
         idempotent: false,
         usageChargeId: null,
+        error: null,
+        bucketBreakdown: null,
       });
     }
     return result;
@@ -713,7 +715,7 @@ export class CreditsService {
     // quotas, and usage history cannot be bypassed by a free rate.
     const result = await this.store.deductWithAllowance(userId, cost, deductionOptions);
 
-    if (result.error) {
+    if (result.error !== null) {
       if (result.error === "quota_exceeded") {
         await this.emitQuotaEvents(userId, effectiveIdempotencyKey);
       }

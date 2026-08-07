@@ -57,8 +57,8 @@ CREATE TABLE bursar.billing_subscriptions (
     ended_at timestamptz,
     grace_ends_at timestamptz,
     grace_expired_at timestamptz,
-    provider_updated_at timestamptz NOT NULL DEFAULT now(),
-    status_changed_at timestamptz NOT NULL DEFAULT now(),
+    provider_updated_at timestamptz NOT NULL,
+    status_changed_at timestamptz NOT NULL,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -160,8 +160,8 @@ CREATE TABLE bursar.billing_payments (
     currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     purpose text NOT NULL CHECK (purpose IN ('subscription', 'credit_topup')),
     status bursar.billing_payment_status NOT NULL DEFAULT 'pending',
-    provider_updated_at timestamptz NOT NULL DEFAULT now(),
-    status_changed_at timestamptz NOT NULL DEFAULT now(),
+    provider_updated_at timestamptz NOT NULL,
+    status_changed_at timestamptz NOT NULL,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -354,7 +354,7 @@ CREATE TABLE bursar.billing_refunds (
     ),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
-    provider_updated_at timestamptz NOT NULL DEFAULT now(),
+    provider_updated_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (
@@ -612,7 +612,7 @@ CREATE TABLE bursar.billing_invoices (
     currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     period_start timestamptz,
     period_end timestamptz,
-    provider_updated_at timestamptz NOT NULL DEFAULT now(),
+    provider_updated_at timestamptz NOT NULL,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -661,7 +661,7 @@ CREATE TABLE bursar.billing_disputes (
         reason IS NULL
         OR bursar.is_nonempty_bounded_text(reason, 2048)
     ),
-    provider_updated_at timestamptz NOT NULL DEFAULT now(),
+    provider_updated_at timestamptz NOT NULL,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
