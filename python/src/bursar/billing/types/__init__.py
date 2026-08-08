@@ -25,12 +25,6 @@ def _normalize_instant(value: str) -> str:
     return parsed.astimezone(UTC).isoformat()
 
 
-class BillingProvider(StrEnum):
-    stripe = "stripe"
-    dodo = "dodo"
-    mock = "mock"
-
-
 class BillingEventType(StrEnum):
     customer_created = "customer.created"
     customer_updated = "customer.updated"
@@ -213,7 +207,7 @@ class BillingEvent(BaseModel):
     event_type: BillingEventType
     occurred_at: str
 
-    user_id: str | None = None
+    user_id: NonEmptyString | None = None
     customer: BillingCustomerInfo | None = None
     subscription: BillingSubscriptionInfo | None = None
     invoice: BillingInvoiceInfo | None = None
@@ -222,7 +216,7 @@ class BillingEvent(BaseModel):
     dispute: BillingDisputeInfo | None = None
     metadata: dict[str, Any] | None = None
     raw: Any = None
-    billing_event_id: str | None = Field(default=None, exclude=True)
+    billing_event_id: NonEmptyString | None = Field(default=None, exclude=True)
 
     @field_validator("occurred_at")
     @classmethod
@@ -391,12 +385,12 @@ class BillingSubscriptionOfferContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    offer_id: str
-    offer_key: str
-    plan_id: str | None = None
-    plan: str | None = None
-    interval: str | None = None
-    interval_count: int | None = None
+    offer_id: NonEmptyString
+    offer_key: NonEmptyString
+    plan_id: NonEmptyString
+    plan: NonEmptyString
+    interval: BillingOfferInterval
+    interval_count: int = Field(gt=0)
 
 
 class BillingSubscriptionChange(BaseModel):
@@ -483,6 +477,15 @@ class BillingPreferences(BaseModel):
 
 AUTO_RECHARGE_STATES = ("disabled", "active", "paused")
 BillingAutoRechargeState = Literal["disabled", "active", "paused"]
+BillingAutoRechargeAttemptState = Literal[
+    "claimed",
+    "submitted",
+    "processing",
+    "unknown",
+    "succeeded",
+    "failed",
+    "action_required",
+]
 
 
 class BillingAutoRechargeProfile(BaseModel):
@@ -514,15 +517,7 @@ class BillingAutoRechargeAttempt(BaseModel):
     provider_attempt_id: str | None
     topup_id: str
     quantity: int
-    state: Literal[
-        "claimed",
-        "submitted",
-        "processing",
-        "unknown",
-        "succeeded",
-        "failed",
-        "action_required",
-    ]
+    state: BillingAutoRechargeAttemptState
     window_start: str
     window_end: str
     quoted_amount_minor: int | None

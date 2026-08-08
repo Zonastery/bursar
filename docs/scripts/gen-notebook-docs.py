@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
 """Render validated Bursar notebooks as Docusaurus tutorial pages."""
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,16 @@ OUTPUT_DIR = REPO_DIR / "docs" / "docs" / "notebooks"
 
 REPOSITORY_URL = "https://github.com/zonastery/bursar"
 NOTEBOOK_PATTERN = re.compile(r"^(?P<position>\d{2})_(?P<slug>[a-z0-9_]+)$")
+DIRECT_IDEMPOTENT_METHODS = {
+    "add_credits",
+    "deduct",
+    "deduct_credits",
+    "refund_credits",
+}
+OPTIONS_IDEMPOTENT_METHODS = {
+    "reserve": "ReserveOptions",
+    "settle": "SettleOptions",
+}
 
 SECTIONS = {
     "foundations": {
@@ -27,13 +38,13 @@ SECTIONS = {
         "description": "Configure pricing, evaluate usage, and understand the expression language before persisting account state.",
     },
     "credits-and-controls": {
-        "label": "Credits and Controls",
+        "label": "Credits and controls",
         "position": 2,
         "title": "Operate credits and account controls",
         "description": "Work with balances, allowances, quotas, expiry, leases, teams, analytics, and lifecycle events.",
     },
     "billing-and-operations": {
-        "label": "Billing and Operations",
+        "label": "Billing and operations",
         "position": 3,
         "title": "Connect billing and operate Bursar",
         "description": "Integrate subscriptions, deploy configuration, evaluate custom stores, and inspect the full schema.",
@@ -43,6 +54,53 @@ SECTIONS = {
 
 class NotebookError(ValueError):
     """Report a notebook that cannot be published as documentation."""
+
+
+def _call_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return None
+
+
+def _has_keyword(call: ast.Call, name: str) -> bool:
+    return any(keyword.arg == name for keyword in call.keywords)
+
+
+def _validate_idempotency(source: str, path: Path, cell_number: int) -> None:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        location = f"line {error.lineno}" if error.lineno else "an unknown line"
+        raise NotebookError(
+            f"{path.name}: code cell {cell_number} has invalid Python at {location}: "
+            f"{error.msg}"
+        ) from error
+
+    missing: list[tuple[str, int]] = []
+    for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        name = _call_name(call)
+        if name in DIRECT_IDEMPOTENT_METHODS and not _has_keyword(
+            call, "idempotency_key"
+        ):
+            missing.append((name, call.lineno))
+        elif name in OPTIONS_IDEMPOTENT_METHODS:
+            option_type = OPTIONS_IDEMPOTENT_METHODS[name]
+            options = [
+                nested
+                for nested in ast.walk(call)
+                if isinstance(nested, ast.Call) and _call_name(nested) == option_type
+            ]
+            if not any(_has_keyword(option, "idempotency_key") for option in options):
+                missing.append((name, call.lineno))
+
+    if missing:
+        calls = ", ".join(f"{name} (line {line})" for name, line in missing)
+        raise NotebookError(
+            f"{path.name}: code cell {cell_number} must pass stable idempotency "
+            f"keys to replayable calls: {calls}"
+        )
 
 
 def _metadata(notebook: nbformat.NotebookNode, path: Path) -> dict[str, Any]:
@@ -67,6 +125,21 @@ def _metadata(notebook: nbformat.NotebookNode, path: Path) -> dict[str, Any]:
 def _validate_notebook(
     notebook: nbformat.NotebookNode, path: Path, metadata: dict[str, Any]
 ) -> None:
+    cell_ids = [str(cell.get("id", "")) for cell in notebook.cells]
+    missing_ids = [
+        index for index, cell_id in enumerate(cell_ids, start=1) if not cell_id
+    ]
+    if missing_ids:
+        positions = ", ".join(map(str, missing_ids))
+        raise NotebookError(f"{path.name}: cells {positions} are missing stable IDs")
+
+    duplicate_ids = sorted(
+        cell_id for cell_id, count in Counter(cell_ids).items() if count > 1
+    )
+    if duplicate_ids:
+        duplicates = ", ".join(duplicate_ids)
+        raise NotebookError(f"{path.name}: duplicate cell IDs: {duplicates}")
+
     nbformat.validate(notebook)
 
     if not notebook.cells or notebook.cells[0].cell_type != "markdown":
@@ -94,6 +167,10 @@ def _validate_notebook(
             f"{path.name}: clear outputs and execution counts in cells {positions}"
         )
 
+    for cell_number, cell in enumerate(notebook.cells, start=1):
+        if cell.cell_type == "code":
+            _validate_idempotency(str(cell.source), path, cell_number)
+
 
 def _frontmatter(
     *, metadata: dict[str, Any], slug: str, position: int, source_name: str
@@ -113,8 +190,10 @@ def _frontmatter(
         fields.append(f"  - {keyword}")
     fields.extend(
         [
-            "custom_edit_url: "
-            f"{REPOSITORY_URL}/edit/main/samples/python/notebooks/{source_name}",
+            (
+                "custom_edit_url: "
+                f"{REPOSITORY_URL}/edit/main/samples/python/notebooks/{source_name}"
+            ),
             "---",
         ]
     )
@@ -128,7 +207,7 @@ def _source_notice(source_name: str) -> str:
         f"samples/python/notebooks/{source_name}"
     )
     return (
-        "<!-- Generated by scripts/gen-notebook-docs.py; edit the source notebook. -->\n\n"
+        "{/* Generated by scripts/gen-notebook-docs.py; edit the source notebook. */}\n\n"
         ":::info Executable tutorial\n\n"
         f"This page is generated from a tested Jupyter notebook. "
         f"[Open it in Google Colab]({colab_url}) or "
@@ -186,7 +265,7 @@ def main() -> int:
         body, _resources = exporter.from_notebook_node(notebook)
         slug = match.group("slug")
         position = int(match.group("position"))
-        output = OUTPUT_DIR / metadata["section"] / f"{slug}.mdx"
+        output = OUTPUT_DIR / metadata["section"] / f"{position:02}_{slug}.mdx"
         output.write_text(
             _frontmatter(
                 metadata=metadata,

@@ -184,19 +184,7 @@ describe("payment provider adapter contracts", () => {
           deleted: false,
           invoice_settings: { default_payment_method: "pm_1" },
         }),
-      },
-      checkout: {
-        sessions: {
-          create: async (...args: unknown[]) => {
-            checkoutCalls.push(args);
-            return { id: "cs_1", url: "https://checkout.test" };
-          },
-          retrieve: async () => ({ status: "expired" }),
-        },
-      },
-      billingPortal: { sessions: { create: async () => ({ url: "https://portal.test" }) } },
-      paymentMethods: {
-        list: async () => ({
+        listPaymentMethods: async () => ({
           data: [
             {
               id: "pm_1",
@@ -209,6 +197,16 @@ describe("payment provider adapter contracts", () => {
           ],
         }),
       },
+      checkout: {
+        sessions: {
+          create: async (...args: unknown[]) => {
+            checkoutCalls.push(args);
+            return { id: "cs_1", url: "https://checkout.test" };
+          },
+          retrieve: async () => ({ status: "expired" }),
+        },
+      },
+      billingPortal: { sessions: { create: async () => ({ url: "https://portal.test" }) } },
       prices: { retrieve: async () => ({ unit_amount: 500, currency: "usd" }) },
       paymentIntents: {
         create: async (...args: unknown[]) => {

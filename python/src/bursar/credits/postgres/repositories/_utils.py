@@ -4,11 +4,30 @@ from decimal import Decimal
 from typing import Any, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from bursar.errors import StoreError
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def validate_row[T: BaseModel](
+    model: type[T],
+    data: object,
+    context: str,
+    *,
+    indeterminate: bool = False,
+) -> T:
+    """Validate a database row and keep adapter failures inside the SDK error contract."""
+    try:
+        return model.model_validate(data)
+    except ValidationError as error:
+        raise StoreError(
+            f"{context}: row validation failed",
+            cause=error,
+            indeterminate=indeterminate,
+            details={"context": context, "model": model.__name__},
+        ) from error
 
 
 def validate_first_row[T: BaseModel](rows: list[Any], model: type[T]) -> T | None:
@@ -16,14 +35,7 @@ def validate_first_row[T: BaseModel](rows: list[Any], model: type[T]) -> T | Non
     if not rows:
         return None
     row = optional_mapping_row(rows, f"{model.__name__} lookup")
-    try:
-        return model.model_validate(row)
-    except ValueError as error:
-        raise StoreError(
-            f"{model.__name__} lookup: row validation failed",
-            cause=error,
-            details={"model": model.__name__},
-        ) from error
+    return validate_row(model, row, f"{model.__name__} lookup")
 
 
 def require_row(rows: list[Any] | None, context: str) -> Any:

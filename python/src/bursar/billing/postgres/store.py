@@ -39,10 +39,15 @@ from bursar.billing.postgres.repositories.offer import BillingOfferRepository
 from bursar.billing.postgres.repositories.payment import BillingPaymentRepository
 from bursar.billing.postgres.repositories.preferences import BillingPreferencesRepository
 from bursar.billing.postgres.repositories.refund import BillingRefundRepository
+from bursar.billing.postgres.repositories.schemas import (
+    BillingOfferRow,
+    BillingTopupRow,
+    SubscriptionRow,
+)
 from bursar.billing.postgres.repositories.subscription import (
     BillingSubscriptionRepository,
-    provider_timestamp_sort_key,
 )
+from bursar.billing.postgres.repositories.subscription_change import BillingSubscriptionChangeRepository
 from bursar.billing.postgres.repositories.topup import BillingTopupRepository
 from bursar.billing.types import (
     BillingAutoRechargeAttempt,
@@ -57,9 +62,6 @@ from bursar.billing.types import (
     BillingPreferences,
     BillingSubscriptionChange,
     BillingSubscriptionChangeInput,
-    BillingSubscriptionChangeState,
-    BillingSubscriptionOfferContext,
-    BillingSubscriptionProrationBehavior,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
@@ -68,15 +70,9 @@ from bursar.billing.types import (
 )
 from bursar.credits.postgres.repositories._utils import (
     optional_mapping_row,
-    require_bigint_identifier_result,
     require_boolean_result,
     require_identifier_result,
     require_mapping_row,
-)
-from bursar.credits.postgres.repositories.schemas import (
-    BillingOfferRow,
-    BillingTopupRow,
-    SubscriptionRow,
 )
 from bursar.errors import BursarError, StoreError
 from bursar.shared.diagnostics import optional_bounded_diagnostic_message
@@ -234,6 +230,10 @@ class PostgresBillingStore(BillingStore):
     def _auto_recharge_repo(self) -> BillingAutoRechargeRepository:
         return BillingAutoRechargeRepository(self._execute)
 
+    @cached_property
+    def _subscription_change_repo(self) -> BillingSubscriptionChangeRepository:
+        return BillingSubscriptionChangeRepository(self._execute)
+
     # ── Helpers ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -263,71 +263,6 @@ class PostgresBillingStore(BillingStore):
             grace_expired_at=_to_utc_iso(r.grace_expired_at),
             provider_updated_at=_required_utc_iso(r.provider_updated_at, "billing subscription"),
             metadata=r.metadata,
-        )
-
-    def _subscription_offer_contexts(
-        self,
-        row: dict[str, Any],
-    ) -> tuple[BillingSubscriptionOfferContext, BillingSubscriptionOfferContext]:
-        rows = self._execute(
-            """SELECT requested.side, requested.offer_id, context.*
-               FROM (
-                   VALUES
-                       ('from', %s::uuid, %s::uuid),
-                       ('to', %s::uuid, %s::uuid)
-               ) AS requested(side, offer_id, catalog_revision_id)
-               CROSS JOIN LATERAL bursar.get_catalog_offer_context(
-                   requested.offer_id,
-                   requested.catalog_revision_id
-               ) AS context""",
-            [
-                row["from_offer_id"],
-                row["from_catalog_revision_id"],
-                row["to_offer_id"],
-                row["to_catalog_revision_id"],
-            ],
-        )
-        by_side = {str(context["side"]): context for context in rows}
-
-        def map_context(side: str) -> BillingSubscriptionOfferContext:
-            context = by_side.get(side)
-            if context is None or context.get("offer_key") is None:
-                raise StoreError(
-                    f"subscription change {side}-offer context not found",
-                    details={"side": side, "subscription_change_id": row.get("id")},
-                )
-            return BillingSubscriptionOfferContext(
-                offer_id=str(context["offer_id"]),
-                offer_key=str(context["offer_key"]),
-                plan_id=str(context["plan_id"]) if context.get("plan_id") else None,
-                plan=str(context["plan_key"]) if context.get("plan_key") else None,
-                interval=str(context["billing_unit"]) if context.get("billing_unit") else None,
-                interval_count=(int(context["billing_count"]) if context.get("billing_count") is not None else None),
-            )
-
-        return map_context("from"), map_context("to")
-
-    def _row_to_subscription_change(self, row: dict[str, Any] | None) -> BillingSubscriptionChange | None:
-        if not row or row.get("id") is None:
-            return None
-        from_offer, to_offer = self._subscription_offer_contexts(row)
-        return BillingSubscriptionChange(
-            id=str(row["id"]),
-            subscription_id=str(row["subscription_id"]),
-            from_offer_id=str(row["from_offer_id"]),
-            to_offer_id=str(row["to_offer_id"]),
-            from_offer=from_offer,
-            to_offer=to_offer,
-            effective_at=_to_utc_iso(row.get("effective_at")),
-            effective=cast(Literal["immediate", "renewal"], str(row["effective_behavior"])),
-            state=cast(BillingSubscriptionChangeState, str(row["state"])),
-            proration_behavior=cast(
-                BillingSubscriptionProrationBehavior,
-                str(row["proration_behavior"]),
-            ),
-            idempotency_key=str(row["idempotency_key"]),
-            provider_operation_id=(str(row["provider_operation_id"]) if row.get("provider_operation_id") else None),
-            error_message=str(row["error_message"]) if row.get("error_message") else None,
         )
 
     @staticmethod
@@ -506,7 +441,7 @@ class PostgresBillingStore(BillingStore):
                 )
             return BillingEventClaim(
                 status="claimed",
-                claim_token=claim_token,
+                claim_token=str(claim_token),
                 billing_event_id=str(billing_event_id),
             )
         if raw_status == "duplicate":
@@ -630,87 +565,19 @@ class PostgresBillingStore(BillingStore):
                 },
             )
 
-        rows = self._execute(
-            """SELECT * FROM bursar.open_subscription_change(
-                   %s::uuid,
-                   %s::uuid,
-                   %s::timestamptz,
-                   %s,
-                   %s,
-                   %s
-               )""",
-            [
-                subscription.id,
-                input.to_offer_id,
-                input.effective_at,
-                input.effective,
-                input.idempotency_key,
-                input.proration_behavior,
-            ],
-        )
-        result = require_mapping_row(rows, "PostgresBillingStore.create_billing_subscription_change")
-        if result.get("error_code"):
-            raise StoreError(
-                f"subscription change: {result['error_code']}",
-                details={"error_code": str(result["error_code"])},
-            )
-        change_id = require_bigint_identifier_result(
-            [result],
-            "change_id",
-            "PostgresBillingStore.create_billing_subscription_change",
-        )
-        change_rows = self._execute(
-            "SELECT * FROM bursar.get_billing_subscription_change(%s::bigint)",
-            [change_id],
-        )
-        parsed_change = self._row_to_subscription_change(change_rows[0] if change_rows else None)
-        if parsed_change is None:
-            raise StoreError(
-                "subscription change creation returned no row",
-                indeterminate=True,
-                details={"subscription_change_id": change_id},
-            )
-        return parsed_change
+        return self._subscription_change_repo.create(str(subscription.id), input)
 
     def get_open_billing_subscription_change(
         self, provider: str, provider_subscription_id: str
     ) -> BillingSubscriptionChange | None:
-        rows = self._execute(
-            "SELECT * FROM bursar.get_open_billing_subscription_change(%s, %s)",
-            [provider, provider_subscription_id],
-        )
-        return self._row_to_subscription_change(rows[0]) if rows else None
+        return self._subscription_change_repo.get_open(provider, provider_subscription_id)
 
     def update_billing_subscription_change(
         self,
         id: str,
         update: BillingSubscriptionChangeUpdate,
     ) -> None:
-        if update.state is None:
-            return
-        rows = self._execute(
-            """SELECT bursar.advance_subscription_change(
-                   %s::bigint,
-                   %s,
-                   %s,
-                   %s
-               ) AS advanced""",
-            [
-                id,
-                update.state,
-                update.provider_operation_id,
-                optional_bounded_diagnostic_message(update.error_message),
-            ],
-        )
-        if not require_boolean_result(
-            rows,
-            "advanced",
-            "PostgresBillingStore.update_billing_subscription_change",
-        ):
-            raise StoreError(
-                f"subscription change transition rejected: {id}",
-                details={"subscription_change_id": id},
-            )
+        self._subscription_change_repo.update(id, update)
 
     def resolve_credit_topup(
         self,
@@ -1079,13 +946,7 @@ class PostgresBillingStore(BillingStore):
         Returns:
             BillingCustomerRecord if found, None otherwise.
         """
-        row = self._customer_repo.get_by_user_id(user_id, provider)
-        if row is None:
-            return None
-        return BillingCustomerRecord(
-            provider=str(row.get("provider", "")),
-            provider_customer_id=str(row.get("provider_customer_id", "")),
-        )
+        return self._customer_repo.get_by_user_id(user_id, provider)
 
     def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None:
         rows = self._execute(
@@ -1126,49 +987,26 @@ class PostgresBillingStore(BillingStore):
                 details={"checkout_intent_id": id},
             ) from exc
 
-    def list_expired_grace_subscriptions(self, now: datetime, limit: int = 100) -> list[dict]:
-        rows = self._execute(
-            "SELECT * FROM bursar.list_expired_grace_subscriptions(%s, %s)",
-            [now.isoformat(), limit],
-        )
-        return [dict(r) for r in rows if isinstance(r, dict)]
+    def list_expired_grace_subscriptions(
+        self,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[BillingSubscriptionState]:
+        result: list[BillingSubscriptionState] = []
+        for row in self._subscription_repo.list_expired_grace_subscriptions(now, limit):
+            mapped = self._row_to_subscription_state(row)
+            if mapped is None:  # pragma: no cover - repository rows are non-null
+                raise StoreError("expired grace subscription could not be mapped")
+            result.append(mapped)
+        return result
 
     def mark_subscription_grace_expired(self, id: str, expected_grace_ends_at: str, expired_at: str) -> bool:
-        rows = self._execute(
-            "SELECT bursar.mark_subscription_grace_expired(%s::uuid, %s, %s) AS marked",
-            [id, expected_grace_ends_at, expired_at],
-        )
-        return require_boolean_result(rows, "marked", "PostgresBillingStore.mark_subscription_grace_expired")
+        return self._subscription_repo.mark_grace_expired(id, expected_grace_ends_at, expired_at)
 
     def select_subscription_entitlement_source(
         self, user_id: str, provider: str, subscription_id: str | None = None
     ) -> bool:
-        rows = self._execute(
-            "SELECT * FROM bursar.list_billing_subscriptions(%s::uuid)",
-            [user_id],
-        )
-        eligible_statuses = {"trialing", "active", "past_due", "paused"}
-        candidates = [
-            r
-            for r in rows
-            if str(r.get("provider", "")) == provider
-            and str(r.get("status", "")) in eligible_statuses
-            and (subscription_id is None or str(r.get("provider_subscription_id", "")) == subscription_id)
-        ]
-        if not candidates:
-            return False
-        replacement = max(candidates, key=provider_timestamp_sort_key)
-        selected = self._execute(
-            "SELECT bursar.select_entitlement_source(%s::uuid, %s::uuid) AS selected",
-            [user_id, replacement["id"]],
-        )
-        if not require_boolean_result(
-            selected,
-            "selected",
-            "PostgresBillingStore.select_subscription_entitlement_source",
-        ):
-            raise StoreError("entitlement source selection was rejected")
-        return True
+        return self._subscription_repo.select_entitlement_source(user_id, provider, subscription_id)
 
     def record_subscription_conflict(
         self,

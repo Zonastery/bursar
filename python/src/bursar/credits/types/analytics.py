@@ -38,8 +38,8 @@ class AggregateStats(BaseModel):
     total_credits_consumed: Decimal
     active_users: int
     avg_daily_spend: Decimal
-    top_model: str
-    top_user: str
+    top_model: str | None
+    top_user: str | None
 
 
 @runtime_checkable

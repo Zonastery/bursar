@@ -4,9 +4,9 @@ from typing import Literal
 
 from pydantic import ValidationError
 
+from bursar.billing.postgres.repositories.schemas import BillingTopupRow
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import unwrap_jsonb, validate_non_empty
-from bursar.credits.postgres.repositories.schemas import BillingTopupRow
 from bursar.errors import StoreError
 
 _TOPUP_FIELDS = (

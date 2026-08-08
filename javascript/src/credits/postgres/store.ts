@@ -47,6 +47,7 @@ import type {
   CatalogRevisionSummary,
   CatalogRevision,
   RefundResult,
+  RevokeCreditsResult,
   ReleaseResult,
   SetUserPlanResult,
   SpendByModelRow,
@@ -55,9 +56,11 @@ import type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
+  TeamRole,
   BucketBalance,
   BucketBalancesResult,
   TopUserRow,
+  UnsetUserPlanResult,
   LedgerEntry,
 } from "../types/index.js";
 import { CreditStore } from "../store.js";
@@ -78,8 +81,6 @@ import {
   mapLedgerEntry,
   mapUsageCharge,
   normalizeCatalogRevision,
-  parseAdmissionOperations,
-  parseEntitlements,
 } from "./value-mappers.js";
 
 const DEFAULT_LEASE_TTL_SECONDS = 600;
@@ -209,7 +210,6 @@ export class PostgresStore extends CreditStore {
   private static readonly RPC_NAME_RE = /^[a-z_][a-z0-9_]*$/;
   private static readonly SCALAR_RPC_NAMES = new Set([
     "apply_due_plan_assignment_changes",
-    "assign_plan",
     "release_lease",
     "remove_team_member",
     "set_plan_revision_pin",
@@ -241,7 +241,7 @@ export class PostgresStore extends CreditStore {
       return { userId, balance: ZERO, lifetimePurchased: ZERO };
     }
     return {
-      userId: String(row.user_id ?? userId),
+      userId: row.user_id,
       balance: dec(row.balance),
       lifetimePurchased: dec(row.lifetime_purchased),
     };
@@ -269,17 +269,17 @@ export class PostgresStore extends CreditStore {
       bucket ?? null,
       idempotencyKey ?? `credit:${randomUUID()}`,
     );
-    if ("error" in row && row.error) {
-      throw new StoreError(`post_credit: ${String(row.error)}`);
+    if (row.error !== null) {
+      throw new StoreError(`post_credit: ${row.error}`);
     }
     return {
       entryId: requireText(row.entry_id, "post_credit"),
-      userId: String(row.user_id ?? userId),
+      userId: row.user_id,
       amount: dec(row.amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
-      bucket: String(row.bucket ?? "default"),
-      idempotent: Boolean(row.idempotent),
+      bucket: row.bucket,
+      idempotent: row.idempotent,
     };
   }
 
@@ -312,7 +312,7 @@ export class PostgresStore extends CreditStore {
       metadata: JSON.stringify(metadata ?? {}),
     });
 
-    if ("error" in row && row.error) {
+    if (row.error !== null) {
       return {
         entryId: null,
         usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
@@ -321,7 +321,7 @@ export class PostgresStore extends CreditStore {
         allowanceConsumed: dec(row.allowance_consumed),
         balanceAfter: row.balance_after == null ? null : dec(row.balance_after),
         idempotent: false,
-        error: String(row.error),
+        error: row.error,
         bucketBreakdown: null,
       };
     }
@@ -334,7 +334,7 @@ export class PostgresStore extends CreditStore {
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
       balanceAfter: dec(row.balance_after),
-      idempotent: Boolean(row.idempotent),
+      idempotent: row.idempotent,
       error: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
@@ -372,7 +372,7 @@ export class PostgresStore extends CreditStore {
       usageId: requireText(row.charge_id, "record_usage"),
       userId,
       requested: dec(row.requested),
-      idempotent: Boolean(row.replayed),
+      idempotent: row.replayed,
       error: null,
     };
   }
@@ -398,7 +398,7 @@ export class PostgresStore extends CreditStore {
     });
 
     const availability = await this.getAvailable(userId);
-    if ("error" in row && row.error) {
+    if (row.error !== null) {
       return {
         leaseId: null,
         userId,
@@ -408,12 +408,12 @@ export class PostgresStore extends CreditStore {
         minimumBalance: row.minimum_balance == null ? null : dec(row.minimum_balance),
         billingMode: options?.billingMode ?? "strict",
         expiresAt: null,
-        error: String(row.error),
+        error: row.error,
       };
     }
     return {
       leaseId: requireText(row.lease_id, "create_lease_for_operation"),
-      userId: String(row.user_id ?? userId),
+      userId: row.user_id,
       amount: dec(row.amount),
       available: availability.available,
       reservedTotal: availability.reserved,
@@ -443,7 +443,7 @@ export class PostgresStore extends CreditStore {
       metadata: JSON.stringify(options?.metadata ?? {}),
     });
 
-    if ("error" in row && row.error) {
+    if (row.error !== null) {
       return {
         entryId: null,
         usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
@@ -452,7 +452,7 @@ export class PostgresStore extends CreditStore {
         allowanceConsumed: dec(row.allowance_consumed),
         balanceAfter: row.balance_after == null ? null : dec(row.balance_after),
         idempotent: false,
-        error: String(row.error),
+        error: row.error,
         bucketBreakdown: null,
       };
     }
@@ -463,7 +463,7 @@ export class PostgresStore extends CreditStore {
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
       balanceAfter: dec(row.balance_after),
-      idempotent: Boolean(row.idempotent),
+      idempotent: row.idempotent,
       error: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
@@ -488,8 +488,8 @@ export class PostgresStore extends CreditStore {
     return {
       leaseId,
       userId,
-      released: Boolean(row.released),
-      reason: row.reason != null ? String(row.reason) : null,
+      released: row.released,
+      reason: row.reason,
     };
   }
 
@@ -536,6 +536,9 @@ export class PostgresStore extends CreditStore {
 
   async getAvailable(userId: string): Promise<AvailableResult> {
     const row = await this.balanceRepo.getAvailable(userId);
+    if (row === null) {
+      return { userId, balance: ZERO, reserved: ZERO, available: ZERO };
+    }
     return {
       userId,
       balance: dec(row.balance),
@@ -550,8 +553,7 @@ export class PostgresStore extends CreditStore {
 
   private async loadActiveCatalog(): Promise<CatalogRevision | null> {
     const row = await this.catalogRepo.getActiveCatalog();
-    if (!row || !row.config) return null;
-    return normalizeCatalogRevision(row, 0);
+    return row === null ? null : normalizeCatalogRevision(row);
   }
 
   async publishAndActivateCatalog(
@@ -586,20 +588,18 @@ export class PostgresStore extends CreditStore {
 
   async getCatalogHistory(): Promise<CatalogRevisionSummary[]> {
     const rows = await this.catalogRepo.getCatalogHistory();
-    if (!rows) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: String(r.id ?? ""),
-      version: Number(r.version ?? 0),
-      label: (r.label as string) ?? null,
-      active: Boolean(r.active ?? false),
-      createdAt: String(r.created_at ?? ""),
+    return rows.map((r) => ({
+      id: r.id,
+      version: r.version,
+      label: r.label,
+      active: r.active,
+      createdAt: r.created_at,
     }));
   }
 
   async getCatalogRevision(version: number): Promise<CatalogRevision | null> {
     const row = await this.catalogRepo.getCatalogRevision(version);
-    if (!row || !row.config) return null;
-    return normalizeCatalogRevision(row, version);
+    return row === null ? null : normalizeCatalogRevision(row);
   }
 
   async activateCatalogRevision(
@@ -631,10 +631,16 @@ export class PostgresStore extends CreditStore {
         planLabel: null,
         allowance: null,
         entitlements: {},
+        rateCard: null,
         creditPolicy: null,
         admission: null,
         allowedOperations: [],
+        planAssignedAt: null,
+        planAssignmentEndsAt: null,
+        assignmentSourceType: null,
+        assignmentSourceId: null,
         catalogRevisionPinned: false,
+        catalogVersion: null,
       };
     }
     let allowance: GetUserPlanResult["allowance"] = null;
@@ -655,47 +661,48 @@ export class PostgresStore extends CreditStore {
       }
       allowance = {
         amount: dec(row.credit_allowance_amount),
-        priority: Number(priority),
-        resetUnit: String(resetUnit),
-        resetCount: Number(resetCount),
-        resetAnchor: String(resetAnchor),
-        resetTimezone: String(resetTimezone),
+        priority,
+        resetUnit,
+        resetCount,
+        resetAnchor,
+        resetTimezone,
       };
     }
-    const admissionOperations = parseAdmissionOperations(row.operation_admission);
+    const admissionOperations = Object.fromEntries(
+      Object.entries(row.operation_admission).map(([operation, policy]) => [
+        operation,
+        { maxInFlight: policy.max_in_flight },
+      ]),
+    );
     return {
-      userId: String(row.user_id ?? userId),
-      planId: (row.plan_id as string) ?? null,
-      planKey: (row.plan_key as string) ?? null,
-      planLabel: (row.plan_label as string) ?? null,
+      userId: row.user_id,
+      planId: row.plan_id,
+      planKey: row.plan_key,
+      planLabel: row.plan_label,
       allowance,
-      entitlements: parseEntitlements(row.entitlements),
-      rateCard: row.rate_card != null ? String(row.rate_card) : null,
+      entitlements: row.entitlements,
+      rateCard: row.rate_card,
       creditPolicy:
         row.credit_policy_type == null
           ? null
           : {
-              type: String(row.credit_policy_type) as "prepaid" | "credit_line",
+              type: row.credit_policy_type,
               creditLimit: row.credit_limit == null ? null : dec(row.credit_limit),
             },
       admission:
         row.admission_max_in_flight == null && Object.keys(admissionOperations).length === 0
           ? null
           : {
-              maxInFlight:
-                row.admission_max_in_flight == null ? null : Number(row.admission_max_in_flight),
+              maxInFlight: row.admission_max_in_flight,
               operations: admissionOperations,
             },
-      allowedOperations: Array.isArray(row.allowed_operations)
-        ? row.allowed_operations.map(String)
-        : [],
-      planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
-      assignmentSourceType:
-        row.assignment_source_type == null ? null : String(row.assignment_source_type),
-      assignmentSourceId:
-        row.assignment_source_id == null ? null : String(row.assignment_source_id),
-      catalogRevisionPinned: row.catalog_revision_pinned === true,
-      catalogVersion: row.catalog_revision_no != null ? Number(row.catalog_revision_no) : null,
+      allowedOperations: row.allowed_operations,
+      planAssignedAt: row.plan_assigned_at,
+      planAssignmentEndsAt: row.plan_assignment_ends_at,
+      assignmentSourceType: row.assignment_source_type,
+      assignmentSourceId: row.assignment_source_id,
+      catalogRevisionPinned: row.catalog_revision_pinned,
+      catalogVersion: row.catalog_revision_no,
     };
   }
 
@@ -721,15 +728,17 @@ export class PostgresStore extends CreditStore {
       planAssignedAt?.toISOString() ?? null,
     );
     return {
-      userId: String(row.user_id ?? userId),
-      planId: requireText(row.plan_id, "assign_plan"),
-      planAssignedAt: row.plan_assigned_at != null ? String(row.plan_assigned_at) : null,
+      userId: row.user_id,
+      planId: requireText(row.plan_id, "set_subject_plan"),
+      planKey: row.plan_key,
+      planAssignedAt: row.plan_assigned_at,
+      assignmentState: row.assignment_state,
     };
   }
 
-  async unsetUserPlan(userId: string): Promise<{ userId: string }> {
+  async unsetUserPlan(userId: string): Promise<UnsetUserPlanResult> {
     const row = await this.planRepo.unsetUserPlan(userId);
-    return { userId: String(row.user_id ?? userId) };
+    return { userId: row.user_id };
   }
 
   async setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean> {
@@ -748,7 +757,6 @@ export class PostgresStore extends CreditStore {
     toPlanId: string,
   ): Promise<PlanMigrationStartResult> {
     const migrationId = await this.planRepo.startPlanMigration(fromPlanId, toPlanId);
-    if (!migrationId) throw new StoreError("start_plan_migration returned no migration id");
     return { migrationId };
   }
 
@@ -758,9 +766,9 @@ export class PostgresStore extends CreditStore {
   ): Promise<PlanMigrationBatchResult> {
     const row = await this.planRepo.migratePlanBatch(migrationId, batchSize);
     return {
-      migrated: Number(row.migrated ?? 0),
-      done: Boolean(row.done),
-      nextCursor: row.next_cursor != null ? String(row.next_cursor) : null,
+      migrated: row.migrated,
+      done: row.done,
+      nextCursor: row.next_cursor,
     };
   }
 
@@ -822,11 +830,17 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async revokeCreditsByEntryType(
-    userId: string,
-    entryType: string,
-  ): Promise<Record<string, unknown>> {
-    return this.deductionRepo.revokeCreditsByEntryType(userId, entryType);
+  async revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeCreditsResult> {
+    const row = await this.deductionRepo.revokeCreditsByEntryType(userId, entryType);
+    if (row.error_code !== null) {
+      throw new StoreError(`revoke_subject_credits_by_operation failed: ${row.error_code}`);
+    }
+    return {
+      userId: row.user_id,
+      entryType: row.entry_type,
+      revoked: dec(row.revoked),
+      balanceAfter: dec(row.balance_after),
+    };
   }
 
   async refundCredits(
@@ -843,21 +857,21 @@ export class PostgresStore extends CreditStore {
       reason ?? null,
       JSON.stringify(metadata ?? {}),
     );
-    if ("error" in row && row.error) {
+    if (row.error !== null) {
       return {
         refundEntryId: null,
         originalEntryId: entryId,
         userId: row.user_id ?? null,
         amount: row.amount == null ? null : dec(row.amount),
         newBalance: row.new_balance == null ? null : dec(row.new_balance),
-        error: String(row.error),
+        error: row.error,
         bucketBreakdown: null,
       };
     }
     return {
       refundEntryId: requireText(row.refund_entry_id, "refund_credit_by_entry"),
       originalEntryId: entryId,
-      userId: String(row.user_id ?? ""),
+      userId: requireText(row.user_id, "refund_credit_by_entry"),
       amount: dec(row.amount),
       newBalance: dec(row.new_balance),
       error: null,
@@ -872,35 +886,35 @@ export class PostgresStore extends CreditStore {
     const row = await this.analyticsRepo.aggregateStats(start.toISOString(), end.toISOString());
     return {
       totalCreditsConsumed: dec(row.total_credits_consumed),
-      activeUsers: Number(row.active_users ?? 0),
+      activeUsers: row.active_users,
       avgDailySpend: dec(row.avg_daily_spend),
-      topModel: String(row.top_model ?? ""),
-      topUser: String(row.top_user ?? ""),
+      topModel: row.top_model,
+      topUser: row.top_user,
     };
   }
 
   async spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]> {
     const rows = await this.analyticsRepo.spendByUser(start.toISOString(), end.toISOString());
     return (rows ?? []).map((r) => ({
-      userId: String(r.user_id ?? ""),
+      userId: r.user_id,
       totalSpend: dec(r.total_spend),
-      entryCount: Number(r.entry_count ?? 0),
+      entryCount: r.entry_count,
     }));
   }
 
   async spendByModel(start: Date, end: Date): Promise<SpendByModelRow[]> {
     const rows = await this.analyticsRepo.spendByModel(start.toISOString(), end.toISOString());
     return (rows ?? []).map((r) => ({
-      model: String(r.model ?? ""),
+      model: r.model,
       totalSpend: dec(r.total_spend),
-      entryCount: Number(r.entry_count ?? 0),
+      entryCount: r.entry_count,
     }));
   }
 
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {
     const rows = await this.analyticsRepo.topUsers(limit, start.toISOString(), end.toISOString());
     return (rows ?? []).map((r) => ({
-      userId: String(r.user_id ?? ""),
+      userId: r.user_id,
       totalSpend: dec(r.total_spend),
     }));
   }
@@ -908,9 +922,9 @@ export class PostgresStore extends CreditStore {
   async dailySpend(start: Date, end: Date): Promise<DailySpendRow[]> {
     const rows = await this.analyticsRepo.dailySpend(start.toISOString(), end.toISOString());
     return (rows ?? []).map((r) => ({
-      date: String(r.date ?? ""),
+      date: r.date,
       totalSpend: dec(r.total_spend),
-      entryCount: Number(r.entry_count ?? 0),
+      entryCount: r.entry_count,
     }));
   }
 
@@ -993,10 +1007,10 @@ export class PostgresStore extends CreditStore {
     initialBalance: Decimal = ZERO,
   ): Promise<CreateTeamResult> {
     const row = await this.teamRepo.createTeam(ownerSubjectId, name, decParam(initialBalance));
-    if (row.error_code) throw new StoreError(String(row.error_code));
+    if (row.error_code !== null) throw new StoreError(row.error_code);
     return {
       teamId: requireText(row.team_id, "create_team"),
-      name: String(row.name ?? name),
+      name: requireText(row.name, "create_team"),
     };
   }
 
@@ -1014,7 +1028,7 @@ export class PostgresStore extends CreditStore {
   async addTeamMember(
     teamId: string,
     userId: string,
-    role = "member",
+    role: TeamRole = "member",
     spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult> {
     const row = await this.teamRepo.addTeamMember(
@@ -1024,17 +1038,17 @@ export class PostgresStore extends CreditStore {
       spendCap != null ? decParam(spendCap) : null,
     );
     return {
-      teamId: String(row.team_id ?? teamId),
-      userId: String(row.user_id ?? userId),
-      role: String(row.role ?? role),
+      teamId: row.team_id,
+      userId: row.user_id,
+      role: row.role,
     };
   }
 
   async getTeamMembers(teamId: string): Promise<TeamMember[]> {
     const rows = await this.teamRepo.getTeamMembers(teamId);
-    return (rows ?? []).map((r) => ({
-      userId: String(r.user_id ?? ""),
-      role: String(r.role ?? "member"),
+    return rows.map((r) => ({
+      userId: r.user_id,
+      role: r.role,
       spendCap: r.spend_cap != null ? dec(r.spend_cap) : null,
       totalSpent: dec(r.total_spent),
     }));
@@ -1066,7 +1080,7 @@ export class PostgresStore extends CreditStore {
       operation,
       JSON.stringify(meta),
     );
-    if ("error" in row && row.error) {
+    if (row.error !== null) {
       return {
         entryId: null,
         teamId,
@@ -1074,16 +1088,16 @@ export class PostgresStore extends CreditStore {
         amount: dec(row.amount),
         teamBalanceAfter: row.team_balance_after == null ? null : dec(row.team_balance_after),
         idempotent: false,
-        error: String(row.error),
+        error: row.error,
       };
     }
     return {
       entryId: requireText(row.entry_id, "deduct_team"),
-      teamId: String(row.team_id ?? teamId),
-      userId: String(row.user_id ?? userId),
+      teamId: row.team_id,
+      userId: row.user_id,
       amount: dec(row.amount),
       teamBalanceAfter: dec(row.team_balance_after),
-      idempotent: Boolean(row.replayed),
+      idempotent: row.replayed,
       error: null,
     };
   }
@@ -1091,21 +1105,22 @@ export class PostgresStore extends CreditStore {
   async sweepExpiredCredits(dryRun = false, userId?: string, limit = 100): Promise<SweepResult> {
     const row = await this.bucketRepo.sweepExpiredCredits(dryRun, userId, limit);
     return {
-      expiredCount: Number(row.expired_count ?? 0),
+      expiredCount: row.expired_count,
       expiredAmount: dec(row.expired_amount),
       dryRun,
-      expiredByBucket: decRecord(row.expired_by_bucket),
+      expiredByBucket: Object.fromEntries(
+        Object.entries(row.expired_by_bucket).map(([key, value]) => [key, dec(value)]),
+      ),
     };
   }
 
   async getBucketBalances(userId: string): Promise<BucketBalancesResult> {
     const envelope = await this.bucketRepo.getBucketBalances(userId);
-    const bucketRows = (envelope.buckets as Record<string, unknown>[] | undefined) ?? [];
-    const buckets: BucketBalance[] = bucketRows.map((row) => ({
-      bucketKey: String(row.bucket_key ?? ""),
-      label: String(row.label ?? ""),
-      priority: Number(row.priority ?? 0),
-      expires: Boolean(row.expires ?? false),
+    const buckets: BucketBalance[] = envelope.buckets.map((row) => ({
+      bucketKey: row.bucket_key,
+      label: row.label,
+      priority: row.priority,
+      expires: row.expires,
       balance: dec(row.balance),
     }));
     return { userId, buckets, totalBalance: dec(envelope.total_balance) };
@@ -1123,14 +1138,27 @@ export class PostgresStore extends CreditStore {
       region: request.region ?? null,
       metadata: JSON.stringify(request.metadata ?? {}),
     });
-    return rows.map((row) => ({
-      grantEventId: row.grant_event_id ?? null,
-      grantAwardId: row.grant_award_id ?? null,
-      recipientSubjectId: row.recipient_subject_id ?? null,
-      ledgerEntryId: row.ledger_entry_id ?? null,
-      amount: dec(row.amount),
-      replayed: Boolean(row.replayed),
-      error: row.error_code ?? null,
-    }));
+    return rows.map((row) => {
+      if (row.error_code !== null) {
+        return {
+          grantEventId: null,
+          grantAwardId: null,
+          recipientSubjectId: null,
+          ledgerEntryId: null,
+          amount: null,
+          replayed: false,
+          error: row.error_code,
+        };
+      }
+      return {
+        grantEventId: requireText(row.grant_event_id, "execute_grant_program"),
+        grantAwardId: requireText(row.grant_award_id, "execute_grant_program"),
+        recipientSubjectId: requireText(row.recipient_subject_id, "execute_grant_program"),
+        ledgerEntryId: requireText(row.ledger_entry_id, "execute_grant_program"),
+        amount: dec(row.amount),
+        replayed: row.replayed,
+        error: null,
+      };
+    });
   }
 }

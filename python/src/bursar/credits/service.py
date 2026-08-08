@@ -101,12 +101,14 @@ from bursar.credits.types import (
     QuotaState,
     RefundResult,
     ReleaseResult,
+    RevokeCreditsResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
     SweepResult,
     TeamDeductionResult,
     TopUserRow,
+    UnsetUserPlanResult,
     UsageChargeCursor,
     UsageChargePage,
     UsageRecordResult,
@@ -743,12 +745,13 @@ class CreditsService:
                 "user_id": user_id,
                 "plan_key": plan_key,
                 "plan_assigned_at": result.plan_assigned_at,
+                "assignment_state": result.assignment_state,
                 "timestamp": datetime.now(UTC),
             },
         )
         return result
 
-    def unset_user_plan(self, user_id: str) -> None:
+    def unset_user_plan(self, user_id: str) -> UnsetUserPlanResult:
         """Clear a user's plan (pauses the allowance period).
 
         Re-assign a plan via :meth:`set_user_plan` to re-anchor the allowance
@@ -757,7 +760,7 @@ class CreditsService:
         Args:
             user_id: The user whose plan to clear.
         """
-        self._store.unset_user_plan(user_id)
+        result = self._store.unset_user_plan(user_id)
         self._emit(
             "credits.plan_changed",
             user_id,
@@ -767,6 +770,7 @@ class CreditsService:
                 "timestamp": datetime.now(UTC),
             },
         )
+        return result
 
     def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
         """Pin or unpin the user's current assignment revision."""
@@ -826,26 +830,23 @@ class CreditsService:
         """
         return self._store.check_feature(user_id, feature)
 
-    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> dict[str, Any]:
+    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> RevokeCreditsResult:
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
         Used by the subscription lifecycle to replace cycle-grant credits on renewal.
-        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "bucket": ...}``.
-
-        Note: the JS equivalent does **not** emit a ``credits.revoked`` event —
-        it delegates directly to the store with no event emission. This divergence
-        is intentional (Python adds observability).
+        Returns the revoked amount and resulting committed balance. Both SDKs
+        emit ``credits.revoked`` when the command removes any credits.
         """
         result = self._store.revoke_credits_by_entry_type(user_id, entry_type)
-        amount = abs(Decimal(str(result.get("amount", 0))))
-        if amount > 0:
+        if result.revoked > 0:
             self._emit(
                 "credits.revoked",
                 user_id,
                 {
                     "user_id": user_id,
-                    "amount": str(amount),
+                    "amount": result.revoked,
                     "entry_type": entry_type,
+                    "balance_after": result.balance_after,
                 },
             )
         return result

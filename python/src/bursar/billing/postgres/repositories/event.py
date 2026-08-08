@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from bursar.billing.postgres.repositories.schemas import BillingEventRow
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import (
     require_boolean_result,
     require_mapping_row,
     validate_non_empty,
+    validate_row,
 )
-from bursar.credits.postgres.repositories.schemas import BillingEventRow
-from bursar.errors import StoreError
 
 
 class BillingEventRepository:
@@ -46,20 +46,16 @@ class BillingEventRepository:
             [provider, event_id, event_type, metadata],
         )
         row = require_mapping_row(rows, "BillingEventRepository.claim")
-        try:
-            return BillingEventRow.model_validate(
-                {
-                    "event_id": row.get("event_id"),
-                    "status": row.get("result"),
-                    "claim_token": row.get("claim_token"),
-                }
-            )
-        except ValueError as exc:
-            raise StoreError(
-                "BillingEventRepository.claim: result schema validation failed",
-                cause=exc,
-                indeterminate=True,
-            ) from exc
+        return validate_row(
+            BillingEventRow,
+            {
+                "event_id": row.get("event_id"),
+                "status": row.get("result"),
+                "claim_token": row.get("claim_token"),
+            },
+            "BillingEventRepository.claim",
+            indeterminate=True,
+        )
 
     def complete(self, provider: str, event_id: str, claim_token: str) -> bool:
         """Mark a billing event as completed.

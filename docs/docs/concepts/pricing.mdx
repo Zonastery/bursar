@@ -1,12 +1,13 @@
 ---
 title: Pricing
+sidebar_label: Pricing
 description: How usage becomes money — operations, measures, rate cards, and price rules with exact decimal charges.
 ---
 
 # Pricing
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
 
 Pricing decides what a usage event costs. Bursar models it in four layers: an
 operation declares the inputs, a rate card names a pricing table, a price rule
@@ -19,10 +20,10 @@ An **operation** is one named billable action — `completion`, `execution`,
 `image_generation`, whatever your product meters. Each operation declares the
 inputs its price can reference:
 
-| Concept | Role | Example |
-| --- | --- | --- |
-| Measure | A numeric quantity with a unit | `input_tokens` (unit `token`) |
-| Dimension | A typed selector, not priced | `model` (`string`) |
+| Concept   | Role                           | Example                       |
+| --------- | ------------------------------ | ----------------------------- |
+| Measure   | A numeric quantity with a unit | `input_tokens` (unit `token`) |
+| Dimension | A typed selector, not priced   | `model` (`string`)            |
 
 ```yaml
 pricing:
@@ -53,12 +54,12 @@ more than one card exists.
 Each operation on a card lists ordered `rules`. A rule's `when` block matches
 dimensions with typed operators, and the **first matching rule wins**:
 
-| Operator | Dimension type | Match |
-| --- | --- | --- |
-| `eq` | any | Exact equality |
-| `in` / `not_in` | any | Membership / non-membership |
-| `prefix` | string | String prefix |
-| `range` | number | Bounds `gt` / `gte` / `lt` / `lte` |
+| Operator        | Dimension type | Match                              |
+| --------------- | -------------- | ---------------------------------- |
+| `eq`            | any            | Exact equality                     |
+| `in` / `not_in` | any            | Membership / non-membership        |
+| `prefix`        | string         | String prefix                      |
+| `range`         | number         | Bounds `gt` / `gte` / `lt` / `lte` |
 
 When no rule matches, the `unmatched` policy decides: `action: reject`
 refuses the event, or `action: charge` applies a fallback charge. The
@@ -76,12 +77,31 @@ rate_cards:
             charge:
               type: sum
               components:
-                - { type: per_unit, measure: input_tokens, rate: "0.0025", unit_size: "1000000" }
-                - { type: per_unit, measure: output_tokens, rate: "0.0100", unit_size: "1000000" }
-                - { type: per_unit, measure: cache_read_tokens, rate: "0.00125", unit_size: "1000000" }
+                - {
+                    type: per_unit,
+                    measure: input_tokens,
+                    rate: "0.0025",
+                    unit_size: "1000000",
+                  }
+                - {
+                    type: per_unit,
+                    measure: output_tokens,
+                    rate: "0.0100",
+                    unit_size: "1000000",
+                  }
+                - {
+                    type: per_unit,
+                    measure: cache_read_tokens,
+                    rate: "0.00125",
+                    unit_size: "1000000",
+                  }
         unmatched:
           action: charge
-          charge: { type: expression, formula: input_tokens * 0.005 + output_tokens * 0.015 }
+          charge:
+            {
+              type: expression,
+              formula: input_tokens * 0.005 + output_tokens * 0.015,
+            }
       execution:
         rules:
           - when: { model: { op: eq, value: gpt-4o } }
@@ -93,15 +113,15 @@ rate_cards:
 
 A charge computes the credit cost for the event:
 
-| Type | What it does | Example |
-| --- | --- | --- |
-| `flat` | A constant fee per event | `{ type: flat, amount: "1.00" }` |
-| `per_unit` | Rate per `unit_size` units — the basis for per-million-token pricing | `{ type: per_unit, measure: input_tokens, rate: "0.0025", unit_size: "1000000" }` |
-| `package` | Price per fixed block, rounded up/down/nearest | `{ type: package, measure: jobs, units: "10", amount: "0.10", rounding: ceil }` |
-| `graduated` | Marginal rates per tier | `{ type: graduated, measure: input_tokens, tiers: [{ up_to: "1000", rate: "0" }, { rate: "0.005" }] }` |
-| `volume` | One rate selected by total volume | `{ type: volume, measure: input_tokens, tiers: [{ up_to: "100000", rate: "0.004" }, { rate: "0.003" }] }` |
-| `expression` | An arbitrary formula over the operation's measures | `{ type: expression, formula: input_tokens * 0.005 + output_tokens * 0.015 }` |
-| `sum` | Sum of sub-charges (each a charge) | The `completion` rule above |
+| Type         | What it does                                                         | Example                                                                                                   |
+| ------------ | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `flat`       | A constant fee per event                                             | `{ type: flat, amount: "1.00" }`                                                                          |
+| `per_unit`   | Rate per `unit_size` units — the basis for per-million-token pricing | `{ type: per_unit, measure: input_tokens, rate: "0.0025", unit_size: "1000000" }`                         |
+| `package`    | Price per fixed block, rounded up/down/nearest                       | `{ type: package, measure: jobs, units: "10", amount: "0.10", rounding: ceil }`                           |
+| `graduated`  | Marginal rates per tier                                              | `{ type: graduated, measure: input_tokens, tiers: [{ up_to: "1000", rate: "0" }, { rate: "0.005" }] }`    |
+| `volume`     | One rate selected by total volume                                    | `{ type: volume, measure: input_tokens, tiers: [{ up_to: "100000", rate: "0.004" }, { rate: "0.003" }] }` |
+| `expression` | An arbitrary formula over the operation's measures                   | `{ type: expression, formula: input_tokens * 0.005 + output_tokens * 0.015 }`                             |
+| `sum`        | Sum of sub-charges (each a charge)                                   | The `completion` rule above                                                                               |
 
 `per_unit` with `unit_size: 1000000` is how per-million-token rates stay
 readable: the rate is what one million tokens cost. `graduated` tiers must
@@ -118,37 +138,41 @@ construct it from the same canonical document:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  from bursar.engine import PricingEngine
-  from bursar.metrics import UsageMetrics
+```python
+from bursar.engine import PricingEngine
+from bursar.metrics import UsageMetrics
 
-  engine = PricingEngine.from_dict(config)          # validates the whole config
-  cost = engine.calculate(
-      UsageMetrics(
-          operation="completion",
-          measures={"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 200},
-          dimensions={"model": "gpt-4o"},
-      ),
-      rate_card="standard",
-  )
-  ```
+engine = PricingEngine.from_dict(config)          # validates the whole config
+cost = engine.calculate(
+    UsageMetrics(
+        operation="completion",
+        measures={"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 200},
+        dimensions={"model": "gpt-4o"},
+    ),
+    rate_card="standard",
+)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  import { PricingEngine } from "@zonastery/bursar";
+```ts
+import { PricingEngine } from "@zonastery/bursar";
 
-  const engine = PricingEngine.fromDict(config);
-  const cost = engine.calculate(
-    {
-      operation: "completion",
-      measures: { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 200 },
-      dimensions: { model: "gpt-4o" },
+const engine = PricingEngine.fromDict(config);
+const cost = engine.calculate(
+  {
+    operation: "completion",
+    measures: {
+      input_tokens: 1000,
+      output_tokens: 500,
+      cache_read_tokens: 200,
     },
-    { rateCard: "standard" }
-  );
-  ```
+    dimensions: { model: "gpt-4o" },
+  },
+  { rateCard: "standard" },
+);
+```
 
   </TabItem>
 </Tabs>
@@ -172,12 +196,12 @@ evaluates a list of events with the same card selection.
 
 `UsageMetrics` (`bursar.metrics` / `@zonastery/bursar`) is the engine input:
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `operation` | `str` / `string` | A key declared in `pricing.operations` |
-| `measures` | `dict[str, Decimal]` | Non-negative billable quantities declared by the operation |
-| `dimensions` | `dict[str, str \| Decimal \| bool]` | Typed values selecting the first matching rule |
-| `metadata` | `dict[str, Any]` | Caller metadata; it does not participate in pricing |
+| Field        | Type                                | Meaning                                                    |
+| ------------ | ----------------------------------- | ---------------------------------------------------------- |
+| `operation`  | `str` / `string`                    | A key declared in `pricing.operations`                     |
+| `measures`   | `dict[str, Decimal]`                | Non-negative billable quantities declared by the operation |
+| `dimensions` | `dict[str, str \| Decimal \| bool]` | Typed values selecting the first matching rule             |
+| `metadata`   | `dict[str, Any]`                    | Caller metadata; it does not participate in pricing        |
 
 Declared measures omitted by the caller are treated as zero. The caller's
 operation name is the only way an event is attributed to a price.
@@ -187,16 +211,16 @@ operation name is the only way an event is attributed to a price.
 `calculate` returns a `CostBreakdown` whose monetary fields are all exact,
 six-decimal `Decimal` values:
 
-| Field | Meaning |
-| --- | --- |
-| `model_credits` | Model-component cost |
-| `tool_credits` | Tool-component cost |
-| `search_credits` | Search-component cost |
-| `cache_savings` | Cache savings credit |
-| `fixed_credits` | Fixed-component cost |
-| `operation_credits` | The charge this operation produced |
-| `total` | Quantized sum, clamped to zero |
-| `breakdown` | `dict` with the matched operation, rate card, charge type, measures, and dimensions |
+| Field               | Meaning                                                                             |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| `model_credits`     | Model-component cost                                                                |
+| `tool_credits`      | Tool-component cost                                                                 |
+| `search_credits`    | Search-component cost                                                               |
+| `cache_savings`     | Cache savings credit                                                                |
+| `fixed_credits`     | Fixed-component cost                                                                |
+| `operation_credits` | The charge this operation produced                                                  |
+| `total`             | Quantized sum, clamped to zero                                                      |
+| `breakdown`         | `dict` with the matched operation, rate card, charge type, measures, and dimensions |
 
 The first five buckets are generic component buckets so host applications can
 classify costs uniformly; the engine reports the operation's charge in
@@ -208,12 +232,12 @@ the only nonzero bucket.
 One gpt-4o completion with 1,000 input, 500 output, and 200 cache-read tokens
 against the `standard` card:
 
-| Component | Rate | Cost |
-| --- | --- | --- |
-| input | 0.0025 per 1M | 0.0025 × 1000 / 1000000 = 0.0000025 |
-| output | 0.0100 per 1M | 0.0100 × 500 / 1000000 = 0.0000050 |
+| Component  | Rate           | Cost                                 |
+| ---------- | -------------- | ------------------------------------ |
+| input      | 0.0025 per 1M  | 0.0025 × 1000 / 1000000 = 0.0000025  |
+| output     | 0.0100 per 1M  | 0.0100 × 500 / 1000000 = 0.0000050   |
 | cache read | 0.00125 per 1M | 0.00125 × 200 / 1000000 = 0.00000025 |
-| **Total** | | 0.00000775 → **0.000008** |
+| **Total**  |                | 0.00000775 → **0.000008**            |
 
 The engine charges exactly `0.000008` credits — the unquantized sum
 `0.00000775` rounded half-up at six decimal places. The same config returns
@@ -222,5 +246,5 @@ the same number in Python and TypeScript.
 ## Related
 
 - [Expressions](./expressions.mdx) — the safe formula language for `expression` charges
-- API reference: [PricingEngine (Python)](../python-api/pricing-engine.mdx) and [PricingEngine (JavaScript)](../javascript-api/pricing-engine.mdx)
+- API reference: [PricingEngine (Python)](../python-api/pricing-engine.mdx) and [PricingEngine (TypeScript)](../javascript-api/pricing-engine.mdx)
 - [Canonical configuration](./configuration.mdx) — where operations and rate cards live

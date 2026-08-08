@@ -1,5 +1,6 @@
 ---
 title: Stores
+sidebar_label: Stores
 description: bursar stores — PostgresStore, PostgresBillingStore, and the CreditStore contract for custom backends.
 ---
 
@@ -25,16 +26,15 @@ const store = new PostgresStore({
 ```
 
 Connects through `pg` and runs every mutation as a canonical SQL function
-(RPC). `tenantId` is a required positional argument that scopes every
-transaction to one tenant.
+(RPC). The `tenantId` option scopes every transaction to one tenant.
 
-| Option            | Type                 | Meaning                                                        |
-| ----------------- | -------------------- | -------------------------------------------------------------- |
-| `postgres`        | `string \| pg.Pool`   | Connection string for an owned pool, or an application pool    |
-| `tenantId`        | `string`             | Required tenant UUID scoping every transaction                 |
-| `poolConstructor` | `PoolConstructor`    | Optional constructor for testing or custom `pg` initialization |
+| Option            | Type                | Meaning                                                        |
+| ----------------- | ------------------- | -------------------------------------------------------------- |
+| `postgres`        | `string \| pg.Pool` | Connection string for an owned pool, or an application pool    |
+| `tenantId`        | `string`            | Required tenant UUID scoping every transaction                 |
+| `poolConstructor` | `PoolConstructor`   | Optional constructor for testing or custom `pg` initialization |
 
-The store owns a pool it creates from `databaseUrl`: call `await store.close()`
+The store owns a pool it creates from a `postgres` connection string: call `await store.close()`
 to drain it. A supplied pool is borrowed and is never ended by the store.
 
 ### PostgreSQL reliability options
@@ -61,7 +61,10 @@ with the original driver error in `cause`.
 ```ts
 import { PostgresBillingStore } from "@zonastery/bursar";
 
-const billingStore = new PostgresBillingStore({ postgres: databaseUrl, tenantId });
+const billingStore = new PostgresBillingStore({
+  postgres: databaseUrl,
+  tenantId,
+});
 ```
 
 It uses the same object shape: `postgres` (a `pg.Pool` or connection string)
@@ -101,7 +104,7 @@ hierarchy (`BillingStore`/`PostgresBillingStore`) with its own repositories.
 
 ## Migrations
 
-The JavaScript package ships no schema SQL and has no migration command of its
+The TypeScript package ships no schema SQL and has no migration command of its
 own. Apply the bundled migrations with the Python CLI during deployment,
 before constructing any store:
 

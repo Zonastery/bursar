@@ -17,9 +17,9 @@ export interface CatalogRevisionSummary {
 export interface PlanAllowancePolicy {
   amount: Decimal;
   priority: number;
-  resetUnit: string;
+  resetUnit: "second" | "minute" | "hour" | "day" | "week" | "month" | "year";
   resetCount: number;
-  resetAnchor: string;
+  resetAnchor: "calendar" | "plan_assignment" | "rolling";
   resetTimezone: string;
 }
 
@@ -47,21 +47,28 @@ export interface GetUserPlanResult {
   planLabel: string | null;
   allowance: PlanAllowancePolicy | null;
   entitlements: Record<string, { value: unknown }>;
-  rateCard?: string | null;
+  rateCard: string | null;
   creditPolicy: PlanCreditPolicy | null;
   admission: PlanAdmissionPolicy | null;
   allowedOperations: string[];
-  planAssignedAt?: Date | null;
-  assignmentSourceType?: string | null;
-  assignmentSourceId?: string | null;
+  planAssignedAt: Date | null;
+  planAssignmentEndsAt: Date | null;
+  assignmentSourceType: "manual" | "subscription" | "migration" | "system" | null;
+  assignmentSourceId: string | null;
   catalogRevisionPinned: boolean;
-  catalogVersion?: number | null;
+  catalogVersion: number | null;
 }
 
 export interface SetUserPlanResult {
   userId: string;
   planId: string;
-  planAssignedAt?: string | null;
+  planKey: string;
+  planAssignedAt: Date;
+  assignmentState: "applied" | "scheduled";
+}
+
+export interface UnsetUserPlanResult {
+  userId: string;
 }
 
 export interface PlanMigrationStartResult {

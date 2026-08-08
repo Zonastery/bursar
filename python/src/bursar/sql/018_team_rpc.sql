@@ -8,6 +8,7 @@ CREATE FUNCTION bursar.create_team(
 )
 RETURNS TABLE (
     team_id uuid,
+    name text,
     team_subject_id uuid,
     account_id uuid,
     error_code text
@@ -26,7 +27,7 @@ BEGIN
     IF p_owner_subject_id IS NULL OR length(trim(COALESCE(p_name,'')))=0
        OR p_initial_credits<0
     THEN
-        RETURN QUERY SELECT NULL::uuid,NULL::uuid,NULL::uuid,'invalid_request';
+        RETURN QUERY SELECT NULL::uuid,NULL::text,NULL::uuid,NULL::uuid,'invalid_request';
 
         RETURN;
 
@@ -37,7 +38,7 @@ BEGIN
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
-        RETURN QUERY SELECT NULL::uuid,NULL::uuid,NULL::uuid,'subject_pseudonymized';
+        RETURN QUERY SELECT NULL::uuid,NULL::text,NULL::uuid,NULL::uuid,'subject_pseudonymized';
         RETURN;
     END IF;
 
@@ -66,7 +67,7 @@ BEGIN
 
     END IF;
 
-    RETURN QUERY SELECT v_team,v_team_subject,v_account,NULL::text;
+    RETURN QUERY SELECT v_team,trim(p_name),v_team_subject,v_account,NULL::text;
 
 END $$;
 

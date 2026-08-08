@@ -11,7 +11,6 @@ import type {
   BillingPreferences,
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
-  BillingSubscriptionOfferContext,
   BillingSubscriptionState,
   CheckoutIntent,
   BillingTopupResult,
@@ -62,6 +61,7 @@ import { BillingInvoiceRepository } from "./repositories/invoice.js";
 import { BillingDisputeRepository } from "./repositories/dispute.js";
 import { BillingPreferencesRepository } from "./repositories/preferences.js";
 import { BillingAutoRechargeRepository } from "./repositories/auto-recharge.js";
+import { BillingSubscriptionChangeRepository } from "./repositories/subscription-change.js";
 
 const PgSafeMinorUnitsSchema = z
   .union([z.string().regex(/^\d+$/), z.number().int().nonnegative().safe()])
@@ -78,7 +78,7 @@ const BillingCreditPostingRowSchema = z
     replayed: pgBoolean,
     error_code: z.string().min(1).nullable(),
   })
-  .passthrough()
+  .strict()
   .superRefine((row, ctx) => {
     if (row.error_code === null && (row.ledger_entry_id === null || row.balance_after === null)) {
       ctx.addIssue({
@@ -101,31 +101,30 @@ const CheckoutIntentRowSchema = z
     checkout_url: z.string().min(1).nullable(),
     expires_at: z.union([z.string().datetime({ offset: true }), z.date()]),
   })
-  .passthrough();
+  .strict();
 
 function billingCreditPostingResult(
   rows: readonly unknown[] | null | undefined,
   context: string,
 ): BillingCreditPostingResult {
-  const row = safeParse(BillingCreditPostingRowSchema, requireRecordRow(rows, context), context, {
-    indeterminate: true,
-  });
+  const raw = requireRecordRow(rows, context);
+  const row = safeParse(
+    BillingCreditPostingRowSchema,
+    {
+      ledger_entry_id: raw.ledger_entry_id,
+      balance_after: raw.balance_after,
+      replayed: raw.replayed,
+      error_code: raw.error_code,
+    },
+    context,
+    { indeterminate: true },
+  );
   return {
     ledgerEntryId: row.ledger_entry_id,
     balanceAfter: row.balance_after,
     replayed: row.replayed,
     errorCode: row.error_code,
   };
-}
-
-function toIso(value: unknown): string | null {
-  if (!value) return null;
-  if (typeof value === "string") return value;
-  if (value instanceof Date) return value.toISOString();
-  if (typeof (value as Record<string, unknown>)["toISOString"] === "function") {
-    return (value as Date).toISOString();
-  }
-  return String(value);
 }
 
 export interface PostgresBillingStoreOptions extends PostgresConnectionOptions {
@@ -152,6 +151,7 @@ export class PostgresBillingStore extends BillingStore {
   private _dispute: BillingDisputeRepository | null = null;
   private _preferences: BillingPreferencesRepository | null = null;
   private _autoRecharge: BillingAutoRechargeRepository | null = null;
+  private _subscriptionChange: BillingSubscriptionChangeRepository | null = null;
   constructor(options: PostgresBillingStoreOptions) {
     super();
     if (typeof options !== "object" || options === null) {
@@ -238,6 +238,13 @@ export class PostgresBillingStore extends BillingStore {
     return this._autoRecharge;
   }
 
+  private get billingSubscriptionChange(): BillingSubscriptionChangeRepository {
+    if (!this._subscriptionChange) {
+      this._subscriptionChange = new BillingSubscriptionChangeRepository(this.queryFn);
+    }
+    return this._subscriptionChange;
+  }
+
   async createOrGetCheckoutIntent(input: CheckoutIntentCreate): Promise<CheckoutIntent> {
     if (!/^[0-9a-fA-F]{64}$/.test(input.requestDigest)) {
       throw new TypeError("requestDigest must be a 32-byte hex string");
@@ -294,8 +301,24 @@ export class PostgresBillingStore extends BillingStore {
         details: { rowCount: rows.length, checkoutIntentId: id },
       });
     }
+    const row = rows[0] as Record<string, unknown>;
     return this.rowToCheckoutIntent(
-      safeParse(CheckoutIntentRowSchema, rows[0], "PostgresBillingStore.getCheckoutIntent"),
+      safeParse(
+        CheckoutIntentRowSchema,
+        {
+          id: row.id,
+          subject_id: row.subject_id,
+          provider: row.provider,
+          checkout_kind: row.checkout_kind,
+          product_key: row.product_key,
+          request_digest: row.request_digest,
+          status: row.status,
+          provider_session_id: row.provider_session_id,
+          checkout_url: row.checkout_url,
+          expires_at: row.expires_at,
+        },
+        "PostgresBillingStore.getCheckoutIntent",
+      ),
     );
   }
 
@@ -364,27 +387,29 @@ export class PostgresBillingStore extends BillingStore {
       eventType,
       JSON.stringify(envelope ?? { eventType }),
     );
-    const r = result as Record<string, unknown>;
-    const s = r.status as string;
-    if (s === "claimed") {
-      if (typeof r.claim_token !== "string" || typeof r.event_id !== "string") {
+    if (result.status === "claimed") {
+      if (result.claim_token === null || result.event_id === null) {
         throw new StoreError("Billing event claim returned no claim identifiers", {
           details: { provider, eventId },
         });
       }
       return {
         status: "claimed" as const,
-        claimToken: r.claim_token,
-        billingEventId: r.event_id,
+        claimToken: result.claim_token,
+        billingEventId: result.event_id,
       };
     }
-    if (s === "duplicate") return { status: "duplicate" as const };
-    if (s === "busy") return { status: "busy" as const };
-    if (s === "invalid_request" || s === "idempotency_conflict" || s === "max_retries_exceeded") {
+    if (result.status === "duplicate") return { status: "duplicate" as const };
+    if (result.status === "busy") return { status: "busy" as const };
+    if (
+      result.status === "invalid_request" ||
+      result.status === "idempotency_conflict" ||
+      result.status === "max_retries_exceeded"
+    ) {
       return { status: "retry" as const };
     }
     throw new StoreError("Billing event claim returned an unsupported status", {
-      details: { provider, eventId, status: s },
+      details: { provider, eventId, status: result.status },
     });
   }
 
@@ -452,54 +477,14 @@ export class PostgresBillingStore extends BillingStore {
         },
       });
     }
-    const rows = await this.queryFn(
-      `SELECT * FROM bursar.open_subscription_change(
-         $1::uuid, $2::uuid, $3::timestamptz, $4, $5, $6
-       )`,
-      [
-        subscription.id,
-        input.toOfferId,
-        input.effectiveAt,
-        input.effective,
-        input.idempotencyKey,
-        input.prorationBehavior ?? "provider_default",
-      ],
-    );
-    const result = requireRecordRow(rows, "PostgresBillingStore.createBillingSubscriptionChange");
-    if (result.error_code) {
-      throw new StoreError(`subscription change: ${String(result.error_code)}`, {
-        details: { errorCode: String(result.error_code) },
-      });
-    }
-    const changeId = safeParse(
-      z.union([z.string().min(1), z.number().int()]).transform(String),
-      result.change_id,
-      "PostgresBillingStore.createBillingSubscriptionChange.change_id",
-      { indeterminate: true },
-    );
-    const changeRows = await this.queryFn(
-      `SELECT * FROM bursar.get_billing_subscription_change($1::bigint)`,
-      [changeId],
-    );
-    if ((changeRows[0] as Record<string, unknown> | undefined)?.id == null) {
-      throw new StoreError("subscription change creation returned no row", {
-        indeterminate: true,
-        details: { changeId },
-      });
-    }
-    return this.rowToSubscriptionChange(changeRows[0] as Record<string, unknown>);
+    return this.billingSubscriptionChange.create(subscription.id, input);
   }
 
   async getOpenBillingSubscriptionChange(
     provider: string,
     providerSubscriptionId: string,
   ): Promise<BillingSubscriptionChange | null> {
-    const rows = await this.queryFn(
-      `SELECT * FROM bursar.get_open_billing_subscription_change($1, $2)`,
-      [provider, providerSubscriptionId],
-    );
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.id == null ? null : this.rowToSubscriptionChange(row);
+    return this.billingSubscriptionChange.getOpen(provider, providerSubscriptionId);
   }
 
   async listExpiredGraceSubscriptions(
@@ -526,28 +511,7 @@ export class PostgresBillingStore extends BillingStore {
     id: string,
     update: BillingSubscriptionChangeUpdate,
   ): Promise<void> {
-    if (!update.state) return;
-    const rows = await this.queryFn(
-      `SELECT bursar.advance_subscription_change($1::bigint, $2, $3, $4) AS advanced`,
-      [
-        id,
-        update.state,
-        update.providerOperationId ?? null,
-        optionalBoundedDiagnosticMessage(update.errorMessage),
-      ],
-    );
-    if (
-      !requireResultField(
-        rows,
-        "advanced",
-        pgBoolean,
-        "PostgresBillingStore.updateBillingSubscriptionChange",
-      )
-    ) {
-      throw new StoreError(`subscription change transition rejected: ${id}`, {
-        details: { subscriptionChangeId: id },
-      });
-    }
+    await this.billingSubscriptionChange.update(id, update);
   }
 
   async getUserSubscription(
@@ -792,12 +756,6 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<BillingPaymentRecord | null> {
     const row = await this.billingPayment.getForRefund(provider, providerPaymentId);
     if (!row) return null;
-    const providerUpdatedAt = toIso(row.provider_updated_at);
-    if (!providerUpdatedAt) {
-      throw new StoreError("billing payment has no provider update timestamp", {
-        details: { provider, providerPaymentId },
-      });
-    }
     return {
       id: row.id,
       provider: row.provider,
@@ -817,7 +775,10 @@ export class PostgresBillingStore extends BillingStore {
       currency: row.currency,
       purpose: row.purpose,
       status: row.status,
-      providerUpdatedAt,
+      providerUpdatedAt:
+        row.provider_updated_at instanceof Date
+          ? row.provider_updated_at.toISOString()
+          : row.provider_updated_at,
       metadata: row.metadata,
     };
   }
@@ -846,71 +807,6 @@ export class PostgresBillingStore extends BillingStore {
       interval: r.interval,
       intervalCount: r.interval_count,
       metadata: r.metadata,
-    };
-  }
-
-  private async getSubscriptionOfferContexts(r: Record<string, unknown>): Promise<{
-    fromOffer: BillingSubscriptionOfferContext;
-    toOffer: BillingSubscriptionOfferContext;
-  }> {
-    const rows = await this.queryFn(
-      `SELECT requested.side, requested.offer_id, context.*
-       FROM (
-         VALUES
-           ('from', $1::uuid, $2::uuid),
-           ('to', $3::uuid, $4::uuid)
-       ) AS requested(side, offer_id, catalog_revision_id)
-       CROSS JOIN LATERAL bursar.get_catalog_offer_context(
-         requested.offer_id,
-         requested.catalog_revision_id
-       ) AS context`,
-      [r.from_offer_id, r.from_catalog_revision_id, r.to_offer_id, r.to_catalog_revision_id],
-    );
-    const bySide = new Map(
-      rows.map((row) => {
-        const context = row as Record<string, unknown>;
-        return [String(context.side), context] as const;
-      }),
-    );
-    const mapContext = (side: "from" | "to"): BillingSubscriptionOfferContext => {
-      const context = bySide.get(side);
-      if (context?.offer_key == null) {
-        throw new StoreError(`subscription change ${side}-offer context not found`, {
-          details: { subscriptionChangeId: r.id, side },
-        });
-      }
-      return {
-        offerId: String(context.offer_id),
-        offerKey: String(context.offer_key),
-        planId: context.plan_id ? String(context.plan_id) : null,
-        plan: context.plan_key ? String(context.plan_key) : null,
-        interval: context.billing_unit ? String(context.billing_unit) : null,
-        intervalCount: context.billing_count == null ? null : Number(context.billing_count),
-      };
-    };
-    return { fromOffer: mapContext("from"), toOffer: mapContext("to") };
-  }
-
-  private async rowToSubscriptionChange(
-    r: Record<string, unknown>,
-  ): Promise<BillingSubscriptionChange> {
-    const { fromOffer, toOffer } = await this.getSubscriptionOfferContexts(r);
-    return {
-      id: String(r.id),
-      subscriptionId: String(r.subscription_id),
-      fromOfferId: String(r.from_offer_id),
-      toOfferId: String(r.to_offer_id),
-      fromOffer,
-      toOffer,
-      effectiveAt: toIso(r.effective_at),
-      effective: String(r.effective_behavior) as BillingSubscriptionChange["effective"],
-      state: String(r.state) as BillingSubscriptionChange["state"],
-      prorationBehavior: String(
-        r.proration_behavior,
-      ) as BillingSubscriptionChange["prorationBehavior"],
-      idempotencyKey: String(r.idempotency_key),
-      providerOperationId: r.provider_operation_id ? String(r.provider_operation_id) : null,
-      errorMessage: r.error_message ? String(r.error_message) : null,
     };
   }
 

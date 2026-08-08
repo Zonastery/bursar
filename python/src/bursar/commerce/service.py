@@ -45,6 +45,7 @@ from bursar.commerce.provider_registry import CommerceProviderRegistry
 from bursar.commerce.types import (
     AccountAllowanceOverview,
     AccountCommerceOverview,
+    AccountCreditDisplay,
     AccountCreditOverview,
     AccountSubscriptionSummary,
     AutoRechargeInput,
@@ -90,12 +91,23 @@ from bursar.providers.types import (
     ChangePlanParams,
     ChangePlanPreview,
     CheckoutParams,
+    CheckoutStatusProvider,
+    CustomerPortalProvider,
+    InvoiceUrlProvider,
     PaymentMethodSetupParams,
+    PaymentMethodSetupProvider,
+    PaymentMethodsProvider,
     PaymentProvider,
+    PlanChangePreviewProvider,
+    PlanChangeProvider,
     PortalParams,
     PreviewChangePlanParams,
     ProviderUrlResult,
+    ScheduledPlanChangeCancellationProvider,
+    SubscriptionCancellationProvider,
+    SubscriptionReactivationProvider,
     UpdatePaymentMethodParams,
+    UpdatePaymentMethodProvider,
     WebhookRequest,
 )
 from bursar.shared.logger import NormalizedLogger, normalize_logger
@@ -264,15 +276,6 @@ def _external_id(reference: ProviderReference) -> str:
     raise UnknownOfferError("Unsupported provider reference")
 
 
-def _supports(provider: PaymentProvider, capability: str) -> bool:
-    method = getattr(provider, capability, None)
-    if not callable(method):
-        return False
-    base = getattr(PaymentProvider, capability, None)
-    implementation = getattr(type(provider), capability, None)
-    return implementation is not base
-
-
 def _replace_intent(url: str, intent_id: str) -> str:
     return url.replace("{intentId}", intent_id)
 
@@ -321,14 +324,14 @@ class CommerceAutoRecharge:
     def __init__(self, commerce: CommerceService) -> None:
         self._commerce = commerce
 
-    async def get_status(self, account_id: str):
+    async def get_status(self, account_id: str) -> BillingAutoRechargeStatus | None:
         provider = await self._commerce.provider_for_account(account_id)
         return await self._commerce.billing.auto_recharge.get_status(
             account_id,
             provider,
         )
 
-    async def enable(self, input: AutoRechargeInput):
+    async def enable(self, input: AutoRechargeInput) -> BillingAutoRechargeStatus | None:
         provider = await self._commerce.provider_for_account(input.account_id)
         balance = self._commerce.credits.get_balance(input.account_id)
         return await self._commerce.billing.auto_recharge.enable(
@@ -341,7 +344,7 @@ class CommerceAutoRecharge:
     def disable(self, account_id: str) -> None:
         self._commerce.billing.auto_recharge.disable(account_id)
 
-    async def retry(self, input: AutoRechargeInput):
+    async def retry(self, input: AutoRechargeInput) -> BillingAutoRechargeStatus | None:
         provider = await self._commerce.provider_for_account(input.account_id)
         balance = self._commerce.credits.get_balance(input.account_id)
         await self._commerce.billing.auto_recharge.retry(
@@ -355,11 +358,9 @@ class CommerceAutoRecharge:
             provider,
         )
 
-    async def process_if_needed(self, input: AutoRechargeInput):
+    async def process_if_needed(self, input: AutoRechargeInput) -> AutoRechargeProcessResult:
         profile = self._commerce.billing.get_auto_recharge_profile(input.account_id)
         if profile is None or not profile.enabled or profile.state != "active":
-            from bursar.billing.auto_recharge_service import AutoRechargeProcessResult
-
             return AutoRechargeProcessResult(outcome="disabled")
         provider = (
             await self._commerce._providers.get(profile.provider)
@@ -401,6 +402,8 @@ class CommerceService:
 
             async def resolve_identity(identity):
                 account_id = await configured_identity_resolver(identity)
+                if account_id is not None and not account_id.strip():
+                    raise ValueError("identity resolver account_id must not be empty")
                 if account_id and identity.customer_id:
                     self.billing.upsert_customer(
                         identity.provider,
@@ -566,17 +569,13 @@ class CommerceService:
             raise CheckoutConflictError("A checkout is already in progress for a different offer")
         if intent.checkout_url:
             locally_expired = datetime.fromisoformat(intent.expires_at) <= datetime.now(UTC)
-            if not locally_expired and (
-                not intent.provider_session_id or not _supports(provider, "get_checkout_session_status")
-            ):
-                raise CheckoutConflictError(
-                    "A checkout is already in progress; continue it in the existing checkout window"
-                )
-            state = (
-                None
-                if locally_expired
-                else await provider.get_checkout_session_status(cast(str, intent.provider_session_id))
-            )
+            state = None
+            if not locally_expired:
+                if not intent.provider_session_id or not isinstance(provider, CheckoutStatusProvider):
+                    raise CheckoutConflictError(
+                        "A checkout is already in progress; continue it in the existing checkout window"
+                    )
+                state = await provider.get_checkout_session_status(intent.provider_session_id)
             payment_status = state.payment_status if state else None
             if payment_status == "succeeded":
                 self.billing.update_checkout_intent(
@@ -680,7 +679,7 @@ class CommerceService:
         }:
             return SubscriptionCommandResult(ok=True)
         provider = await self._providers.get(subscription.provider)
-        if not _supports(provider, "cancel_subscription"):
+        if not isinstance(provider, SubscriptionCancellationProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "cancel_subscription",
@@ -719,7 +718,7 @@ class CommerceService:
         ):
             return SubscriptionCommandResult(ok=True)
         provider = await self._providers.get(subscription.provider)
-        if not _supports(provider, "reactivate_subscription"):
+        if not isinstance(provider, SubscriptionReactivationProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "reactivate_subscription",
@@ -757,7 +756,7 @@ class CommerceService:
         for subscription in subscriptions:
             try:
                 provider = await self._providers.get(subscription.provider)
-                if not _supports(provider, "cancel_subscription"):
+                if not isinstance(provider, SubscriptionCancellationProvider):
                     raise ProviderCapabilityNotSupportedError(
                         provider.provider,
                         "cancel_subscription",
@@ -829,7 +828,7 @@ class CommerceService:
                 scheduled=pending.effective == "renewal",
                 provider_operation_id=pending.provider_operation_id,
             )
-        status = _status_value(subscription.status) if subscription and subscription.status else None
+        status = subscription.status if subscription else None
         is_current = status in _CURRENT_SUBSCRIPTION_STATUSES
         is_entitled = entitlement.plan_key is not None
         plan_key = entitlement.plan_key or (subscription.plan if is_current and subscription else None)
@@ -949,7 +948,7 @@ class CommerceService:
         context: dict[str, Any],
     ) -> ChangePlanPreview:
         provider = cast(PaymentProvider, context["provider"])
-        if not _supports(provider, "preview_change_plan"):
+        if not isinstance(provider, PlanChangePreviewProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "preview_change_plan",
@@ -1023,12 +1022,27 @@ class CommerceService:
         if quote_fingerprint != refreshed.quote_fingerprint:
             raise QuoteChangedError(refreshed)
         provider = cast(PaymentProvider, context["provider"])
-        if not _supports(provider, "change_plan"):
+        if not isinstance(provider, PlanChangeProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "change_plan",
             )
         subscription = cast(BillingSubscriptionState, context["subscription"])
+        cancellation_provider: SubscriptionCancellationProvider | None = None
+        reactivation_provider: SubscriptionReactivationProvider | None = None
+        if subscription.cancel_at_period_end:
+            if not isinstance(provider, SubscriptionReactivationProvider):
+                raise ProviderCapabilityNotSupportedError(
+                    provider.provider,
+                    "reactivate_subscription",
+                )
+            if not isinstance(provider, SubscriptionCancellationProvider):
+                raise ProviderCapabilityNotSupportedError(
+                    provider.provider,
+                    "cancel_subscription",
+                )
+            reactivation_provider = provider
+            cancellation_provider = provider
         existing = self.billing.get_open_billing_subscription_change(
             subscription.provider,
             subscription.provider_subscription_id,
@@ -1056,17 +1070,8 @@ class CommerceService:
         cancellation_was_reactivated = False
         try:
             if subscription.cancel_at_period_end:
-                if not _supports(provider, "reactivate_subscription"):
-                    raise ProviderCapabilityNotSupportedError(
-                        provider.provider,
-                        "reactivate_subscription",
-                    )
-                if not _supports(provider, "cancel_subscription"):
-                    raise ProviderCapabilityNotSupportedError(
-                        provider.provider,
-                        "cancel_subscription",
-                    )
-                await provider.reactivate_subscription(
+                assert reactivation_provider is not None
+                await reactivation_provider.reactivate_subscription(
                     subscription.provider_subscription_id,
                     f"{operation_key}:keep",
                 )
@@ -1098,7 +1103,8 @@ class CommerceService:
             failure: Exception = exc
             if cancellation_was_reactivated:
                 try:
-                    await provider.cancel_subscription(
+                    assert cancellation_provider is not None
+                    await cancellation_provider.cancel_subscription(
                         subscription.provider_subscription_id,
                         f"{operation_key}:restore-cancellation",
                     )
@@ -1141,7 +1147,7 @@ class CommerceService:
         if change is None or change.state != "scheduled" or change.effective != "renewal":
             raise CommerceResourceNotFoundError("No scheduled plan change found")
         provider = await self._providers.get(subscription.provider)
-        if not _supports(provider, "cancel_scheduled_plan_change"):
+        if not isinstance(provider, ScheduledPlanChangeCancellationProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "cancel_scheduled_plan_change",
@@ -1175,10 +1181,7 @@ class CommerceService:
         provider = await self._providers.get(customer.provider)
         if purpose == "payment-method":
             if subscription is not None and subscription.provider_subscription_id:
-                if not _supports(
-                    provider,
-                    "create_update_payment_method_session",
-                ):
+                if not isinstance(provider, UpdatePaymentMethodProvider):
                     raise ProviderCapabilityNotSupportedError(
                         provider.provider,
                         "create_update_payment_method_session",
@@ -1190,10 +1193,7 @@ class CommerceService:
                         return_url=return_url,
                     )
                 )
-            if not _supports(
-                provider,
-                "create_payment_method_setup_session",
-            ):
+            if not isinstance(provider, PaymentMethodSetupProvider):
                 raise ProviderCapabilityNotSupportedError(
                     provider.provider,
                     "create_payment_method_setup_session",
@@ -1205,7 +1205,7 @@ class CommerceService:
                     cancel_url=cancel_url,
                 )
             )
-        if not _supports(provider, "create_customer_portal_session"):
+        if not isinstance(provider, CustomerPortalProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "create_customer_portal_session",
@@ -1360,7 +1360,7 @@ class CommerceService:
             )
             if customer is not None:
                 provider = await self._providers.get(customer.provider)
-                if _supports(provider, "list_payment_methods"):
+                if isinstance(provider, PaymentMethodsProvider):
                     payment_methods = await provider.list_payment_methods(customer.provider_customer_id)
                 else:
                     payment_methods_available = False
@@ -1430,10 +1430,10 @@ class CommerceService:
                 buckets_by_key={bucket.bucket_key: bucket.balance for bucket in buckets.buckets},
                 spend_order=spend_order,
                 display=(
-                    {
-                        "currency": config.credits.display.currency,
-                        "units_per_major": str(config.credits.display.units_per_major),
-                    }
+                    AccountCreditDisplay(
+                        currency=config.credits.display.currency,
+                        units_per_major=config.credits.display.units_per_major,
+                    )
                     if config.credits.display
                     else None
                 ),
@@ -1493,7 +1493,7 @@ class CommerceService:
             provider_name = owned.provider
             provider_document_id = owned.provider_document_id
         provider = await self._providers.get(provider_name)
-        if not _supports(provider, "get_invoice_url"):
+        if not isinstance(provider, InvoiceUrlProvider):
             raise ProviderCapabilityNotSupportedError(
                 provider.provider,
                 "get_invoice_url",

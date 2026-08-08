@@ -22,6 +22,14 @@ def require_provider_string(value: object, field: str) -> str:
     return value.strip()
 
 
+def optional_provider_string(value: object, field: str) -> str | None:
+    """Validate an optional provider string without manufacturing a value."""
+
+    if value is None:
+        return None
+    return require_provider_string(value, field)
+
+
 def require_minor_units(value: object, field: str, *, positive: bool = False) -> int:
     """Validate an integral provider amount before it crosses the billing boundary."""
 
@@ -87,9 +95,9 @@ def call_billing_event_sink(sink: BillingEventSink, event: BillingEvent) -> Bill
     return result
 
 
-def parse_status(raw: str | None) -> BillingSubscriptionStatus | None:
-    """Safely parse a status string into a BillingSubscriptionStatus enum."""
-    if raw is None:
+def parse_subscription_status(raw: object) -> BillingSubscriptionStatus | None:
+    """Parse an exact provider status without admitting unknown database values."""
+    if not isinstance(raw, str):
         return None
     try:
         return BillingSubscriptionStatus(raw)

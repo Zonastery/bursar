@@ -1,4 +1,4 @@
-import type { ProviderRef } from "./common.js";
+import type { BillingOfferInterval, ProviderRef } from "./common.js";
 
 export type BillingSubscriptionStatus =
   | "incomplete"
@@ -72,10 +72,10 @@ export type BillingSubscriptionChangeState =
 export interface BillingSubscriptionOfferContext {
   offerId: string;
   offerKey: string;
-  planId?: string | null;
-  plan?: string | null;
-  interval?: string | null;
-  intervalCount?: number | null;
+  planId: string;
+  plan: string;
+  interval: BillingOfferInterval;
+  intervalCount: number;
 }
 
 export interface BillingSubscriptionChange {

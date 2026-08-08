@@ -18,13 +18,29 @@ export interface ExecuteGrantProgramRequest {
   metadata?: CreditMetadata | null;
 }
 
-/** One award row produced by a grant-program execution. */
-export interface GrantProgramAwardResult {
-  grantEventId: string | null;
-  grantAwardId: string | null;
-  recipientSubjectId: string | null;
-  ledgerEntryId: string | null;
-  amount: Decimal;
+interface GrantProgramAwardBase {
   replayed: boolean;
-  error?: string | null;
 }
+
+/** One committed award produced by a grant-program execution. */
+export interface GrantProgramAwardSuccess extends GrantProgramAwardBase {
+  grantEventId: string;
+  grantAwardId: string;
+  recipientSubjectId: string;
+  ledgerEntryId: string;
+  amount: Decimal;
+  error: null;
+}
+
+/** A rejected grant-program execution. No financial identifiers are fabricated. */
+export interface GrantProgramAwardFailure extends GrantProgramAwardBase {
+  grantEventId: null;
+  grantAwardId: null;
+  recipientSubjectId: null;
+  ledgerEntryId: null;
+  amount: null;
+  replayed: false;
+  error: string;
+}
+
+export type GrantProgramAwardResult = GrantProgramAwardSuccess | GrantProgramAwardFailure;

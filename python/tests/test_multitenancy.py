@@ -738,7 +738,9 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
               ON revision.id = plan.catalog_revision_id
             WHERE plan.plan_key = 'pro'
               AND revision.status = 'active'
-            """
+              AND plan.tenant_id = %s::uuid
+            """,
+            (TEST_TENANT_ID,),
         )
         first_target = first_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         second_cursor.execute(
@@ -749,7 +751,9 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
               ON revision.id = plan.catalog_revision_id
             WHERE plan.plan_key = 'pro'
               AND revision.status = 'active'
-            """
+              AND plan.tenant_id = %s::uuid
+            """,
+            (SECOND_TENANT_ID,),
         )
         second_target = second_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
 

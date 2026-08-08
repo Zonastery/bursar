@@ -6,13 +6,13 @@ This directory contains the public Bursar documentation site. Docusaurus renders
 
 The site follows the [Diátaxis](https://diataxis.fr/) content model. Each page serves one reader need:
 
-| Content type | Reader need | Location |
-| --- | --- | --- |
-| Get started | Understand the product boundary and complete the first integration | `docs/intro.mdx`, `docs/quickstart.mdx` |
-| Tutorials | Learn through a complete, reproducible exercise | `../samples/python/notebooks/` |
-| How-to guides | Complete a production task | `docs/guides/` |
-| Core concepts | Understand design decisions and system behavior | `docs/concepts/` |
-| Reference | Look up exact commands, types, and schema details | `docs/cli.mdx`, `docs/*-api/`, generated references |
+| Content type  | Reader need                                                        | Location                                            |
+| ------------- | ------------------------------------------------------------------ | --------------------------------------------------- |
+| Get started   | Understand the product boundary and complete the first integration | `docs/intro.mdx`, `docs/quickstart.mdx`             |
+| Tutorials     | Learn through a complete, reproducible exercise                    | `../samples/python/notebooks/`                      |
+| How-to guides | Complete a production task                                         | `docs/guides/`                                      |
+| Core concepts | Understand design decisions and system behavior                    | `docs/concepts/`                                    |
+| Reference     | Look up exact commands, types, and schema details                  | `docs/cli.mdx`, `docs/*-api/`, generated references |
 
 The sidebar exposes these categories in that order. Do not organize pages around internal package names unless the page is API reference.
 
@@ -20,15 +20,15 @@ The sidebar exposes these categories in that order. Do not organize pages around
 
 Do not maintain the same technical fact in multiple prose documents. Follow this ownership map:
 
-| Subject | Canonical source | Site artifact |
-| --- | --- | --- |
-| Python signatures | Python source and docstrings | Sphinx Markdown in `docs/python-api/reference/` |
-| TypeScript signatures | TypeScript source and TSDoc | TypeDoc Markdown in `docs/javascript-api/reference/` |
-| Database structure | Ordered SQL migrations | Mermaid entity-relationship diagram in `docs/concepts/database-schema.md` |
-| Configuration shape | Pydantic models and generated schema | `pricing-config.schema.json` |
-| Executable tutorials | Jupyter notebooks | MDX pages in `docs/notebooks/` |
-| Navigation and page summaries | Docusaurus sidebar and front matter | Search, sitemap, `llms.txt`, and `llms-full.txt` |
-| Agent procedure | `../skills/bursar/SKILL.md` | Linked from `docs/agent-skills.mdx` |
+| Subject                       | Canonical source                       | Site artifact                                                             |
+| ----------------------------- | -------------------------------------- | ------------------------------------------------------------------------- |
+| Python signatures             | Public `bursar` exports and docstrings | Sphinx Autosummary in `docs/python-api/reference/`                        |
+| TypeScript signatures         | TypeScript source and TSDoc            | TypeDoc Markdown in `docs/javascript-api/reference/`                      |
+| Database structure            | Ordered SQL migrations                 | Mermaid entity-relationship diagram in `docs/concepts/database-schema.md` |
+| Configuration shape           | Pydantic models and generated schema   | `pricing-config.schema.json`                                              |
+| Executable tutorials          | Jupyter notebooks                      | MDX pages in `docs/notebooks/`                                            |
+| Navigation and page summaries | Docusaurus sidebar and front matter    | Search, sitemap, `llms.txt`, and `llms-full.txt`                          |
+| Agent procedure               | `../skills/bursar/SKILL.md`            | Linked from `docs/agent-skills.mdx`                                       |
 
 Generated paths are build artifacts. Edit their source instead.
 
@@ -38,13 +38,15 @@ Install these runtimes:
 
 - Node.js 20 or newer and npm
 - Bun 1.3.14 for TypeDoc dependencies in `../javascript/`
-- Python 3.12 or 3.13 with the Bursar development group for notebook and Sphinx generation
+- Python 3.12 or 3.13 with the Bursar development group, Sphinx, and `sphinx-markdown-builder`
 
 Install dependencies from the repository root and package directories:
 
 ```bash
 cd python
 uv sync --group dev
+uv pip install --python .venv sphinx sphinx-markdown-builder
+source .venv/bin/activate
 cd ../javascript
 bun ci
 cd ../docs

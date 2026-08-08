@@ -27,9 +27,30 @@ const BillingPaymentRowSchema = z
     provider_updated_at: z.union([z.string().datetime({ offset: true }), z.date()]),
     metadata: z.record(z.string(), z.unknown()),
   })
-  .passthrough();
+  .strict();
 export type BillingPaymentRow = z.infer<typeof BillingPaymentRowSchema>;
 export type ForRefundRow = BillingPaymentRow;
+
+function parsePaymentRow(row: Record<string, unknown>, context: string): BillingPaymentRow {
+  return safeParse(
+    BillingPaymentRowSchema,
+    {
+      id: row.id,
+      provider: row.provider,
+      provider_payment_id: row.provider_payment_id,
+      provider_invoice_id: row.provider_invoice_id,
+      subject_id: row.subject_id,
+      amount_minor: row.amount_minor,
+      tax_minor: row.tax_minor,
+      currency: row.currency,
+      purpose: row.purpose,
+      status: row.status,
+      provider_updated_at: row.provider_updated_at,
+      metadata: row.metadata,
+    },
+    context,
+  );
+}
 
 export class BillingPaymentRepository {
   constructor(private query: QueryFn) {}
@@ -76,9 +97,7 @@ export class BillingPaymentRepository {
       providerPaymentId,
     ]);
     const row = optionalRecordRow(rows, "BillingPaymentRepository.getForRefund");
-    return row === null
-      ? null
-      : safeParse(BillingPaymentRowSchema, row, "BillingPaymentRepository.getForRefund");
+    return row === null ? null : parsePaymentRow(row, "BillingPaymentRepository.getForRefund");
   }
   async getDirect(provider: string, providerPaymentId: string): Promise<BillingPaymentRow | null> {
     const rows = await this.query("SELECT * FROM bursar.get_billing_payment_by_provider($1,$2)", [
@@ -86,8 +105,6 @@ export class BillingPaymentRepository {
       providerPaymentId,
     ]);
     const row = optionalRecordRow(rows, "BillingPaymentRepository.getDirect");
-    return row === null
-      ? null
-      : safeParse(BillingPaymentRowSchema, row, "BillingPaymentRepository.getDirect");
+    return row === null ? null : parsePaymentRow(row, "BillingPaymentRepository.getDirect");
   }
 }

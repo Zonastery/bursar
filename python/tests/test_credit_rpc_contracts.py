@@ -172,7 +172,7 @@ def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
     def callproc(name: str, params: list[object]) -> list[object]:
         calls.append((name, params))
         if name == "create_lease_for_operation":
-            return [{"lease_id": LEASE_ID, "reserved_amount": "12", "error_code": None}]
+            return [{"lease_id": LEASE_ID, "status": "active", "reserved_amount": "12", "error_code": None}]
         if name == "get_credit_lease":
             return [{"expires_at": expires_at, "minimum_balance": "0"}]
         if name == "settle_lease":
@@ -253,7 +253,7 @@ def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
     assert created is not None
     assert created.expires_at == expires_at
     assert settled is not None
-    assert settled.charge_id == USAGE_ID
+    assert str(settled.charge_id) == USAGE_ID
     assert settled.balance_after == "92"
     assert settled.allowance_consumed == "2"
     assert settled.bucket_breakdown == {"purchased": "6"}
@@ -266,7 +266,7 @@ def test_lease_repository_renews_through_official_rpc() -> None:
     def callproc(name: str, params: list[object]) -> list[object]:
         calls.append((name, params))
         if name == "renew_lease":
-            return [{"lease_id": LEASE_ID, "reserved_amount": "12", "error_code": None}]
+            return [{"lease_id": LEASE_ID, "status": "active", "reserved_amount": "12", "error_code": None}]
         if name == "get_credit_lease":
             return [{"expires_at": expires_at, "minimum_balance": "0"}]
         raise AssertionError(f"unexpected RPC: {name}")
@@ -289,6 +289,44 @@ def test_lease_repository_expires_a_bounded_batch() -> None:
 
     assert expired == 3
     assert calls == [("expire_leases", [25])]
+
+
+def test_balance_repository_hydrates_scalar_destination_bucket() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        if name == "post_credit":
+            return [
+                {
+                    "entry_id": ENTRY_ID,
+                    "balance_after": "10",
+                    "replayed": False,
+                    "error_code": None,
+                }
+            ]
+        if name == "get_credit_state":
+            return [{"lifetime_purchased": "10"}]
+        if name == "get_credit_grant_details":
+            return ["default"]
+        raise AssertionError(f"unexpected RPC: {name}")
+
+    result = BalanceRepository(callproc).add_credits(
+        USER_ID,
+        "10",
+        "purchase",
+        "{}",
+        None,
+        None,
+        "purchase-1",
+    )
+
+    assert result.bucket == "default"
+    assert [name for name, _params in calls] == [
+        "post_credit",
+        "get_credit_state",
+        "get_credit_grant_details",
+    ]
 
 
 def test_balance_repository_executes_every_grant_program_award() -> None:
@@ -326,7 +364,7 @@ def test_balance_repository_executes_every_grant_program_award() -> None:
     ]
     assert len(awards) == 1
     assert awards[0].amount == "12.5"
-    assert awards[0].recipient_subject_id == USER_ID
+    assert str(awards[0].recipient_subject_id) == USER_ID
 
 
 def test_team_repository_removes_member_through_official_rpc() -> None:
@@ -375,8 +413,9 @@ def test_catalog_repository_fetches_historical_revision_instead_of_active_revisi
             {
                 "id": "00000000-0000-0000-0000-000000000905",
                 "revision_no": 2,
-                "status": "superseded",
+                "status": "retired",
                 "source_document": {"version": 1},
+                "label": None,
                 "created_at": "2030-01-01T00:00:00Z",
             }
         ]
@@ -401,6 +440,13 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
                 "plan_id": "00000000-0000-0000-0000-000000000906",
                 "plan_key": "pro",
                 "plan_label": "Pro",
+                "plan_assigned_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "plan_assignment_ends_at": None,
+                "assignment_source_type": "manual",
+                "assignment_source_id": None,
+                "catalog_revision_pinned": False,
+                "rate_card": "standard",
+                "allowed_operations": ["completion"],
                 "credit_allowance_amount": "100",
                 "credit_allowance_priority": 15,
                 "credit_allowance_reset_unit": "month",
@@ -425,7 +471,7 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
     assert plan.catalog_revision_no == 4
     assert plan.credit_policy_type == "credit_line"
     assert plan.credit_limit == "20"
-    assert plan.operation_admission == {"completion": {"max_in_flight": 1}}
+    assert plan.operation_admission["completion"].max_in_flight == 1
 
     store = object.__new__(PostgresStore)
     vars(store)["_plan_repo"] = repository
@@ -457,7 +503,7 @@ def test_refund_repository_uses_entry_scoped_idempotent_rpc() -> None:
             }
         ]
 
-    result = DeductionRepository(callproc, callproc).refund_credits(
+    result = DeductionRepository(callproc).refund_credits(
         ENTRY_ID,
         None,
         "curriculum:job-1:refund",
@@ -478,7 +524,7 @@ def test_refund_repository_uses_entry_scoped_idempotent_rpc() -> None:
         )
     ]
     assert result is not None
-    assert result.user_id == USER_ID
+    assert str(result.user_id) == USER_ID
     assert result.amount == "8"
 
 
@@ -507,7 +553,7 @@ def test_deduction_repository_preserves_operation_usage_dimensions() -> None:
             ]
         raise AssertionError(f"unexpected RPC: {name}")
 
-    result = DeductionRepository(callproc, callproc).deduct_with_allowance(
+    result = DeductionRepository(callproc).deduct_with_allowance(
         DeductParams(
             user_id=USER_ID,
             operation="completion",
@@ -538,7 +584,7 @@ def test_deduction_repository_preserves_operation_usage_dimensions() -> None:
         ],
     )
     assert result is not None
-    assert result.user_id == USER_ID
+    assert str(result.user_id) == USER_ID
     assert result.balance_after == "90"
     assert result.bucket_breakdown == {"purchased": "8"}
 
@@ -553,12 +599,15 @@ def test_deduction_repository_records_child_usage_without_a_ledger_debit() -> No
             {
                 "charge_id": USAGE_ID,
                 "requested": "12",
+                "ledger_entry_id": None,
+                "charged": "0",
+                "allowance_covered": "0",
                 "replayed": False,
                 "error_code": None,
             }
         ]
 
-    result = DeductionRepository(callproc, callproc).record_usage(
+    result = DeductionRepository(callproc).record_usage(
         DeductParams(
             user_id=USER_ID,
             operation="roadmap_gen",
@@ -574,7 +623,7 @@ def test_deduction_repository_records_child_usage_without_a_ledger_debit() -> No
     )
 
     assert result is not None
-    assert result.charge_id == USAGE_ID
+    assert str(result.charge_id) == USAGE_ID
     assert result.requested == "12"
     assert calls[0] == (
         "record_usage",

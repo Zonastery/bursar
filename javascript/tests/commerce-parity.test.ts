@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 
 import { loadConfigFromDict } from "../src/config.js";
 import {
+  CommerceProviderRegistry,
   InvalidOfferQuantityError,
   ProviderCapabilityNotSupportedError,
   QuoteChangedError,
   UnknownOfferError,
   classifySubscriptionChange,
 } from "../src/commerce/index.js";
+import type { PaymentProvider } from "../src/providers/types.js";
 
 interface ParityFixture {
   catalog: Record<string, unknown>;
@@ -27,6 +29,24 @@ interface ParityFixture {
 const fixture = JSON.parse(
   readFileSync(new URL("../../common/commerce-parity.json", import.meta.url), "utf8"),
 ) as ParityFixture;
+
+function minimalProvider(): PaymentProvider {
+  return {
+    provider: "alpha",
+    async createCheckoutSession(params) {
+      return { url: params.returnUrl };
+    },
+    async handleWebhook() {
+      return {
+        received: true,
+        retryable: false,
+        provider: "alpha",
+        eventId: null,
+        eventType: null,
+      };
+    },
+  };
+}
 
 describe("shared commerce parity fixture", () => {
   it("classifies transitions from rank and cadence", () => {
@@ -75,5 +95,63 @@ describe("shared commerce parity fixture", () => {
     );
     expect(serviceSource).not.toMatch(/defaultProvider\s*(?:\?\?|=)\s*["']dodo["']/);
     expect(typesSource).not.toMatch(/\b(productId|quoteHash)\b/);
+  });
+
+  it("validates provider factories and preserves newer loads when a cleared load fails", async () => {
+    const invalid = new CommerceProviderRegistry(
+      { providers: { alpha: () => ({ provider: "alpha" }) as never } },
+      { eventSink: {} as never },
+    );
+    await expect(invalid.get("alpha")).rejects.toThrow("did not return a valid payment provider");
+
+    let calls = 0;
+    let rejectFirst!: () => void;
+    const firstRelease = new Promise<void>((resolve) => {
+      rejectFirst = resolve;
+    });
+    const registry = new CommerceProviderRegistry(
+      {
+        providers: {
+          alpha: async () => {
+            calls += 1;
+            if (calls === 1) {
+              await firstRelease;
+              throw new Error("stale load failed");
+            }
+            return minimalProvider();
+          },
+        },
+      },
+      { eventSink: {} as never },
+    );
+
+    const stale = registry.get("alpha");
+    registry.clear();
+    const current = await registry.get("alpha");
+    rejectFirst();
+    await expect(stale).rejects.toThrow("stale load failed");
+
+    expect(await registry.get("alpha")).toBe(current);
+    expect(calls).toBe(2);
+  });
+
+  it("rejects ambiguous provider registry configuration at construction", () => {
+    expect(
+      () => new CommerceProviderRegistry({ providers: {} }, { eventSink: {} as never }),
+    ).toThrow("At least one payment provider must be registered");
+    expect(
+      () =>
+        new CommerceProviderRegistry(
+          { providers: { " ": () => minimalProvider() } },
+          { eventSink: {} as never },
+        ),
+    ).toThrow("Payment provider names must not be empty");
+    expect(
+      () =>
+        new CommerceProviderRegistry(
+          { providers: { alpha: () => minimalProvider() }, defaultProvider: " " },
+          { eventSink: {} as never },
+        ),
+    ).toThrow("Default payment provider must not be empty");
   });
 });

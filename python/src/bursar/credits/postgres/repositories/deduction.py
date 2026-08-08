@@ -1,22 +1,30 @@
 from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_amount, validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    optional_mapping_row,
+    require_mapping_row,
+    validate_amount,
+    validate_non_empty,
+    validate_row,
+)
 from bursar.credits.postgres.repositories.schemas import (
+    ChargeRpcRow,
     DeductionRow,
     DeductParams,
     RefundRow,
+    RefundRpcRow,
     RevokeRow,
     UsageRecordRow,
+    UsageRecordRpcRow,
 )
 
 
 class DeductionRepository:
-    def __init__(self, callproc: DbQuery, query: DbQuery) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
-        self._query = query
 
-    def deduct_with_allowance(self, params: DeductParams) -> DeductionRow | None:
+    def deduct_with_allowance(self, params: DeductParams) -> DeductionRow:
         validate_non_empty(params.user_id, "user_id")
         validate_amount(params.amount, "amount")
         rows = (
@@ -37,36 +45,40 @@ class DeductionRepository:
             )
             or []
         )
-        if not rows:
-            return None
-        row = dict(rows[0])
-        details: dict[str, object] = {}
-        if row.get("error_code") is None:
-            detail_rows = self._callproc(
-                "get_credit_operation_details",
-                [
-                    params.user_id,
-                    row.get("ledger_entry_id"),
-                    params.idempotency_key,
-                ],
+        row = validate_row(
+            ChargeRpcRow,
+            require_mapping_row(rows, "DeductionRepository.deduct_with_allowance"),
+            "DeductionRepository.deduct_with_allowance",
+            indeterminate=True,
+        )
+        details = (
+            optional_mapping_row(
+                self._callproc(
+                    "get_credit_operation_details",
+                    [params.user_id, row.ledger_entry_id, params.idempotency_key],
+                ),
+                "DeductionRepository.deduct_with_allowance.details",
             )
-            if detail_rows:
-                details = dict(detail_rows[0])
-        row.update(
+            if row.error_code is None
+            else None
+        )
+        return validate_row(
+            DeductionRow,
             {
                 "user_id": params.user_id,
-                "entry_id": row.get("ledger_entry_id"),
-                "amount": row.get("charged"),
-                "allowance_consumed": row.get("allowance_covered"),
-                "balance_after": details.get("balance_after", row.get("balance_after")),
-                "bucket_breakdown": details.get("bucket_breakdown", row.get("bucket_breakdown")),
-                "idempotent": row.get("replayed"),
-                "error": row.get("error_code"),
-            }
+                "charge_id": row.charge_id,
+                "entry_id": row.ledger_entry_id,
+                "amount": row.charged,
+                "allowance_consumed": row.allowance_covered,
+                "balance_after": details.get("balance_after") if details is not None else None,
+                "bucket_breakdown": details.get("bucket_breakdown") if details is not None else None,
+                "idempotent": row.replayed,
+                "error": row.error_code,
+            },
+            "DeductionRepository.deduct_with_allowance",
         )
-        return DeductionRow.model_validate(row)
 
-    def record_usage(self, params: DeductParams) -> UsageRecordRow | None:
+    def record_usage(self, params: DeductParams) -> UsageRecordRow:
         validate_non_empty(params.user_id, "user_id")
         validate_amount(params.amount, "amount")
         rows = (
@@ -87,7 +99,22 @@ class DeductionRepository:
             )
             or []
         )
-        return UsageRecordRow.model_validate(dict(rows[0])) if rows else None
+        row = validate_row(
+            UsageRecordRpcRow,
+            require_mapping_row(rows, "DeductionRepository.record_usage"),
+            "DeductionRepository.record_usage",
+            indeterminate=True,
+        )
+        return validate_row(
+            UsageRecordRow,
+            {
+                "charge_id": row.charge_id,
+                "requested": row.requested,
+                "replayed": row.replayed,
+                "error_code": row.error_code,
+            },
+            "DeductionRepository.record_usage",
+        )
 
     def refund_credits(
         self,
@@ -96,7 +123,7 @@ class DeductionRepository:
         idempotency_key: str,
         reason: str | None,
         metadata: str,
-    ) -> RefundRow | None:
+    ) -> RefundRow:
         validate_non_empty(entry_id, "entry_id")
         validate_non_empty(idempotency_key, "idempotency_key")
         rows = (
@@ -106,30 +133,42 @@ class DeductionRepository:
             )
             or []
         )
-        if not rows:
-            return None
-        row = dict(rows[0])
-        row.update(
-            {
-                "refund_entry_id": row.get("entry_id"),
-                "user_id": row.get("subject_id"),
-                "new_balance": row.get("balance_after"),
-                "error": row.get("error_code"),
-            }
+        row = validate_row(
+            RefundRpcRow,
+            require_mapping_row(rows, "DeductionRepository.refund_credits"),
+            "DeductionRepository.refund_credits",
+            indeterminate=True,
         )
-        return RefundRow.model_validate(row)
+        return validate_row(
+            RefundRow,
+            {
+                "refund_entry_id": row.entry_id,
+                "user_id": row.subject_id,
+                "amount": row.amount,
+                "new_balance": row.balance_after,
+                "bucket_breakdown": None,
+                "error": row.error_code,
+            },
+            "DeductionRepository.refund_credits",
+        )
 
-    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> RevokeRow | None:
+    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> RevokeRow:
+        validate_non_empty(user_id, "user_id")
+        validate_non_empty(entry_type, "entry_type")
         rows = self._callproc(
             "revoke_subject_credits_by_operation",
             [user_id, entry_type],
         )
-        row = dict(rows[0]) if rows else {}
-        return RevokeRow.model_validate(
+        row = require_mapping_row(rows, "DeductionRepository.revoke_credits_by_entry_type")
+        return validate_row(
+            RevokeRow,
             {
                 "user_id": user_id,
-                "amount": row.get("revoked"),
-                "new_balance": row.get("balance_after"),
-                "bucket": None,
-            }
+                "entry_type": entry_type,
+                "revoked": row.get("revoked"),
+                "balance_after": row.get("balance_after"),
+                "error_code": row.get("error_code"),
+            },
+            "DeductionRepository.revoke_credits_by_entry_type",
+            indeterminate=True,
         )

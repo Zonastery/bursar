@@ -1967,8 +1967,8 @@ DECLARE
     v_expired_id uuid;
 BEGIN
     IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
-        RETURN QUERY SELECT 0;
-        RETURN;
+        RAISE EXCEPTION 'invalid lease expiry limit'
+            USING ERRCODE = '22023';
     END IF;
 
     WITH claimed AS (

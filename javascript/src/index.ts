@@ -51,6 +51,7 @@ export {
   OperationNotAllowedError,
   PaymentMethodRequiredError,
   ProviderCapabilityNotSupportedError,
+  ProviderResponseError,
   CatalogNotLoadedError,
   RefundError,
   QuotaExceededError,
@@ -129,6 +130,7 @@ export type {
   RefundResult,
   RefundFailure,
   RefundSuccess,
+  RevokeCreditsResult,
   ReleaseResult,
   SetUserPlanResult,
   SpendByModelRow,
@@ -195,6 +197,7 @@ export type { BillingServiceOptions } from "./billing/billing-service.js";
 
 export type {
   BillingAutoRechargeAttempt,
+  BillingAutoRechargeAttemptState,
   BillingAutoRechargeProfile,
   BillingAutoRechargeStatus,
   BillingProvisioningPort,
@@ -212,7 +215,6 @@ export type {
   BillingPaymentInfo,
   BillingPaymentRecord,
   BillingPreferences,
-  BillingProvider,
   PostgresBillingStoreOptions,
   BillingRefundInfo,
   BillingSubscriptionInfo,

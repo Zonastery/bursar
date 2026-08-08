@@ -2,7 +2,11 @@ import Decimal from "decimal.js";
 import { describe, expect, it, vi, type Mocked } from "vitest";
 
 import type { BillingCapability, BillingEventSink } from "../src/billing/contracts.js";
-import type { BillingSubscriptionState, CheckoutIntent } from "../src/billing/types/index.js";
+import type {
+  BillingSubscriptionChange,
+  BillingSubscriptionState,
+  CheckoutIntent,
+} from "../src/billing/types/index.js";
 import {
   CheckoutConflictError,
   CheckoutCompletedError,
@@ -242,8 +246,22 @@ function harness(input?: {
       subscriptionId: "subscription-row",
       fromOfferId: "offer-basic",
       toOfferId: value.toOfferId,
-      fromOffer: { offerId: "offer-basic", offerKey: "basic_month" },
-      toOffer: { offerId: value.toOfferId, offerKey: "pro_month" },
+      fromOffer: {
+        offerId: "offer-basic",
+        offerKey: "basic_month",
+        planId: "plan-basic",
+        plan: "basic",
+        interval: "month",
+        intervalCount: 1,
+      },
+      toOffer: {
+        offerId: value.toOfferId,
+        offerKey: "pro_month",
+        planId: "plan-pro",
+        plan: "pro",
+        interval: "month",
+        intervalCount: 1,
+      },
       effectiveAt: value.effectiveAt,
       effective: value.effective,
       state: value.effective === "renewal" ? "scheduled" : "awaiting_payment",
@@ -566,13 +584,27 @@ describe("CommerceService", () => {
     const alpha = provider("alpha");
     const { service, billing } = harness({ alpha });
     billing.getActiveSubscription.mockResolvedValue(activeSubscription());
-    const existing = {
+    const existing: BillingSubscriptionChange = {
       id: "old-change",
       subscriptionId: "subscription-row",
       fromOfferId: "offer-basic",
       toOfferId: "offer-pro",
-      fromOffer: { offerId: "offer-basic", offerKey: "basic_month" },
-      toOffer: { offerId: "offer-pro", offerKey: "pro_month" },
+      fromOffer: {
+        offerId: "offer-basic",
+        offerKey: "basic_month",
+        planId: "plan-basic",
+        plan: "basic",
+        interval: "month",
+        intervalCount: 1,
+      },
+      toOffer: {
+        offerId: "offer-pro",
+        offerKey: "pro_month",
+        planId: "plan-pro",
+        plan: "pro",
+        interval: "month",
+        intervalCount: 1,
+      },
       effectiveAt: "2026-09-01T00:00:00.000Z",
       effective: "renewal" as const,
       state: "scheduled" as const,
@@ -719,6 +751,20 @@ describe("CommerceService", () => {
       providerInvoices: true,
       transactions: false,
       usage: false,
+    });
+  });
+
+  it("treats a missing allowance window as zero current allowance", async () => {
+    const { service, credits } = harness();
+    credits.checkAllowance.mockResolvedValue(null);
+
+    const overview = await service.getAccountOverview("user-1");
+
+    expect(overview.credits.effectiveSpendableBalance.toString()).toBe("30");
+    expect(overview.credits.allowance).toMatchObject({
+      remaining: new Decimal(0),
+      periodStart: null,
+      periodEnd: null,
     });
   });
 

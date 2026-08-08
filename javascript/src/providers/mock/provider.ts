@@ -1,4 +1,3 @@
-import type { PaymentProvider, ResolveUserCallback } from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -14,9 +13,11 @@ import type {
   SavedPaymentChargeResult,
   SavedPaymentChargeQuote,
   WebhookResult,
+  PaymentProvider,
+  ResolveUserCallback,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
-import { assertBillingEvent, type BillingEvent } from "../../billing/types/index.js";
+import { assertBillingEvent } from "../../billing/types/index.js";
 
 export interface MockPaymentProviderOptions {
   eventSink: BillingEventSink;
@@ -148,7 +149,7 @@ export class MockPaymentProvider implements PaymentProvider {
       };
     }
 
-    const event = { ...payload, provider: this.provider } as unknown as BillingEvent;
+    const event: unknown = { ...payload, provider: this.provider };
     assertBillingEvent(event);
     let userId: string | null = event.userId ?? null;
 

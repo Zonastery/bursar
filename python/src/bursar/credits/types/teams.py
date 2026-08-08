@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+TeamRole = Literal["owner", "admin", "member"]
 
 
 class Team(BaseModel):
@@ -23,9 +26,11 @@ class TeamBalanceResult(BaseModel):
 
 
 class TeamMember(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str
-    role: str
-    spend_cap: Decimal | None = None
+    role: TeamRole
+    spend_cap: Decimal | None
     total_spent: Decimal
 
 
@@ -37,7 +42,7 @@ class CreateTeamResult(BaseModel):
 class AddTeamMemberResult(BaseModel):
     team_id: str
     user_id: str
-    role: str
+    role: TeamRole
 
 
 class TeamDeductionResult(BaseModel):

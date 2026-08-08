@@ -217,6 +217,22 @@ describe("event type routing", () => {
     );
   });
 
+  it("preserves trialing status on subscription.active", async () => {
+    const sink = makeSink();
+    await mapDodoEvent(
+      "subscription.active",
+      { ...DODO_SUBSCRIPTION_ACTIVE, status: "trialing" },
+      "user_1",
+      {},
+      sink,
+    );
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subscription: expect.objectContaining({ status: "trialing" }),
+      }),
+    );
+  });
+
   it("subscription.renewed → subscription.renewed", async () => {
     const sink = makeSink();
     await mapDodoEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, "user_1", {}, sink);
@@ -426,6 +442,20 @@ describe("ref resolution", () => {
         subscription: expect.objectContaining({ refs: { lookupKey: "sage" } }),
       }),
     );
+  });
+
+  it("rejects a blank product_id instead of manufacturing a reference", async () => {
+    const sink = makeSink();
+    await expect(
+      mapDodoEvent(
+        "subscription.updated",
+        { subscription_id: "sub_blank_product", product_id: "   " },
+        "user_1",
+        { plan_slug: "sage" },
+        sink,
+      ),
+    ).rejects.toThrow("product_id");
+    expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
   it("uses the official payment product_cart for refs", async () => {

@@ -1,5 +1,6 @@
 ---
 title: Python API
+sidebar_label: Python API
 description: The bursar Python SDK — Bursar facade, credit manager, pricing engine, and pluggable stores.
 ---
 
@@ -45,17 +46,17 @@ the package never runs migrations from the store itself.
 `bursar` is a flat namespace: everything you need is importable from the top
 level.
 
-| Export | Purpose |
-| --- | --- |
-| `Bursar` | The facade: `credits`, `catalog`, `accounts`, plus optional `billing`/`commerce` |
-| `PostgresStore` | Production, tenant-scoped credit store (requires the `[postgres]` extra) |
-| `PostgresBillingStore` | Billing store for payment-provider lifecycle (requires the `[postgres]` extra) |
-| `PricingEngine` | Database-free operation-pricing core |
-| `CreditStore` | Abstract base class for custom credit backends |
-| `BillingStore` | Abstract base class for custom billing backends |
-| `UsageMetrics` | One billable operation (measures + dimensions) |
-| `load_config_from_dict` | Validate and canonicalize a config document |
-| errors | `BursarError`, `CreditError`, `ConfigError`, `StoreError`, `CapabilityNotSupportedError`, … |
+| Export                  | Purpose                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| `Bursar`                | The facade: `credits`, `catalog`, `accounts`, plus optional `billing`/`commerce`            |
+| `PostgresStore`         | Production, tenant-scoped credit store (requires the `[postgres]` extra)                    |
+| `PostgresBillingStore`  | Billing store for payment-provider lifecycle (requires the `[postgres]` extra)              |
+| `PricingEngine`         | Database-free operation-pricing core                                                        |
+| `CreditStore`           | Abstract base class for custom credit backends                                              |
+| `BillingStore`          | Abstract base class for custom billing backends                                             |
+| `UsageMetrics`          | One billable operation (measures + dimensions)                                              |
+| `load_config_from_dict` | Validate and canonicalize a config document                                                 |
+| errors                  | `BursarError`, `CreditError`, `ConfigError`, `StoreError`, `CapabilityNotSupportedError`, … |
 
 `PostgresStore` and `PostgresBillingStore` are lazy-imported: they are only
 available when the optional `psycopg2` extra is installed.

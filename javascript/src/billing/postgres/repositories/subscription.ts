@@ -27,6 +27,43 @@ const SubscriptionStatusSchema = z.enum([
   "paused",
   "expired",
 ]);
+const PersistedSubscriptionRowSchema = z
+  .object({
+    id: postgresUuid,
+    subject_id: postgresUuid,
+    provider: z.string().min(1),
+    provider_subscription_id: z.string().min(1),
+    provider_customer_id: z.string().min(1).nullable(),
+    offer_id: postgresUuid,
+    catalog_revision_id: postgresUuid,
+    status: SubscriptionStatusSchema,
+    current_period_start: timestamp.nullable(),
+    current_period_end: timestamp.nullable(),
+    trial_end: timestamp.nullable(),
+    cancel_at: timestamp.nullable(),
+    ended_at: timestamp.nullable(),
+    grace_ends_at: timestamp.nullable(),
+    grace_expired_at: timestamp.nullable(),
+    provider_updated_at: timestamp,
+    cancel_at_period_end: pgBoolean,
+    metadata: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+const CatalogReferenceSchema = z
+  .object({
+    offer_id: postgresUuid,
+    catalog_revision_id: postgresUuid,
+  })
+  .strict();
+const OfferContextSchema = z
+  .object({
+    offer_key: z.string().min(1),
+    plan_id: postgresUuid,
+    plan_key: z.string().min(1),
+    billing_unit: z.enum(["day", "week", "month", "year"]),
+    billing_count: z.number().int().positive(),
+  })
+  .strict();
 
 const SubscriptionRowSchema = z
   .object({
@@ -53,25 +90,42 @@ const SubscriptionRowSchema = z
     interval_count: z.number().int().positive(),
     metadata: z.record(z.string(), z.unknown()),
   })
-  .passthrough();
+  .strict();
 
-function providerTimestampValue(row: Record<string, unknown>): number {
-  return Date.parse(
-    safeParse(
-      timestamp,
-      row.provider_updated_at,
-      "BillingSubscriptionRepository.providerUpdatedAt",
-    ),
+export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
+type PersistedSubscriptionRow = z.infer<typeof PersistedSubscriptionRowSchema>;
+
+function record(value: unknown, context: string): Record<string, unknown> {
+  return safeParse(z.record(z.string(), z.unknown()), value, context);
+}
+
+function persistedSubscription(row: unknown, context: string): PersistedSubscriptionRow {
+  const value = record(row, context);
+  return safeParse(
+    PersistedSubscriptionRowSchema,
+    {
+      id: value.id,
+      subject_id: value.subject_id,
+      provider: value.provider,
+      provider_subscription_id: value.provider_subscription_id,
+      provider_customer_id: value.provider_customer_id,
+      offer_id: value.offer_id,
+      catalog_revision_id: value.catalog_revision_id,
+      status: value.status,
+      current_period_start: value.current_period_start,
+      current_period_end: value.current_period_end,
+      trial_end: value.trial_end,
+      cancel_at: value.cancel_at,
+      ended_at: value.ended_at,
+      grace_ends_at: value.grace_ends_at,
+      grace_expired_at: value.grace_expired_at,
+      provider_updated_at: value.provider_updated_at,
+      cancel_at_period_end: value.cancel_at_period_end,
+      metadata: value.metadata,
+    },
+    context,
   );
 }
-
-function compareProviderTimestampsDescending(
-  left: Record<string, unknown>,
-  right: Record<string, unknown>,
-): number {
-  return providerTimestampValue(right) - providerTimestampValue(left);
-}
-export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 
 export class BillingSubscriptionRepository {
   constructor(private query: QueryFn) {}
@@ -79,9 +133,9 @@ export class BillingSubscriptionRepository {
   async upsert(state: BillingSubscriptionState): Promise<void> {
     const provider = state.provider;
     const providerSubscriptionId = state.providerSubscriptionId;
-    let userId = state.userId;
+    const userId = state.userId;
     let providerCustomerId = state.providerCustomerId ?? null;
-    let offerId = state.offerId ?? "";
+    let offerId = state.offerId ?? null;
 
     if (!provider || !providerSubscriptionId) {
       throw new TypeError(
@@ -93,22 +147,32 @@ export class BillingSubscriptionRepository {
       `SELECT * FROM bursar.get_billing_subscription_by_provider($1, $2)`,
       [provider, providerSubscriptionId],
     );
+    const rawExisting = optionalRecordRow(
+      existing,
+      "BillingSubscriptionRepository.upsert.existing",
+    );
     const existingRow =
-      optionalRecordRow(existing, "BillingSubscriptionRepository.upsert.existing") ?? undefined;
-    if (!userId && existingRow?.subject_id != null) userId = String(existingRow.subject_id);
-    if (providerCustomerId == null && existingRow?.provider_customer_id != null) {
-      providerCustomerId = String(existingRow.provider_customer_id);
+      rawExisting === null
+        ? null
+        : persistedSubscription(rawExisting, "BillingSubscriptionRepository.upsert.existing");
+    if (providerCustomerId === null && existingRow !== null) {
+      providerCustomerId = existingRow.provider_customer_id;
     }
-    if (!offerId && existingRow?.offer_id != null) offerId = String(existingRow.offer_id);
+    if (offerId === null && existingRow !== null) offerId = existingRow.offer_id;
 
-    const offerKey = state.offerKey ?? "";
-    if (!offerId && offerKey) {
+    const offerKey = state.offerKey ?? null;
+    if (offerId === null && offerKey !== null) {
       const offerRows = await this.query(`SELECT * FROM bursar.resolve_active_catalog_offer($1)`, [
         offerKey,
       ]);
-      const offerRow =
-        optionalRecordRow(offerRows, "BillingSubscriptionRepository.upsert.offer") ?? undefined;
-      if (offerRow?.id != null) offerId = String(offerRow.id);
+      const offerRow = optionalRecordRow(offerRows, "BillingSubscriptionRepository.upsert.offer");
+      if (offerRow !== null) {
+        offerId = safeParse(
+          postgresUuid,
+          offerRow.id,
+          "BillingSubscriptionRepository.upsert.offer.id",
+        );
+      }
     }
 
     if (!userId || !offerId) {
@@ -146,33 +210,72 @@ export class BillingSubscriptionRepository {
   }
 
   private map(row: unknown): SubscriptionRow {
-    const r = row as Record<string, unknown>;
+    const r = record(row, "BillingSubscriptionRepository.map");
     return safeParse(
       SubscriptionRowSchema,
-      { ...r, user_id: r.subject_id },
+      {
+        id: r.id,
+        user_id: r.subject_id,
+        provider: r.provider,
+        provider_subscription_id: r.provider_subscription_id,
+        provider_customer_id: r.provider_customer_id,
+        offer_id: r.offer_id,
+        offer_key: r.offer_key,
+        plan_id: r.plan_id,
+        plan: r.plan,
+        status: r.status,
+        current_period_start: r.current_period_start,
+        current_period_end: r.current_period_end,
+        trial_end: r.trial_end,
+        cancel_at: r.cancel_at,
+        ended_at: r.ended_at,
+        grace_ends_at: r.grace_ends_at,
+        grace_expired_at: r.grace_expired_at,
+        provider_updated_at: r.provider_updated_at,
+        cancel_at_period_end: r.cancel_at_period_end,
+        interval: r.interval,
+        interval_count: r.interval_count,
+        metadata: r.metadata,
+      },
       "BillingSubscriptionRepository",
     );
   }
 
-  private async withOfferContext(row: unknown): Promise<Record<string, unknown>> {
-    const value = row as Record<string, unknown>;
-    if (value.offer_id == null || value.catalog_revision_id == null) {
-      throw new StoreError("Billing subscription is missing its catalog reference");
-    }
+  private async withOfferContext(
+    value: PersistedSubscriptionRow,
+  ): Promise<Record<string, unknown>> {
+    const reference = safeParse(
+      CatalogReferenceSchema,
+      { offer_id: value.offer_id, catalog_revision_id: value.catalog_revision_id },
+      "BillingSubscriptionRepository.withOfferContext.reference",
+    );
     const contextRows = await this.query(
       `SELECT * FROM bursar.get_catalog_offer_context($1::uuid, $2::uuid)`,
-      [value.offer_id, value.catalog_revision_id],
+      [reference.offer_id, reference.catalog_revision_id],
     );
-    const context =
-      optionalRecordRow(contextRows, "BillingSubscriptionRepository.withOfferContext") ?? undefined;
-    if (context?.offer_key == null) {
+    const rawContext = optionalRecordRow(
+      contextRows,
+      "BillingSubscriptionRepository.withOfferContext",
+    );
+    if (rawContext === null) {
       throw new StoreError("Billing subscription offer context is missing", {
         details: {
-          offerId: value.offer_id,
-          catalogRevisionId: value.catalog_revision_id,
+          offerId: reference.offer_id,
+          catalogRevisionId: reference.catalog_revision_id,
         },
       });
     }
+    const context = safeParse(
+      OfferContextSchema,
+      {
+        offer_key: rawContext.offer_key,
+        plan_id: rawContext.plan_id,
+        plan_key: rawContext.plan_key,
+        billing_unit: rawContext.billing_unit,
+        billing_count: rawContext.billing_count,
+      },
+      "BillingSubscriptionRepository.withOfferContext.context",
+    );
     return {
       ...value,
       ...context,
@@ -188,23 +291,43 @@ export class BillingSubscriptionRepository {
       [provider, providerSubscriptionId],
     );
     const row = optionalRecordRow(rows, "BillingSubscriptionRepository.get");
-    return row === null ? null : this.map(await this.withOfferContext(row));
+    return row === null
+      ? null
+      : this.map(
+          await this.withOfferContext(
+            persistedSubscription(row, "BillingSubscriptionRepository.get"),
+          ),
+        );
   }
   async getUserSubscription(userId: string, statuses?: string[]): Promise<SubscriptionRow | null> {
+    const allowed = new Set(
+      safeParse(
+        z.array(SubscriptionStatusSchema),
+        statuses ?? ["active", "trialing"],
+        "BillingSubscriptionRepository.getUserSubscription.statuses",
+      ),
+    );
     const rows = await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
       userId,
     ]);
-    const allowed = statuses ?? ["active", "trialing"];
-    const candidates = (rows as Array<Record<string, unknown>>)
-      .filter((row) => allowed.includes(String(row.status)))
-      .sort(compareProviderTimestampsDescending);
-    return candidates[0] ? this.map(await this.withOfferContext(candidates[0])) : null;
+    const candidates = rows
+      .map((row) => persistedSubscription(row, "BillingSubscriptionRepository.getUserSubscription"))
+      .filter((row) => allowed.has(row.status))
+      .sort(
+        (left, right) =>
+          Date.parse(right.provider_updated_at) - Date.parse(left.provider_updated_at),
+      );
+    const selected = candidates[0];
+    return selected === undefined ? null : this.map(await this.withOfferContext(selected));
   }
   async getUserSubscriptions(userId: string): Promise<SubscriptionRow[]> {
     const rows = await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
       userId,
     ]);
-    const enriched = await Promise.all(rows.map((row) => this.withOfferContext(row)));
+    const persisted = rows.map((row) =>
+      persistedSubscription(row, "BillingSubscriptionRepository.getUserSubscriptions"),
+    );
+    const enriched = await Promise.all(persisted.map((row) => this.withOfferContext(row)));
     return enriched.map((row) => this.map(row));
   }
 
@@ -213,7 +336,10 @@ export class BillingSubscriptionRepository {
       now,
       limit,
     ]);
-    const enriched = await Promise.all(rows.map((row) => this.withOfferContext(row)));
+    const persisted = rows.map((row) =>
+      persistedSubscription(row, "BillingSubscriptionRepository.listExpiredGraceSubscriptions"),
+    );
+    const enriched = await Promise.all(persisted.map((row) => this.withOfferContext(row)));
     return enriched.map((row) => this.map(row));
   }
 
@@ -269,18 +395,24 @@ export class BillingSubscriptionRepository {
     provider: string,
     providerSubscriptionId?: string | null,
   ): Promise<boolean> {
-    const rows = (await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
-      userId,
-    ])) as Array<Record<string, unknown>>;
     const eligibleStatuses = new Set(["trialing", "active", "past_due", "paused"]);
+    const rows = await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
+      userId,
+    ]);
     const replacement = rows
+      .map((row) =>
+        persistedSubscription(row, "BillingSubscriptionRepository.selectEntitlementSource"),
+      )
       .filter(
         (row) =>
           row.provider === provider &&
-          eligibleStatuses.has(String(row.status)) &&
+          eligibleStatuses.has(row.status) &&
           (!providerSubscriptionId || row.provider_subscription_id === providerSubscriptionId),
       )
-      .sort(compareProviderTimestampsDescending)[0];
+      .sort(
+        (left, right) =>
+          Date.parse(right.provider_updated_at) - Date.parse(left.provider_updated_at),
+      )[0];
 
     if (replacement?.id == null) return false;
 

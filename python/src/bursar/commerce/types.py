@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SkipValidation
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validator, model_validator
 
 from bursar.billing.contracts import BillingEventSink
 from bursar.billing.types import (
@@ -13,6 +13,7 @@ from bursar.billing.types import (
     BillingPreferences,
     BillingSubscriptionChange,
     BillingSubscriptionState,
+    BillingSubscriptionStatus,
 )
 from bursar.credits.types import BucketBalance, GetUserPlanResult, LedgerEntry, UsageCharge
 from bursar.providers.types import (
@@ -20,13 +21,13 @@ from bursar.providers.types import (
     PaymentMethodInfo,
     PaymentProvider,
     ResolveUserCallback,
-    SavedPaymentChargeResult,
     WebhookResult,
 )
 from bursar.shared.logger import Logger
 
 CommerceCheckoutKind = Literal["subscription", "credit_pack"]
 CommerceCheckoutStatus = Literal["pending", "succeeded", "failed", "expired"]
+SubscriptionAccessState = Literal["entitled", "grace", "blocked", "none"]
 PlanChangeClassification = Literal[
     "unchanged",
     "upgrade",
@@ -34,6 +35,7 @@ PlanChangeClassification = Literal[
     "lateral",
     "cadence_change",
 ]
+NonEmptyString = Annotated[str, Field(min_length=1)]
 
 
 class _CommerceModel(BaseModel):
@@ -69,27 +71,44 @@ class PreferencePatch(_CommerceModel):
 
 
 class CommerceOptions(_CommerceModel):
-    tenant_id: str | None = None
-    providers: dict[str, CommerceProviderFactory]
-    default_provider: str | None = None
-    checkout_intent_ttl_ms: int = 24 * 60 * 60 * 1_000
+    tenant_id: NonEmptyString | None = None
+    providers: dict[str, CommerceProviderFactory] = Field(min_length=1)
+    default_provider: NonEmptyString | None = None
+    checkout_intent_ttl_ms: int = Field(default=24 * 60 * 60 * 1_000, strict=True, gt=0)
     preference_defaults: PreferencePatch = Field(default_factory=PreferencePatch)
     identity_resolver: ResolveUserCallback | None = None
     logger: SkipValidation[Logger] | None = None
 
+    @field_validator("providers")
+    @classmethod
+    def validate_provider_names(
+        cls,
+        providers: dict[str, CommerceProviderFactory],
+    ) -> dict[str, CommerceProviderFactory]:
+        if any(not name.strip() for name in providers):
+            raise ValueError("payment provider names must not be empty")
+        return providers
+
 
 class CreateCheckoutInput(_CommerceModel):
-    subject_id: str
-    offer_key: str
-    return_url: str
-    cancel_url: str
-    operation_key: str
-    account_id: str | None = None
-    email: str | None = None
-    provider: str | None = None
+    subject_id: NonEmptyString
+    offer_key: NonEmptyString
+    return_url: NonEmptyString
+    cancel_url: NonEmptyString
+    operation_key: NonEmptyString
+    account_id: NonEmptyString | None = None
+    email: NonEmptyString | None = None
+    provider: NonEmptyString | None = None
     type: CommerceCheckoutKind | None = None
-    quantity: int | None = None
+    quantity: int | None = Field(default=None, strict=True)
     metadata: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, metadata: dict[str, str]) -> dict[str, str]:
+        if any(not key.strip() for key in metadata):
+            raise ValueError("checkout metadata keys must not be empty")
+        return metadata
 
 
 class CreateCheckoutResult(_CommerceModel):
@@ -120,9 +139,9 @@ class NormalizedPendingPlanChange(_CommerceModel):
 class AccountSubscriptionSummary(_CommerceModel):
     account_id: str
     plan_key: str | None
-    status: str | None
-    lifecycle_state: str
-    access_state: Literal["entitled", "grace", "blocked", "none"]
+    status: BillingSubscriptionStatus | None
+    lifecycle_state: BillingSubscriptionStatus | Literal["none"]
+    access_state: SubscriptionAccessState
     is_current: bool
     is_entitled: bool
     is_blocking_checkout: bool
@@ -154,15 +173,29 @@ class PlanChangePreviewResult(_CommerceModel):
     preview: ChangePlanPreview | None = None
     quote_fingerprint: str | None = None
 
+    @model_validator(mode="after")
+    def validate_result(self) -> PlanChangePreviewResult:
+        if self.unchanged:
+            if (
+                self.classification != "unchanged"
+                or self.scheduled
+                or self.preview is not None
+                or self.quote_fingerprint is not None
+            ):
+                raise ValueError("unchanged plan previews cannot include a provider quote")
+        elif self.classification == "unchanged" or self.preview is None or not self.quote_fingerprint:
+            raise ValueError("changed plan previews require a classification, preview, and quote fingerprint")
+        return self
+
 
 class PreviewPlanChangeInput(_CommerceModel):
-    account_id: str
-    offer_key: str
+    account_id: NonEmptyString
+    offer_key: NonEmptyString
 
 
 class ConfirmPlanChangeInput(PreviewPlanChangeInput):
-    quote_fingerprint: str
-    operation_key: str
+    quote_fingerprint: NonEmptyString
+    operation_key: NonEmptyString
 
 
 class ConfirmPlanChangeResult(_CommerceModel):
@@ -176,10 +209,10 @@ class ConfirmPlanChangeResult(_CommerceModel):
 
 
 class PortalSessionInput(_CommerceModel):
-    account_id: str
+    account_id: NonEmptyString
     purpose: Literal["billing", "payment-method"] = "billing"
-    return_url: str
-    cancel_url: str | None = None
+    return_url: NonEmptyString
+    cancel_url: NonEmptyString | None = None
 
 
 class BillingDocumentInvoiceRef(_CommerceModel):
@@ -212,13 +245,13 @@ BillingDocumentRef = Annotated[
 
 class BillingDocumentInvoiceLocator(_CommerceModel):
     kind: Literal["provider_invoice"]
-    provider: str
-    provider_document_id: str
+    provider: NonEmptyString
+    provider_document_id: NonEmptyString
 
 
 class BillingDocumentLedgerLocator(_CommerceModel):
     kind: Literal["ledger_entry"]
-    ledger_entry_id: str
+    ledger_entry_id: NonEmptyString
 
 
 BillingDocumentLocator = Annotated[
@@ -250,6 +283,11 @@ class CreditSpendSource(_CommerceModel):
     priority: int
 
 
+class AccountCreditDisplay(_CommerceModel):
+    currency: NonEmptyString
+    units_per_major: Decimal = Field(gt=0)
+
+
 class AccountCreditOverview(_CommerceModel):
     ledger_balance: Decimal
     effective_spendable_balance: Decimal
@@ -258,7 +296,7 @@ class AccountCreditOverview(_CommerceModel):
     buckets: list[BucketBalance]
     buckets_by_key: dict[str, Decimal]
     spend_order: list[CreditSpendSource]
-    display: dict[str, str] | None = None
+    display: AccountCreditDisplay | None = None
 
 
 class AccountCommerceOverview(_CommerceModel):
@@ -279,24 +317,19 @@ class AccountCommerceOverview(_CommerceModel):
 
 
 class GetInvoiceLinkInput(_CommerceModel):
-    account_id: str
+    account_id: NonEmptyString
     document: BillingDocumentLocator
 
 
 class CommerceWebhookInput(_CommerceModel):
-    provider: str | None = None
+    provider: NonEmptyString | None = None
     raw_body: str
     headers: dict[str, str]
 
 
 class AutoRechargeInput(_CommerceModel):
-    account_id: str
-    return_url: str | None = None
+    account_id: NonEmptyString
+    return_url: NonEmptyString | None = None
 
 
 CommerceWebhookResult = WebhookResult
-
-
-class AutoRechargeProcessResultLike(_CommerceModel):
-    outcome: str
-    charge: SavedPaymentChargeResult | None = None

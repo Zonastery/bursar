@@ -2,7 +2,7 @@ from typing import Any, cast
 
 import pytest
 
-from bursar.shared.postgres_client import PostgresClient
+from bursar.shared.postgres_client import PostgresClient, create_pool
 
 
 class FakePool:
@@ -42,3 +42,46 @@ def test_owned_pool_is_closed_exactly_once() -> None:
     client.close()
 
     assert pool.close_calls == 1
+
+
+def test_owned_pool_is_created_lazily_and_closed_once(monkeypatch) -> None:
+    connection = object()
+    calls: list[tuple] = []
+
+    class UnderlyingPool:
+        def getconn(self):
+            return connection
+
+        def putconn(self, conn, key=None, close=False) -> None:
+            calls.append(("put", conn, key, close))
+
+        def closeall(self) -> None:
+            calls.append(("close",))
+
+    def create(*args, **kwargs):
+        calls.append(("create", args, kwargs))
+        return UnderlyingPool()
+
+    monkeypatch.setattr("bursar.shared.postgres_client.psycopg2.pool.ThreadedConnectionPool", create)
+    pool = create_pool("postgresql://database.test/bursar")
+
+    assert calls == []
+    assert pool.getconn() is connection
+    pool.putconn(connection)
+    pool.closeall()
+    pool.closeall()
+
+    assert [call[0] for call in calls] == ["create", "put", "close"]
+
+
+def test_closing_unused_owned_pool_does_not_open_a_connection(monkeypatch) -> None:
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("pool constructor was not expected")
+
+    monkeypatch.setattr(
+        "bursar.shared.postgres_client.psycopg2.pool.ThreadedConnectionPool",
+        unexpected,
+    )
+    pool = create_pool("postgresql://database.test/bursar")
+
+    pool.closeall()

@@ -43,89 +43,49 @@ export function decimalRecord(raw: unknown): Record<string, Decimal> | null {
   );
 }
 
-export function parseEntitlements(raw: unknown): Record<string, { value: unknown }> {
-  if (!raw || typeof raw !== "object") return {};
-  return Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>).map(([key, value]) => {
-      const record = value as Record<string, unknown> | null;
-      return [
-        key,
-        {
-          value:
-            record &&
-            typeof record === "object" &&
-            Object.prototype.hasOwnProperty.call(record, "value")
-              ? record.value
-              : value,
-        },
-      ];
-    }),
-  );
-}
-
-export function parseAdmissionOperations(
-  raw: unknown,
-): Record<string, { maxInFlight: number | null }> {
-  if (!raw || typeof raw !== "object") return {};
-  return Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>).map(([key, value]) => {
-      const operation = (value ?? {}) as Record<string, unknown>;
-      return [
-        key,
-        {
-          maxInFlight: operation.max_in_flight == null ? null : Number(operation.max_in_flight),
-        },
-      ];
-    }),
-  );
-}
-
-export function normalizeCatalogRevision(
-  row: Record<string, unknown>,
-  defaultVersion: number,
-): CatalogRevision {
-  const config = row.config as Record<string, unknown> | undefined;
+export function normalizeCatalogRevision(row: {
+  id: string;
+  config: Record<string, unknown>;
+  version: number;
+}): CatalogRevision {
   return {
-    id: String(row.id ?? ""),
-    config: config ?? {},
-    version: config == null ? defaultVersion : Number(row.version ?? defaultVersion),
+    id: row.id,
+    config: row.config,
+    version: row.version,
   };
 }
 
 export function mapLedgerEntry(row: LedgerEntryRow): LedgerEntry {
   return {
-    entryId: String(row.entry_id),
-    accountId: String(row.account_id),
-    actorUserId: row.actor_user_id == null ? null : String(row.actor_user_id),
+    entryId: row.entry_id,
+    accountId: row.account_id,
+    actorUserId: row.actor_user_id,
     amount: decimalValue(row.amount),
-    entryType: String(row.entry_type),
-    operation: String(row.operation),
-    referenceEntryId: row.reference_entry_id == null ? null : String(row.reference_entry_id),
-    idempotencyKey: row.idempotency_key == null ? null : String(row.idempotency_key),
-    metadata: row.metadata ?? null,
-    createdAt:
-      row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    entryType: row.entry_type,
+    operation: row.operation,
+    referenceEntryId: row.reference_entry_id,
+    idempotencyKey: row.idempotency_key,
+    metadata: row.metadata,
+    createdAt: row.created_at,
   };
 }
 
 export function mapUsageCharge(row: UsageChargeRow): UsageCharge {
-  const toIso = (value: string | Date): string =>
-    value instanceof Date ? value.toISOString() : String(value);
   return {
-    usageId: String(row.usage_id),
-    accountId: String(row.account_id),
-    operation: String(row.operation),
+    usageId: row.usage_id,
+    accountId: row.account_id,
+    operation: row.operation,
     requested: decimalValue(row.requested),
     charged: decimalValue(row.charged),
     allowanceRequested: decimalValue(row.allowance_requested),
     allowanceCovered: decimalValue(row.allowance_covered),
     billingDisposition: row.billing_disposition,
-    feature: row.feature == null ? null : String(row.feature),
-    model: row.model == null ? null : String(row.model),
-    region: row.region == null ? null : String(row.region),
-    eventAt: toIso(row.event_at),
-    idempotencyKey: String(row.idempotency_key),
-    metadata: row.metadata ?? null,
-    createdAt: toIso(row.created_at),
+    feature: row.feature,
+    model: row.model,
+    region: row.region,
+    eventAt: row.event_at,
+    idempotencyKey: row.idempotency_key,
+    metadata: row.metadata,
+    createdAt: row.created_at,
   };
 }

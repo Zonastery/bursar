@@ -1095,19 +1095,15 @@ class TestBillingServiceLifecycle:
         )
         assert cm.get_user_plan(USER_ID2).plan_id is not None
 
-    def test_unknown_event_type_ignored(self, pg_database_url: str, pg_store: object) -> None:
-        bs, _cm, sink = _make_components(pg_database_url, pg_store)
-        result = sink.ingest_billing_event(
-            BillingEvent.model_construct(
+    def test_unknown_event_type_is_rejected_at_the_public_contract(self) -> None:
+        with pytest.raises(ValueError, match="event_type"):
+            BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_unknown",
-                event_type="some.unknown.event",
+                event_type="some.unknown.event",  # type: ignore[arg-type]
                 occurred_at=_now(),
                 user_id=USER_ID,
             )
-        )
-        assert result.handled is False
-        assert result.error == "unhandled_event_type"
 
     def test_duplicate_event_skips_side_effects(self, pg_database_url: str, pg_store: object) -> None:
         bs, _cm, sink = _make_components(pg_database_url, pg_store)

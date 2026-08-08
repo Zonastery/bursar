@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import stripe as stripe_mod
 
 from bursar.bursar import BillingEventSink
+from bursar.errors import ProviderResponseError
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
 from bursar.providers.types import (
     ChangePlanLineItem,
@@ -22,7 +24,6 @@ from bursar.providers.types import (
     CreateCustomerResult,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
-    PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
     ProviderLogger,
@@ -30,12 +31,70 @@ from bursar.providers.types import (
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
+    SavedPaymentChargeStatus,
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
+
+if TYPE_CHECKING:
+    from stripe.params import CustomerCreateParams, SubscriptionScheduleUpdateParams, SubscriptionUpdateParams
+    from stripe.params.checkout import SessionCreateParams
+
+
+def _require_stripe_text(value: object, operation: str, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ProviderResponseError("stripe", operation, details={"field": field})
+    return value
+
+
+def _require_stripe_int(
+    value: object,
+    operation: str,
+    field: str,
+    *,
+    minimum: int = 0,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ProviderResponseError("stripe", operation, details={"field": field})
+    return value
+
+
+def _require_stripe_number(value: object, operation: str, field: str) -> float:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError as error:
+            raise ProviderResponseError("stripe", operation, cause=error, details={"field": field}) from error
+    else:
+        raise ProviderResponseError("stripe", operation, details={"field": field})
+    if not math.isfinite(parsed):
+        raise ProviderResponseError("stripe", operation, details={"field": field})
+    return parsed
+
+
+def _request_options(idempotency_key: str | None) -> stripe_mod.RequestOptions | None:
+    return {"idempotency_key": idempotency_key} if idempotency_key else None
+
+
+def _saved_payment_status(value: object) -> SavedPaymentChargeStatus:
+    mapping: dict[str, SavedPaymentChargeStatus] = {
+        "succeeded": "succeeded",
+        "processing": "processing",
+        "requires_action": "requires_customer_action",
+        "requires_payment_method": "requires_payment_method",
+        "requires_confirmation": "requires_confirmation",
+        "requires_capture": "requires_capture",
+        "canceled": "cancelled",
+    }
+    status = mapping.get(str(value))
+    if status is None:
+        raise ProviderResponseError("stripe", "charge_saved_payment_method", details={"field": "status"})
+    return status
 
 
 def _stripe_val(obj: Any, key: str, default: Any = None) -> Any:
@@ -75,7 +134,11 @@ def _schedule_phase_params(phase: Any) -> dict[str, Any]:
     for item in _stripe_val(phase, "items", []) or []:
         price_id = _expandable_id(_stripe_val(item, "price"))
         if not price_id:
-            raise ValueError("Stripe subscription schedule item has no price")
+            raise ProviderResponseError(
+                "stripe",
+                "change_plan",
+                details={"field": "schedule.phases.items.price"},
+            )
         mapped: dict[str, Any] = {"price": price_id}
         quantity = _stripe_val(item, "quantity")
         if quantity is not None:
@@ -85,11 +148,22 @@ def _schedule_phase_params(phase: Any) -> dict[str, Any]:
             mapped["metadata"] = metadata
         tax_rates = _stripe_val(item, "tax_rates")
         if tax_rates:
-            mapped["tax_rates"] = [_expandable_id(rate) for rate in tax_rates]
+            mapped["tax_rates"] = [
+                _require_stripe_text(
+                    _expandable_id(rate),
+                    "change_plan",
+                    "schedule.phases.items.tax_rates",
+                )
+                for rate in tax_rates
+            ]
         items.append(mapped)
 
     if not items:
-        raise ValueError("Stripe subscription schedule phase has no billing items")
+        raise ProviderResponseError(
+            "stripe",
+            "change_plan",
+            details={"field": "schedule.phases.items"},
+        )
 
     result: dict[str, Any] = {
         "items": items,
@@ -98,7 +172,14 @@ def _schedule_phase_params(phase: Any) -> dict[str, Any]:
     }
     automatic_tax = _stripe_val(phase, "automatic_tax")
     if automatic_tax:
-        result["automatic_tax"] = {"enabled": bool(_stripe_val(automatic_tax, "enabled", False))}
+        enabled = _stripe_val(automatic_tax, "enabled")
+        if type(enabled) is not bool:
+            raise ProviderResponseError(
+                "stripe",
+                "change_plan",
+                details={"field": "schedule.phases.automatic_tax.enabled"},
+            )
+        result["automatic_tax"] = {"enabled": enabled}
     for field in (
         "billing_cycle_anchor",
         "collection_method",
@@ -121,7 +202,7 @@ def _stripe_proration_behavior(mode: str) -> str:
     return "none" if mode == "do_not_bill" else "always_invoice"
 
 
-class StripeProvider(PaymentProvider):
+class StripeProvider:
     provider = "stripe"
 
     def __init__(
@@ -129,14 +210,14 @@ class StripeProvider(PaymentProvider):
         *,
         event_sink: BillingEventSink,
         webhook_secret: str,
-        get_client: Callable[[], Any] | None = None,
+        get_client: Callable[[], stripe_mod.StripeClient],
         logger: ProviderLogger | None = None,
     ) -> None:
         if not webhook_secret.strip():
             raise ValueError("webhook_secret must not be empty")
         self._sink = event_sink
         self._webhook_secret = webhook_secret
-        self._get_stripe = get_client or (lambda: stripe_mod)
+        self._get_stripe = get_client
         self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
@@ -150,10 +231,11 @@ class StripeProvider(PaymentProvider):
             if params.email:
                 customer_kwargs["email"] = params.email
             customer_idempotency_key = _scoped_idempotency_key(params.idempotency_key, "customer")
-            if customer_idempotency_key:
-                customer_kwargs["idempotency_key"] = customer_idempotency_key
-            customer = await stripe.Customer.create_async(**customer_kwargs)
-            customer_id = customer["id"]
+            customer = await stripe.v1.customers.create_async(
+                cast("CustomerCreateParams", customer_kwargs),
+                _request_options(customer_idempotency_key),
+            )
+            customer_id = _require_stripe_text(customer.id, "create_checkout_session", "customer.id")
 
         quantity = params.quantity if params.quantity is not None else 1
         common: dict[str, Any] = {
@@ -165,74 +247,64 @@ class StripeProvider(PaymentProvider):
             "automatic_tax": {"enabled": True},
             "metadata": params.metadata or {},
         }
-        if params.idempotency_key:
-            common["idempotency_key"] = params.idempotency_key
-
         if params.type == "subscription":
-            session = await stripe.checkout.Session.create_async(
+            common.update(
                 mode="subscription",
                 subscription_data={
                     "metadata": {"userId": params.user_id, **(params.metadata or {})},
                 },
-                **common,
             )
         else:
-            session = await stripe.checkout.Session.create_async(
+            common.update(
                 mode="payment",
                 payment_intent_data={
                     "metadata": {"userId": params.user_id, **(params.metadata or {})},
                 },
-                **common,
             )
-
-        url = _stripe_val(session, "url")
-        if not url:
-            raise ValueError("Stripe checkout session returned no URL")
-        provider_session_id = _stripe_val(session, "id")
-        if not provider_session_id:
-            raise ValueError("Stripe checkout session returned no ID")
+        session = await stripe.v1.checkout.sessions.create_async(
+            cast("SessionCreateParams", common),
+            _request_options(params.idempotency_key),
+        )
         return CheckoutSessionResult(
-            url=str(url),
-            customer_id=str(customer_id),
-            provider_session_id=str(provider_session_id),
+            url=_require_stripe_text(session.url, "create_checkout_session", "session.url"),
+            customer_id=_require_stripe_text(customer_id, "create_checkout_session", "customer_id"),
+            provider_session_id=_require_stripe_text(session.id, "create_checkout_session", "session.id"),
         )
 
     async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
         stripe = self._get_stripe()
-        session = await stripe.billing_portal.Session.create_async(
-            customer=params.customer_id,
-            return_url=params.return_url,
+        session = await stripe.v1.billing_portal.sessions.create_async(
+            {"customer": params.customer_id, "return_url": params.return_url}
         )
-        url = _stripe_val(session, "url")
-        if not url:
-            raise ValueError("Stripe portal session returned no URL")
-        return ProviderUrlResult(url=str(url))
+        return ProviderUrlResult(url=_require_stripe_text(session.url, "create_customer_portal_session", "session.url"))
 
     async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
         stripe = self._get_stripe()
-        session = await stripe.billing_portal.Session.create_async(
-            customer=params.customer_id,
-            return_url=params.return_url,
-            flow_data={"type": "payment_method_update"},
+        session = await stripe.v1.billing_portal.sessions.create_async(
+            {
+                "customer": params.customer_id,
+                "return_url": params.return_url,
+                "flow_data": {"type": "payment_method_update"},
+            }
         )
-        url = _stripe_val(session, "url")
-        if not url:
-            raise ValueError("Stripe portal session returned no URL")
-        return ProviderUrlResult(url=str(url))
+        return ProviderUrlResult(
+            url=_require_stripe_text(session.url, "create_update_payment_method_session", "session.url")
+        )
 
     async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
         stripe = self._get_stripe()
-        session = await stripe.checkout.Session.create_async(
-            customer=params.customer_id,
-            mode="setup",
-            success_url=params.return_url,
-            cancel_url=params.cancel_url or params.return_url,
-            payment_method_types=["card"],
+        session = await stripe.v1.checkout.sessions.create_async(
+            {
+                "customer": params.customer_id,
+                "mode": "setup",
+                "success_url": params.return_url,
+                "cancel_url": params.cancel_url or params.return_url,
+                "payment_method_types": ["card"],
+            }
         )
-        url = _stripe_val(session, "url")
-        if not url:
-            raise ValueError("Stripe setup session returned no URL")
-        return ProviderUrlResult(url=str(url))
+        return ProviderUrlResult(
+            url=_require_stripe_text(session.url, "create_payment_method_setup_session", "session.url")
+        )
 
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         stripe = self._get_stripe()
@@ -247,7 +319,7 @@ class StripeProvider(PaymentProvider):
             )
 
         try:
-            event = stripe.Webhook.construct_event(
+            event = stripe.construct_event(
                 req.raw_body,
                 signature,
                 self._webhook_secret,
@@ -292,7 +364,7 @@ class StripeProvider(PaymentProvider):
             user_id,
             metadata,
             self._sink,
-            self._get_stripe(),
+            stripe,
             self._logger,
             getattr(event, "created", None),
         )
@@ -306,22 +378,18 @@ class StripeProvider(PaymentProvider):
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         stripe = self._get_stripe()
-        kwargs: dict[str, Any] = {"cancel_at_period_end": True}
-        if idempotency_key:
-            kwargs["idempotency_key"] = idempotency_key
-        await stripe.Subscription.modify_async(
+        await stripe.v1.subscriptions.update_async(
             subscription_id,
-            **kwargs,
+            {"cancel_at_period_end": True},
+            _request_options(idempotency_key),
         )
 
     async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         stripe = self._get_stripe()
-        kwargs: dict[str, Any] = {"cancel_at_period_end": False}
-        if idempotency_key:
-            kwargs["idempotency_key"] = idempotency_key
-        await stripe.Subscription.modify_async(
+        await stripe.v1.subscriptions.update_async(
             subscription_id,
-            **kwargs,
+            {"cancel_at_period_end": False},
+            _request_options(idempotency_key),
         )
 
     async def cancel_scheduled_plan_change(
@@ -333,14 +401,23 @@ class StripeProvider(PaymentProvider):
         if not provider_operation_id:
             raise ValueError("Stripe scheduled change has no schedule ID")
         stripe = self._get_stripe()
-        kwargs: dict[str, Any] = {}
-        if idempotency_key:
-            kwargs["idempotency_key"] = idempotency_key
-        await stripe.SubscriptionSchedule.release_async(provider_operation_id, **kwargs)
+        await stripe.v1.subscription_schedules.release_async(
+            provider_operation_id,
+            {},
+            _request_options(idempotency_key),
+        )
 
     async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
         stripe = self._get_stripe()
-        session = await stripe.checkout.Session.retrieve_async(provider_session_id, expand=["payment_intent"])
+        try:
+            session = await stripe.v1.checkout.sessions.retrieve_async(
+                provider_session_id,
+                {"expand": ["payment_intent"]},
+            )
+        except stripe_mod.InvalidRequestError as error:
+            if error.code == "resource_missing":
+                return None
+            raise
         if _stripe_val(session, "status") == "expired":
             return CheckoutSessionStatus(payment_status="cancelled")
         payment_status = _stripe_val(session, "payment_status")
@@ -360,120 +437,163 @@ class StripeProvider(PaymentProvider):
             "requires_capture": "requires_capture",
             "canceled": "cancelled",
         }
-        mapped_status: CheckoutPaymentStatus = (
-            statuses.get(intent_status, "processing") if intent_status else "processing"
-        )
+        mapped_status = statuses.get(intent_status) if intent_status else None
         return CheckoutSessionStatus(payment_status=mapped_status)
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         stripe = self._get_stripe()
         customer, methods = await asyncio.gather(
-            stripe.Customer.retrieve_async(customer_id),
-            stripe.PaymentMethod.list_async(customer=customer_id, type="card"),
+            stripe.v1.customers.retrieve_async(customer_id),
+            stripe.v1.customers.payment_methods.list_async(customer_id, {"type": "card"}),
         )
         if bool(_stripe_val(customer, "deleted", False)):
             return []
         default = _stripe_val(_stripe_val(customer, "invoice_settings", {}), "default_payment_method")
         default_id = _stripe_val(default, "id", default) if default else None
         result: list[PaymentMethodInfo] = []
-        for pm in _stripe_val(methods, "data", []):
-            card = _stripe_val(pm, "card", {}) or {}
+        for payment_method in methods.data:
+            card = payment_method.card
+            if card is None:
+                raise ProviderResponseError("stripe", "list_payment_methods", details={"field": "card"})
+            last4 = _require_stripe_text(card.last4, "list_payment_methods", "card.last4")
+            if len(last4) != 4 or not last4.isascii() or not last4.isdigit():
+                raise ProviderResponseError(
+                    "stripe",
+                    "list_payment_methods",
+                    details={"field": "card.last4"},
+                )
+            payment_method_id = _require_stripe_text(payment_method.id, "list_payment_methods", "id")
             result.append(
                 PaymentMethodInfo(
-                    id=pm["id"],
-                    last4=_stripe_val(card, "last4", ""),
-                    brand=_stripe_val(card, "brand", "unknown"),
-                    expiry_month=_stripe_val(card, "exp_month", 0),
-                    expiry_year=_stripe_val(card, "exp_year", 0),
-                    is_default=pm["id"] == default_id,
+                    id=payment_method_id,
+                    last4=last4,
+                    brand=_require_stripe_text(card.brand, "list_payment_methods", "card.brand"),
+                    expiry_month=_require_stripe_int(
+                        card.exp_month,
+                        "list_payment_methods",
+                        "card.exp_month",
+                        minimum=1,
+                    ),
+                    expiry_year=_require_stripe_int(
+                        card.exp_year,
+                        "list_payment_methods",
+                        "card.exp_year",
+                        minimum=1,
+                    ),
+                    is_default=payment_method_id == default_id,
                 )
             )
         return deduplicate_payment_methods(result)
 
     async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
-        price = await self._get_stripe().Price.retrieve_async(params.product_id)
-        unit_amount = _stripe_val(price, "unit_amount")
+        price = await self._get_stripe().v1.prices.retrieve_async(params.product_id)
+        unit_amount = price.unit_amount
         if unit_amount is None:
-            raise ValueError("Stripe top-up price has no fixed amount")
+            raise ProviderResponseError(
+                "stripe",
+                "preview_saved_payment_charge",
+                details={"field": "unit_amount"},
+            )
         return SavedPaymentChargeQuote(
-            amount_minor=int(unit_amount) * params.quantity,
-            currency=str(_stripe_val(price, "currency", "USD")).upper(),
+            amount_minor=_require_stripe_int(
+                unit_amount * params.quantity,
+                "preview_saved_payment_charge",
+                "amount",
+            ),
+            currency=_require_stripe_text(
+                price.currency,
+                "preview_saved_payment_charge",
+                "currency",
+            ).upper(),
         )
 
     async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
         stripe = self._get_stripe()
-        price = await stripe.Price.retrieve_async(params.product_id)
-        unit_amount = _stripe_val(price, "unit_amount")
+        price = await stripe.v1.prices.retrieve_async(params.product_id)
+        unit_amount = price.unit_amount
         if unit_amount is None:
-            raise ValueError("Stripe top-up price has no fixed amount")
-        intent = await stripe.PaymentIntent.create_async(
-            amount=int(unit_amount) * params.quantity,
-            currency=_stripe_val(price, "currency"),
-            customer=params.customer_id,
-            payment_method=params.payment_method_id,
-            confirm=True,
-            off_session=True,
-            metadata={**(params.metadata or {}), "price_id": params.product_id},
-            idempotency_key=params.idempotency_key,
-        )
-        raw_status = _stripe_val(intent, "status", "processing")
-        status = {
-            "succeeded": "succeeded",
-            "processing": "processing",
-            "requires_action": "requires_customer_action",
-            "requires_payment_method": "requires_payment_method",
-        }.get(raw_status, "failed")
-        return SavedPaymentChargeResult.model_validate(
+            raise ProviderResponseError(
+                "stripe",
+                "charge_saved_payment_method",
+                details={"field": "unit_amount"},
+            )
+        intent = await stripe.v1.payment_intents.create_async(
             {
-                "provider_payment_id": _stripe_val(intent, "id"),
-                "status": status,
-                "amount_minor": _stripe_val(intent, "amount"),
-                "currency": _stripe_val(intent, "currency"),
-            }
+                "amount": unit_amount * params.quantity,
+                "currency": price.currency,
+                "customer": params.customer_id,
+                "payment_method": params.payment_method_id,
+                "confirm": True,
+                "off_session": True,
+                "metadata": {**params.metadata, "price_id": params.product_id},
+            },
+            _request_options(params.idempotency_key),
+        )
+        return SavedPaymentChargeResult(
+            provider_payment_id=_require_stripe_text(
+                intent.id,
+                "charge_saved_payment_method",
+                "id",
+            ),
+            status=_saved_payment_status(intent.status),
+            amount_minor=_require_stripe_int(
+                intent.amount,
+                "charge_saved_payment_method",
+                "amount",
+            ),
+            currency=_require_stripe_text(
+                intent.currency,
+                "charge_saved_payment_method",
+                "currency",
+            ),
         )
 
     async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
         stripe = self._get_stripe()
-        customer = await stripe.Customer.create_async(
-            email=params.email,
-            name=params.name,
-            metadata=params.metadata or {},
+        customer = await stripe.v1.customers.create_async(
+            {"email": params.email, "name": params.name, "metadata": params.metadata}
         )
-        return CreateCustomerResult(customer_id=str(customer["id"]))
+        return CreateCustomerResult(customer_id=_require_stripe_text(customer.id, "create_customer", "customer.id"))
 
     async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         stripe = self._get_stripe()
-        invoice = await stripe.Invoice.retrieve_async(provider_payment_id)
-        url = _stripe_val(invoice, "hosted_invoice_url")
-        if not url:
+        invoice = await stripe.v1.invoices.retrieve_async(provider_payment_id)
+        if invoice.hosted_invoice_url is None:
             return None
-        return ProviderUrlResult(url=str(url))
+        return ProviderUrlResult(
+            url=_require_stripe_text(invoice.hosted_invoice_url, "get_invoice_url", "hosted_invoice_url")
+        )
 
     async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult:
         stripe = self._get_stripe()
-        subscription = await stripe.Subscription.retrieve_async(params.provider_subscription_id)
-        items = _stripe_val(_stripe_val(subscription, "items", {}), "data", [])
-        item = items[0] if items else None
-        if not item:
-            raise ValueError("Stripe subscription has no billing item")
-        item_id = _stripe_val(item, "id")
+        subscription = await stripe.v1.subscriptions.retrieve_async(params.provider_subscription_id)
+        item = subscription.items.data[0] if subscription.items.data else None
+        if item is None:
+            raise ProviderResponseError(
+                "stripe",
+                "change_plan",
+                details={"field": "subscription.items"},
+            )
+        item_id = _require_stripe_text(item.id, "change_plan", "subscription.items.id")
         if params.effective_at == "next_billing_date":
-            schedule_api: Any = stripe.SubscriptionSchedule
-            create_kwargs: dict[str, Any] = {"from_subscription": params.provider_subscription_id}
             create_key = _scoped_idempotency_key(params.idempotency_key, "schedule-create")
-            if create_key:
-                create_kwargs["idempotency_key"] = create_key
-            schedule = await schedule_api.create_async(**create_kwargs)
-            phases = _stripe_val(schedule, "phases", [])
-            current_phase = phases[0] if phases else None
+            schedule = await stripe.v1.subscription_schedules.create_async(
+                {"from_subscription": params.provider_subscription_id},
+                _request_options(create_key),
+            )
+            current_phase = schedule.phases[0] if schedule.phases else None
             if current_phase is None:
-                raise ValueError("Stripe subscription schedule has no current phase")
+                raise ProviderResponseError(
+                    "stripe",
+                    "change_plan",
+                    details={"field": "schedule.phases"},
+                )
             update_kwargs: dict[str, Any] = {
                 "phases": [
                     _schedule_phase_params(current_phase),
                     {
                         "items": [{"price": params.product_id, "quantity": params.quantity}],
-                        "start_date": _stripe_val(current_phase, "end_date"),
+                        "start_date": current_phase.end_date,
                         "proration_behavior": "none",
                         **({"metadata": params.metadata} if params.metadata else {}),
                     },
@@ -481,13 +601,13 @@ class StripeProvider(PaymentProvider):
                 "proration_behavior": "none",
             }
             update_key = _scoped_idempotency_key(params.idempotency_key, "schedule-update")
-            if update_key:
-                update_kwargs["idempotency_key"] = update_key
-            await schedule_api.modify_async(
-                _stripe_val(schedule, "id"),
-                **update_kwargs,
+            schedule_id = _require_stripe_text(schedule.id, "change_plan", "schedule.id")
+            await stripe.v1.subscription_schedules.update_async(
+                schedule_id,
+                cast("SubscriptionScheduleUpdateParams", update_kwargs),
+                _request_options(update_key),
             )
-            return ChangePlanResult(provider_operation_id=str(_stripe_val(schedule, "id")))
+            return ChangePlanResult(provider_operation_id=schedule_id)
         kwargs: dict[str, Any] = {
             "items": [{"id": item_id, "price": params.product_id, "quantity": params.quantity}],
             "proration_behavior": _stripe_proration_behavior(params.proration_billing_mode),
@@ -498,63 +618,150 @@ class StripeProvider(PaymentProvider):
         if params.metadata:
             kwargs["metadata"] = params.metadata
         update_key = _scoped_idempotency_key(params.idempotency_key, "subscription-update")
-        if update_key:
-            kwargs["idempotency_key"] = update_key
-        updated = await stripe.Subscription.modify_async(params.provider_subscription_id, **kwargs)
-        latest_invoice = _stripe_val(updated, "latest_invoice")
-        return ChangePlanResult(provider_operation_id=str(latest_invoice) if latest_invoice else None)
+        updated = await stripe.v1.subscriptions.update_async(
+            params.provider_subscription_id,
+            cast("SubscriptionUpdateParams", kwargs),
+            _request_options(update_key),
+        )
+        return ChangePlanResult(provider_operation_id=_expandable_id(updated.latest_invoice))
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
         stripe = self._get_stripe()
-        subscription = await stripe.Subscription.retrieve_async(params.provider_subscription_id)
-        items = _stripe_val(_stripe_val(subscription, "items", {}), "data", [])
-        item = items[0] if items else None
-        if not item:
-            raise ValueError("Stripe subscription has no billing item")
-        customer = _stripe_val(subscription, "customer")
-        invoice = await stripe.Invoice.create_preview_async(
-            customer=customer,
-            subscription=params.provider_subscription_id,
-            subscription_details={
-                "items": [{"id": _stripe_val(item, "id"), "price": params.product_id, "quantity": params.quantity}],
-                "proration_behavior": (
-                    "none"
-                    if params.effective_at == "next_billing_date"
-                    else _stripe_proration_behavior(params.proration_billing_mode)
-                ),
-            },
+        subscription = await stripe.v1.subscriptions.retrieve_async(params.provider_subscription_id)
+        item = subscription.items.data[0] if subscription.items.data else None
+        if item is None:
+            raise ProviderResponseError(
+                "stripe",
+                "preview_change_plan",
+                details={"field": "subscription.items"},
+            )
+        item_id = _require_stripe_text(item.id, "preview_change_plan", "subscription.items.id")
+        customer_id = _require_stripe_text(
+            _expandable_id(subscription.customer),
+            "preview_change_plan",
+            "subscription.customer",
         )
-        total = int(_stripe_val(invoice, "total", 0) or 0)
-        amount_due = int(_stripe_val(invoice, "amount_due", 0) or 0)
-        currency = str(_stripe_val(invoice, "currency", "USD"))
-        invoice_lines = _stripe_val(_stripe_val(invoice, "lines", {}), "data", []) or []
-        price = await stripe.Price.retrieve_async(params.product_id)
-        current_period_end = int(_stripe_val(item, "current_period_end", 0) or 0)
+        invoice = await stripe.v1.invoices.create_preview_async(
+            {
+                "customer": customer_id,
+                "subscription": params.provider_subscription_id,
+                "subscription_details": {
+                    "items": [{"id": item_id, "price": params.product_id, "quantity": params.quantity}],
+                    "proration_behavior": (
+                        "none"
+                        if params.effective_at == "next_billing_date"
+                        else _stripe_proration_behavior(params.proration_billing_mode)
+                    ),
+                },
+            }
+        )
+        total = _require_stripe_int(invoice.total, "preview_change_plan", "invoice.total")
+        amount_due = _require_stripe_int(invoice.amount_due, "preview_change_plan", "invoice.amount_due")
+        currency = _require_stripe_text(invoice.currency, "preview_change_plan", "invoice.currency")
+        price = await stripe.v1.prices.retrieve_async(params.product_id)
+        current_period_end = _require_stripe_int(
+            item.current_period_end,
+            "preview_change_plan",
+            "subscription.items.current_period_end",
+            minimum=1,
+        )
         next_billing_date = datetime.fromtimestamp(current_period_end, tz=UTC).isoformat()
+        line_items: list[ChangePlanLineItem] = []
+        for line in invoice.lines.data:
+            parent = line.parent
+            if parent is None or parent.subscription_item_details is None:
+                continue
+            pricing = line.pricing
+            price_details = pricing.price_details if pricing is not None else None
+            if pricing is None or price_details is None:
+                raise ProviderResponseError(
+                    "stripe",
+                    "preview_change_plan",
+                    details={"field": "invoice.lines.pricing.price_details"},
+                )
+            quantity = (
+                1
+                if line.quantity is None
+                else _require_stripe_int(
+                    line.quantity,
+                    "preview_change_plan",
+                    "invoice.lines.quantity",
+                    minimum=1,
+                )
+            )
+            unit_price = _require_stripe_number(
+                pricing.unit_amount_decimal,
+                "preview_change_plan",
+                "invoice.lines.pricing.unit_amount_decimal",
+            )
+            subtotal = _require_stripe_int(
+                line.subtotal,
+                "preview_change_plan",
+                "invoice.lines.subtotal",
+                minimum=-(2**63),
+            )
+            expected_subtotal = unit_price * quantity
+            taxes = line.taxes or []
+            line_items.append(
+                ChangePlanLineItem(
+                    product_id=_require_stripe_text(
+                        _expandable_id(price_details.price),
+                        "preview_change_plan",
+                        "invoice.lines.pricing.price_details.price",
+                    ),
+                    name=_require_stripe_text(
+                        line.description,
+                        "preview_change_plan",
+                        "invoice.lines.description",
+                    ),
+                    unit_price=unit_price,
+                    quantity=quantity,
+                    proration_factor=(1 if expected_subtotal == 0 else subtotal / expected_subtotal),
+                    currency=_require_stripe_text(
+                        line.currency,
+                        "preview_change_plan",
+                        "invoice.lines.currency",
+                    ),
+                    tax=sum(
+                        _require_stripe_int(
+                            tax.amount,
+                            "preview_change_plan",
+                            "invoice.lines.taxes.amount",
+                        )
+                        for tax in taxes
+                    ),
+                    subtotal=subtotal,
+                )
+            )
+        invoice_created = _require_stripe_int(
+            invoice.created,
+            "preview_change_plan",
+            "invoice.created",
+            minimum=1,
+        )
         return ChangePlanPreview(
             total_amount=total,
             settlement_amount=amount_due,
             currency=currency,
-            line_items=[
-                ChangePlanLineItem(
-                    product_id=params.product_id,
-                    name=str(_stripe_val(line, "description", "Subscription change")),
-                    unit_price=int(_stripe_val(line, "amount", 0) or 0),
-                    quantity=int(_stripe_val(line, "quantity", 1) or 1),
-                    proration_factor=1,
-                    currency=str(_stripe_val(line, "currency", currency)),
-                    tax=sum(int(_stripe_val(tax, "amount", 0) or 0) for tax in (_stripe_val(line, "taxes", []) or [])),
-                    subtotal=int(_stripe_val(line, "amount", 0) or 0),
-                )
-                for line in invoice_lines
-            ],
+            line_items=line_items,
             effective_at=(
-                next_billing_date if params.effective_at == "next_billing_date" else datetime.now(UTC).isoformat()
+                next_billing_date
+                if params.effective_at == "next_billing_date"
+                else datetime.fromtimestamp(invoice_created, tz=UTC).isoformat()
             ),
-            recurring_amount=int(_stripe_val(price, "unit_amount", 0) or 0),
-            recurring_currency=str(_stripe_val(price, "currency", currency)),
+            recurring_amount=price.unit_amount,
+            recurring_currency=_require_stripe_text(
+                price.currency,
+                "preview_change_plan",
+                "price.currency",
+            ),
             next_billing_date=next_billing_date,
             tax_amount=sum(
-                int(_stripe_val(tax, "amount", 0) or 0) for tax in (_stripe_val(invoice, "total_taxes", []) or [])
+                _require_stripe_int(
+                    tax.amount,
+                    "preview_change_plan",
+                    "invoice.total_taxes.amount",
+                )
+                for tax in (invoice.total_taxes or [])
             ),
         )

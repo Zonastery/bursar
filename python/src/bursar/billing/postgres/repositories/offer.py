@@ -6,14 +6,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from bursar.billing.postgres.repositories.schemas import BillingOfferRow
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import unwrap_jsonb, validate_non_empty
-from bursar.credits.postgres.repositories.schemas import BillingOfferRow
 from bursar.errors import StoreError
 
 
 class _CatalogOfferRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     id: UUID
     catalog_revision_id: UUID
@@ -100,7 +100,21 @@ class BillingOfferRepository:
         raw_offer = unwrap_jsonb(rows)
         if raw_offer is None:
             return None
-        offer = _validate_row(_CatalogOfferRow, raw_offer, context)
+        offer = _validate_row(
+            _CatalogOfferRow,
+            {
+                "id": raw_offer.get("id"),
+                "catalog_revision_id": raw_offer.get("catalog_revision_id"),
+                "offer_key": raw_offer.get("offer_key"),
+                "plan_key": raw_offer.get("plan_key"),
+                "billing_unit": raw_offer.get("billing_unit"),
+                "billing_count": raw_offer.get("billing_count"),
+                "cycle_grant_amount": raw_offer.get("cycle_grant_amount"),
+                "cycle_grant_bucket_key": raw_offer.get("cycle_grant_bucket_key"),
+                "cycle_grant_renewal": raw_offer.get("cycle_grant_renewal"),
+            },
+            context,
+        )
 
         context_rows = self._execute(
             "SELECT * FROM bursar.get_catalog_offer_context(%s::uuid, %s::uuid)",

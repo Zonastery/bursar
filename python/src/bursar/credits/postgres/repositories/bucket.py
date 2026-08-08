@@ -3,8 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import require_row, validate_non_empty
-from bursar.credits.postgres.repositories.schemas import BucketEnvelopeRow, SweepRow
+from bursar.credits.postgres.repositories._utils import (
+    require_mapping_row,
+    validate_non_empty,
+    validate_row,
+)
+from bursar.credits.postgres.repositories.schemas import BucketBalanceRow, BucketEnvelopeRow, SweepRow
 
 
 class BucketRepository:
@@ -18,7 +22,7 @@ class BucketRepository:
     def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
-    def get_bucket_balances(self, user_id: str) -> BucketEnvelopeRow | None:
+    def get_bucket_balances(self, user_id: str) -> BucketEnvelopeRow:
         """Get all credit bucket balances for a user.
 
         Args:
@@ -29,19 +33,19 @@ class BucketRepository:
         """
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("get_credit_bucket_balances", [user_id])
-        if not rows:
-            return None
-        buckets = [dict(row) for row in rows if isinstance(row, dict)]
+        buckets = [validate_row(BucketBalanceRow, row, "BucketRepository.get_bucket_balances") for row in rows or []]
         total = sum(
-            (Decimal(str(row.get("balance", 0) or 0)) for row in buckets),
+            (Decimal(str(row.balance)) for row in buckets),
             Decimal(0),
         )
-        return BucketEnvelopeRow.model_validate(
+        return validate_row(
+            BucketEnvelopeRow,
             {
                 "user_id": user_id,
                 "buckets": buckets,
                 "total_balance": total,
-            }
+            },
+            "BucketRepository.get_bucket_balances",
         )
 
     def sweep_expired_credits(
@@ -54,12 +58,10 @@ class BucketRepository:
         if limit < 1:
             raise ValueError("limit must be positive")
         rows = self._callproc("sweep_expired_lots", [limit, user_id, dry_run])
-        row = require_row(rows, "BucketRepository.sweep_expired_credits")
-        if isinstance(row, int):
-            return SweepRow(expired_count=row)
-        return SweepRow(
-            expired_count=int(row.get("expired_count", 0)),
-            expired_amount=row.get("expired_amount", "0"),
-            dry_run=bool(row.get("dry_run", dry_run)),
-            expired_by_bucket=row.get("expired_by_bucket"),
+        row = require_mapping_row(rows, "BucketRepository.sweep_expired_credits")
+        return validate_row(
+            SweepRow,
+            row,
+            "BucketRepository.sweep_expired_credits",
+            indeterminate=not dry_run,
         )

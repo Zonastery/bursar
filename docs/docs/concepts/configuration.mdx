@@ -1,5 +1,6 @@
 ---
 title: Canonical configuration
+sidebar_label: Configuration
 description: The strict, versioned BursarConfig document — operations, rate cards, credits, plans, and validation — shared by both SDKs.
 ---
 
@@ -7,20 +8,20 @@ description: The strict, versioned BursarConfig document — operations, rate ca
 
 `BursarConfig` is one strict versioned document. Pydantic defines the Python
 contract, generates the published JSON Schema, and AJV validates the same
-contract in JavaScript. Unknown fields and legacy shapes are rejected, and the
+contract in TypeScript. Unknown fields and legacy shapes are rejected, and the
 same document bills identically in both SDKs.
 
 The top-level sections are organized by responsibility:
 
-| Section | Purpose |
-| --- | --- |
-| `pricing` | Usage operations, measures, dimensions, and reusable rate cards |
-| `credits` | Buckets, spending policies, grants, and display conversion |
-| `entitlements` | Typed product features |
-| `admission` | Reusable concurrency policies |
-| `plans` | Product access, allowances, quotas, and policy references |
-| `commerce` | Providers, offers, and auto-recharge guardrails |
-| `catalog` | Catalog-wide settings such as the default signup plan |
+| Section        | Purpose                                                         |
+| -------------- | --------------------------------------------------------------- |
+| `pricing`      | Usage operations, measures, dimensions, and reusable rate cards |
+| `credits`      | Buckets, spending policies, grants, and display conversion      |
+| `entitlements` | Typed product features                                          |
+| `admission`    | Reusable concurrency policies                                   |
+| `plans`        | Product access, allowances, quotas, and policy references       |
+| `commerce`     | Providers, offers, and auto-recharge guardrails                 |
+| `catalog`      | Catalog-wide settings such as the default signup plan           |
 
 Only `version` and `credits` are required. Fixed v1 accounting defaults to
 `credit`, six decimal places, and half-up rounding, so authors do not need to
@@ -70,9 +71,24 @@ pricing:
               charge:
                 type: sum
                 components:
-                  - { type: per_unit, measure: input_tokens, rate: "0.0025", unit_size: "1000000" }
-                  - { type: per_unit, measure: output_tokens, rate: "0.0100", unit_size: "1000000" }
-                  - { type: per_unit, measure: cache_read_tokens, rate: "0.00125", unit_size: "1000000" }
+                  - {
+                      type: per_unit,
+                      measure: input_tokens,
+                      rate: "0.0025",
+                      unit_size: "1000000",
+                    }
+                  - {
+                      type: per_unit,
+                      measure: output_tokens,
+                      rate: "0.0100",
+                      unit_size: "1000000",
+                    }
+                  - {
+                      type: per_unit,
+                      measure: cache_read_tokens,
+                      rate: "0.00125",
+                      unit_size: "1000000",
+                    }
           unmatched:
             action: charge
             charge:
@@ -94,7 +110,8 @@ credits:
 entitlements:
   features:
     voice_mode: { type: boolean, default: false }
-    max_context: { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
+    max_context:
+      { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
 
 admission:
   policies:
@@ -194,11 +211,11 @@ integrations.
 
 Publishing writes an immutable catalog revision; activating selects it.
 
-| Step | API | Effect |
-| --- | --- | --- |
-| Publish a draft | `bursar.catalog.publish_draft(config, label)` / `publishDraft` | Validates the document and inserts a `published` revision; the live catalog does not change |
-| Activate | `bursar.catalog.activate(version)` / `activate(version)` | Marks one revision `active`; exactly one active revision exists per tenant |
-| Publish and activate | `bursar.catalog.publish_and_activate(config, label)` / `publishAndActivate` | One-shot: validate, insert, and activate |
+| Step                 | API                                                                         | Effect                                                                                      |
+| -------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Publish a draft      | `bursar.catalog.publish_draft(config, label)` / `publishDraft`              | Validates the document and inserts a `published` revision; the live catalog does not change |
+| Activate             | `bursar.catalog.activate(version)` / `activate(version)`                    | Marks one revision `active`; exactly one active revision exists per tenant                  |
+| Publish and activate | `bursar.catalog.publish_and_activate(config, label)` / `publishAndActivate` | One-shot: validate, insert, and activate                                                    |
 
 Revisions are immutable and identified by a SHA-256 digest of the canonical
 document: publishing a document whose digest matches an existing revision

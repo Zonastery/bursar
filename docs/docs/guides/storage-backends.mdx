@@ -1,12 +1,13 @@
 ---
-title: Storage backends
+title: Configure storage backends
+sidebar_label: Storage backends
 description: PostgreSQL is the production credit store; optional ClickHouse and S3 adapters route high-cardinality data through a transactional outbox.
 ---
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
 
-# Storage backends
+# Configure storage backends
 
 ## Prerequisites
 
@@ -29,16 +30,16 @@ top level:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  from bursar import CreditStore, PostgresStore
-  ```
+```python
+from bursar import CreditStore, PostgresStore
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  import { CreditStore, PostgresStore } from "@zonastery/bursar";
-  ```
+```ts
+import { CreditStore, PostgresStore } from "@zonastery/bursar";
+```
 
   </TabItem>
 </Tabs>
@@ -46,22 +47,22 @@ top level:
 ## PostgresStore
 
 The store is tenant-bound: pass the provisioned tenant UUID when constructing
-it. In Python `tenant_id` is a keyword argument; in JavaScript it is the
-second positional argument.
+it. Python accepts `tenant_id` as a keyword argument. TypeScript accepts
+`tenantId` in the constructor options object.
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  store = PostgresStore(database_url, tenant_id=tenant_id)
-  ```
+```python
+store = PostgresStore(database_url, tenant_id=tenant_id)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const store = new PostgresStore({ postgres: databaseUrl, tenantId });
-  ```
+```ts
+const store = new PostgresStore({ postgres: databaseUrl, tenantId });
+```
 
   </TabItem>
 </Tabs>
@@ -84,13 +85,13 @@ external systems through optional adapters. PostgreSQL remains the canonical
 source for balances, compact usage receipts, billing claims, and idempotency.
 In Python they live under `bursar.storage`
 (importing requires the `postgres` extra; the native S3 adapter also needs
-the `s3` extra); in JavaScript they are exported from the Node-only
+the `s3` extra); in TypeScript they are exported from the Node-only
 `@zonastery/bursar/node` subpath.
 
-| Adapter | Purpose |
-| --- | --- |
+| Adapter                | Purpose                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------- |
 | `ClickHouseUsageStore` | Usage history and analytics — skips PostgreSQL detail and rollup rows when enabled |
-| `S3BillingArchive` | Billing payload archive — skips PostgreSQL raw envelope rows when enabled |
+| `S3BillingArchive`     | Billing payload archive — skips PostgreSQL raw envelope rows when enabled          |
 
 High-cardinality usage details follow the usage backend: monthly PostgreSQL
 partitions with retention cleanup by default, or the ClickHouse usage
@@ -118,36 +119,36 @@ adapters, and the outbox worker onto one connection pool:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
+```python
+from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
 
-  runtime = create_bursar_runtime(
-      BursarRuntimeOptions(
-          postgres=database_url,
-          tenant_id=tenant_id,
-          clickhouse=clickhouse_options,
-          s3=s3_options,
-          outbox=outbox_options,
-      )
-  )
-  runtime.start(BursarRuntimeStartOptions(load_catalog=True))
-  ```
+runtime = create_bursar_runtime(
+    BursarRuntimeOptions(
+        postgres=database_url,
+        tenant_id=tenant_id,
+        clickhouse=clickhouse_options,
+        s3=s3_options,
+        outbox=outbox_options,
+    )
+)
+runtime.start(BursarRuntimeStartOptions(load_catalog=True))
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  import { createBursarRuntime } from "@zonastery/bursar/node";
+```ts
+import { createBursarRuntime } from "@zonastery/bursar/node";
 
-  const runtime = await createBursarRuntime({
-    postgres: databaseUrl,
-    tenantId,
-    clickhouse: clickhouseOptions,
-    s3: s3Options,
-    outbox: outboxOptions,
-  });
-  await runtime.start({ loadCatalog: true });
-  ```
+const runtime = await createBursarRuntime({
+  postgres: databaseUrl,
+  tenantId,
+  clickhouse: clickhouseOptions,
+  s3: s3Options,
+  outbox: outboxOptions,
+});
+await runtime.start({ loadCatalog: true });
+```
 
   </TabItem>
 </Tabs>

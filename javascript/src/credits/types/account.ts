@@ -51,7 +51,8 @@ export interface AddCreditsResult {
   amount: Decimal;
   newBalance: Decimal;
   lifetimePurchased: Decimal;
-  bucket: string;
+  /** Destination bucket for grants; `null` when a debit spans one or more lots. */
+  bucket: string | null;
   idempotent: boolean;
 }
 
@@ -119,9 +120,17 @@ export interface RefundFailure extends RefundResultBase {
 
 export type RefundResult = RefundSuccess | RefundFailure;
 
+/** Credits removed from all remaining lots created by one ledger operation. */
+export interface RevokeCreditsResult {
+  userId: string;
+  entryType: string;
+  revoked: Decimal;
+  balanceAfter: Decimal;
+}
+
 export interface SweepResult {
   expiredCount: number;
   expiredAmount: Decimal;
   dryRun: boolean;
-  expiredByBucket?: Record<string, Decimal> | null;
+  expiredByBucket: Record<string, Decimal>;
 }

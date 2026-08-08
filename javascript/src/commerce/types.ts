@@ -23,6 +23,7 @@ import type {
   WebhookResult,
 } from "../providers/types.js";
 import type { BillingEventSink } from "../billing/contracts.js";
+import type { AutoRechargeOutcome } from "../billing/auto-recharge-service.js";
 import type { Logger } from "../shared/logger.js";
 
 export interface CommerceProviderFactoryContext {
@@ -235,6 +236,11 @@ export interface CreditSpendSource {
   priority: number;
 }
 
+export interface AccountCreditDisplay {
+  currency: string;
+  unitsPerMajor: Decimal;
+}
+
 export interface AccountCommerceOverview {
   accountId: string;
   credits: {
@@ -250,10 +256,7 @@ export interface AccountCommerceOverview {
     buckets: BucketBalance[];
     bucketsByKey: Record<string, Decimal>;
     spendOrder: CreditSpendSource[];
-    display: {
-      currency: string;
-      unitsPerMajor: Decimal;
-    } | null;
+    display: AccountCreditDisplay | null;
   };
   entitlement: GetUserPlanResult;
   subscriptionSummary: AccountSubscriptionSummary;
@@ -293,7 +296,7 @@ export interface CommerceAutoRecharge {
   disable(input: Pick<AutoRechargeInput, "accountId">): Promise<void>;
   retry(input: AutoRechargeInput): Promise<BillingAutoRechargeStatus | null>;
   processIfNeeded(input: AutoRechargeInput): Promise<{
-    outcome: string;
+    outcome: AutoRechargeOutcome;
     charge?: SavedPaymentChargeResult | null;
   }>;
 }

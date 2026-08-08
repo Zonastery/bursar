@@ -125,6 +125,24 @@ export class ProviderCapabilityNotSupportedError extends BillingError {
   }
 }
 
+/** Raised when a payment provider returns a response that violates its contract. */
+export class ProviderResponseError extends BillingError {
+  override readonly name = "ProviderResponseError";
+  override readonly code = "PROVIDER_RESPONSE_INVALID";
+  override readonly category = "unavailable" as const;
+
+  constructor(
+    readonly provider: string,
+    readonly operation: string,
+    options: BursarErrorOptions = {},
+  ) {
+    super(`Payment provider '${provider}' returned an invalid response for '${operation}'`, {
+      ...options,
+      details: { ...options.details, provider, operation },
+    });
+  }
+}
+
 export class ConfigError extends BursarError {
   override readonly name = "ConfigError";
   override readonly code = "CONFIG_ERROR";

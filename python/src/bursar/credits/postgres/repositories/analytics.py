@@ -37,9 +37,15 @@ class AnalyticsRepository:
         normalized = []
         for row in rows:
             data = _to_dict(row, fields)
-            data["user_id"] = data.get("subject_id", data.get("user_id"))
-            data["entry_count"] = data.get("charge_count", data.get("entry_count"))
-            normalized.append(SpendByUserRow.model_validate(data))
+            normalized.append(
+                SpendByUserRow.model_validate(
+                    {
+                        "user_id": data.get("subject_id", data.get("user_id")),
+                        "total_spend": data.get("total_spend"),
+                        "entry_count": data.get("charge_count", data.get("entry_count")),
+                    }
+                )
+            )
         return normalized
 
     def spend_by_model(self, start: str, end: str) -> list[SpendByModelRow]:
@@ -48,8 +54,15 @@ class AnalyticsRepository:
         normalized = []
         for row in rows:
             data = _to_dict(row, fields)
-            data["entry_count"] = data.get("charge_count", data.get("entry_count"))
-            normalized.append(SpendByModelRow.model_validate(data))
+            normalized.append(
+                SpendByModelRow.model_validate(
+                    {
+                        "model": data.get("model"),
+                        "total_spend": data.get("total_spend"),
+                        "entry_count": data.get("charge_count", data.get("entry_count")),
+                    }
+                )
+            )
         return normalized
 
     def top_users(self, limit: int, start: str, end: str) -> list[TopUserRow]:
@@ -61,8 +74,14 @@ class AnalyticsRepository:
                 row,
                 ["user_id", "total_spend", "entry_count"],
             )
-            data["user_id"] = data.get("subject_id", data.get("user_id"))
-            normalized.append(TopUserRow.model_validate(data))
+            normalized.append(
+                TopUserRow.model_validate(
+                    {
+                        "user_id": data.get("subject_id", data.get("user_id")),
+                        "total_spend": data.get("total_spend"),
+                    }
+                )
+            )
         return normalized
 
     def daily_spend(self, start: str, end: str) -> list[DailySpendRow]:
@@ -71,9 +90,15 @@ class AnalyticsRepository:
         normalized = []
         for row in rows:
             data = _to_dict(row, fields)
-            data["date"] = data.get("day", data.get("date"))
-            data["entry_count"] = data.get("charge_count", data.get("entry_count"))
-            normalized.append(DailySpendRow.model_validate(data))
+            normalized.append(
+                DailySpendRow.model_validate(
+                    {
+                        "date": data.get("day", data.get("date")),
+                        "total_spend": data.get("total_spend"),
+                        "entry_count": data.get("charge_count", data.get("entry_count")),
+                    }
+                )
+            )
         return normalized
 
     def aggregate_stats(self, start: str, end: str) -> AggregateStatsRow:

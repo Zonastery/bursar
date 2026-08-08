@@ -21,7 +21,7 @@ const BillingEventRowSchema = z
     event_id: postgresUuid.nullable(),
     claim_token: postgresUuid.nullable(),
   })
-  .passthrough();
+  .strict();
 
 export type BillingEventRow = z.infer<typeof BillingEventRowSchema>;
 
@@ -49,7 +49,7 @@ export class BillingEventRepository {
     const row = requireRecordRow(rows, "BillingEventRepository.claim");
     return safeParse(
       BillingEventRowSchema,
-      { ...row, status: row.result },
+      { event_id: row.event_id, status: row.result, claim_token: row.claim_token },
       "BillingEventRepository.claim",
       { indeterminate: true },
     );

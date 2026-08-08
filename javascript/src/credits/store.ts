@@ -34,14 +34,17 @@ import type {
   CatalogRevisionSummary,
   CatalogRevision,
   RefundResult,
+  RevokeCreditsResult,
   ReleaseResult,
   SetUserPlanResult,
+  UnsetUserPlanResult,
   SpendByModelRow,
   SpendByUserRow,
   SweepResult,
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
+  TeamRole,
   TopUserRow,
   LedgerEntry,
 } from "./types/index.js";
@@ -221,7 +224,7 @@ export abstract class CreditStore {
     planKey: string,
     planAssignedAt?: Date | null,
   ): Promise<SetUserPlanResult>;
-  abstract unsetUserPlan(userId: string): Promise<{ userId: string }>;
+  abstract unsetUserPlan(userId: string): Promise<UnsetUserPlanResult>;
   abstract setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean>;
   abstract applyDuePlanChanges(limit?: number): Promise<number>;
   abstract startPlanMigration(
@@ -240,7 +243,7 @@ export abstract class CreditStore {
   abstract revokeCreditsByEntryType(
     userId: string,
     entryType: string,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<RevokeCreditsResult>;
 
   // ── Refunds ────────────────────────────────────────────────────────
   abstract refundCredits(
@@ -351,7 +354,7 @@ export abstract class CreditStore {
   async addTeamMember(
     _teamId: string,
     _userId: string,
-    _role?: string,
+    _role?: TeamRole,
     _spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult> {
     throw new CapabilityNotSupportedError("addTeamMember is not supported by this store");

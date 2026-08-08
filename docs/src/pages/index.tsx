@@ -1,38 +1,38 @@
-import type {ReactNode} from 'react';
-import Link from '@docusaurus/Link';
-import Layout from '@theme/Layout';
-import CodeBlock from '@theme/CodeBlock';
-import Heading from '@theme/Heading';
-import styles from './index.module.css';
+import type { ReactNode } from "react";
+import Link from "@docusaurus/Link";
+import Layout from "@theme/Layout";
+import CodeBlock from "@theme/CodeBlock";
+import Heading from "@theme/Heading";
+import styles from "./index.module.css";
 
 const capabilities = [
   {
-    number: '01',
-    title: 'Price every operation',
+    number: "01",
+    title: "Price every operation",
     description:
-      'Define metered operations, exact-decimal rates, and plan-specific pricing in one validated configuration.',
-    to: '/docs/concepts/pricing',
+      "Define metered operations, exact-decimal rates, and plan-specific pricing in one validated configuration.",
+    to: "/docs/concepts/pricing",
   },
   {
-    number: '02',
-    title: 'Control spend before work starts',
+    number: "02",
+    title: "Control spend before work starts",
     description:
-      'Enforce allowances, quotas, entitlements, and concurrency limits in the same transaction as admission.',
-    to: '/docs/guides/financial-safety',
+      "Enforce allowances, quotas, entitlements, and concurrency limits in the same transaction as admission.",
+    to: "/docs/guides/financial-safety",
   },
   {
-    number: '03',
-    title: 'Maintain an auditable ledger',
+    number: "03",
+    title: "Maintain an auditable ledger",
     description:
-      'Record grants, purchases, charges, refunds, and expiry as immutable entries with replay-safe mutations.',
-    to: '/docs/concepts/data-model',
+      "Record grants, purchases, charges, refunds, and expiry as immutable entries with replay-safe mutations.",
+    to: "/docs/concepts/data-model",
   },
   {
-    number: '04',
-    title: 'Connect payments when needed',
+    number: "04",
+    title: "Connect payments when needed",
     description:
-      'Map provider events to subscriptions, top-ups, plan changes, and guarded auto-recharge workflows.',
-    to: '/docs/guides/subscription-integration',
+      "Map provider events to subscriptions, top-ups, plan changes, and guarded auto-recharge workflows.",
+    to: "/docs/guides/subscription-integration",
   },
 ];
 
@@ -66,7 +66,8 @@ function CapabilityGrid(): ReactNode {
         <Link
           className={styles.capabilityCard}
           key={capability.number}
-          to={capability.to}>
+          to={capability.to}
+        >
           <span className={styles.capabilityNumber} aria-hidden="true">
             {capability.number}
           </span>
@@ -81,7 +82,11 @@ function CapabilityGrid(): ReactNode {
 
 function SystemDiagram(): ReactNode {
   return (
-    <div className={styles.systemDiagram} aria-label="Bursar system boundary">
+    <div
+      className={styles.systemDiagram}
+      role="img"
+      aria-label="Application usage, pricing configuration, and provider events flow through Bursar into a tenant-isolated PostgreSQL ledger"
+    >
       <div className={styles.diagramSources}>
         <span>Application usage</span>
         <span>Pricing config</span>
@@ -110,12 +115,15 @@ export default function Home(): ReactNode {
   return (
     <Layout
       title="Usage metering and billing infrastructure"
-      description="Bursar adds exact usage metering, prepaid credits, plans, and billing to AI products through Python and TypeScript SDKs.">
+      description="Bursar adds exact usage metering, prepaid credits, plans, and billing to AI products through Python and TypeScript SDKs."
+    >
       <main>
         <header className={styles.hero}>
           <div className={`container ${styles.heroGrid}`}>
             <div className={styles.heroCopy}>
-              <p className={styles.eyebrow}>Open-source billing infrastructure</p>
+              <p className={styles.eyebrow}>
+                Open-source billing infrastructure
+              </p>
               <Heading as="h1">
                 Meter usage. Protect spend. Bill with confidence.
               </Heading>
@@ -124,16 +132,23 @@ export default function Home(): ReactNode {
                 prepaid credits, plans, allowances, and subscriptions.
               </p>
               <div className={styles.actions}>
-                <Link className="button button--primary button--lg" to="/docs/quickstart">
-                  Read the Quickstart
+                <Link
+                  className="button button--primary button--lg"
+                  to="/docs/quickstart"
+                >
+                  Read the quickstart
                 </Link>
                 <Link
                   className="button button--outline button--secondary button--lg"
-                  href="https://github.com/zonastery/bursar">
+                  href="https://github.com/zonastery/bursar"
+                >
                   View on GitHub
                 </Link>
               </div>
-              <ul className={styles.supportList} aria-label="Supported platforms">
+              <ul
+                className={styles.supportList}
+                aria-label="Supported platforms"
+              >
                 <li>Python 3.12+</li>
                 <li>Node.js 22+</li>
                 <li>PostgreSQL 16+</li>
@@ -152,7 +167,10 @@ export default function Home(): ReactNode {
           </div>
         </header>
 
-        <section className={styles.section} aria-labelledby="capabilities-heading">
+        <section
+          className={styles.section}
+          aria-labelledby="capabilities-heading"
+        >
           <div className="container">
             <div className={styles.sectionHeading}>
               <p className={styles.eyebrow}>Complete billing lifecycle</p>
@@ -160,15 +178,18 @@ export default function Home(): ReactNode {
                 Keep pricing, access, and money state consistent
               </Heading>
               <p>
-                Each capability shares the same versioned configuration,
-                tenant boundary, and transactional ledger.
+                Each capability shares the same versioned configuration, tenant
+                boundary, and transactional ledger.
               </p>
             </div>
             <CapabilityGrid />
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.systemSection}`} aria-labelledby="system-heading">
+        <section
+          className={`${styles.section} ${styles.systemSection}`}
+          aria-labelledby="system-heading"
+        >
           <div className={`container ${styles.systemGrid}`}>
             <div className={styles.sectionHeading}>
               <p className={styles.eyebrow}>One system of record</p>
@@ -179,7 +200,10 @@ export default function Home(): ReactNode {
                 Bursar prices usage, checks policy, and commits the result in
                 one transaction. Payment integrations remain optional.
               </p>
-              <Link className={styles.textLink} to="/docs/concepts/architecture">
+              <Link
+                className={styles.textLink}
+                to="/docs/concepts/architecture"
+              >
                 Explore the architecture
               </Link>
             </div>
@@ -233,13 +257,17 @@ export default function Home(): ReactNode {
               </p>
             </div>
             <div className={styles.actions}>
-              <Link className="button button--primary button--lg" to="/docs/quickstart">
-                Open the Quickstart
+              <Link
+                className="button button--primary button--lg"
+                to="/docs/quickstart"
+              >
+                Open the quickstart
               </Link>
               <Link
                 className="button button--outline button--secondary button--lg"
-                to="/docs/tutorials">
-                Browse Tutorials
+                to="/docs/tutorials"
+              >
+                Browse tutorials
               </Link>
             </div>
           </div>

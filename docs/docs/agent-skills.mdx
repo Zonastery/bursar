@@ -1,6 +1,6 @@
 ---
 title: Install the Bursar agent skill
-sidebar_label: Agent Skill
+sidebar_label: Agent skill
 description: Install the compact Bursar skill so coding agents follow the project workflow and financial safety rules.
 keywords:
   - Agent Skills
@@ -38,11 +38,11 @@ See the [Skills CLI repository](https://github.com/vercel-labs/skills) for suppo
 
 The package uses progressive disclosure so a coding agent loads only the context needed for the task:
 
-| File | Purpose |
-| --- | --- |
-| `SKILL.md` | Trigger description, integration workflow, source lookup order, and financial safety gates |
-| `agents/openai.yaml` | User-facing metadata for clients that support skill catalogs |
-| `assets/pricing.config.example.yaml` | A complete configuration template that an agent can copy and adapt |
+| File                                 | Purpose                                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `SKILL.md`                           | Trigger description, integration workflow, source lookup order, and financial safety gates |
+| `agents/openai.yaml`                 | User-facing metadata for clients that support skill catalogs                               |
+| `assets/pricing.config.example.yaml` | A complete configuration template that an agent can copy and adapt                         |
 
 The skill does not copy the quickstart, API tables, billing guide, or configuration reference. It links to the maintained documentation and tells an agent to inspect the installed SDK version before writing code.
 
@@ -68,14 +68,14 @@ The skill should cause the agent to identify the installed Bursar version, inspe
 
 Each subject has one maintained owner:
 
-| Subject | Canonical source |
-| --- | --- |
-| Integration procedure and non-negotiable agent checks | `skills/bursar/SKILL.md` |
-| Tutorials, how-to guides, and concepts | This documentation site |
-| Python and TypeScript signatures | Generated API reference and installed package types |
-| PostgreSQL schema | Ordered migrations in `python/src/bursar/sql/` |
-| Configuration shape | Generated JSON Schema |
-| Executable learning material | `samples/python/notebooks/` |
+| Subject                                               | Canonical source                                    |
+| ----------------------------------------------------- | --------------------------------------------------- |
+| Integration procedure and non-negotiable agent checks | `skills/bursar/SKILL.md`                            |
+| Tutorials, how-to guides, and concepts                | This documentation site                             |
+| Python and TypeScript signatures                      | Generated API reference and installed package types |
+| PostgreSQL schema                                     | Ordered migrations in `python/src/bursar/sql/`      |
+| Configuration shape                                   | Generated JSON Schema                               |
+| Executable learning material                          | `samples/python/notebooks/`                         |
 
 This separation prevents the skill and documentation from drifting while keeping the skill useful when an agent works inside a repository checkout.
 

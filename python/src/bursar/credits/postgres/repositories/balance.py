@@ -3,7 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    optional_mapping_row,
+    require_mapping_row,
+    validate_non_empty,
+    validate_row,
+)
 from bursar.credits.postgres.repositories.schemas import (
     AddCreditsRow,
     AvailableRow,
@@ -23,9 +28,18 @@ class BalanceRepository:
         # lifetime_purchased column, so the fresh-grant/replace-prior logic in the
         # service layer used to read a field that was always 0 (JS parity).
         rows = self._callproc("get_credit_state", [user_id]) or []
-        if not rows or not isinstance(rows[0], dict):
+        row = optional_mapping_row(rows, "BalanceRepository.get_balance")
+        if row is None:
             return None
-        return BalanceRow.model_validate({"user_id": user_id, **rows[0]})
+        return validate_row(
+            BalanceRow,
+            {
+                "user_id": user_id,
+                "balance": row.get("balance"),
+                "lifetime_purchased": row.get("lifetime_purchased"),
+            },
+            "BalanceRepository.get_balance",
+        )
 
     def add_credits(
         self,
@@ -36,7 +50,7 @@ class BalanceRepository:
         expires_at: str | None,
         bucket: str | None,
         idempotency_key: str | None,
-    ) -> AddCreditsRow | None:
+    ) -> AddCreditsRow:
         validate_non_empty(user_id, "user_id")
         amount_dec = Decimal(amount)
         entry_kind = "adjustment" if amount_dec < 0 else "purchase" if type_ == "purchase" else "grant"
@@ -58,9 +72,7 @@ class BalanceRepository:
             )
             or []
         )
-        if not rows or not isinstance(rows[0], dict):
-            return None
-        row = dict(rows[0])
+        row = require_mapping_row(rows, "BalanceRepository.add_credits")
         error_code = row.get("error_code")
         lifetime_purchased = None
         resolved_bucket = None
@@ -74,29 +86,44 @@ class BalanceRepository:
             entry_id = row.get("entry_id")
             if amount_dec > 0 and entry_id is not None:
                 grant = self._callproc("get_credit_grant_details", [user_id, entry_id]) or []
-                if grant and isinstance(grant[0], dict):
-                    resolved_bucket = grant[0].get("bucket_key")
-        row.update(
+                if grant:
+                    grant_row = grant[0]
+                    if isinstance(grant_row, str):
+                        resolved_bucket = grant_row
+                    elif isinstance(grant_row, dict):
+                        resolved_bucket = grant_row.get("bucket_key")
+        return validate_row(
+            AddCreditsRow,
             {
+                "entry_id": row.get("entry_id"),
                 "user_id": user_id,
                 "amount": amount,
                 "new_balance": row.get("balance_after"),
                 "lifetime_purchased": lifetime_purchased,
-                "bucket": resolved_bucket or bucket or "default",
+                "bucket": resolved_bucket if amount_dec > 0 else None,
                 "idempotent": row.get("replayed"),
                 "error": error_code,
-            }
+            },
+            "BalanceRepository.add_credits",
         )
-        return AddCreditsRow.model_validate(row)
 
     def get_available(self, user_id: str) -> AvailableRow | None:
         validate_non_empty(user_id, "user_id")
         # Route through get_credit_state so reserved/available reflect active
         # lease holds (get_credit_bucket_balances reported reserved=0 always).
         rows = self._callproc("get_credit_state", [user_id]) or []
-        if not rows or not isinstance(rows[0], dict):
+        row = optional_mapping_row(rows, "BalanceRepository.get_available")
+        if row is None:
             return None
-        return AvailableRow.model_validate(rows[0])
+        return validate_row(
+            AvailableRow,
+            {
+                "balance": row.get("balance"),
+                "reserved": row.get("reserved"),
+                "available": row.get("available"),
+            },
+            "BalanceRepository.get_available",
+        )
 
     def execute_grant_program(
         self,
@@ -116,4 +143,6 @@ class BalanceRepository:
             "execute_grant_program",
             [trigger, program_key, subject_id, event_key, referrer_subject_id, region, metadata],
         )
-        return [GrantProgramAwardRow.model_validate(row) for row in rows or [] if isinstance(row, dict)]
+        return [
+            validate_row(GrantProgramAwardRow, row, "BalanceRepository.execute_grant_program") for row in rows or []
+        ]

@@ -14,7 +14,9 @@ from bursar.errors import StoreError
 def _optional_utc_iso(value: object) -> str | None:
     if value is None:
         return None
-    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    if not isinstance(value, (datetime, str)):
+        raise TypeError("invoice timestamp must be a datetime or ISO-8601 string")
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("invoice timestamp must include a timezone")
     return parsed.astimezone(UTC).isoformat()
@@ -43,13 +45,16 @@ class BillingInvoiceRepository:
                     details={"row_index": index},
                 )
             try:
-                payload = dict(row)
-                payload.update(
-                    {
-                        "period_start": _optional_utc_iso(row.get("period_start")),
-                        "period_end": _optional_utc_iso(row.get("period_end")),
-                    }
-                )
+                payload = {
+                    "provider": row.get("provider"),
+                    "provider_invoice_id": row.get("provider_invoice_id"),
+                    "status": row.get("status"),
+                    "amount_paid_minor": row.get("amount_paid_minor"),
+                    "amount_due_minor": row.get("amount_due_minor"),
+                    "currency": row.get("currency"),
+                    "period_start": _optional_utc_iso(row.get("period_start")),
+                    "period_end": _optional_utc_iso(row.get("period_end")),
+                }
                 invoices.append(BillingInvoiceRecord.model_validate(payload))
             except (ValidationError, ValueError) as exc:
                 raise StoreError(

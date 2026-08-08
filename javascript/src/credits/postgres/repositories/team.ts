@@ -1,62 +1,106 @@
 import { z } from "zod";
+import Decimal from "decimal.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
+import {
+  optionalRecordRow,
+  postgresUuid,
+  requireRow,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
 import { StoreError } from "../../../errors.js";
+
+const decimal = z.union([z.string().min(1), z.number().finite()] as const);
+const safeInteger = z
+  .union([z.number().int(), z.string().regex(/^\d+$/)] as const)
+  .transform(Number)
+  .refine(Number.isSafeInteger, "expected a safe integer");
+const teamRole = z.enum(["owner", "admin", "member"]);
 
 const CreateTeamRowSchema = z
   .object({
-    team_id: z.string().optional(),
-    name: z.string().optional(),
+    team_id: postgresUuid.nullable(),
+    name: z.string().min(1).nullable(),
+    team_subject_id: postgresUuid.nullable(),
+    account_id: postgresUuid.nullable(),
+    error_code: z.string().min(1).nullable(),
   })
-  .passthrough();
+  .strict()
+  .superRefine((row, context) => {
+    const identifiers = [row.team_id, row.name, row.team_subject_id, row.account_id];
+    if (row.error_code === null && identifiers.some((value) => value === null)) {
+      context.addIssue({
+        code: "custom",
+        message: "successful team creation requires identity fields",
+      });
+    }
+    if (row.error_code !== null && identifiers.some((value) => value !== null)) {
+      context.addIssue({
+        code: "custom",
+        message: "failed team creation cannot expose identity fields",
+      });
+    }
+  });
 
 const TeamBalanceRowSchema = z
   .object({
-    team_id: z.string().min(1),
+    team_id: postgresUuid,
     name: z.string().min(1),
-    balance: z.union([z.string().min(1), z.number().finite()] as const),
-    member_count: z.coerce.number().int().nonnegative(),
+    balance: decimal,
+    member_count: safeInteger,
   })
   .strict();
 
 const AddTeamMemberRowSchema = z
   .object({
-    team_id: z.string().optional(),
-    user_id: z.string().optional(),
-    role: z.string().optional(),
+    team_id: postgresUuid,
+    user_id: postgresUuid,
+    role: teamRole,
   })
-  .passthrough();
+  .strict();
 
 const TeamMemberRowSchema = z
   .object({
-    user_id: z.string().optional(),
-    role: z.string().optional(),
-    spend_cap: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    total_spent: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
+    user_id: postgresUuid,
+    role: teamRole,
+    spend_cap: decimal.nullable(),
+    total_spent: decimal,
   })
-  .passthrough();
+  .strict();
+
+const TeamDeductionRpcRowSchema = z
+  .object({
+    entry_id: postgresUuid.nullable(),
+    team_id: postgresUuid,
+    subject_id: postgresUuid,
+    amount: decimal,
+    balance_after: decimal.nullable(),
+    replayed: z.boolean(),
+    error_code: z.string().min(1).nullable(),
+  })
+  .strict();
 
 const TeamDeductionRowSchema = z
   .object({
-    entry_id: z.string().nullable().optional(),
-    team_id: z.string().min(1),
-    user_id: z.string().min(1),
-    amount: z.union([z.string().min(1), z.number().finite()] as const),
-    team_balance_after: z.union([z.string().min(1), z.number().finite()] as const).nullable(),
+    entry_id: postgresUuid.nullable(),
+    team_id: postgresUuid,
+    user_id: postgresUuid,
+    amount: decimal,
+    team_balance_after: decimal.nullable(),
     error: z.string().min(1).nullable(),
-    replayed: pgBoolean,
+    replayed: z.boolean(),
   })
+  .strict()
   .superRefine((row, context) => {
     if (row.error === null && (row.entry_id == null || row.team_balance_after === null)) {
       context.addIssue({
         code: "custom",
         message: "successful team deductions require entry and balance fields",
+      });
+    }
+    if (row.error !== null && (row.entry_id !== null || row.replayed)) {
+      context.addIssue({
+        code: "custom",
+        message: "failed team deductions cannot be replayed or committed",
       });
     }
   });
@@ -93,8 +137,10 @@ export class TeamRepository {
   /** Fetch a team's balance and member count. Returns null if the team does not exist. */
   async getTeamBalance(teamId: string): Promise<TeamBalanceRow | null> {
     const rows = await this.callproc("get_team_balance", [teamId]);
-    if (!rows || rows.length === 0) return null;
-    return safeParse(TeamBalanceRowSchema, rows[0], "TeamRepository.getTeamBalance");
+    const row = optionalRecordRow(rows, "TeamRepository.getTeamBalance");
+    return row === null
+      ? null
+      : safeParse(TeamBalanceRowSchema, row, "TeamRepository.getTeamBalance");
   }
 
   /** Add a member to a team with an optional spend cap. */
@@ -105,7 +151,12 @@ export class TeamRepository {
     spendCap: string | null,
   ): Promise<AddTeamMemberRow> {
     const rows = await this.callproc("set_team_member", [teamId, userId, role, spendCap]);
-    if (requireRow(rows, "TeamRepository.addTeamMember") !== true) {
+    const added = safeParse(
+      z.boolean(),
+      requireRow(rows, "TeamRepository.addTeamMember"),
+      "TeamRepository.addTeamMember",
+    );
+    if (!added) {
       throw new StoreError("TeamRepository.addTeamMember: set_team_member returned false");
     }
     return safeParse(
@@ -126,7 +177,11 @@ export class TeamRepository {
   /** Remove a team member, returning false when absent or the final owner. */
   async removeTeamMember(teamId: string, userId: string): Promise<boolean> {
     const rows = await this.callproc("remove_team_member", [teamId, userId]);
-    return requireRow(rows, "TeamRepository.removeTeamMember") === true;
+    return safeParse(
+      z.boolean(),
+      requireRow(rows, "TeamRepository.removeTeamMember"),
+      "TeamRepository.removeTeamMember",
+    );
   }
 
   /** Deduct credits from a team's balance on behalf of a user. */
@@ -146,13 +201,25 @@ export class TeamRepository {
       operation,
       metadata,
     ]);
-    const row = requireRow(rows, "TeamRepository.deductTeam") as Record<string, unknown>;
+    const row = safeParse(
+      TeamDeductionRpcRowSchema,
+      requireRow(rows, "TeamRepository.deductTeam"),
+      "TeamRepository.deductTeam",
+    );
+    if (row.error_code === null && !new Decimal(row.amount).equals(amount)) {
+      throw new StoreError("TeamRepository.deductTeam: committed amount differs from the request", {
+        indeterminate: true,
+      });
+    }
     return safeParse(
       TeamDeductionRowSchema,
       {
-        ...row,
+        entry_id: row.entry_id,
+        team_id: row.team_id,
         user_id: row.subject_id,
+        amount,
         team_balance_after: row.balance_after,
+        replayed: row.replayed,
         error: row.error_code,
       },
       "TeamRepository.deductTeam",

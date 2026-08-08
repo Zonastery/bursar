@@ -34,8 +34,8 @@ export interface AggregateStats {
   totalCreditsConsumed: Decimal;
   activeUsers: number;
   avgDailySpend: Decimal;
-  topModel: string;
-  topUser: string;
+  topModel: string | null;
+  topUser: string | null;
 }
 
 /**

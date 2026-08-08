@@ -11,17 +11,26 @@ const safeMinorUnits = z
   .union([z.number().int().nonnegative().safe(), z.string().regex(/^\d+$/)])
   .transform(Number)
   .refine(Number.isSafeInteger, "minor-unit amount exceeds JavaScript's safe integer range");
+const optionalTimestamp = z
+  .union([
+    z.date().refine((value) => !Number.isNaN(value.getTime())),
+    z.string().datetime({ offset: true }),
+  ])
+  .transform((value) => (value instanceof Date ? value.toISOString() : value))
+  .nullable();
 
-const InvoiceRowSchema = z.object({
-  provider: z.string().min(1),
-  provider_invoice_id: z.string().min(1),
-  status: z.enum(["draft", "open", "paid", "void", "uncollectible"]),
-  amount_paid_minor: safeMinorUnits,
-  amount_due_minor: safeMinorUnits,
-  currency: z.string().regex(/^[A-Z]{3}$/),
-  period_start: z.unknown().nullable(),
-  period_end: z.unknown().nullable(),
-});
+const InvoiceRowSchema = z
+  .object({
+    provider: z.string().min(1),
+    provider_invoice_id: z.string().min(1),
+    status: z.enum(["draft", "open", "paid", "void", "uncollectible"]),
+    amount_paid_minor: safeMinorUnits,
+    amount_due_minor: safeMinorUnits,
+    currency: z.string().regex(/^[A-Z]{3}$/),
+    period_start: optionalTimestamp,
+    period_end: optionalTimestamp,
+  })
+  .strict();
 
 export class BillingInvoiceRepository {
   constructor(private query: QueryFn) {}
@@ -29,7 +38,24 @@ export class BillingInvoiceRepository {
   async listForUser(userId: string): Promise<BillingInvoiceRecord[]> {
     const rows = await this.query(`SELECT * FROM bursar.list_billing_invoices($1::uuid)`, [userId]);
     return rows.map((row) => {
-      const parsed = safeParse(InvoiceRowSchema, row, "BillingInvoiceRepository.listForUser");
+      if (typeof row !== "object" || row === null || Array.isArray(row)) {
+        throw new TypeError("BillingInvoiceRepository.listForUser expected an object row");
+      }
+      const raw = row as Record<string, unknown>;
+      const parsed = safeParse(
+        InvoiceRowSchema,
+        {
+          provider: raw.provider,
+          provider_invoice_id: raw.provider_invoice_id,
+          status: raw.status,
+          amount_paid_minor: raw.amount_paid_minor,
+          amount_due_minor: raw.amount_due_minor,
+          currency: raw.currency,
+          period_start: raw.period_start,
+          period_end: raw.period_end,
+        },
+        "BillingInvoiceRepository.listForUser",
+      );
       return {
         provider: parsed.provider,
         providerInvoiceId: parsed.provider_invoice_id,
@@ -37,8 +63,8 @@ export class BillingInvoiceRepository {
         amountPaidMinor: parsed.amount_paid_minor,
         amountDueMinor: parsed.amount_due_minor,
         currency: parsed.currency,
-        periodStart: parsed.period_start == null ? null : String(parsed.period_start),
-        periodEnd: parsed.period_end == null ? null : String(parsed.period_end),
+        periodStart: parsed.period_start,
+        periodEnd: parsed.period_end,
       } satisfies BillingInvoiceRecord;
     });
   }

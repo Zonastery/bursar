@@ -3,10 +3,13 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bursar.bursar import BillingEventSink
+from bursar.errors import ProviderResponseError
+from bursar.providers._shared import optional_provider_string
 from bursar.providers.dodo.event_mapper import dodo_billing_event_id, handle_dodo_billing_event
 from bursar.providers.types import (
     ChangePlanLineItem,
@@ -20,7 +23,6 @@ from bursar.providers.types import (
     CreateCustomerResult,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
-    PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
     ProviderLogger,
@@ -36,6 +38,9 @@ from bursar.providers.types import (
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
+
+if TYPE_CHECKING:
+    from dodopayments import AsyncDodoPayments
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +96,56 @@ def _idempotency_headers(key: str | None) -> dict[str, str] | None:
     return {"Idempotency-Key": key} if key else None
 
 
-class DodoProvider(PaymentProvider):
+def _require_provider_text(value: object, operation: str, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ProviderResponseError("dodo", operation, details={"field": field})
+    return value
+
+
+def _require_provider_int(
+    value: object,
+    operation: str,
+    field: str,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
+    if isinstance(value, bool):
+        raise ProviderResponseError("dodo", operation, details={"field": field})
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.isascii() and value.isdigit():
+        parsed = int(value)
+    else:
+        raise ProviderResponseError("dodo", operation, details={"field": field})
+    if parsed < minimum or (maximum is not None and parsed > maximum):
+        raise ProviderResponseError("dodo", operation, details={"field": field})
+    return parsed
+
+
+def _require_provider_number(value: object, operation: str, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value < 0:
+        raise ProviderResponseError("dodo", operation, details={"field": field})
+    return float(value)
+
+
+def _require_provider_instant(value: object, operation: str, field: str) -> str:
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except (TypeError, ValueError) as error:
+        raise ProviderResponseError("dodo", operation, cause=error, details={"field": field}) from error
+    if parsed.utcoffset() is None:
+        raise ProviderResponseError("dodo", operation, details={"field": field})
+    return parsed.isoformat()
+
+
+class DodoProvider:
     provider = "dodo"
 
     def __init__(
         self,
         *,
-        get_client: Callable[[], Any],
+        get_client: Callable[[], AsyncDodoPayments],
         webhook_key: str,
         event_sink: BillingEventSink,
         setup_product_id: str | None = None,
@@ -132,12 +180,13 @@ class DodoProvider(PaymentProvider):
         if params.idempotency_key:
             session_kwargs["extra_headers"] = _idempotency_headers(params.idempotency_key)
         session = await client.checkout_sessions.create(**session_kwargs)
-        url = session.checkout_url
-        if not url:
-            raise ValueError("Checkout session returned no URL")
         return CheckoutSessionResult(
-            url=str(url),
-            provider_session_id=str(session.session_id),
+            url=_require_provider_text(session.checkout_url, "create_checkout_session", "checkout_url"),
+            provider_session_id=_require_provider_text(
+                session.session_id,
+                "create_checkout_session",
+                "session_id",
+            ),
         )
 
     async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
@@ -146,7 +195,7 @@ class DodoProvider(PaymentProvider):
             params.customer_id,
             return_url=params.return_url,
         )
-        return ProviderUrlResult(url=str(session.link))
+        return ProviderUrlResult(url=_require_provider_text(session.link, "create_customer_portal_session", "link"))
 
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         client = self._get_client()
@@ -174,10 +223,18 @@ class DodoProvider(PaymentProvider):
         user_id: str | None = metadata.get("userId")
         if not user_id and self._resolve_user is not None and event_type != "payment.failed":
             customer = data_dict.get("customer")
-            customer_dict = customer if isinstance(customer, dict) else {}
-            customer_id = str(data_dict.get("customer_id") or customer_dict.get("customer_id") or "").strip() or None
-            email_value = customer_dict.get("email")
-            email = str(email_value).strip().lower() if email_value else None
+            if customer is not None and not isinstance(customer, dict):
+                raise ValueError("Dodo customer must be an object")
+            customer_dict = customer or {}
+            customer_id = optional_provider_string(
+                data_dict.get("customer_id"),
+                "Dodo customer_id",
+            ) or optional_provider_string(
+                customer_dict.get("customer_id"),
+                "Dodo customer.customer_id",
+            )
+            email_value = optional_provider_string(customer_dict.get("email"), "Dodo customer.email")
+            email = email_value.lower() if email_value else None
             provider_event_type = str(event_type)
             user_id = await self._resolve_user(
                 ResolveIdentityInput(
@@ -269,10 +326,13 @@ class DodoProvider(PaymentProvider):
             return_url=params.return_url,
             metadata={"purpose": "update_payment_method", "subscription_id": params.subscription_id},
         )
-        url = response.checkout_url
-        if not url:
-            raise ValueError("Failed to create payment method update session")
-        return ProviderUrlResult(url=str(url))
+        return ProviderUrlResult(
+            url=_require_provider_text(
+                response.checkout_url,
+                "create_update_payment_method_session",
+                "checkout_url",
+            )
+        )
 
     async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
         product_id = params.product_id or self._setup_product_id
@@ -285,28 +345,67 @@ class DodoProvider(PaymentProvider):
             return_url=params.return_url,
             metadata={"purpose": "setup_payment_method"},
         )
-        url = session.checkout_url
-        if not url:
-            raise ValueError("Checkout session returned no URL")
-        return ProviderUrlResult(url=str(url))
+        return ProviderUrlResult(
+            url=_require_provider_text(
+                session.checkout_url,
+                "create_payment_method_setup_session",
+                "checkout_url",
+            )
+        )
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         client = self._get_client()
         response = await client.customers.retrieve_payment_methods(customer_id)
         result: list[PaymentMethodInfo] = []
         for payment_method in response.items:
-            if payment_method.payment_method != "card" or payment_method.card is None:
+            if payment_method.payment_method != "card":
                 continue
             if not payment_method.recurring_enabled:
                 continue
+            if payment_method.card is None:
+                raise ProviderResponseError(
+                    "dodo",
+                    "list_payment_methods",
+                    details={"field": "card"},
+                )
             card = payment_method.card
+            last4 = _require_provider_text(
+                card.last4_digits,
+                "list_payment_methods",
+                "card.last4_digits",
+            )
+            if len(last4) != 4 or not last4.isascii() or not last4.isdigit():
+                raise ProviderResponseError(
+                    "dodo",
+                    "list_payment_methods",
+                    details={"field": "card.last4_digits"},
+                )
             result.append(
                 PaymentMethodInfo(
-                    id=payment_method.payment_method_id,
-                    last4=card.last4_digits or "",
-                    brand=card.card_network or "unknown",
-                    expiry_month=int(card.expiry_month or 0),
-                    expiry_year=int(card.expiry_year or 0),
+                    id=_require_provider_text(
+                        payment_method.payment_method_id,
+                        "list_payment_methods",
+                        "payment_method_id",
+                    ),
+                    last4=last4,
+                    brand=_require_provider_text(
+                        card.card_network,
+                        "list_payment_methods",
+                        "card.card_network",
+                    ),
+                    expiry_month=_require_provider_int(
+                        card.expiry_month,
+                        "list_payment_methods",
+                        "card.expiry_month",
+                        minimum=1,
+                        maximum=12,
+                    ),
+                    expiry_year=_require_provider_int(
+                        card.expiry_year,
+                        "list_payment_methods",
+                        "card.expiry_year",
+                        minimum=1,
+                    ),
                 )
             )
         methods = deduplicate_payment_methods(result)
@@ -320,39 +419,68 @@ class DodoProvider(PaymentProvider):
             customer={"customer_id": params.customer_id},
         )
         return SavedPaymentChargeQuote(
-            amount_minor=preview.current_breakup.total_amount,
-            tax_minor=preview.current_breakup.tax,
-            currency=str(preview.currency),
+            amount_minor=_require_provider_int(
+                preview.current_breakup.total_amount,
+                "preview_saved_payment_charge",
+                "current_breakup.total_amount",
+            ),
+            tax_minor=(
+                _require_provider_int(
+                    preview.current_breakup.tax,
+                    "preview_saved_payment_charge",
+                    "current_breakup.tax",
+                )
+                if preview.current_breakup.tax is not None
+                else None
+            ),
+            currency=_require_provider_text(
+                preview.currency,
+                "preview_saved_payment_charge",
+                "currency",
+            ),
         )
 
     async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
         client = self._get_client()
+        metadata: dict[str, str | float | bool] = dict(params.metadata)
         session = await client.checkout_sessions.create(
             product_cart=[{"product_id": params.product_id, "quantity": params.quantity}],
             customer={"customer_id": params.customer_id},
             payment_method_id=params.payment_method_id,
             confirm=True,
             return_url=params.return_url,
-            metadata=params.metadata or {},
+            metadata=metadata,
             extra_headers=_idempotency_headers(params.idempotency_key),
         )
-        payment_id = session.payment_id
-        if not payment_id:
-            return SavedPaymentChargeResult(status="failed")
+        payment_id = _require_provider_text(
+            session.payment_id,
+            "charge_saved_payment_method",
+            "payment_id",
+        )
         payment = await client.payments.retrieve(payment_id)
-        raw_status = payment.status or "processing"
-        status = {
-            "succeeded": "succeeded",
-            "processing": "processing",
-            "requires_customer_action": "requires_customer_action",
-            "requires_payment_method": "requires_payment_method",
-        }.get(raw_status, "failed")
+        status = _require_provider_text(
+            payment.status,
+            "charge_saved_payment_method",
+            "status",
+        )
         return SavedPaymentChargeResult.model_validate(
             {
-                "provider_payment_id": payment.payment_id,
+                "provider_payment_id": _require_provider_text(
+                    payment.payment_id,
+                    "charge_saved_payment_method",
+                    "payment_id",
+                ),
                 "status": status,
-                "amount_minor": payment.total_amount,
-                "currency": payment.currency,
+                "amount_minor": _require_provider_int(
+                    payment.total_amount,
+                    "charge_saved_payment_method",
+                    "total_amount",
+                ),
+                "currency": _require_provider_text(
+                    payment.currency,
+                    "charge_saved_payment_method",
+                    "currency",
+                ),
             }
         )
 
@@ -365,7 +493,9 @@ class DodoProvider(PaymentProvider):
         if params.metadata:
             kwargs["metadata"] = params.metadata
         customer = await client.customers.create(**kwargs)
-        return CreateCustomerResult(customer_id=customer.customer_id)
+        return CreateCustomerResult(
+            customer_id=_require_provider_text(customer.customer_id, "create_customer", "customer_id")
+        )
 
     async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         client = self._get_client()
@@ -390,7 +520,7 @@ class DodoProvider(PaymentProvider):
         if params.idempotency_key:
             kwargs["extra_headers"] = _idempotency_headers(params.idempotency_key)
         await client.subscriptions.change_plan(params.provider_subscription_id, **kwargs)
-        return ChangePlanResult(provider_operation_id=None)
+        return ChangePlanResult()
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
         client = self._get_client()
@@ -407,17 +537,55 @@ class DodoProvider(PaymentProvider):
         line_items: list[ChangePlanLineItem] = []
         for item in immediate_charge.line_items:
             if item.type == "subscription":
+                operation = "preview_change_plan"
+                product_id = _require_provider_text(
+                    item.product_id,
+                    operation,
+                    "immediate_charge.line_items.product_id",
+                )
+                name = item.name or item.description
+                name = _require_provider_text(name, operation, "immediate_charge.line_items.name")
+                unit_price = _require_provider_int(
+                    item.unit_price,
+                    operation,
+                    "immediate_charge.line_items.unit_price",
+                )
+                quantity = _require_provider_int(
+                    item.quantity,
+                    operation,
+                    "immediate_charge.line_items.quantity",
+                    minimum=1,
+                )
+                proration_factor = _require_provider_number(
+                    item.proration_factor,
+                    operation,
+                    "immediate_charge.line_items.proration_factor",
+                )
+                currency = _require_provider_text(
+                    item.currency,
+                    operation,
+                    "immediate_charge.line_items.currency",
+                )
+                tax = (
+                    _require_provider_int(
+                        item.tax,
+                        operation,
+                        "immediate_charge.line_items.tax",
+                    )
+                    if item.tax is not None
+                    else 0
+                )
                 line_items.append(
                     ChangePlanLineItem(
-                        product_id=item.product_id,
-                        name=item.name or item.description or "",
-                        unit_price=item.unit_price,
-                        quantity=item.quantity,
-                        proration_factor=item.proration_factor,
-                        currency=str(item.currency),
-                        tax=item.tax or 0,
+                        product_id=product_id,
+                        name=name,
+                        unit_price=unit_price,
+                        quantity=quantity,
+                        proration_factor=proration_factor,
+                        currency=currency,
+                        tax=tax,
                         subtotal=int(
-                            (Decimal(item.unit_price * item.quantity) * Decimal(str(item.proration_factor))).quantize(
+                            (Decimal(unit_price * quantity) * Decimal(str(proration_factor))).quantize(
                                 Decimal("1"), rounding=ROUND_HALF_UP
                             )
                         ),
@@ -425,22 +593,72 @@ class DodoProvider(PaymentProvider):
                 )
         new_plan = response.new_plan
         return ChangePlanPreview(
-            total_amount=summary.total_amount,
-            settlement_amount=summary.settlement_amount,
-            currency=str(summary.settlement_currency),
-            line_items=line_items,
-            effective_at=immediate_charge.effective_at.isoformat(),
-            recurring_amount=(
-                new_plan.recurring_pre_tax_amount if new_plan.recurring_pre_tax_amount is not None else None
+            total_amount=_require_provider_int(
+                summary.total_amount,
+                "preview_change_plan",
+                "immediate_charge.summary.total_amount",
             ),
-            recurring_currency=str(new_plan.currency),
-            next_billing_date=new_plan.next_billing_date.isoformat(),
+            settlement_amount=_require_provider_int(
+                summary.settlement_amount,
+                "preview_change_plan",
+                "immediate_charge.summary.settlement_amount",
+            ),
+            currency=_require_provider_text(
+                summary.settlement_currency,
+                "preview_change_plan",
+                "immediate_charge.summary.settlement_currency",
+            ),
+            line_items=line_items,
+            effective_at=_require_provider_instant(
+                immediate_charge.effective_at,
+                "preview_change_plan",
+                "immediate_charge.effective_at",
+            ),
+            recurring_amount=(
+                _require_provider_int(
+                    new_plan.recurring_pre_tax_amount,
+                    "preview_change_plan",
+                    "new_plan.recurring_pre_tax_amount",
+                )
+                if new_plan is not None and new_plan.recurring_pre_tax_amount is not None
+                else None
+            ),
+            recurring_currency=(
+                _require_provider_text(
+                    new_plan.currency,
+                    "preview_change_plan",
+                    "new_plan.currency",
+                )
+                if new_plan is not None and new_plan.currency is not None
+                else None
+            ),
+            next_billing_date=(
+                _require_provider_instant(
+                    new_plan.next_billing_date,
+                    "preview_change_plan",
+                    "new_plan.next_billing_date",
+                )
+                if new_plan is not None and new_plan.next_billing_date is not None
+                else None
+            ),
             tax_amount=(
-                summary.settlement_tax
+                _require_provider_int(
+                    summary.settlement_tax,
+                    "preview_change_plan",
+                    "immediate_charge.summary.settlement_tax",
+                )
                 if summary.settlement_tax is not None
-                else summary.tax
+                else _require_provider_int(
+                    summary.tax,
+                    "preview_change_plan",
+                    "immediate_charge.summary.tax",
+                )
                 if summary.tax is not None
                 else None
             ),
-            customer_credits=summary.customer_credits,
+            customer_credits=_require_provider_int(
+                summary.customer_credits,
+                "preview_change_plan",
+                "immediate_charge.summary.customer_credits",
+            ),
         )

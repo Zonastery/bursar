@@ -38,6 +38,7 @@ export type CreditEventType =
   | "credits.lease_expired"
   | "credits.overdraft"
   | "credits.cycle_renewed"
+  | "credits.revoked"
   | "credits.quota_blocked"
   | "credits.quota_threshold";
 

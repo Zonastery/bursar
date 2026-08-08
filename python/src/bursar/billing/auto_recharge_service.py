@@ -37,10 +37,13 @@ from bursar.errors import (
 )
 from bursar.providers.types import (
     PaymentMethodInfo,
+    PaymentMethodsProvider,
     PaymentProvider,
     SavedPaymentChargeParams,
+    SavedPaymentChargeProvider,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
+    SavedPaymentPreviewProvider,
 )
 
 AutoRechargeOutcome = Literal[
@@ -191,10 +194,9 @@ class AutoRechargeService:
         customer = self._billing.get_customer_by_user_id(user_id, provider.provider)
         if customer is None:
             return None
-        try:
-            methods = await provider.list_payment_methods(customer.provider_customer_id)
-        except NotImplementedError as error:
-            raise ProviderCapabilityNotSupportedError(provider.provider, "list_payment_methods") from error
+        if not isinstance(provider, PaymentMethodsProvider):
+            raise ProviderCapabilityNotSupportedError(provider.provider, "list_payment_methods")
+        methods = await provider.list_payment_methods(customer.provider_customer_id)
         method = next((candidate for candidate in methods if candidate.is_default), None)
         if method is None and len(methods) == 1:
             method = methods[0]
@@ -219,20 +221,19 @@ class AutoRechargeService:
         payment: tuple[str, PaymentMethodInfo],
         provider: PaymentProvider,
     ) -> SavedPaymentChargeQuote | None:
-        customer_id, method = payment
-        try:
-            return await provider.preview_saved_payment_charge(
-                SavedPaymentChargeParams(
-                    customer_id=customer_id,
-                    payment_method_id=method.id,
-                    product_id=policy.product_id,
-                    quantity=policy.quantity,
-                    metadata={},
-                    idempotency_key="auto-recharge-preview",
-                )
-            )
-        except NotImplementedError:
+        if not isinstance(provider, SavedPaymentPreviewProvider):
             return None
+        customer_id, method = payment
+        return await provider.preview_saved_payment_charge(
+            SavedPaymentChargeParams(
+                customer_id=customer_id,
+                payment_method_id=method.id,
+                product_id=policy.product_id,
+                quantity=policy.quantity,
+                metadata={},
+                idempotency_key="auto-recharge-preview",
+            )
+        )
 
     async def get_status(
         self,
@@ -360,6 +361,8 @@ class AutoRechargeService:
             return AutoRechargeProcessResult(outcome="disabled")
         if Decimal(balance) >= policy.threshold:
             return AutoRechargeProcessResult(outcome="above_threshold")
+        if not isinstance(provider, SavedPaymentChargeProvider):
+            raise ProviderCapabilityNotSupportedError(provider.provider, "charge_saved_payment_method")
 
         payment = await self._payment_method(user_id, provider)
         if payment is None:
@@ -393,15 +396,6 @@ class AutoRechargeService:
                     },
                 )
             )
-        except NotImplementedError as error:
-            self._billing.update_auto_recharge_attempt(
-                AutoRechargeAttemptUpdate(
-                    id=attempt.id,
-                    state="failed",
-                    failure_code="provider_capability_not_supported",
-                )
-            )
-            raise ProviderCapabilityNotSupportedError(provider.provider, "charge_saved_payment_method") from error
         except Exception as error:
             self._billing.update_auto_recharge_attempt(
                 AutoRechargeAttemptUpdate(
@@ -422,7 +416,15 @@ class AutoRechargeService:
             )
             return AutoRechargeProcessResult(outcome="action_required", charge=charge)
 
-        if charge.status in {"succeeded", "processing"}:
+        if charge.status in {
+            "succeeded",
+            "processing",
+            "requires_merchant_action",
+            "requires_confirmation",
+            "requires_capture",
+            "partially_captured",
+            "partially_captured_and_capturable",
+        }:
             self._billing.update_auto_recharge_attempt(
                 AutoRechargeAttemptUpdate(
                     id=attempt.id,

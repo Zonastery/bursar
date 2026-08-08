@@ -543,7 +543,7 @@ AS $$
             ),
             1
         ),
-        COALESCE((SELECT model FROM model_rank), ''),
+        (SELECT model FROM model_rank),
         (SELECT subject_id FROM user_rank)
     FROM totals
 $$;

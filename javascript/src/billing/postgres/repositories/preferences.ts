@@ -19,7 +19,7 @@ const BillingPreferencesRowSchema = z
     usage_alerts: pgBoolean,
     invoice_reminders: pgBoolean,
   })
-  .passthrough();
+  .strict();
 
 export class BillingPreferencesRepository {
   constructor(private query: QueryFn) {}
@@ -29,12 +29,21 @@ export class BillingPreferencesRepository {
       userId,
     ]);
     const row = optionalRecordRow(rows, "BillingPreferencesRepository.get");
-    // PostgreSQL functions returning a composite type emit one all-null row
-    // when the SQL body finds no record. Treat that sentinel as not found.
-    if (row === null || row.subject_id == null) {
+    if (row === null) {
       return null;
     }
-    const parsed = safeParse(BillingPreferencesRowSchema, row, "BillingPreferencesRepository.get");
+    const parsed = safeParse(
+      BillingPreferencesRowSchema,
+      {
+        subject_id: row.subject_id,
+        auto_recharge: row.auto_recharge,
+        overage_protection: row.overage_protection,
+        email_notifications: row.email_notifications,
+        usage_alerts: row.usage_alerts,
+        invoice_reminders: row.invoice_reminders,
+      },
+      "BillingPreferencesRepository.get",
+    );
     return {
       userId: parsed.subject_id,
       autoRecharge: parsed.auto_recharge,

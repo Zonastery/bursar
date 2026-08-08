@@ -1,5 +1,6 @@
 ---
 title: Stores
+sidebar_label: Stores
 description: bursar stores — PostgresStore, PostgresBillingStore, and the CreditStore contract for custom backends.
 ---
 
@@ -22,12 +23,12 @@ Connects through `psycopg2` and runs every mutation as a canonical SQL function
 (RPC). Requires the `bursar[postgres]` extra
 (`pip install "bursar[postgres]"`).
 
-| Parameter | Type | Meaning |
-| --- | --- | --- |
-| `database_url` | `str` | Postgres connection string (positional) |
-| `tenant_id` | `str \| UUID` | Required keyword argument scoping every transaction to one tenant |
-| `max_pool_size` | `int = 20` | Upper bound of the internal `ThreadedConnectionPool` |
-| `pool` | `ThreadedConnectionPool \| None` | Reuse an existing pool instead of creating one |
+| Parameter       | Type                             | Meaning                                                           |
+| --------------- | -------------------------------- | ----------------------------------------------------------------- |
+| `database_url`  | `str`                            | Postgres connection string (positional)                           |
+| `tenant_id`     | `str \| UUID`                    | Required keyword argument scoping every transaction to one tenant |
+| `max_pool_size` | `int = 20`                       | Upper bound of the internal `ThreadedConnectionPool`              |
+| `pool`          | `ThreadedConnectionPool \| None` | Reuse an existing pool instead of creating one                    |
 
 The store owns its pool: call `store.close()` to drain it. `database_url` is
 exposed as a read-only property.

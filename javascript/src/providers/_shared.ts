@@ -15,6 +15,11 @@ export function requireProviderString(value: unknown, field: string): string {
   return value.trim();
 }
 
+export function optionalProviderString(value: unknown, field: string): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return requireProviderString(value, field);
+}
+
 export function requireMinorUnits(value: unknown, field: string, positive = false): number {
   const amount =
     typeof value === "number"

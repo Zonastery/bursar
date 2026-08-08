@@ -30,13 +30,13 @@ flowchart LR
 
 Your application calls one `Bursar` facade. The facade exposes these capabilities:
 
-| Capability | Responsibility |
-| --- | --- |
-| `credits` | Balances, ledger entries, metered charges, leases, refunds, quotas, and analytics |
-| `catalog` | Validation, publication, activation, and rollback of configuration versions |
-| `accounts` | Default plan assignment and account-created grant programs |
-| `billing` | Normalized provider events, subscriptions, invoices, payments, and disputes |
-| `commerce` | Checkout, plan changes, top-ups, and auto-recharge |
+| Capability | Responsibility                                                                    |
+| ---------- | --------------------------------------------------------------------------------- |
+| `credits`  | Balances, ledger entries, metered charges, leases, refunds, quotas, and analytics |
+| `catalog`  | Validation, publication, activation, and rollback of configuration versions       |
+| `accounts` | Default plan assignment and account-created grant programs                        |
+| `billing`  | Normalized provider events, subscriptions, invoices, payments, and disputes       |
+| `commerce` | Checkout, plan changes, top-ups, and auto-recharge                                |
 
 `billing` and `commerce` are optional. Configure them only when Bursar should coordinate a payment provider.
 
@@ -68,11 +68,11 @@ Use Bursar when your product needs one or more of these controls:
 
 ## Supported platforms
 
-| Surface | Supported version | Package |
-| --- | --- | --- |
-| Python SDK and command-line interface | Python 3.12 and 3.13 | `bursar` |
-| TypeScript SDK | Node.js 22 or newer | `@zonastery/bursar` |
-| Database | PostgreSQL 16 or newer | `pg_partman` 5.x and `pg_jsonschema` 0.3+ |
+| Surface                               | Supported version      | Package                                   |
+| ------------------------------------- | ---------------------- | ----------------------------------------- |
+| Python SDK and command-line interface | Python 3.12 and 3.13   | `bursar`                                  |
+| TypeScript SDK                        | Node.js 22 or newer    | `@zonastery/bursar`                       |
+| Database                              | PostgreSQL 16 or newer | `pg_partman` 5.x and `pg_jsonschema` 0.3+ |
 
 The current documentation tracks Bursar 1.x. Docusaurus version snapshots will be added only when a future major release changes user-facing behavior.
 

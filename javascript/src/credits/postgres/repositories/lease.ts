@@ -2,30 +2,84 @@ import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
 import { DeductionRowSchema } from "./deduction.js";
 import type { DeductionRow } from "./deduction.js";
-import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
+import {
+  optionalRecordRow,
+  postgresUuid,
+  requireRow,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
+import { StoreError } from "../../../errors.js";
+import Decimal from "decimal.js";
 
 const decimal = z.union([z.string().min(1), z.number().finite()] as const);
+const timestamp = z.union([z.string().min(1), z.date()] as const).transform((value, context) => {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    context.addIssue({ code: "custom", message: "expected a valid timestamp" });
+    return z.NEVER;
+  }
+  return parsed.toISOString();
+});
+const safeInteger = z
+  .union([z.number().int(), z.string().regex(/^\d+$/)] as const)
+  .transform(Number)
+  .refine(Number.isSafeInteger, "expected a safe integer");
+const leaseStatus = z.enum(["active", "settling", "settled", "released", "expired"]);
+
+const LeaseMutationRpcRowSchema = z
+  .object({
+    lease_id: postgresUuid.nullable(),
+    status: leaseStatus,
+    reserved_amount: decimal,
+    error_code: z.string().min(1).nullable(),
+  })
+  .strict()
+  .superRefine((row, context) => {
+    if (row.error_code === null && (row.lease_id === null || row.status !== "active")) {
+      context.addIssue({
+        code: "custom",
+        message: "successful lease mutations require an active lease",
+      });
+    }
+  });
+
+const SettleLeaseRpcRowSchema = z
+  .object({
+    ledger_entry_id: postgresUuid.nullable(),
+    charge_id: postgresUuid.nullable(),
+    settled_amount: decimal,
+    replayed: z.boolean(),
+    error_code: z.string().min(1).nullable(),
+  })
+  .strict()
+  .superRefine((row, context) => {
+    if (row.error_code === null && row.charge_id === null) {
+      context.addIssue({
+        code: "custom",
+        message: "successful lease settlement requires a charge receipt",
+      });
+    }
+    if (
+      row.error_code !== null &&
+      (row.ledger_entry_id !== null || row.charge_id !== null || row.replayed)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "failed lease settlement cannot expose committed fields",
+      });
+    }
+  });
 
 const LeaseRowSchema = z
   .object({
-    lease_id: z.string().nullable().optional(),
-    user_id: z.string().min(1),
+    lease_id: postgresUuid.nullable(),
+    user_id: postgresUuid,
     amount: decimal.nullable(),
-    available: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    reserved: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    billing_mode: z.string().optional(),
     minimum_balance: decimal.nullable(),
-    expires_at: z
-      .union([z.string(), z.date().transform((value) => value.toISOString())])
-      .nullable(),
+    expires_at: timestamp.nullable(),
     error: z.string().min(1).nullable(),
   })
+  .strict()
   .superRefine((row, context) => {
     if (
       row.error === null &&
@@ -39,23 +93,40 @@ const LeaseRowSchema = z
         message: "successful lease acquisition requires lease and policy fields",
       });
     }
+    if (
+      row.error !== null &&
+      (row.lease_id !== null ||
+        row.amount !== null ||
+        row.minimum_balance !== null ||
+        row.expires_at !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "failed lease mutations cannot expose committed fields",
+      });
+    }
   });
 
 const ReleaseRowSchema = z
   .object({
-    released: pgBoolean.nullable().optional(),
-    reason: z.string().nullable().optional(),
+    released: z.boolean(),
+    reason: leaseStatus.or(z.literal("missing_lease")).nullable(),
   })
-  .passthrough();
+  .strict();
 
 const LeasePricingContextRowSchema = z
   .object({
-    catalog_revision_no: z.coerce.number(),
-    plan_id: z.string().nullable().optional(),
-    plan_key: z.string().nullable().optional(),
-    rate_card: z.string().nullable().optional(),
+    catalog_revision_no: safeInteger,
+    plan_id: postgresUuid.nullable(),
+    plan_key: z.string().min(1).nullable(),
+    rate_card: z.string().min(1).nullable(),
   })
-  .passthrough();
+  .strict()
+  .superRefine((row, context) => {
+    if ((row.plan_id === null) !== (row.plan_key === null)) {
+      context.addIssue({ code: "custom", message: "lease plan identity fields are inconsistent" });
+    }
+  });
 
 export type LeaseRow = z.infer<typeof LeaseRowSchema>;
 export type ReleaseRow = z.infer<typeof ReleaseRowSchema>;
@@ -92,22 +163,38 @@ export class LeaseRepository {
       params.minimumBalance,
       params.maxConcurrent,
     ]);
-    const row = requireRow(rows, "LeaseRepository.createLease") as Record<string, unknown>;
-    const lease =
-      row.lease_id == null
-        ? null
-        : ((await this.callproc("get_credit_lease", [params.userId, row.lease_id]))[0] as
-            | Record<string, unknown>
-            | undefined);
+    const row = safeParse(
+      LeaseMutationRpcRowSchema,
+      requireRow(rows, "LeaseRepository.createLease"),
+      "LeaseRepository.createLease",
+    );
+    if (row.error_code !== null) {
+      return safeParse(
+        LeaseRowSchema,
+        {
+          lease_id: null,
+          user_id: params.userId,
+          amount: null,
+          expires_at: null,
+          minimum_balance: null,
+          error: row.error_code,
+        },
+        "LeaseRepository.createLease",
+      );
+    }
+    const lease = optionalRecordRow(
+      await this.callproc("get_credit_lease", [params.userId, row.lease_id]),
+      "LeaseRepository.createLease.details",
+    );
     return safeParse(
       LeaseRowSchema,
       {
-        ...row,
+        lease_id: row.lease_id,
         user_id: params.userId,
         amount: row.reserved_amount,
-        expires_at: lease?.expires_at ?? null,
-        minimum_balance: lease?.minimum_balance ?? null,
-        error: row.error_code,
+        expires_at: lease?.expires_at,
+        minimum_balance: lease?.minimum_balance,
+        error: null,
       },
       "LeaseRepository.createLease",
     );
@@ -138,26 +225,40 @@ export class LeaseRepository {
       params.dimensions,
       params.metadata,
     ]);
-    const row = requireRow(rows, "LeaseRepository.settleLease") as Record<string, unknown>;
+    const row = safeParse(
+      SettleLeaseRpcRowSchema,
+      requireRow(rows, "LeaseRepository.settleLease"),
+      "LeaseRepository.settleLease",
+    );
+    if (row.error_code === null && !new Decimal(row.settled_amount).equals(params.amount)) {
+      throw new StoreError(
+        "LeaseRepository.settleLease: committed amount differs from the request",
+        {
+          indeterminate: true,
+        },
+      );
+    }
     const charge =
       row.error_code == null
-        ? ((
+        ? optionalRecordRow(
             await this.callproc("get_credit_operation_details", [
               params.userId,
               row.ledger_entry_id ?? null,
               params.idempotencyKey,
-            ])
-          )[0] as Record<string, unknown> | undefined)
-        : undefined;
+            ]),
+            "LeaseRepository.settleLease.details",
+          )
+        : null;
     return safeParse(
       DeductionRowSchema,
       {
-        ...row,
+        charge_id: row.charge_id,
         user_id: params.userId,
         entry_id: row.ledger_entry_id,
-        amount: row.settled_amount,
-        allowance_consumed: charge?.allowance_covered ?? "0",
-        balance_after: charge?.balance_after ?? null,
+        amount: row.error_code === null ? row.settled_amount : params.amount,
+        allowance_consumed: row.error_code === null ? charge?.allowance_covered : "0",
+        balance_after: row.error_code === null ? charge?.balance_after : null,
+        bucket_breakdown: row.error_code === null ? charge?.bucket_breakdown : null,
         idempotent: row.replayed,
         error: row.error_code,
       },
@@ -168,21 +269,25 @@ export class LeaseRepository {
   /** Return the immutable pricing context captured at lease admission. */
   async getPricingContext(userId: string, leaseId: string): Promise<LeasePricingContextRow | null> {
     const rows = await this.callproc("get_credit_lease_pricing_context", [userId, leaseId]);
-    if (!rows?.length) return null;
-    return safeParse(LeasePricingContextRowSchema, rows[0], "LeaseRepository.getPricingContext");
+    const row = optionalRecordRow(rows, "LeaseRepository.getPricingContext");
+    return row === null
+      ? null
+      : safeParse(LeasePricingContextRowSchema, row, "LeaseRepository.getPricingContext");
   }
 
   /** Release a lease without charging — idempotent. */
   async releaseLease(userId: string, leaseId: string): Promise<ReleaseRow> {
     const rows = await this.callproc("release_lease", [userId, leaseId]);
-    const value = requireRow(rows, "LeaseRepository.releaseLease");
-    const result = value as { released?: boolean };
-    const reason = typeof value === "string" ? value : result.released === true ? "released" : null;
+    const status = safeParse(
+      leaseStatus.or(z.literal("missing_lease")),
+      requireRow(rows, "LeaseRepository.releaseLease"),
+      "LeaseRepository.releaseLease",
+    );
     return safeParse(
       ReleaseRowSchema,
       {
-        released: reason === "released",
-        reason,
+        released: status === "released",
+        reason: status === "released" ? null : status,
       },
       "LeaseRepository.releaseLease",
     );
@@ -191,23 +296,38 @@ export class LeaseRepository {
   /** Extend an active lease without changing its captured policy snapshot. */
   async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseRow> {
     const rows = await this.callproc("renew_lease", [userId, leaseId, `${ttlSeconds} seconds`]);
-    const row = requireRow(rows, "LeaseRepository.renewLease") as Record<string, unknown>;
-    const lease =
-      row.error_code == null && row.lease_id != null
-        ? ((await this.callproc("get_credit_lease", [userId, row.lease_id]))[0] as
-            | Record<string, unknown>
-            | undefined)
-        : undefined;
+    const row = safeParse(
+      LeaseMutationRpcRowSchema,
+      requireRow(rows, "LeaseRepository.renewLease"),
+      "LeaseRepository.renewLease",
+    );
+    if (row.error_code !== null) {
+      return safeParse(
+        LeaseRowSchema,
+        {
+          lease_id: null,
+          user_id: userId,
+          amount: null,
+          expires_at: null,
+          minimum_balance: null,
+          error: row.error_code,
+        },
+        "LeaseRepository.renewLease",
+      );
+    }
+    const lease = optionalRecordRow(
+      await this.callproc("get_credit_lease", [userId, row.lease_id]),
+      "LeaseRepository.renewLease.details",
+    );
     return safeParse(
       LeaseRowSchema,
       {
-        ...row,
-        ...lease,
+        lease_id: row.lease_id,
         user_id: userId,
         amount: row.reserved_amount,
-        expires_at: lease?.expires_at ?? null,
-        minimum_balance: lease?.minimum_balance ?? null,
-        error: row.error_code,
+        expires_at: lease?.expires_at,
+        minimum_balance: lease?.minimum_balance,
+        error: null,
       },
       "LeaseRepository.renewLease",
     );
@@ -216,7 +336,11 @@ export class LeaseRepository {
   /** Expire a bounded batch of leases and release their reservations. */
   async expireLeases(limit: number): Promise<number> {
     const rows = await this.callproc("expire_leases", [limit]);
-    const row = requireRow(rows, "LeaseRepository.expireLeases") as Record<string, unknown>;
-    return Number(row.expired ?? 0);
+    const row = safeParse(
+      z.object({ expired: z.number().int().nonnegative() }).strict(),
+      requireRow(rows, "LeaseRepository.expireLeases"),
+      "LeaseRepository.expireLeases",
+    );
+    return row.expired;
   }
 }

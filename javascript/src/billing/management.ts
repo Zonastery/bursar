@@ -1,6 +1,7 @@
 import type { BillingStore } from "./billing-store.js";
 import type {
   BillingAutoRechargeAttempt,
+  BillingAutoRechargeAttemptState,
   BillingAutoRechargeProfile,
   BillingCustomerRecord,
   BillingOfferResult,
@@ -138,7 +139,7 @@ export class BillingManagement {
 
   async updateAutoRechargeAttempt(input: {
     id: string;
-    state: string;
+    state: BillingAutoRechargeAttemptState;
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
@@ -150,7 +151,7 @@ export class BillingManagement {
   async updateAutoRechargeAttemptByProviderPayment(input: {
     provider: string;
     providerPaymentId: string;
-    state: string;
+    state: BillingAutoRechargeAttemptState;
     failureCode?: string | null;
     failureMessage?: string | null;
   }): Promise<void> {

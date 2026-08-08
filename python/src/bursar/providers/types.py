@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -214,8 +213,14 @@ SavedPaymentChargeStatus = Literal[
     "succeeded",
     "processing",
     "failed",
+    "cancelled",
     "requires_customer_action",
+    "requires_merchant_action",
     "requires_payment_method",
+    "requires_confirmation",
+    "requires_capture",
+    "partially_captured",
+    "partially_captured_and_capturable",
 ]
 
 
@@ -273,7 +278,7 @@ class PreviewChangePlanParams(_ProviderModel):
 class ChangePlanLineItem(_ProviderModel):
     product_id: str
     name: str
-    unit_price: int
+    unit_price: float
     quantity: int
     proration_factor: float
     currency: str
@@ -294,59 +299,87 @@ class ChangePlanPreview(_ProviderModel):
     customer_credits: int | None = None
 
 
-class PaymentProvider(ABC):
+@runtime_checkable
+class PaymentProvider(Protocol):
+    """Required structural contract for a payment provider."""
+
     provider: str
 
-    @abstractmethod
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult: ...
 
-    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
-        raise NotImplementedError("provider does not support create_customer_portal_session")
-
-    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
-        raise NotImplementedError("provider does not support create_update_payment_method_session")
-
-    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
-        raise NotImplementedError("provider does not support create_payment_method_setup_session")
-
-    async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
-        raise NotImplementedError("provider does not support create_customer")
-
-    @abstractmethod
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult: ...
 
-    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
-        return None
 
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
-        raise NotImplementedError("provider does not support cancel_subscription")
+@runtime_checkable
+class CheckoutStatusProvider(Protocol):
+    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None: ...
 
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
-        raise NotImplementedError("provider does not support reactivate_subscription")
 
+@runtime_checkable
+class CustomerPortalProvider(Protocol):
+    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult: ...
+
+
+@runtime_checkable
+class UpdatePaymentMethodProvider(Protocol):
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult: ...
+
+
+@runtime_checkable
+class PaymentMethodSetupProvider(Protocol):
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult: ...
+
+
+@runtime_checkable
+class CustomerCreationProvider(Protocol):
+    async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult: ...
+
+
+@runtime_checkable
+class SubscriptionCancellationProvider(Protocol):
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+
+
+@runtime_checkable
+class SubscriptionReactivationProvider(Protocol):
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+
+
+@runtime_checkable
+class ScheduledPlanChangeCancellationProvider(Protocol):
     async def cancel_scheduled_plan_change(
         self,
         subscription_id: str,
         provider_operation_id: str | None = None,
         idempotency_key: str | None = None,
-    ) -> None:
-        """Remove a pending plan switch while retaining the subscription."""
-        raise NotImplementedError
+    ) -> None: ...
 
-    async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
-        raise NotImplementedError("provider does not support list_payment_methods")
 
-    async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
-        raise NotImplementedError("provider does not support saved-payment previews")
+@runtime_checkable
+class PaymentMethodsProvider(Protocol):
+    async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]: ...
 
-    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
-        raise NotImplementedError("provider does not support charge_saved_payment_method")
 
-    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
-        raise NotImplementedError("provider does not support get_invoice_url")
+@runtime_checkable
+class SavedPaymentPreviewProvider(Protocol):
+    async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote: ...
 
-    async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult | None:
-        raise NotImplementedError("provider does not support change_plan")
 
-    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
-        raise NotImplementedError("provider does not support preview_change_plan")
+@runtime_checkable
+class SavedPaymentChargeProvider(Protocol):
+    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult: ...
+
+
+@runtime_checkable
+class InvoiceUrlProvider(Protocol):
+    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None: ...
+
+
+@runtime_checkable
+class PlanChangeProvider(Protocol):
+    async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult | None: ...
+
+
+@runtime_checkable
+class PlanChangePreviewProvider(Protocol):
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview: ...

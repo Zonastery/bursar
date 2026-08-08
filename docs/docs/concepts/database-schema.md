@@ -1,5 +1,6 @@
 ---
 title: Database schema
+sidebar_label: Database schema
 description: Generated ERD for Bursar's PostgreSQL schema.
 ---
 
@@ -370,23 +371,23 @@ erDiagram
         TIMESTAMPTZ created_at
     }
     credit_usage_charges {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID account_id "FK,UK"
-        TEXT operation
-        TIMESTAMPTZ event_at
-        NUMERIC20 requested
-        NUMERIC20 charged
-        NUMERIC20 allowance_requested
-        NUMERIC20 allowance_covered
-        TEXT billing_disposition
-        UUID catalog_revision_id "FK"
-        UUID plan_id "FK"
-        TEXT rate_card_key
-        UUID ledger_entry_id "FK"
-        TEXT idempotency_key "UK"
-        BYTEA request_digest
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid account_id
+        text operation
+        timestamptz event_at
+        numeric requested
+        numeric charged
+        numeric allowance_requested
+        numeric allowance_covered
+        text billing_disposition
+        uuid catalog_revision_id
+        uuid plan_id
+        text rate_card_key
+        uuid ledger_entry_id
+        text idempotency_key
+        bytea request_digest
+        timestamptz created_at
     }
     usage_charge_payloads {
         UUID tenant_id "FK"
@@ -570,6 +571,7 @@ erDiagram
         text settlement_idempotency_key
         bytea settlement_request_digest
         uuid ledger_entry_id
+        uuid usage_charge_id
         timestamptz created_at
         timestamptz updated_at
     }
@@ -1022,11 +1024,6 @@ erDiagram
     tenants ||--o{ credit_debt_repayments : "tenant_id to id"
     credit_ledger_entries ||--o{ credit_debt_repayments : "ledger_entry_id to id"
     credit_accounts ||--o{ credit_debt_repayments : "account_id to id"
-    tenants ||--o{ credit_usage_charges : "tenant_id to id"
-    credit_accounts ||--|| credit_usage_charges : "account_id to id"
-    catalog_plans ||--o{ credit_usage_charges : "catalog_revision_id to catalog_revision_id"
-    catalog_plans ||--o{ credit_usage_charges : "plan_id to id"
-    credit_ledger_entries ||--o{ credit_usage_charges : "ledger_entry_id to id"
     tenants ||--o{ usage_charge_payloads : "tenant_id to id"
     credit_usage_charges ||--o{ usage_charge_payloads : "charge_id to id"
     tenants ||--o{ usage_daily_rollups : "tenant_id to id"

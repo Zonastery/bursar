@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
-from dodopayments import NotFoundError
+from dodopayments import AsyncDodoPayments, NotFoundError
 
 from bursar.billing.types import BillingEvent, BillingEventResult
 from bursar.providers.dodo.provider import DodoProvider
@@ -100,7 +100,7 @@ async def test_returns_received_true_when_unwrap_succeeds(sink: FakeSink, logger
         ),
     )
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
         resolve_user=None,
@@ -122,7 +122,7 @@ async def test_returns_received_true_when_unwrap_succeeds(sink: FakeSink, logger
 async def test_returns_non_retryable_on_signature_failure(sink: FakeSink, logger: FakeLogger) -> None:
     client = FakeClient(unwrap_error=ValueError("Invalid signature"))
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
         resolve_user=None,
@@ -143,7 +143,7 @@ async def test_returns_non_retryable_on_signature_failure(sink: FakeSink, logger
 async def test_returns_non_retryable_for_malformed_payload(sink: FakeSink, logger: FakeLogger) -> None:
     client = FakeClient(unwrap_error=ValueError("Malformed payload"))
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="wrong_key",
         event_sink=sink,
         resolve_user=None,
@@ -178,7 +178,7 @@ async def test_does_not_resolve_anonymous_user_for_payment_failed(
     )
     resolve_user = FakeResolveUser()
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
         resolve_user=resolve_user,
@@ -206,7 +206,7 @@ async def test_get_checkout_session_status_with_requires_customer_action(sink: F
     client = FakeClient(unwrap_result=None)
     client.checkout_sessions = FakeCheckoutSessions()
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
         resolve_user=None,
@@ -230,7 +230,7 @@ async def test_returns_none_for_missing_session(sink: FakeSink, logger: FakeLogg
     client = FakeClient(unwrap_result=None)
     client.checkout_sessions = FakeCheckoutSessions()
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
         resolve_user=None,

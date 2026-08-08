@@ -3,6 +3,15 @@ import type Decimal from "decimal.js";
 export const AUTO_RECHARGE_STATES = ["disabled", "active", "paused"] as const;
 export type BillingAutoRechargeState = (typeof AUTO_RECHARGE_STATES)[number];
 
+export type BillingAutoRechargeAttemptState =
+  | "claimed"
+  | "submitted"
+  | "processing"
+  | "unknown"
+  | "succeeded"
+  | "failed"
+  | "action_required";
+
 export interface BillingAutoRechargeProfile {
   userId: string;
   enabled: boolean;
@@ -28,14 +37,7 @@ export interface BillingAutoRechargeAttempt {
   providerAttemptId: string | null;
   topupId: string;
   quantity: number;
-  state:
-    | "claimed"
-    | "submitted"
-    | "processing"
-    | "unknown"
-    | "succeeded"
-    | "failed"
-    | "action_required";
+  state: BillingAutoRechargeAttemptState;
   windowStart: string;
   windowEnd: string;
   quotedAmountMinor: number | null;

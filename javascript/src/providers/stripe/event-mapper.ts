@@ -25,10 +25,7 @@ function subscriptionPeriodValue(
   subscription: Stripe.Subscription,
   field: "current_period_start" | "current_period_end",
 ): number | null {
-  const itemValue = subscription.items?.data?.[0]?.[field];
-  if (itemValue != null) return itemValue;
-  // Compatibility for accounts deliberately pinned before 2025-03-31.basil.
-  return (subscription as unknown as Record<string, number | undefined>)[field] ?? null;
+  return subscription.items.data[0]?.[field] ?? null;
 }
 
 function buildEnd(subscription: Stripe.Subscription): string | null {
@@ -137,12 +134,7 @@ function checkoutPaymentInfo(
 }
 
 function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
-  const current = invoice.parent?.subscription_details?.subscription;
-  if (current) return expandableId(current);
-  // Compatibility for accounts deliberately pinned before 2025-03-31.basil.
-  return expandableId(
-    (invoice as unknown as { subscription?: string | Stripe.Subscription | null }).subscription,
-  );
+  return expandableId(invoice.parent?.subscription_details?.subscription);
 }
 
 function invoiceMetadata(invoice: Stripe.Invoice): Record<string, string> {

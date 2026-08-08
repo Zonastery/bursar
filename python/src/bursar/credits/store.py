@@ -46,6 +46,7 @@ from bursar.credits.types import (
     QuotaState,
     RefundResult,
     ReleaseResult,
+    RevokeCreditsResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
@@ -53,7 +54,9 @@ from bursar.credits.types import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TeamRole,
     TopUserRow,
+    UnsetUserPlanResult,
     UsageChargeCursor,
     UsageChargePage,
     UsageRecordResult,
@@ -437,7 +440,7 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def unset_user_plan(self, user_id: str) -> dict:
+    def unset_user_plan(self, user_id: str) -> UnsetUserPlanResult:
         """Clear the user's plan assignment."""
         ...
 
@@ -536,11 +539,11 @@ class CreditStore(ABC):
         self,
         user_id: str,
         entry_type: str,
-    ) -> dict:
+    ) -> RevokeCreditsResult:
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
         Used by the subscription lifecycle to replace cycle-grant credits on renewal.
-        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "bucket": ...}``.
+        Returns the revoked amount and resulting committed balance.
         """
         ...
 
@@ -706,7 +709,7 @@ class CreditStore(ABC):
         self,
         team_id: str,
         user_id: str,
-        role: str = "member",
+        role: TeamRole = "member",
         spend_cap: Decimal | None = None,
     ) -> AddTeamMemberResult:
         """Add a user to a team.

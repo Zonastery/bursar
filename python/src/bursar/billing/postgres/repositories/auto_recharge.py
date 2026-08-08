@@ -35,7 +35,7 @@ _AttemptState = Literal[
 
 
 class _RowModel(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
 
 class _ProfileRow(_RowModel):
@@ -124,7 +124,26 @@ def _iso(value: datetime) -> str:
 
 
 def _profile_from_row(row: dict[str, Any]) -> BillingAutoRechargeProfile:
-    parsed = _validate_row(_ProfileRow, row, "BillingAutoRechargeRepository.profile")
+    parsed = _validate_row(
+        _ProfileRow,
+        {
+            "subject_id": row.get("subject_id"),
+            "enabled": row.get("enabled"),
+            "armed": row.get("armed"),
+            "state": row.get("state"),
+            "provider": row.get("provider"),
+            "topup_id": row.get("topup_id"),
+            "quantity": row.get("quantity"),
+            "threshold": row.get("threshold"),
+            "max_charges_per_window": row.get("max_charges_per_window"),
+            "window_unit": row.get("window_unit"),
+            "window_count": row.get("window_count"),
+            "window_anchor": row.get("window_anchor"),
+            "window_timezone": row.get("window_timezone"),
+            "updated_at": row.get("updated_at"),
+        },
+        "BillingAutoRechargeRepository.profile",
+    )
     assert isinstance(parsed, _ProfileRow)
     return BillingAutoRechargeProfile(
         user_id=str(parsed.subject_id),
@@ -145,7 +164,29 @@ def _profile_from_row(row: dict[str, Any]) -> BillingAutoRechargeProfile:
 
 
 def _attempt_from_row(row: dict[str, Any]) -> BillingAutoRechargeAttempt:
-    parsed = _validate_row(_AttemptRow, row, "BillingAutoRechargeRepository.attempt")
+    parsed = _validate_row(
+        _AttemptRow,
+        {
+            "id": row.get("id"),
+            "subject_id": row.get("subject_id"),
+            "provider": row.get("provider"),
+            "idempotency_key": row.get("idempotency_key"),
+            "provider_attempt_id": row.get("provider_attempt_id"),
+            "topup_id": row.get("topup_id"),
+            "quantity": row.get("quantity"),
+            "state": row.get("state"),
+            "window_start": row.get("window_start"),
+            "window_end": row.get("window_end"),
+            "quoted_amount_minor": row.get("quoted_amount_minor"),
+            "currency": row.get("currency"),
+            "failure_code": row.get("failure_code"),
+            "failure_message": row.get("failure_message"),
+            "metadata": row.get("metadata"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        },
+        "BillingAutoRechargeRepository.attempt",
+    )
     assert isinstance(parsed, _AttemptRow)
     return BillingAutoRechargeAttempt(
         id=str(parsed.id),

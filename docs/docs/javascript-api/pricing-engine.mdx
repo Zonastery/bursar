@@ -1,5 +1,6 @@
 ---
 title: PricingEngine
+sidebar_label: Pricing engine
 description: The bursar PricingEngine — database-free pricing from a canonical config document, pricing UsageMetrics, and CostBreakdown results.
 ---
 
@@ -76,13 +77,30 @@ const engine = PricingEngine.fromDict({
           completion: {
             rules: [
               {
-                when: { model: { op: "in", values: ["gpt-4o", "gpt-4o-mini"] } },
+                when: {
+                  model: { op: "in", values: ["gpt-4o", "gpt-4o-mini"] },
+                },
                 charge: {
                   type: "sum",
                   components: [
-                    { type: "per_unit", measure: "input_tokens", rate: "0.0025", unit_size: "1000000" },
-                    { type: "per_unit", measure: "output_tokens", rate: "0.0100", unit_size: "1000000" },
-                    { type: "per_unit", measure: "cache_read_tokens", rate: "0.00125", unit_size: "1000000" },
+                    {
+                      type: "per_unit",
+                      measure: "input_tokens",
+                      rate: "0.0025",
+                      unit_size: "1000000",
+                    },
+                    {
+                      type: "per_unit",
+                      measure: "output_tokens",
+                      rate: "0.0100",
+                      unit_size: "1000000",
+                    },
+                    {
+                      type: "per_unit",
+                      measure: "cache_read_tokens",
+                      rate: "0.00125",
+                      unit_size: "1000000",
+                    },
                   ],
                 },
               },
@@ -109,7 +127,9 @@ const cost = engine.calculate({
 });
 
 // Exact decimals: 2,000,000 × 0.0025/M + 500,000 × 0.0100/M = 0.01
-const expected = new Decimal("0.0025").times(2).plus(new Decimal("0.0100").times(0.5));
+const expected = new Decimal("0.0025")
+  .times(2)
+  .plus(new Decimal("0.0100").times(0.5));
 if (!cost.total.equals(expected)) {
   throw new Error(`unexpected total: ${cost.total.toString()}`);
 }
@@ -118,12 +138,12 @@ console.log(cost.total.toString()); // "0.01"
 
 ## UsageMetrics
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `operation` | `string` | A key declared in `pricing.operations` |
-| `measures` | `Record<string, number \| string>` | Non-negative billable quantities declared by the operation |
-| `dimensions` | `Record<string, string \| number \| boolean>` | Typed values used to select the first matching rate rule |
-| `metadata` | `Record<string, unknown>` | Caller metadata; it does not participate in pricing |
+| Field        | Type                                          | Meaning                                                    |
+| ------------ | --------------------------------------------- | ---------------------------------------------------------- |
+| `operation`  | `string`                                      | A key declared in `pricing.operations`                     |
+| `measures`   | `Record<string, number \| string>`            | Non-negative billable quantities declared by the operation |
+| `dimensions` | `Record<string, string \| number \| boolean>` | Typed values used to select the first matching rate rule   |
+| `metadata`   | `Record<string, unknown>`                     | Caller metadata; it does not participate in pricing        |
 
 Declared measures omitted by the caller are treated as zero. Required
 dimensions must be present. Undeclared measures or dimensions are rejected.
@@ -134,16 +154,16 @@ All monetary fields are `Decimal` values quantized to six decimal places with
 half-up rounding. Operation pricing is reported in `operationCredits`;
 `total` is the complete quantized result.
 
-| Field | Type |
-| --- | --- |
-| `operationCredits` | `Decimal` |
-| `modelCredits` | `Decimal` |
-| `toolCredits` | `Decimal` |
-| `searchCredits` | `Decimal` |
-| `cacheSavings` | `Decimal` |
-| `fixedCredits` | `Decimal` |
-| `total` | `Decimal` |
-| `breakdown` | `Record<string, unknown>` |
+| Field              | Type                      |
+| ------------------ | ------------------------- |
+| `operationCredits` | `Decimal`                 |
+| `modelCredits`     | `Decimal`                 |
+| `toolCredits`      | `Decimal`                 |
+| `searchCredits`    | `Decimal`                 |
+| `cacheSavings`     | `Decimal`                 |
+| `fixedCredits`     | `Decimal`                 |
+| `total`            | `Decimal`                 |
+| `breakdown`        | `Record<string, unknown>` |
 
 See [Pricing](/docs/concepts/pricing) for how rate cards, rules, and unmatched
 actions compose, and [Expressions](/docs/concepts/expressions) for the

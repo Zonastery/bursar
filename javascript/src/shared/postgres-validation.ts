@@ -6,25 +6,8 @@ export const postgresUuid = z
   .string()
   .regex(/^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/);
 
-/** Parse only PostgreSQL's documented boolean representations. */
-export const pgBoolean = z
-  .union([
-    z.boolean(),
-    z.literal("true"),
-    z.literal("false"),
-    z.literal("t"),
-    z.literal("f"),
-    z.literal("1"),
-    z.literal("0"),
-    z.literal(1),
-    z.literal(0),
-  ])
-  .transform((v) => {
-    if (typeof v === "boolean") return v;
-    if (typeof v === "string") return v === "true" || v === "t" || v === "1";
-    if (typeof v === "number") return v !== 0;
-    return false;
-  });
+/** PostgreSQL drivers return boolean columns as booleans; reject transport-shaped coercions. */
+export const pgBoolean = z.boolean();
 
 /** Unwrap a single-key JSONB result row. Matches Python _unwrap_jsonb behavior. */
 export function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {

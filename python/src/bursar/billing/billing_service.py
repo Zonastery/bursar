@@ -307,39 +307,26 @@ class BillingService:
         as_of = effective_now.isoformat()
         expired_count = 0
         for candidate in self._store.list_expired_grace_subscriptions(effective_now):
-            subscription_id = candidate.get("subscription_id")
-            provider = candidate.get("provider")
-            provider_subscription_id = candidate.get("provider_subscription_id")
-            grace_ends_at = candidate.get("grace_ends_at")
-            user_id = candidate.get("user_id")
-            if not all(
-                (
-                    subscription_id,
-                    provider,
-                    provider_subscription_id,
-                    grace_ends_at,
-                    user_id,
-                )
-            ):
+            if candidate.subscription_id is None or candidate.grace_ends_at is None:
                 continue
             current = self._store.get_billing_subscription(
-                str(provider),
-                str(provider_subscription_id),
+                candidate.provider,
+                candidate.provider_subscription_id,
             )
             if (
                 current is None
                 or current.status != BillingSubscriptionStatus.past_due
-                or current.grace_ends_at != str(grace_ends_at)
+                or current.grace_ends_at != candidate.grace_ends_at
                 or current.grace_expired_at
             ):
                 continue
             self._revoke_if_current_subscription(
-                str(user_id),
-                str(provider_subscription_id),
+                candidate.user_id,
+                candidate.provider_subscription_id,
             )
             if self._store.mark_subscription_grace_expired(
-                str(subscription_id),
-                str(grace_ends_at),
+                candidate.subscription_id,
+                candidate.grace_ends_at,
                 as_of,
             ):
                 expired_count += 1

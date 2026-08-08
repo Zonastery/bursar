@@ -1,12 +1,13 @@
 ---
 title: The data model
+sidebar_label: Data model
 description: Accounts, the append-only ledger, lots, leases, and allowances — every concept mapped to tables on one PostgreSQL schema.
 ---
 
 # The data model
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
 
 Before the API details, here is the shape of the money. One `Bursar` facade
 talks to one Postgres schema, and every concept maps to tables you can point a
@@ -54,7 +55,7 @@ nothing drifts between "can I afford this?" and "you are billed".
 Plans are non-monetary. `account_plan_assignments` records which plan an
 account holds against which catalog revision; `allowance_windows` and
 `quota_windows` track usage windows and consumption keyed by account. The
-allowance is real money *available* to the account, but it never enters the
+allowance is real money _available_ to the account, but it never enters the
 balance — `DeductionResult.allowance_consumed` tells you the split.
 
 ## Usage charges
@@ -67,14 +68,14 @@ so quotas and analytics cannot be bypassed by a free rate.
 
 ## Core tables
 
-| Table | Purpose |
-| --- | --- |
-| `credit_accounts` | One locked balance and version per account (personal or team) |
-| `credit_ledger_entries` | Append-only money history with `balance_after` per entry |
-| `credit_lots` | Each positive entry as a spendable lot with bucket, priority, expiry |
-| `credit_lot_allocations` | Which lots a debit consumed, in priority order |
-| `credit_leases` | Temporary holds and policy snapshots for admission control |
-| `account_plan_assignments` | Current plan per account, pinned to a catalog revision |
+| Table                      | Purpose                                                              |
+| -------------------------- | -------------------------------------------------------------------- |
+| `credit_accounts`          | One locked balance and version per account (personal or team)        |
+| `credit_ledger_entries`    | Append-only money history with `balance_after` per entry             |
+| `credit_lots`              | Each positive entry as a spendable lot with bucket, priority, expiry |
+| `credit_lot_allocations`   | Which lots a debit consumed, in priority order                       |
+| `credit_leases`            | Temporary holds and policy snapshots for admission control           |
+| `account_plan_assignments` | Current plan per account, pinned to a catalog revision               |
 
 ## The three money invariants
 
@@ -96,31 +97,31 @@ holds; buckets break the balance into tiers:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  balance = bursar.credits.get_balance(ada)
-  available = bursar.credits.get_available(ada)
-  buckets = bursar.credits.get_bucket_balances(ada)
+```python
+balance = bursar.credits.get_balance(ada)
+available = bursar.credits.get_available(ada)
+buckets = bursar.credits.get_bucket_balances(ada)
 
-  print(balance.balance)              # 1000.000000
-  print(available.available)          # balance minus active holds
-  for bucket in buckets.buckets:
-      print(bucket.bucket_key, bucket.priority, bucket.balance)
-  ```
+print(balance.balance)              # 1000.000000
+print(available.available)          # balance minus active holds
+for bucket in buckets.buckets:
+    print(bucket.bucket_key, bucket.priority, bucket.balance)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const balance = await bursar.credits.getBalance(ada);
-  const available = await bursar.credits.getAvailable(ada);
-  const buckets = await bursar.credits.getBucketBalances(ada);
+```ts
+const balance = await bursar.credits.getBalance(ada);
+const available = await bursar.credits.getAvailable(ada);
+const buckets = await bursar.credits.getBucketBalances(ada);
 
-  console.log(balance.balance);            // 1000.000000
-  console.log(available.available);        // balance minus active holds
-  for (const bucket of buckets.buckets) {
-    console.log(bucket.bucketKey, bucket.priority, bucket.balance);
-  }
-  ```
+console.log(balance.balance); // 1000.000000
+console.log(available.available); // balance minus active holds
+for (const bucket of buckets.buckets) {
+  console.log(bucket.bucketKey, bucket.priority, bucket.balance);
+}
+```
 
   </TabItem>
 </Tabs>
@@ -135,4 +136,4 @@ it.
 - [Architecture](./architecture.mdx) — the facade and how capabilities map to the schema
 - [Canonical configuration](./configuration.mdx) — the document that defines buckets, lots, and plans
 - [Financial safety](../guides/financial-safety.mdx) — holds, leases, and the money invariants in action
-- [The credit lifecycle](../notebooks/04_credit_lifecycle.mdx) — every entry kind on one ledger
+- [Manage the credit lifecycle](../notebooks/credits-and-controls/04_credit_lifecycle.mdx) — every entry kind on one ledger

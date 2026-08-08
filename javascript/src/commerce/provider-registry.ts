@@ -3,6 +3,17 @@ import type { PaymentProvider } from "../providers/types.js";
 import { ProviderSelectionError } from "./errors.js";
 import type { CommerceOptions, CommerceProviderFactoryContext } from "./types.js";
 
+function isPaymentProvider(value: unknown): value is PaymentProvider {
+  if (typeof value !== "object" || value == null) return false;
+  const candidate = value as Partial<PaymentProvider>;
+  return (
+    typeof candidate.provider === "string" &&
+    candidate.provider.trim().length > 0 &&
+    typeof candidate.createCheckoutSession === "function" &&
+    typeof candidate.handleWebhook === "function"
+  );
+}
+
 export class CommerceProviderRegistry {
   private readonly instances = new Map<string, Promise<PaymentProvider>>();
 
@@ -10,6 +21,16 @@ export class CommerceProviderRegistry {
     private readonly options: CommerceOptions,
     private readonly context: CommerceProviderFactoryContext,
   ) {
+    const providerNames = Object.keys(options.providers);
+    if (providerNames.length === 0) {
+      throw new ProviderSelectionError("At least one payment provider must be registered");
+    }
+    if (providerNames.some((name) => !name.trim())) {
+      throw new ProviderSelectionError("Payment provider names must not be empty");
+    }
+    if (options.defaultProvider !== undefined && !options.defaultProvider.trim()) {
+      throw new ProviderSelectionError("Default payment provider must not be empty");
+    }
     if (
       options.defaultProvider != null &&
       !Object.prototype.hasOwnProperty.call(options.providers, options.defaultProvider)
@@ -35,8 +56,13 @@ export class CommerceProviderRegistry {
     }
     let loading = this.instances.get(providerName);
     if (!loading) {
-      loading = Promise.resolve(factory(this.context))
+      const created = Promise.resolve(factory(this.context))
         .then((provider) => {
+          if (!isPaymentProvider(provider)) {
+            throw new ProviderSelectionError(
+              `Provider factory '${providerName}' did not return a valid payment provider`,
+            );
+          }
           if (provider.provider !== providerName) {
             throw new ProviderSelectionError(
               `Provider factory '${providerName}' returned provider '${provider.provider}'`,
@@ -45,9 +71,12 @@ export class CommerceProviderRegistry {
           return provider;
         })
         .catch((error: unknown) => {
-          this.instances.delete(providerName);
+          if (this.instances.get(providerName) === created) {
+            this.instances.delete(providerName);
+          }
           throw error;
         });
+      loading = created;
       this.instances.set(providerName, loading);
     }
     return loading;

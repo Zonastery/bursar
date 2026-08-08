@@ -1,5 +1,7 @@
 import type { Decimal } from "decimal.js";
 
+export type TeamRole = "owner" | "admin" | "member";
+
 // ── Team/shared balance pools ─────────────────────────────────────────
 /** A team with a shared credit balance pool. */
 export interface Team {
@@ -13,8 +15,8 @@ export interface Team {
 /** A member of a team, with optional spend cap. */
 export interface TeamMember {
   userId: string;
-  role: string;
-  spendCap?: Decimal | null;
+  role: TeamRole;
+  spendCap: Decimal | null;
   totalSpent: Decimal;
 }
 
@@ -36,7 +38,7 @@ export interface CreateTeamResult {
 export interface AddTeamMemberResult {
   teamId: string;
   userId: string;
-  role: string;
+  role: TeamRole;
 }
 
 /** Result of deducting credits from a team pool. */

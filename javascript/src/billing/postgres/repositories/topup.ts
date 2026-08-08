@@ -26,7 +26,7 @@ const BillingTopupRowSchema = z
     max_quantity: z.number().int().positive(),
     default_quantity: z.number().int().positive(),
   })
-  .passthrough()
+  .strict()
   .superRefine((row, ctx) => {
     if (row.max_quantity < row.min_quantity) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "max_quantity is below min_quantity" });
@@ -80,6 +80,20 @@ export class BillingTopupRepository {
     }
     const raw = unwrapJsonb(rows);
     if (raw?.id == null) return null;
-    return safeParse(BillingTopupRowSchema, raw, context);
+    return safeParse(
+      BillingTopupRowSchema,
+      {
+        id: raw.id,
+        topup_key: raw.topup_key,
+        credits_per_unit: raw.credits_per_unit,
+        bucket_key: raw.bucket_key,
+        amount_minor: raw.amount_minor,
+        currency: raw.currency,
+        min_quantity: raw.min_quantity,
+        max_quantity: raw.max_quantity,
+        default_quantity: raw.default_quantity,
+      },
+      context,
+    );
   }
 }

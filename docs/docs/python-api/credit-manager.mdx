@@ -1,5 +1,6 @@
 ---
 title: Credits service
+sidebar_label: Credits service
 description: The bursar credits service — balances and adjustments, metered charging, the lease lifecycle, plans, ledger history, analytics, and team charging.
 ---
 
@@ -21,7 +22,9 @@ grant = bursar.credits.add_credits(
 charge = bursar.credits.deduct_credits(
     user_id, 5, idempotency_key="operation:1"
 )
-refund = bursar.credits.refund_credits(charge.entry_id, reason="clawback")
+refund = bursar.credits.refund_credits(
+    charge.entry_id, reason="clawback", idempotency_key="refund:operation:1"
+)
 ```
 
 `add_credits` and `deduct_credits` move a raw amount; `refund_credits` reverses
@@ -39,14 +42,14 @@ through to the store, so administrative deductions are replay-safe too.
 The high-volume path, however, is `deduct(metrics, idempotency_key)` — see
 below.
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
-| `add_credits` | `user_id: str`, `amount: Decimal \| int`, `entry_type="adjustment"`, `metadata=None`, `expires_at=None`, `bucket=None`, `idempotency_key=None` | `AddCreditsResult` |
-| `deduct_credits` | `user_id: str`, `amount: Decimal \| int`, `*, entry_type="adjustment"`, `bucket`, `metadata`, `idempotency_key` | `AddCreditsResult` |
-| `refund_credits` | `entry_id: str`, `amount=None`, `reason`, `metadata`, `idempotency_key` | `RefundResult` |
-| `get_balance` | `user_id: str` | `BalanceResult` |
-| `get_available` | `user_id: str` | `AvailableResult` |
-| `get_bucket_balances` | `user_id: str` | `BucketBalancesResult` |
+| Method                | Parameters                                                                                                                                     | Returns                |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `add_credits`         | `user_id: str`, `amount: Decimal \| int`, `entry_type="adjustment"`, `metadata=None`, `expires_at=None`, `bucket=None`, `idempotency_key=None` | `AddCreditsResult`     |
+| `deduct_credits`      | `user_id: str`, `amount: Decimal \| int`, `*, entry_type="adjustment"`, `bucket`, `metadata`, `idempotency_key`                                | `AddCreditsResult`     |
+| `refund_credits`      | `entry_id: str`, `amount=None`, `reason`, `metadata`, `idempotency_key`                                                                        | `RefundResult`         |
+| `get_balance`         | `user_id: str`                                                                                                                                 | `BalanceResult`        |
+| `get_available`       | `user_id: str`                                                                                                                                 | `AvailableResult`      |
+| `get_bucket_balances` | `user_id: str`                                                                                                                                 | `BucketBalancesResult` |
 
 ## Metered charging
 
@@ -75,12 +78,12 @@ flat-rate jobs and billing-cycle grants. `revoke_credits_by_entry_type`
 reverses every deduction of a given entry type (e.g. claw back a whole batch),
 and `sweep_expired_credits(dry_run=False)` expires eligible credit lots.
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
-| `deduct` | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None`, `*, feature=None` | `DeductionResult` |
-| `deduct_flat_job` | `user_id: str`, `job_name: str`, `idempotency_key=None`, `metadata=None`, `feature=None` | `DeductionResult` |
-| `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str` | `dict[str, Any]` |
-| `sweep_expired_credits` | `dry_run=False` | `SweepResult` |
+| Method                         | Parameters                                                                                          | Returns           |
+| ------------------------------ | --------------------------------------------------------------------------------------------------- | ----------------- |
+| `deduct`                       | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None`, `*, feature=None` | `DeductionResult` |
+| `deduct_flat_job`              | `user_id: str`, `job_name: str`, `idempotency_key=None`, `metadata=None`, `feature=None`            | `DeductionResult` |
+| `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str`                                                                   | `dict[str, Any]`  |
+| `sweep_expired_credits`        | `dry_run=False`                                                                                     | `SweepResult`     |
 
 ## AI and batch usage accounting
 
@@ -119,22 +122,29 @@ lease and re-raises. Long jobs may call `renew` from inside `do_work`; a crash
 between reserve and settle is covered by the lease TTL.
 
 ```python
+from bursar.credits.service_types import ReserveOptions, SettleOptions
+
 lease = bursar.credits.reserve(
     user_id,
     UsageMetrics(operation="completion", measures={"input_tokens": 1000}),
-    options={"idempotency_key": "run:7", "ttl": 300},
+    ReserveOptions(idempotency_key="run:7:reserve", ttl=300),
 )
 # ... do the work ...
-bursar.credits.settle(user_id, lease.lease_id, actual_metrics)
+bursar.credits.settle(
+    user_id,
+    lease.lease_id,
+    actual_metrics,
+    SettleOptions(idempotency_key="run:7:settle"),
+)
 ```
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
-| `reserve` | `user_id: str`, `metrics_or_amount`, `options: ReserveOptions \| None` | `LeaseResult` |
-| `settle` | `user_id: str`, `lease_id: str`, `metrics_or_amount`, `options: SettleOptions \| None` | `DeductionResult` |
-| `release` | `user_id: str`, `lease_id: str` | `ReleaseResult` |
-| `renew` | `user_id: str`, `lease_id: str`, `ttl: int \| None = None` | `LeaseResult` |
-| `run_billed` | `user_id: str`, `options: RunBilledOptions` | `RunBilledResult` |
+| Method       | Parameters                                                                             | Returns           |
+| ------------ | -------------------------------------------------------------------------------------- | ----------------- |
+| `reserve`    | `user_id: str`, `metrics_or_amount`, `options: ReserveOptions \| None`                 | `LeaseResult`     |
+| `settle`     | `user_id: str`, `lease_id: str`, `metrics_or_amount`, `options: SettleOptions \| None` | `DeductionResult` |
+| `release`    | `user_id: str`, `lease_id: str`                                                        | `ReleaseResult`   |
+| `renew`      | `user_id: str`, `lease_id: str`, `ttl: int \| None = None`                             | `LeaseResult`     |
+| `run_billed` | `user_id: str`, `options: RunBilledOptions`                                            | `RunBilledResult` |
 
 `ReserveOptions` carries `idempotency_key`, `operation_type`, `billing_mode`,
 `ttl`, `metadata`, `feature`, and `model`; `SettleOptions` carries
@@ -154,12 +164,12 @@ allowance = bursar.credits.check_allowance(user_id)
 voice = bursar.credits.check_feature(user_id, "voice_mode")
 ```
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
-| `set_user_plan` | `user_id: str`, `plan_key: str`, `plan_assigned_at=None` | `SetUserPlanResult` |
-| `get_user_plan` | `user_id: str` | `GetUserPlanResult` |
-| `check_allowance` | `user_id: str` | `AllowanceResult` |
-| `check_feature` | `user_id: str`, `feature: str` | `CheckFeatureResult` |
+| Method            | Parameters                                               | Returns              |
+| ----------------- | -------------------------------------------------------- | -------------------- |
+| `set_user_plan`   | `user_id: str`, `plan_key: str`, `plan_assigned_at=None` | `SetUserPlanResult`  |
+| `get_user_plan`   | `user_id: str`                                           | `GetUserPlanResult`  |
+| `check_allowance` | `user_id: str`                                           | `AllowanceResult`    |
+| `check_feature`   | `user_id: str`, `feature: str`                           | `CheckFeatureResult` |
 
 ## Ledger and usage charges
 
@@ -179,12 +189,12 @@ while page.next_cursor:
     )
 ```
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
-| `list_ledger_entries` | `user_id: str`, `entry_types=None`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `LedgerPage` |
-| `get_ledger_entry` | `user_id: str`, `entry_id: str` | `LedgerEntry \| None` |
-| `list_usage_entries` | `user_id: str`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `LedgerPage` |
-| `list_usage_charges` | `user_id: str`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `UsageChargePage` |
+| Method                | Parameters                                                                                      | Returns               |
+| --------------------- | ----------------------------------------------------------------------------------------------- | --------------------- |
+| `list_ledger_entries` | `user_id: str`, `entry_types=None`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `LedgerPage`          |
+| `get_ledger_entry`    | `user_id: str`, `entry_id: str`                                                                 | `LedgerEntry \| None` |
+| `list_usage_entries`  | `user_id: str`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None`                     | `LedgerPage`          |
+| `list_usage_charges`  | `user_id: str`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None`                     | `UsageChargePage`     |
 
 ## Analytics
 
@@ -192,13 +202,13 @@ Usage analytics aggregate across all users of the tenant within a
 `[start, end)` window. These are optional store capabilities — custom stores
 that omit them raise `CapabilityNotSupportedError`.
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
-| `spend_by_user` | `start: datetime`, `end: datetime` | `list[SpendByUserRow]` |
-| `spend_by_model` | `start: datetime`, `end: datetime` | `list[SpendByModelRow]` |
-| `top_users` | `limit: int`, `start: datetime`, `end: datetime` | `list[TopUserRow]` |
-| `daily_spend` | `start: datetime`, `end: datetime` | `list[DailySpendRow]` |
-| `aggregate_stats` | `start: datetime`, `end: datetime` | `AggregateStats` |
+| Method            | Parameters                                       | Returns                 |
+| ----------------- | ------------------------------------------------ | ----------------------- |
+| `spend_by_user`   | `start: datetime`, `end: datetime`               | `list[SpendByUserRow]`  |
+| `spend_by_model`  | `start: datetime`, `end: datetime`               | `list[SpendByModelRow]` |
+| `top_users`       | `limit: int`, `start: datetime`, `end: datetime` | `list[TopUserRow]`      |
+| `daily_spend`     | `start: datetime`, `end: datetime`               | `list[DailySpendRow]`   |
+| `aggregate_stats` | `start: datetime`, `end: datetime`               | `AggregateStats`        |
 
 ## Teams
 
@@ -217,8 +227,8 @@ bursar.credits.deduct_team(
 )
 ```
 
-| Method | Parameters | Returns |
-| --- | --- | --- |
+| Method        | Parameters                                                                                       | Returns               |
+| ------------- | ------------------------------------------------------------------------------------------------ | --------------------- |
 | `deduct_team` | `team_id: str`, `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None` | `TeamDeductionResult` |
 
 See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account

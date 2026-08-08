@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
-import pytest
+from dodopayments import AsyncDodoPayments
+from stripe import StripeClient
 
 from bursar.billing.types import BillingEvent, BillingEventResult, BillingEventType, BillingInvoiceInfo
 from bursar.providers._shared import call_billing_event_sink
@@ -23,13 +24,14 @@ from bursar.providers.types import (
     PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
+    SubscriptionCancellationProvider,
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
 )
 
 
-class MinimalProvider(PaymentProvider):
+class MinimalProvider:
     """Custom provider implementing the same two required capabilities as JS."""
 
     provider = "minimal"
@@ -180,14 +182,14 @@ def run(awaitable: Any) -> Any:
 def test_custom_provider_only_requires_the_js_core_contract() -> None:
     provider = MinimalProvider()
 
-    with pytest.raises(NotImplementedError, match="cancel_subscription"):
-        run(provider.cancel_subscription("sub_1"))
+    assert isinstance(provider, PaymentProvider)
+    assert not isinstance(provider, SubscriptionCancellationProvider)
 
 
 def test_dodo_adapter_maps_requests_and_responses() -> None:
     client = DodoClient()
     provider = DodoProvider(
-        get_client=lambda: client,
+        get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_webhook_key",
         event_sink=Sink(),
         setup_product_id="prod_setup",
@@ -255,9 +257,11 @@ def test_dodo_webhook_failures_are_classified_without_network() -> None:
                 raise TimeoutError("timeout")
 
     result = run(
-        DodoProvider(get_client=lambda: Broken(), webhook_key="k", event_sink=Sink()).handle_webhook(
-            WebhookRequest(raw_body="{}", headers={})
-        )
+        DodoProvider(
+            get_client=lambda: cast(AsyncDodoPayments, Broken()),
+            webhook_key="k",
+            event_sink=Sink(),
+        ).handle_webhook(WebhookRequest(raw_body="{}", headers={}))
     )
     assert result.received is False
     assert result.retryable is False
@@ -265,27 +269,37 @@ def test_dodo_webhook_failures_are_classified_without_network() -> None:
 
 
 def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -> None:
-    calls: list[tuple[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any], dict[str, str] | None]] = []
 
     class Checkout:
-        async def create_async(self, **kwargs: Any) -> dict[str, str]:
-            calls.append(("checkout", kwargs))
-            return {"id": "cs_1", "url": "https://checkout.test"}
+        async def create_async(
+            self,
+            params: dict[str, Any],
+            options: dict[str, str] | None = None,
+        ) -> SimpleNamespace:
+            calls.append(("checkout", params, options))
+            return SimpleNamespace(id="cs_1", url="https://checkout.test")
 
     class Customers:
-        async def create_async(self, **kwargs: Any) -> dict[str, str]:
-            calls.append(("customer", kwargs))
-            return {"id": "cus_1"}
+        async def create_async(
+            self,
+            params: dict[str, Any],
+            options: dict[str, str] | None = None,
+        ) -> SimpleNamespace:
+            calls.append(("customer", params, options))
+            return SimpleNamespace(id="cus_1")
 
     fake = SimpleNamespace(
-        Customer=Customers(),
-        checkout=SimpleNamespace(Session=Checkout()),
-        Webhook=SimpleNamespace(construct_event=lambda *_args: None),
+        v1=SimpleNamespace(
+            customers=Customers(),
+            checkout=SimpleNamespace(sessions=Checkout()),
+        ),
+        construct_event=lambda *_args: None,
     )
     provider = StripeProvider(
         event_sink=Sink(),
         webhook_secret="test_webhook_secret",
-        get_client=lambda: fake,
+        get_client=lambda: cast(StripeClient, fake),
     )
     result = run(
         provider.create_checkout_session(
@@ -306,9 +320,9 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     assert result.provider_session_id == "cs_1"
     assert calls[0][0] == "customer"
     assert calls[0][1]["email"] == "u1@example.com"
-    assert calls[0][1]["idempotency_key"] == "idem_1:customer"
+    assert calls[0][2] == {"idempotency_key": "idem_1:customer"}
     assert calls[1][1]["line_items"] == [{"price": "price_1", "quantity": 1}]
-    assert calls[1][1]["idempotency_key"] == "idem_1"
+    assert calls[1][2] == {"idempotency_key": "idem_1"}
     webhook = run(provider.handle_webhook(WebhookRequest(raw_body="{}", headers={})))
     assert webhook.received is False
     assert webhook.retryable is False
@@ -316,14 +330,14 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
 
 
 def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() -> None:
-    subscription_updates: list[tuple[str, dict[str, Any]]] = []
-    schedule_creates: list[dict[str, Any]] = []
-    schedule_updates: list[tuple[str, dict[str, Any]]] = []
-    schedule_releases: list[tuple[str, dict[str, Any]]] = []
+    subscription_updates: list[tuple[str, dict[str, Any], dict[str, str] | None]] = []
+    schedule_creates: list[tuple[dict[str, Any], dict[str, str] | None]] = []
+    schedule_updates: list[tuple[str, dict[str, Any], dict[str, str] | None]] = []
+    schedule_releases: list[tuple[str, dict[str, Any], dict[str, str] | None]] = []
 
     class Checkout:
-        async def retrieve_async(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
-            assert kwargs == {"expand": ["payment_intent"]}
+        async def retrieve_async(self, session_id: str, params: dict[str, Any]) -> dict[str, Any]:
+            assert params == {"expand": ["payment_intent"]}
             if session_id == "cs_open":
                 return {"status": "open", "payment_status": "unpaid"}
             return {
@@ -333,55 +347,76 @@ def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() ->
             }
 
     class Subscription:
-        async def retrieve_async(self, _subscription_id: str) -> dict[str, Any]:
-            return {
-                "customer": "cus_1",
-                "items": {
-                    "data": [
-                        {
-                            "id": "si_1",
-                            "current_period_start": 1_767_225_600,
-                            "current_period_end": 1_769_904_000,
-                        }
+        async def retrieve_async(self, _subscription_id: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                customer="cus_1",
+                items=SimpleNamespace(
+                    data=[
+                        SimpleNamespace(
+                            id="si_1",
+                            current_period_start=1_767_225_600,
+                            current_period_end=1_769_904_000,
+                        )
                     ]
-                },
-            }
+                ),
+            )
 
-        async def modify_async(self, subscription_id: str, **kwargs: Any) -> dict[str, str]:
-            subscription_updates.append((subscription_id, kwargs))
-            return {"latest_invoice": "in_1"}
+        async def update_async(
+            self,
+            subscription_id: str,
+            params: dict[str, Any],
+            options: dict[str, str] | None = None,
+        ) -> SimpleNamespace:
+            subscription_updates.append((subscription_id, params, options))
+            return SimpleNamespace(latest_invoice="in_1")
 
     class SubscriptionSchedule:
-        async def create_async(self, **kwargs: Any) -> dict[str, Any]:
-            schedule_creates.append(kwargs)
-            return {
-                "id": "sub_sched_1",
-                "phases": [
-                    {
-                        "items": [{"price": "price_old", "quantity": 1}],
-                        "start_date": 1_767_225_600,
-                        "end_date": 1_769_904_000,
-                    }
+        async def create_async(
+            self,
+            params: dict[str, Any],
+            options: dict[str, str] | None = None,
+        ) -> SimpleNamespace:
+            schedule_creates.append((params, options))
+            return SimpleNamespace(
+                id="sub_sched_1",
+                phases=[
+                    SimpleNamespace(
+                        items=[SimpleNamespace(price="price_old", quantity=1)],
+                        start_date=1_767_225_600,
+                        end_date=1_769_904_000,
+                    )
                 ],
-            }
+            )
 
-        async def modify_async(self, schedule_id: str, **kwargs: Any) -> dict[str, Any]:
-            schedule_updates.append((schedule_id, kwargs))
-            return {}
+        async def update_async(
+            self,
+            schedule_id: str,
+            params: dict[str, Any],
+            options: dict[str, str] | None = None,
+        ) -> SimpleNamespace:
+            schedule_updates.append((schedule_id, params, options))
+            return SimpleNamespace()
 
-        async def release_async(self, schedule_id: str, **kwargs: Any) -> dict[str, Any]:
-            schedule_releases.append((schedule_id, kwargs))
-            return {}
+        async def release_async(
+            self,
+            schedule_id: str,
+            params: dict[str, Any],
+            options: dict[str, str] | None = None,
+        ) -> SimpleNamespace:
+            schedule_releases.append((schedule_id, params, options))
+            return SimpleNamespace()
 
     fake = SimpleNamespace(
-        checkout=SimpleNamespace(Session=Checkout()),
-        Subscription=Subscription(),
-        SubscriptionSchedule=SubscriptionSchedule(),
+        v1=SimpleNamespace(
+            checkout=SimpleNamespace(sessions=Checkout()),
+            subscriptions=Subscription(),
+            subscription_schedules=SubscriptionSchedule(),
+        ),
     )
     provider = StripeProvider(
         event_sink=Sink(),
         webhook_secret="test_webhook_secret",
-        get_client=lambda: fake,
+        get_client=lambda: cast(StripeClient, fake),
     )
 
     assert run(provider.get_checkout_session_status("cs_open")).payment_status == "processing"
@@ -400,10 +435,10 @@ def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() ->
         )
     )
     assert scheduled.provider_operation_id == "sub_sched_1"
-    assert schedule_creates == [{"from_subscription": "sub_1", "idempotency_key": "plan_1:schedule-create"}]
-    schedule_id, schedule_kwargs = schedule_updates[0]
+    assert schedule_creates == [({"from_subscription": "sub_1"}, {"idempotency_key": "plan_1:schedule-create"})]
+    schedule_id, schedule_kwargs, schedule_options = schedule_updates[0]
     assert schedule_id == "sub_sched_1"
-    assert schedule_kwargs["idempotency_key"] == "plan_1:schedule-update"
+    assert schedule_options == {"idempotency_key": "plan_1:schedule-update"}
     assert schedule_kwargs["phases"][0]["items"] == [{"price": "price_old", "quantity": 1}]
     assert schedule_kwargs["phases"][1] == {
         "items": [{"price": "price_new", "quantity": 1}],
@@ -433,18 +468,18 @@ def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() ->
             "proration_behavior": "none",
             "payment_behavior": "allow_incomplete",
             "metadata": {"plan": "team"},
-            "idempotency_key": "plan_2:subscription-update",
         },
+        {"idempotency_key": "plan_2:subscription-update"},
     )
 
     run(provider.cancel_subscription("sub_1", "cancel_1"))
     run(provider.reactivate_subscription("sub_1", "reactivate_1"))
     run(provider.cancel_scheduled_plan_change("sub_1", "sub_sched_1", "release_1"))
     assert subscription_updates[-2:] == [
-        ("sub_1", {"cancel_at_period_end": True, "idempotency_key": "cancel_1"}),
-        ("sub_1", {"cancel_at_period_end": False, "idempotency_key": "reactivate_1"}),
+        ("sub_1", {"cancel_at_period_end": True}, {"idempotency_key": "cancel_1"}),
+        ("sub_1", {"cancel_at_period_end": False}, {"idempotency_key": "reactivate_1"}),
     ]
-    assert schedule_releases == [("sub_sched_1", {"idempotency_key": "release_1"})]
+    assert schedule_releases == [("sub_sched_1", {}, {"idempotency_key": "release_1"})]
 
 
 def test_mock_provider_is_a_complete_deterministic_test_double() -> None:

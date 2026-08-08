@@ -79,6 +79,44 @@ const DEFAULT_PREFERENCES = {
   invoiceReminders: false,
 } as const;
 
+function requireNonEmptyText(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`${field} must be a non-empty string`);
+  }
+}
+
+function requireOptionalNonEmptyText(value: unknown, field: string): void {
+  if (value !== null && value !== undefined) requireNonEmptyText(value, field);
+}
+
+function assertCreateCheckoutInput(input: CreateCheckoutInput): void {
+  requireNonEmptyText(input.subjectId, "subjectId");
+  requireNonEmptyText(input.offerKey, "offerKey");
+  requireNonEmptyText(input.returnUrl, "returnUrl");
+  requireNonEmptyText(input.cancelUrl, "cancelUrl");
+  requireNonEmptyText(input.operationKey, "operationKey");
+  requireOptionalNonEmptyText(input.accountId, "accountId");
+  requireOptionalNonEmptyText(input.email, "email");
+  requireOptionalNonEmptyText(input.provider, "provider");
+  if (input.type !== undefined && input.type !== "subscription" && input.type !== "credit_pack") {
+    throw new TypeError("type must be 'subscription' or 'credit_pack'");
+  }
+  if (input.metadata !== undefined) {
+    if (
+      typeof input.metadata !== "object" ||
+      input.metadata === null ||
+      Array.isArray(input.metadata)
+    ) {
+      throw new TypeError("metadata must be an object of string values");
+    }
+    for (const [key, value] of Object.entries(input.metadata)) {
+      if (!key.trim() || typeof value !== "string") {
+        throw new TypeError("metadata must contain non-empty keys and string values");
+      }
+    }
+  }
+}
+
 const TERMINAL_CHECKOUT_STATUSES = new Set(["failed", "cancelled", "requires_payment_method"]);
 const CURRENT_SUBSCRIPTION_STATUSES = new Set(["active", "trialing", "past_due", "incomplete"]);
 const BLOCKING_SUBSCRIPTION_STATUSES = new Set(["active", "trialing", "past_due", "incomplete"]);
@@ -249,10 +287,17 @@ export class CommerceService {
     eventSink: BillingEventSink,
     readonly options: CommerceOptions,
   ) {
+    if (
+      options.checkoutIntentTtlMs !== undefined &&
+      (!Number.isSafeInteger(options.checkoutIntentTtlMs) || options.checkoutIntentTtlMs <= 0)
+    ) {
+      throw new TypeError("checkoutIntentTtlMs must be a positive safe integer");
+    }
     this.logger = normalizeLogger(options.logger);
     const identityResolver = options.identityResolver
       ? async (input: Parameters<NonNullable<CommerceOptions["identityResolver"]>>[0]) => {
           const accountId = await options.identityResolver!(input);
+          requireOptionalNonEmptyText(accountId, "identity resolver accountId");
           if (accountId && input.customerId) {
             await this.billing.upsertCustomer(
               input.provider,
@@ -342,6 +387,7 @@ export class CommerceService {
   }
 
   async createCheckout(input: CreateCheckoutInput): Promise<CreateCheckoutResult> {
+    assertCreateCheckoutInput(input);
     const resolved = await this.resolveOffer(input);
     const quantity = this.quantity(resolved.offer, input.quantity);
     const accountState = input.accountId

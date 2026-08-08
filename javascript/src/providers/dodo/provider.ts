@@ -24,8 +24,10 @@ import type {
   WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
+import { ProviderResponseError } from "../../errors.js";
 import type { DodoClient, DodoWebhookPayload } from "./client-contract.js";
 import { dodoBillingEventId, handleDodoBillingEvent } from "./event-mapper.js";
+import { optionalProviderString } from "../_shared.js";
 
 export interface DodoWebhookProcessorOptions {
   eventSink: BillingEventSink;
@@ -90,20 +92,55 @@ function normalizeMetadata(value: unknown): Record<string, string> {
   );
 }
 
+function requireProviderText(value: unknown, operation: string, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ProviderResponseError("dodo", operation, { details: { field } });
+  }
+  return value;
+}
+
+function requireProviderInteger(
+  value: unknown,
+  operation: string,
+  field: string,
+  options: { min?: number; max?: number } = {},
+): number {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < (options.min ?? 0) ||
+    (options.max !== undefined && parsed > options.max)
+  ) {
+    throw new ProviderResponseError("dodo", operation, { details: { field } });
+  }
+  return parsed;
+}
+
 function identityInput(
   provider: string,
   providerEventType: string,
   data: Record<string, unknown>,
   metadata: Record<string, string>,
 ) {
-  const customer =
-    typeof data.customer === "object" && data.customer !== null
-      ? (data.customer as Record<string, unknown>)
-      : {};
-  const customerId = String(data.customer_id ?? customer.customer_id ?? "").trim() || null;
-  const emailValue = customer.email;
+  if (
+    data.customer !== null &&
+    data.customer !== undefined &&
+    (typeof data.customer !== "object" || Array.isArray(data.customer))
+  ) {
+    throw new TypeError("Dodo customer must be an object");
+  }
+  const customer = (data.customer as Record<string, unknown> | null | undefined) ?? {};
+  const customerId =
+    optionalProviderString(data.customer_id, "Dodo customer_id") ??
+    optionalProviderString(customer.customer_id, "Dodo customer.customer_id") ??
+    null;
   const email =
-    typeof emailValue === "string" && emailValue.trim() ? emailValue.trim().toLowerCase() : null;
+    optionalProviderString(customer.email, "Dodo customer.email")?.toLowerCase() ?? null;
   return {
     provider,
     providerEventType,
@@ -120,38 +157,6 @@ function identityInput(
       : metadata.credits
         ? ("credit_topup" as const)
         : null,
-  };
-}
-
-function restoreSignedExtensionFields(
-  payload: DodoWebhookPayload,
-  rawBody: string,
-): DodoWebhookPayload {
-  // Some Dodo SDK versions omit provider extension fields from the typed
-  // result. The raw body is safe to consult only after unwrap has verified it.
-  let signedData: Record<string, unknown>;
-  try {
-    signedData = (JSON.parse(rawBody) as { data?: Record<string, unknown> }).data ?? {};
-  } catch {
-    return payload;
-  }
-
-  const verifiedData = (payload.data ?? {}) as Record<string, unknown>;
-  const productCart = signedData.product_cart;
-  const cartProductId = Array.isArray(productCart)
-    ? (productCart[0] as { product_id?: unknown } | undefined)?.product_id
-    : undefined;
-  return {
-    ...payload,
-    data: {
-      ...verifiedData,
-      ...(verifiedData.metadata == null && signedData.metadata != null
-        ? { metadata: signedData.metadata }
-        : {}),
-      ...(verifiedData.product_id == null && (signedData.product_id ?? cartProductId) != null
-        ? { product_id: signedData.product_id ?? cartProductId }
-        : {}),
-    },
   };
 }
 
@@ -238,8 +243,14 @@ export class DodoProvider implements PaymentProvider {
       ? { idempotencyKey: params.idempotencyKey }
       : undefined;
     const session = await client.checkoutSessions.create(body, requestOptions);
-    if (!session.checkout_url) throw new Error("Checkout session returned no URL");
-    return { url: session.checkout_url, providerSessionId: session.session_id };
+    return {
+      url: requireProviderText(session.checkout_url, "createCheckoutSession", "checkout_url"),
+      providerSessionId: requireProviderText(
+        session.session_id,
+        "createCheckoutSession",
+        "session_id",
+      ),
+    };
   }
 
   async getCheckoutSessionStatus(providerSessionId: string): Promise<{
@@ -259,8 +270,10 @@ export class DodoProvider implements PaymentProvider {
     const client = this.getClient();
     const session = await client.customers.customerPortal.create(params.customerId, {
       return_url: params.returnUrl,
-    } as Record<string, unknown>);
-    return { url: session.link };
+    });
+    return {
+      url: requireProviderText(session.link, "createCustomerPortalSession", "link"),
+    };
   }
 
   async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
@@ -283,7 +296,7 @@ export class DodoProvider implements PaymentProvider {
       };
     }
 
-    return this.handleVerifiedWebhook(restoreSignedExtensionFields(payload, req.rawBody));
+    return this.handleVerifiedWebhook(payload);
   }
 
   /** Process a payload already verified and parsed by an official Dodo adapter. */
@@ -329,7 +342,7 @@ export class DodoProvider implements PaymentProvider {
     params: UpdatePaymentMethodParams,
   ): Promise<{ url: string }> {
     const productId = params.productId ?? this.config.setupProductId;
-    if (!productId) throw new Error("productId is required for payment method update");
+    if (!productId) throw new TypeError("productId is required for payment method update");
     const client = this.getClient();
     const response = await client.checkoutSessions.create({
       product_cart: [{ product_id: productId, quantity: 1 }],
@@ -337,15 +350,20 @@ export class DodoProvider implements PaymentProvider {
       return_url: params.returnUrl,
       metadata: { purpose: "update_payment_method", subscription_id: params.subscriptionId },
     });
-    if (!response.checkout_url) throw new Error("Failed to create payment method update session");
-    return { url: response.checkout_url };
+    return {
+      url: requireProviderText(
+        response.checkout_url,
+        "createUpdatePaymentMethodSession",
+        "checkout_url",
+      ),
+    };
   }
 
   async createPaymentMethodSetupSession(
     params: PaymentMethodSetupParams,
   ): Promise<{ url: string }> {
     const productId = params.productId ?? this.config.setupProductId;
-    if (!productId) throw new Error("setupProductId is required for payment method setup");
+    if (!productId) throw new TypeError("setupProductId is required for payment method setup");
     const client = this.getClient();
     const session = await client.checkoutSessions.create({
       product_cart: [{ product_id: productId, quantity: 1 }],
@@ -353,29 +371,65 @@ export class DodoProvider implements PaymentProvider {
       return_url: params.returnUrl,
       metadata: { purpose: "setup_payment_method" },
     });
-    if (!session.checkout_url) throw new Error("Checkout session returned no URL");
-    return { url: session.checkout_url };
+    return {
+      url: requireProviderText(
+        session.checkout_url,
+        "createPaymentMethodSetupSession",
+        "checkout_url",
+      ),
+    };
   }
 
   async listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]> {
     const client = this.getClient();
-    try {
-      const { items } = await client.customers.retrievePaymentMethods(customerId);
-      const methods = items
-        .filter((pm) => pm.payment_method === "card" && pm.card && pm.recurring_enabled)
-        .map((pm) => ({
-          id: pm.payment_method_id,
-          last4: pm.card!.last4_digits ?? "",
-          brand: pm.card!.card_network ?? "unknown",
-          expiryMonth: pm.card!.expiry_month ? Number(pm.card!.expiry_month) : 0,
-          expiryYear: pm.card!.expiry_year ? Number(pm.card!.expiry_year) : 0,
-        }));
-      const deduplicated = deduplicatePaymentMethods(methods);
-      if (deduplicated.length === 1) deduplicated[0]!.isDefault = true;
-      return deduplicated;
-    } catch {
-      return [];
-    }
+    const { items } = await client.customers.retrievePaymentMethods(customerId);
+    const methods = items
+      .filter((method) => method.payment_method === "card" && method.recurring_enabled)
+      .map((method) => {
+        if (method.card === null || method.card === undefined) {
+          throw new ProviderResponseError("dodo", "listPaymentMethods", {
+            details: { field: "card" },
+          });
+        }
+        const last4 = requireProviderText(
+          method.card.last4_digits,
+          "listPaymentMethods",
+          "card.last4_digits",
+        );
+        if (!/^\d{4}$/.test(last4)) {
+          throw new ProviderResponseError("dodo", "listPaymentMethods", {
+            details: { field: "card.last4_digits" },
+          });
+        }
+        return {
+          id: requireProviderText(
+            method.payment_method_id,
+            "listPaymentMethods",
+            "payment_method_id",
+          ),
+          last4,
+          brand: requireProviderText(
+            method.card.card_network,
+            "listPaymentMethods",
+            "card.card_network",
+          ),
+          expiryMonth: requireProviderInteger(
+            method.card.expiry_month,
+            "listPaymentMethods",
+            "card.expiry_month",
+            { min: 1, max: 12 },
+          ),
+          expiryYear: requireProviderInteger(
+            method.card.expiry_year,
+            "listPaymentMethods",
+            "card.expiry_year",
+            { min: 1 },
+          ),
+        };
+      });
+    const deduplicated = deduplicatePaymentMethods(methods);
+    if (deduplicated.length === 1) deduplicated[0]!.isDefault = true;
+    return deduplicated;
   }
 
   async previewSavedPaymentCharge(
@@ -386,9 +440,20 @@ export class DodoProvider implements PaymentProvider {
       customer: { customer_id: params.customerId },
     });
     return {
-      amountMinor: preview.current_breakup.total_amount,
-      taxMinor: preview.current_breakup.tax ?? null,
-      currency: preview.currency,
+      amountMinor: requireProviderInteger(
+        preview.current_breakup.total_amount,
+        "previewSavedPaymentCharge",
+        "current_breakup.total_amount",
+      ),
+      taxMinor:
+        preview.current_breakup.tax == null
+          ? null
+          : requireProviderInteger(
+              preview.current_breakup.tax,
+              "previewSavedPaymentCharge",
+              "current_breakup.tax",
+            ),
+      currency: requireProviderText(preview.currency, "previewSavedPaymentCharge", "currency"),
     };
   }
 
@@ -407,26 +472,30 @@ export class DodoProvider implements PaymentProvider {
       },
       { idempotencyKey: params.idempotencyKey },
     );
-    if (!session.payment_id) {
-      return { status: "failed" };
+    const paymentId = requireProviderText(
+      session.payment_id,
+      "chargeSavedPaymentMethod",
+      "payment_id",
+    );
+    const payment = await client.payments.retrieve(paymentId);
+    if (payment.status == null) {
+      throw new ProviderResponseError("dodo", "chargeSavedPaymentMethod", {
+        details: { field: "status" },
+      });
     }
-    const payment = await client.payments.retrieve(session.payment_id);
-    const rawStatus = payment.status ?? "processing";
-    const status: SavedPaymentChargeResult["status"] =
-      rawStatus === "succeeded"
-        ? "succeeded"
-        : rawStatus === "processing"
-          ? "processing"
-          : rawStatus === "requires_customer_action"
-            ? "requires_customer_action"
-            : rawStatus === "requires_payment_method"
-              ? "requires_payment_method"
-              : "failed";
     return {
-      providerPaymentId: payment.payment_id,
-      status,
-      amountMinor: payment.total_amount,
-      currency: payment.currency,
+      providerPaymentId: requireProviderText(
+        payment.payment_id,
+        "chargeSavedPaymentMethod",
+        "payment_id",
+      ),
+      status: payment.status,
+      amountMinor: requireProviderInteger(
+        payment.total_amount,
+        "chargeSavedPaymentMethod",
+        "total_amount",
+      ),
+      currency: requireProviderText(payment.currency, "chargeSavedPaymentMethod", "currency"),
     };
   }
 
@@ -437,7 +506,9 @@ export class DodoProvider implements PaymentProvider {
       name: params.name,
       ...(params.metadata ? { metadata: params.metadata } : {}),
     });
-    return { customerId: customer.customer_id };
+    return {
+      customerId: requireProviderText(customer.customer_id, "createCustomer", "customer_id"),
+    };
   }
 
   async getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null> {
@@ -460,7 +531,7 @@ export class DodoProvider implements PaymentProvider {
       },
       params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
     );
-    return { providerOperationId: undefined };
+    return {};
   }
 
   async previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
@@ -482,11 +553,19 @@ export class DodoProvider implements PaymentProvider {
           item.proration_factor == null ||
           !item.currency
         ) {
-          throw new Error("Dodo plan-change preview returned an incomplete subscription item");
+          throw new ProviderResponseError("dodo", "previewChangePlan", {
+            details: { field: "immediate_charge.line_items" },
+          });
+        }
+        const name = item.name ?? item.description;
+        if (!name?.trim()) {
+          throw new ProviderResponseError("dodo", "previewChangePlan", {
+            details: { field: "immediate_charge.line_items.name" },
+          });
         }
         lineItems.push({
           productId: item.product_id,
-          name: item.name ?? item.description ?? "",
+          name,
           unitPrice: item.unit_price,
           quantity: item.quantity,
           prorationFactor: item.proration_factor,

@@ -148,6 +148,29 @@ class ProviderCapabilityNotSupportedError(BillingError):
         )
 
 
+class ProviderResponseError(BillingError):
+    """Raised when a payment provider violates its documented response contract."""
+
+    code = "PROVIDER_RESPONSE_INVALID"
+    category: BursarErrorCategory = "unavailable"
+
+    def __init__(
+        self,
+        provider: str,
+        operation: str,
+        *,
+        cause: BaseException | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.provider = provider
+        self.operation = operation
+        super().__init__(
+            f"Payment provider {provider!r} returned an invalid response for {operation!r}",
+            cause=cause,
+            details={**(details or {}), "provider": provider, "operation": operation},
+        )
+
+
 class CatalogNotLoadedError(CreditError):
     """Raised when an operation requires a catalog that is not loaded."""
 

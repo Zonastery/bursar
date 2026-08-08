@@ -1315,16 +1315,11 @@ BEGIN
         );
 
         IF v_result.error_code IS NOT NULL THEN
-            RETURN QUERY
-            SELECT
-                v_revoked,
-                (
-                    SELECT account.balance
-                    FROM bursar.credit_accounts AS account
-                    WHERE account.id = v_account
-                ),
-                v_result.error_code;
-            RETURN;
+            -- Do not return a partially successful aggregate. Let the statement
+            -- fail so PostgreSQL rolls back every lot already revoked by this
+            -- invocation.
+            RAISE EXCEPTION 'credit revocation failed: %', v_result.error_code
+                USING ERRCODE = 'P0001';
         END IF;
 
         v_revoked := v_revoked + lot_row.amount;

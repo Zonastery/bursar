@@ -299,7 +299,15 @@ export class AutoRechargeService {
       });
       return { outcome: "action_required", charge };
     }
-    if (charge.status === "succeeded" || charge.status === "processing") {
+    if (
+      charge.status === "succeeded" ||
+      charge.status === "processing" ||
+      charge.status === "requires_merchant_action" ||
+      charge.status === "requires_confirmation" ||
+      charge.status === "requires_capture" ||
+      charge.status === "partially_captured" ||
+      charge.status === "partially_captured_and_capturable"
+    ) {
       await this.billing.updateAutoRechargeAttempt({
         id: attempt.id,
         state: "processing",

@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import require_row, validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    optional_mapping_row,
+    require_mapping_row,
+    require_row,
+    validate_non_empty,
+    validate_row,
+)
 from bursar.credits.postgres.repositories.schemas import (
     AllowanceRow,
+    EntitlementRow,
     PlanMigrationBatchRow,
     QuotaEventRow,
     QuotaStateRow,
@@ -36,21 +45,20 @@ class PlanRepository:
             UserPlanRow if found, None if the user has no plan assigned.
         """
         validate_non_empty(user_id, "user_id")
-        rows = self._callproc("get_subject_plan", [user_id])
-        if not rows:
+        row = optional_mapping_row(
+            self._callproc("get_subject_plan", [user_id]),
+            "PlanRepository.get_user_plan",
+        )
+        if row is None:
             return None
-        if not isinstance(rows[0], dict):
-            return None
-        return UserPlanRow.model_validate(rows[0])
+        return validate_row(UserPlanRow, row, "PlanRepository.get_user_plan")
 
-    def get_entitlement(self, user_id: str, feature: str) -> dict[str, object] | None:
+    def get_entitlement(self, user_id: str, feature: str) -> EntitlementRow | None:
         validate_non_empty(user_id, "user_id")
         validate_non_empty(feature, "feature")
-        rows = self._callproc("get_subject_entitlements", [user_id])
-        return next(
-            (row for row in rows if isinstance(row, dict) and row.get("feature_key") == feature),
-            None,
-        )
+        rows = self._callproc("get_subject_entitlements", [user_id]) or []
+        entitlements = [validate_row(EntitlementRow, row, "PlanRepository.get_entitlement") for row in rows]
+        return next((row for row in entitlements if row.feature_key == feature), None)
 
     def set_user_plan(
         self,
@@ -70,21 +78,15 @@ class PlanRepository:
         """
         validate_non_empty(user_id, "user_id")
         validate_non_empty(plan_key, "plan_key")
-        plan_rows = self._callproc("resolve_active_plan", [plan_key])
-        if not plan_rows or not isinstance(plan_rows[0], dict) or plan_rows[0].get("id") is None:
-            raise StoreError(f"Unknown active plan {plan_key!r}")
-        plan_id = str(plan_rows[0]["id"])
-        params = [user_id, plan_id]
-        if plan_assigned_at is not None:
-            params.append(plan_assigned_at)
-        rows = self._callproc("assign_plan", params)
-        if require_row(rows, "PlanRepository.set_user_plan") is not True:
-            raise StoreError("PlanRepository.set_user_plan: assign_plan returned false")
-        assigned = self.get_user_plan(user_id)
-        return SetUserPlanRow(
-            user_id=user_id,
-            plan_id=(assigned.plan_id if assigned and assigned.plan_id else plan_id),
-            plan_assigned_at=(assigned.plan_assigned_at if assigned is not None else plan_assigned_at),
+        row = require_mapping_row(
+            self._callproc("set_subject_plan", [user_id, plan_key, plan_assigned_at]),
+            "PlanRepository.set_user_plan",
+        )
+        return validate_row(
+            SetUserPlanRow,
+            row,
+            "PlanRepository.set_user_plan",
+            indeterminate=True,
         )
 
     def unset_user_plan(self, user_id: str) -> UnsetUserPlanRow:
@@ -98,26 +100,42 @@ class PlanRepository:
         """
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("unassign_plan", [user_id, "sdk_unassignment"])
-        if require_row(rows, "PlanRepository.unset_user_plan") is not True:
+        result = require_row(rows, "PlanRepository.unset_user_plan")
+        if type(result) is not bool:
+            raise StoreError(
+                "PlanRepository.unset_user_plan: expected a boolean result",
+                indeterminate=True,
+            )
+        if not result:
             raise StoreError("PlanRepository.unset_user_plan: unassign_plan returned false")
-        return UnsetUserPlanRow(user_id=user_id)
+        return validate_row(
+            UnsetUserPlanRow,
+            {"user_id": user_id},
+            "PlanRepository.unset_user_plan",
+        )
 
     def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
         """Pin or unpin the user's current assignment to its catalog revision."""
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("set_plan_revision_pin", [user_id, pinned])
-        return require_row(rows, "PlanRepository.set_plan_revision_pin") is True
+        result = require_row(rows, "PlanRepository.set_plan_revision_pin")
+        if type(result) is not bool:
+            raise StoreError("PlanRepository.set_plan_revision_pin: expected a boolean result")
+        return result
 
     def apply_due_plan_changes(self, limit: int) -> int:
         """Apply one bounded batch of renewal-effective plan changes."""
         rows = self._callproc("apply_due_plan_assignment_changes", [limit]) or []
-        return int(require_row(rows, "PlanRepository.apply_due_plan_changes"))
+        result = require_row(rows, "PlanRepository.apply_due_plan_changes")
+        if isinstance(result, bool) or not isinstance(result, int) or result < 0:
+            raise StoreError("PlanRepository.apply_due_plan_changes: expected a non-negative integer")
+        return result
 
     def start_plan_migration(
         self,
         from_plan_id: str | None,
         to_plan_id: str,
-    ) -> str | None:
+    ) -> str:
         """Start a resumable migration between catalog plan records.
 
         Args:
@@ -125,27 +143,40 @@ class PlanRepository:
             to_plan_id: Target catalog plan ID.
 
         Returns:
-            Migration ID, or None when the plan IDs are invalid.
+            Migration ID.
         """
         if from_plan_id is not None:
             validate_non_empty(from_plan_id, "from_plan_id")
         validate_non_empty(to_plan_id, "to_plan_id")
         rows = self._callproc("start_plan_migration", [from_plan_id, to_plan_id])
-        return str(rows[0]) if rows and rows[0] is not None else None
+        value = require_row(rows, "PlanRepository.start_plan_migration")
+        try:
+            return str(UUID(str(value)))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise StoreError(
+                "PlanRepository.start_plan_migration: expected a UUID result",
+                indeterminate=True,
+            ) from error
 
     def migrate_plan_batch(
         self,
         migration_id: str,
         batch_size: int = 100,
-    ) -> PlanMigrationBatchRow | None:
+    ) -> PlanMigrationBatchRow:
         """Advance a plan migration by one bounded batch."""
         validate_non_empty(migration_id, "migration_id")
         if batch_size < 1 or batch_size > 1000:
             raise ValueError("batch_size must be between 1 and 1000")
-        rows = self._callproc("migrate_plan_batch", [migration_id, batch_size])
-        if not rows or not isinstance(rows[0], dict):
-            return None
-        return PlanMigrationBatchRow.model_validate(rows[0])
+        row = require_mapping_row(
+            self._callproc("migrate_plan_batch", [migration_id, batch_size]),
+            "PlanRepository.migrate_plan_batch",
+        )
+        return validate_row(
+            PlanMigrationBatchRow,
+            row,
+            "PlanRepository.migrate_plan_batch",
+            indeterminate=True,
+        )
 
     def get_quota_state(
         self,
@@ -157,7 +188,7 @@ class PlanRepository:
             "get_subject_quota_state",
             [user_id, quota_key],
         )
-        return [QuotaStateRow.model_validate(row) for row in rows if isinstance(row, dict)]
+        return [validate_row(QuotaStateRow, row, "PlanRepository.get_quota_state") for row in rows]
 
     def check_allowance(self, user_id: str) -> AllowanceRow | None:
         """Check the remaining plan allowance for a user.
@@ -168,10 +199,13 @@ class PlanRepository:
             AllowanceRow if found, None if no plan or allowance configured.
         """
         validate_non_empty(user_id, "user_id")
-        rows = self._callproc("get_subject_allowance", [user_id])
-        if not rows:
+        row = optional_mapping_row(
+            self._callproc("get_subject_allowance", [user_id]),
+            "PlanRepository.check_allowance",
+        )
+        if row is None:
             return None
-        return AllowanceRow.model_validate(rows[0])
+        return validate_row(AllowanceRow, row, "PlanRepository.check_allowance")
 
     def list_quota_events(
         self,
@@ -186,4 +220,4 @@ class PlanRepository:
             "list_subject_quota_events",
             [user_id, after, limit, idempotency_key, after_id],
         )
-        return [QuotaEventRow.model_validate(row) for row in rows if isinstance(row, dict)]
+        return [validate_row(QuotaEventRow, row, "PlanRepository.list_quota_events") for row in rows]

@@ -39,7 +39,7 @@ class SweepResult(BaseModel):
     expired_count: int
     expired_amount: Decimal
     dry_run: bool
-    expired_by_bucket: dict[str, Decimal] | None = None
+    expired_by_bucket: dict[str, Decimal]
 
 
 class QuotaState(BaseModel):
@@ -83,18 +83,21 @@ class Entitlement(BaseModel):
 
 
 class GetUserPlanResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str
     plan_id: str | None
     plan_key: str | None
     plan_label: str | None
     allowance: PlanAllowancePolicy | None
     entitlements: dict[str, Entitlement]
-    rate_card: str | None = None
+    rate_card: str | None
     credit_policy: PlanCreditPolicy | None
     admission: PlanAdmissionPolicy | None
     allowed_operations: list[str]
-    plan_assigned_at: datetime | None = None
-    assignment_source_type: str | None = None
-    assignment_source_id: str | None = None
-    catalog_revision_pinned: bool = False
-    catalog_version: int | None = None
+    plan_assigned_at: datetime | None
+    plan_assignment_ends_at: datetime | None
+    assignment_source_type: Literal["manual", "subscription", "migration", "system"] | None
+    assignment_source_id: str | None
+    catalog_revision_pinned: bool
+    catalog_version: int | None

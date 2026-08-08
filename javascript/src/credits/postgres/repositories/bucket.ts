@@ -1,32 +1,35 @@
 import { z } from "zod";
 import Decimal from "decimal.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { requireRow, safeParse } from "../../../shared/postgres-validation.js";
+import { postgresUuid, requireRow, safeParse } from "../../../shared/postgres-validation.js";
+
+const decimal = z.union([z.string().min(1), z.number().finite()] as const);
+
+const BucketRowSchema = z
+  .object({
+    bucket_key: z.string().min(1),
+    label: z.string().min(1),
+    priority: z.number().int().nonnegative(),
+    expires: z.boolean(),
+    balance: decimal,
+  })
+  .strict();
 
 const BucketEnvelopeRowSchema = z
   .object({
-    user_id: z.string().optional(),
-    buckets: z.array(z.record(z.string(), z.unknown())).optional(),
-    total_balance: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
+    user_id: postgresUuid,
+    buckets: z.array(BucketRowSchema),
+    total_balance: decimal,
   })
-  .passthrough();
+  .strict();
 
 const SweepRowSchema = z
   .object({
-    expired_count: z.coerce.number().optional(),
-    expired_amount: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    expired_by_bucket: z
-      .record(z.string(), z.union([z.string(), z.number()] as const))
-      .nullable()
-      .optional(),
+    expired_count: z.number().int().nonnegative(),
+    expired_amount: decimal,
+    expired_by_bucket: z.record(z.string().min(1), decimal),
   })
-  .passthrough();
+  .strict();
 
 export type BucketEnvelopeRow = z.infer<typeof BucketEnvelopeRowSchema>;
 export type SweepRow = z.infer<typeof SweepRowSchema>;
@@ -38,12 +41,11 @@ export class BucketRepository {
   /** Fetch per-bucket credit balances for a user. */
   async getBucketBalances(userId: string): Promise<BucketEnvelopeRow> {
     const rows = await this.callproc("get_credit_bucket_balances", [userId]);
-    const buckets = (rows ?? []).filter(
-      (row): row is Record<string, unknown> =>
-        row != null && typeof row === "object" && !Array.isArray(row),
+    const buckets = (rows ?? []).map((row) =>
+      safeParse(BucketRowSchema, row, "BucketRepository.getBucketBalances"),
     );
     const totalBalance = buckets
-      .reduce((total, row) => total.plus(String(row.balance ?? 0)), new Decimal(0))
+      .reduce((total, row) => total.plus(row.balance), new Decimal(0))
       .toString();
     return safeParse(
       BucketEnvelopeRowSchema,

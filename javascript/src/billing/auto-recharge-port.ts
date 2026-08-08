@@ -1,5 +1,6 @@
 import type {
   BillingAutoRechargeAttempt,
+  BillingAutoRechargeAttemptState,
   BillingAutoRechargeProfile,
   BillingCustomerRecord,
   BillingTopupResult,
@@ -29,7 +30,7 @@ export interface AutoRechargeBillingPort {
   }): Promise<BillingAutoRechargeAttempt | null>;
   updateAutoRechargeAttempt(input: {
     id: string;
-    state: string;
+    state: BillingAutoRechargeAttemptState;
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;

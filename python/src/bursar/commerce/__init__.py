@@ -23,10 +23,10 @@ from bursar.commerce.service import CommerceAutoRecharge, CommerceService
 from bursar.commerce.types import (
     AccountAllowanceOverview,
     AccountCommerceOverview,
+    AccountCreditDisplay,
     AccountCreditOverview,
     AccountSubscriptionSummary,
     AutoRechargeInput,
-    AutoRechargeProcessResultLike,
     BillingDocumentInvoiceLocator,
     BillingDocumentInvoiceRef,
     BillingDocumentLedgerLocator,
@@ -57,17 +57,18 @@ from bursar.commerce.types import (
     PortalSessionInput,
     PreferencePatch,
     PreviewPlanChangeInput,
+    SubscriptionAccessState,
     SubscriptionCommandResult,
 )
 
 __all__ = [
     "AccountAllowanceOverview",
     "AccountCommerceOverview",
+    "AccountCreditDisplay",
     "AccountCreditOverview",
     "AccountSubscriptionSummary",
     "ActiveSubscriptionError",
     "AutoRechargeInput",
-    "AutoRechargeProcessResultLike",
     "BillingDocumentInvoiceRef",
     "BillingDocumentInvoiceLocator",
     "BillingDocumentLedgerRef",
@@ -116,5 +117,6 @@ __all__ = [
     "ProviderSelectionError",
     "QuoteChangedError",
     "SubscriptionCommandResult",
+    "SubscriptionAccessState",
     "UnknownOfferError",
 ]

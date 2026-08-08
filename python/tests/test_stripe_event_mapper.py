@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from stripe import StripeClient
 
 from bursar.billing.types import BillingEventResult
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
@@ -42,28 +44,30 @@ def stripe_client(
     subscription_retrieve: AsyncMock | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        checkout=SimpleNamespace(
-            Session=SimpleNamespace(
-                retrieve_async=checkout_retrieve
-                or AsyncMock(
-                    return_value={
-                        "line_items": {
-                            "data": [
-                                {
-                                    "price": {
-                                        "id": "price_topup",
-                                        "product": "prod_topup",
+        v1=SimpleNamespace(
+            checkout=SimpleNamespace(
+                sessions=SimpleNamespace(
+                    retrieve_async=checkout_retrieve
+                    or AsyncMock(
+                        return_value={
+                            "line_items": {
+                                "data": [
+                                    {
+                                        "price": {
+                                            "id": "price_topup",
+                                            "product": "prod_topup",
+                                        }
                                     }
-                                }
-                            ]
+                                ]
+                            }
                         }
-                    }
+                    )
                 )
-            )
-        ),
-        Subscription=SimpleNamespace(
-            retrieve_async=subscription_retrieve or AsyncMock(return_value=subscription_fixture())
-        ),
+            ),
+            subscriptions=SimpleNamespace(
+                retrieve_async=subscription_retrieve or AsyncMock(return_value=subscription_fixture())
+            ),
+        )
     )
 
 
@@ -89,7 +93,7 @@ async def emit(
         None,
         {},
         sink,
-        stripe,
+        cast(StripeClient, stripe),
         event_created=STRIPE_EVENT_CREATED,
     )
 

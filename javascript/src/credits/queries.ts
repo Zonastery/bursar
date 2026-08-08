@@ -14,6 +14,7 @@ import type {
   ListUsageEntriesOptions,
   PlanMigrationBatchResult,
   PlanMigrationStartResult,
+  RevokeCreditsResult,
   QuotaEvent,
   QuotaState,
   SpendByModelRow,
@@ -71,10 +72,7 @@ export class CreditQueries {
     return this.store.migratePlanBatch(migrationId, batchSize);
   }
 
-  async revokeCreditsByEntryType(
-    userId: string,
-    entryType: string,
-  ): Promise<Record<string, unknown>> {
+  async revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeCreditsResult> {
     return this.store.revokeCreditsByEntryType(userId, entryType);
   }
 

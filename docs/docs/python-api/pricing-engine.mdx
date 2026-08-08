@@ -1,5 +1,6 @@
 ---
 title: PricingEngine
+sidebar_label: Pricing engine
 description: The bursar PricingEngine — database-free pricing from a canonical config document, pricing UsageMetrics, and CostBreakdown results.
 ---
 
@@ -123,12 +124,12 @@ assert cost.total == Decimal("0.01")  # 2,000,000 × 0.0025/M + 500,000 × 0.010
 
 ## UsageMetrics
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `operation` | `str` | A key declared in `pricing.operations` |
-| `measures` | `dict[str, Decimal]` | Non-negative billable quantities declared by the operation |
-| `dimensions` | `dict[str, str \| Decimal \| bool]` | Typed values used to select the first matching rate rule |
-| `metadata` | `dict[str, Any]` | Caller metadata; it does not participate in pricing |
+| Field        | Type                                | Meaning                                                    |
+| ------------ | ----------------------------------- | ---------------------------------------------------------- |
+| `operation`  | `str`                               | A key declared in `pricing.operations`                     |
+| `measures`   | `dict[str, Decimal]`                | Non-negative billable quantities declared by the operation |
+| `dimensions` | `dict[str, str \| Decimal \| bool]` | Typed values used to select the first matching rate rule   |
+| `metadata`   | `dict[str, Any]`                    | Caller metadata; it does not participate in pricing        |
 
 Declared measures omitted by the caller are treated as zero. Required
 dimensions must be present. Undeclared measures or dimensions are rejected.
@@ -139,16 +140,16 @@ All monetary fields are `Decimal` values quantized to six decimal places with
 half-up rounding. Operation pricing is reported in `operation_credits`;
 `total` is the complete quantized result.
 
-| Field | Type |
-| --- | --- |
-| `operation_credits` | `Decimal` |
-| `model_credits` | `Decimal` |
-| `tool_credits` | `Decimal` |
-| `search_credits` | `Decimal` |
-| `cache_savings` | `Decimal` |
-| `fixed_credits` | `Decimal` |
-| `total` | `Decimal` |
-| `breakdown` | `dict[str, Any]` |
+| Field               | Type             |
+| ------------------- | ---------------- |
+| `operation_credits` | `Decimal`        |
+| `model_credits`     | `Decimal`        |
+| `tool_credits`      | `Decimal`        |
+| `search_credits`    | `Decimal`        |
+| `cache_savings`     | `Decimal`        |
+| `fixed_credits`     | `Decimal`        |
+| `total`             | `Decimal`        |
+| `breakdown`         | `dict[str, Any]` |
 
 See [Pricing](/docs/concepts/pricing) for how rate cards, rules, and unmatched
 actions compose, and [Expressions](/docs/concepts/expressions) for the

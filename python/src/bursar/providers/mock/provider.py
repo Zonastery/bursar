@@ -14,7 +14,6 @@ from bursar.providers.types import (
     CreateCustomerResult,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
-    PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
     ProviderUrlResult,
@@ -29,7 +28,7 @@ from bursar.providers.types import (
 )
 
 
-class MockPaymentProvider(PaymentProvider):
+class MockPaymentProvider:
     provider = "mock"
 
     def __init__(

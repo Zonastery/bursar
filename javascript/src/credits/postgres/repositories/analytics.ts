@@ -1,61 +1,68 @@
 import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { safeParse } from "../../../shared/postgres-validation.js";
+import { optionalRecordRow, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
-const decimal = z.union([z.string(), z.number()]);
+const decimal = z.union([z.string().min(1), z.number().finite()] as const);
+const count = z.union([
+  z.number().int().nonnegative(),
+  z.string().regex(/^\d+$/).transform(Number),
+]);
+const timestamp = z.union([z.string().min(1), z.date().transform((value) => value.toISOString())]);
+const calendarDate = z.union([
+  z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  z.date().transform((value) => value.toISOString().slice(0, 10)),
+]);
 
 const SpendByUserRowSchema = z
   .object({
-    user_id: z.string().optional(),
-    total_spend: decimal.nullable().optional(),
-    entry_count: decimal.nullable().optional(),
+    user_id: z.string().min(1),
+    total_spend: decimal,
+    entry_count: count,
   })
-  .passthrough();
+  .strict();
 
 const SpendByModelRowSchema = z
   .object({
-    model: z.string().optional(),
-    total_spend: decimal.nullable().optional(),
-    entry_count: decimal.nullable().optional(),
+    model: z.string().min(1),
+    total_spend: decimal,
+    entry_count: count,
   })
-  .passthrough();
+  .strict();
 
-const TopUserRowSchema = z
-  .object({ user_id: z.string().optional(), total_spend: decimal.nullable().optional() })
-  .passthrough();
+const TopUserRowSchema = z.object({ user_id: z.string().min(1), total_spend: decimal }).strict();
 
 const DailySpendRowSchema = z
   .object({
-    date: z.string().optional(),
-    total_spend: decimal.nullable().optional(),
-    entry_count: decimal.nullable().optional(),
+    date: calendarDate,
+    total_spend: decimal,
+    entry_count: count,
   })
-  .passthrough();
+  .strict();
 
 const AggregateStatsRowSchema = z
   .object({
-    total_credits_consumed: decimal.nullable().optional(),
-    active_users: decimal.nullable().optional(),
-    avg_daily_spend: decimal.nullable().optional(),
-    top_model: z.string().nullable().optional(),
-    top_user: z.string().nullable().optional(),
+    total_credits_consumed: decimal,
+    active_users: count,
+    avg_daily_spend: decimal,
+    top_model: z.string().min(1).nullable(),
+    top_user: z.string().min(1).nullable(),
   })
-  .passthrough();
+  .strict();
 
 const LedgerEntryRowSchema = z
   .object({
     entry_id: z.string(),
     account_id: z.string(),
-    actor_user_id: z.string().nullable().optional(),
+    actor_user_id: z.string().nullable(),
     amount: decimal,
     entry_type: z.string(),
     operation: z.string(),
-    reference_entry_id: z.string().nullable().optional(),
-    idempotency_key: z.string().nullable().optional(),
-    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
-    created_at: z.union([z.string(), z.date()]),
+    reference_entry_id: z.string().nullable(),
+    idempotency_key: z.string().nullable(),
+    metadata: z.record(z.string(), z.unknown()).nullable(),
+    created_at: timestamp,
   })
-  .passthrough();
+  .strict();
 
 const UsageChargeRowSchema = z
   .object({
@@ -67,15 +74,15 @@ const UsageChargeRowSchema = z
     allowance_requested: decimal,
     allowance_covered: decimal,
     billing_disposition: z.enum(["billable", "record_only"]),
-    feature: z.string().nullable().optional(),
-    model: z.string().nullable().optional(),
-    region: z.string().nullable().optional(),
-    event_at: z.union([z.string(), z.date()]),
+    feature: z.string().nullable(),
+    model: z.string().nullable(),
+    region: z.string().nullable(),
+    event_at: timestamp,
     idempotency_key: z.string(),
-    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
-    created_at: z.union([z.string(), z.date()]),
+    metadata: z.record(z.string(), z.unknown()).nullable(),
+    created_at: timestamp,
   })
-  .passthrough();
+  .strict();
 
 export type SpendByUserRow = z.infer<typeof SpendByUserRowSchema>;
 export type SpendByModelRow = z.infer<typeof SpendByModelRowSchema>;
@@ -94,11 +101,7 @@ export class AnalyticsRepository {
       const row = raw as Record<string, unknown>;
       return safeParse(
         SpendByUserRowSchema,
-        {
-          ...row,
-          user_id: row.subject_id,
-          entry_count: row.charge_count,
-        },
+        { user_id: row.subject_id, total_spend: row.total_spend, entry_count: row.charge_count },
         "AnalyticsRepository.spendByUser",
       );
     });
@@ -110,7 +113,7 @@ export class AnalyticsRepository {
       const row = raw as Record<string, unknown>;
       return safeParse(
         SpendByModelRowSchema,
-        { ...row, entry_count: row.charge_count },
+        { model: row.model, total_spend: row.total_spend, entry_count: row.charge_count },
         "AnalyticsRepository.spendByModel",
       );
     });
@@ -122,7 +125,7 @@ export class AnalyticsRepository {
       const row = raw as Record<string, unknown>;
       return safeParse(
         TopUserRowSchema,
-        { ...row, user_id: row.subject_id },
+        { user_id: row.subject_id, total_spend: row.total_spend },
         "AnalyticsRepository.topUsers",
       );
     });
@@ -134,11 +137,7 @@ export class AnalyticsRepository {
       const row = raw as Record<string, unknown>;
       return safeParse(
         DailySpendRowSchema,
-        {
-          ...row,
-          date: row.day,
-          entry_count: row.charge_count,
-        },
+        { date: row.day, total_spend: row.total_spend, entry_count: row.charge_count },
         "AnalyticsRepository.dailySpend",
       );
     });
@@ -148,7 +147,7 @@ export class AnalyticsRepository {
     const rows = await this.callproc("aggregate_usage_stats", [start, end]);
     return safeParse(
       AggregateStatsRowSchema,
-      rows?.[0] ?? {},
+      requireRow(rows, "AnalyticsRepository.aggregateStats"),
       "AnalyticsRepository.aggregateStats",
     );
   }
@@ -183,8 +182,10 @@ export class AnalyticsRepository {
 
   async getLedgerEntry(userId: string, entryId: string): Promise<LedgerEntryRow | null> {
     const rows = await this.callproc("get_ledger_entry", [userId, entryId]);
-    if (!rows?.length) return null;
-    return safeParse(LedgerEntryRowSchema, rows[0], "AnalyticsRepository.getLedgerEntry");
+    const row = optionalRecordRow(rows, "AnalyticsRepository.getLedgerEntry");
+    return row === null
+      ? null
+      : safeParse(LedgerEntryRowSchema, row, "AnalyticsRepository.getLedgerEntry");
   }
 
   async listUsageCharges(

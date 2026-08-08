@@ -771,7 +771,6 @@ describe("BursarRuntime", () => {
       clickhouse,
       s3,
       outbox: {},
-      bursar: { commerceOptions: { providers: {} } },
     });
 
     expect(runtime.clickhouse).toBe(clickhouse);

@@ -1,5 +1,6 @@
 ---
 title: Plans, entitlements, quotas, and admission
+sidebar_label: Plans and access
 description: What a paid tier gets — allowed operations, rate cards, free credit allowances, features, quotas, and admission policies.
 ---
 
@@ -13,18 +14,18 @@ application code.
 
 ## What a plan contains
 
-| Field | Role |
-| --- | --- |
-| `display_name` | Customer-facing label |
-| `rank` | Catalog ordering; lower ranks first (default `0`) |
-| `rate_card` | The rate card that prices allowed operations |
-| `allowed_operations` | Operations the plan may run |
-| `features` | Feature values for the plan (`{ voice_mode: true, max_context: 200000 }`) |
-| `credit_allowance` | Free credits per window; optional `priority` positions them among credit buckets |
-| `quotas` | Per-operation measure limits over a window |
-| `credit_policy` | Reference to a `prepaid` or `credit_line` policy |
-| `admission_policy` | Reference to a named concurrency policy |
-| `revision_policy` | When config changes reach subscribers (`immediate` \| `next_renewal` \| `pinned`) |
+| Field                | Role                                                                              |
+| -------------------- | --------------------------------------------------------------------------------- |
+| `display_name`       | Customer-facing label                                                             |
+| `rank`               | Catalog ordering; lower ranks first (default `0`)                                 |
+| `rate_card`          | The rate card that prices allowed operations                                      |
+| `allowed_operations` | Operations the plan may run                                                       |
+| `features`           | Feature values for the plan (`{ voice_mode: true, max_context: 200000 }`)         |
+| `credit_allowance`   | Free credits per window; optional `priority` positions them among credit buckets  |
+| `quotas`             | Per-operation measure limits over a window                                        |
+| `credit_policy`      | Reference to a `prepaid` or `credit_line` policy                                  |
+| `admission_policy`   | Reference to a named concurrency policy                                           |
+| `revision_policy`    | When config changes reach subscribers (`immediate` \| `next_renewal` \| `pinned`) |
 
 `catalog.default_plan` names the signup plan; when omitted, the lowest-rank
 plan is chosen.
@@ -104,7 +105,8 @@ number (including `0`), and any string (including `""`) count as present;
 entitlements:
   features:
     voice_mode: { type: boolean, default: false }
-    max_context: { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
+    max_context:
+      { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
 ```
 
 Feature types are `boolean`, `enum` (with `values`), `integer` (with optional
@@ -133,9 +135,9 @@ The same policy can be shared by several plans.
 
 `credits.policies` name prepaid or credit-line policies:
 
-| Policy | Behavior |
-| --- | --- |
-| `prepaid` | Floor at zero; structural zero debt |
+| Policy        | Behavior                                              |
+| ------------- | ----------------------------------------------------- |
+| `prepaid`     | Floor at zero; structural zero debt                   |
 | `credit_line` | `limit` allows a negative floor — a bounded overdraft |
 
 A plan's `credit_policy` reference applies its floor to deductions. The
@@ -168,7 +170,10 @@ if not feature.has_feature:
 import { Bursar } from "@zonastery/bursar";
 
 const bursar = new Bursar({ creditStore: store });
-await bursar.accounts.onAccountCreated({ accountId: userId, eventKey: "signup:1" });
+await bursar.accounts.onAccountCreated({
+  accountId: userId,
+  eventKey: "signup:1",
+});
 
 await bursar.credits.setUserPlan(userId, "pro");
 const allowance = await bursar.credits.checkAllowance(userId);
@@ -197,5 +202,5 @@ version in effect at assignment. When omitted, subscription-backed plans use
 
 - [Canonical configuration](./configuration.mdx) — plans and policy references in one document
 - [Financial safety](../guides/financial-safety.mdx) — floors, holds, and the lease lifecycle
-- [Credit lifecycle](../notebooks/04_credit_lifecycle.mdx) — end-to-end walkthrough
-- API reference: [Credits service (Python)](../python-api/credit-manager.mdx) and [Credits service (JavaScript)](../javascript-api/credit-manager.mdx)
+- [Manage the credit lifecycle](../notebooks/credits-and-controls/04_credit_lifecycle.mdx) — end-to-end walkthrough
+- API reference: [Credits service (Python)](../python-api/credit-manager.mdx) and [Credits service (TypeScript)](../javascript-api/credit-manager.mdx)

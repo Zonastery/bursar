@@ -20,6 +20,7 @@ from bursar.billing.types import (
     BillingEvent,
     BillingEventResult,
     BillingInvoiceRecord,
+    BillingOfferInterval,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionChange,
@@ -72,6 +73,7 @@ from bursar.providers.types import (
     PortalParams,
     PreviewChangePlanParams,
     ProviderUrlResult,
+    SubscriptionCancellationProvider,
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
@@ -100,7 +102,7 @@ def commerce_catalog() -> dict[str, Any]:
     return catalog
 
 
-class RecordingProvider(PaymentProvider):
+class RecordingProvider:
     provider = "alpha"
 
     def __init__(self) -> None:
@@ -204,7 +206,7 @@ class RecordingProvider(PaymentProvider):
         return ChangePlanResult(provider_operation_id="change-1")
 
 
-class MinimalProvider(PaymentProvider):
+class MinimalProvider:
     """Custom provider implementing the same two required capabilities as JS."""
 
     provider = "minimal"
@@ -420,15 +422,17 @@ class FakeBilling:
             from_offer=BillingSubscriptionOfferContext(
                 offer_id="offer-starter",
                 offer_key="starter_month",
+                plan_id="plan-starter",
                 plan="starter",
-                interval="month",
+                interval=BillingOfferInterval.month,
                 interval_count=1,
             ),
             to_offer=BillingSubscriptionOfferContext(
                 offer_id=value.to_offer_id,
                 offer_key="pro_month",
+                plan_id="plan-pro",
                 plan="pro",
-                interval="month",
+                interval=BillingOfferInterval.month,
                 interval_count=1,
             ),
             effective_at=value.effective_at,
@@ -490,11 +494,18 @@ class FakeCredits:
             plan_label="Starter",
             allowance=None,
             entitlements={},
+            rate_card=None,
             credit_policy=None,
             admission=None,
             allowed_operations=[],
+            plan_assigned_at=None,
+            plan_assignment_ends_at=None,
+            assignment_source_type=None,
+            assignment_source_id=None,
+            catalog_revision_pinned=False,
+            catalog_version=None,
         )
-        self.allowance = AllowanceResult(
+        self.allowance: AllowanceResult | None = AllowanceResult(
             plan_id="plan-starter",
             allowance_remaining=Decimal("5"),
             period_start="2026-07-01T00:00:00Z",
@@ -526,7 +537,7 @@ class FakeCredits:
         del account_id
         return self.plan
 
-    def check_allowance(self, account_id: str) -> AllowanceResult:
+    def check_allowance(self, account_id: str) -> AllowanceResult | None:
         del account_id
         return self.allowance
 
@@ -605,15 +616,17 @@ def scheduled_change() -> BillingSubscriptionChange:
         from_offer=BillingSubscriptionOfferContext(
             offer_id="offer-starter",
             offer_key="starter_month",
+            plan_id="plan-starter",
             plan="starter",
-            interval="month",
+            interval=BillingOfferInterval.month,
             interval_count=1,
         ),
         to_offer=BillingSubscriptionOfferContext(
             offer_id="offer-pro",
             offer_key="pro_month",
+            plan_id="plan-pro",
             plan="pro",
-            interval="month",
+            interval=BillingOfferInterval.month,
             interval_count=1,
         ),
         effective_at="2026-09-01T00:00:00.000Z",
@@ -996,6 +1009,19 @@ async def test_overview_documents_payment_methods_preferences_and_optional_failu
 
 
 @pytest.mark.asyncio
+async def test_account_overview_treats_missing_allowance_window_as_zero() -> None:
+    commerce, _billing, credits, _provider = make_harness()
+    credits.allowance = None
+
+    overview = await commerce.get_account_overview("user-1")
+
+    assert overview.credits.effective_spendable_balance == Decimal("30")
+    assert overview.credits.allowance.remaining == Decimal(0)
+    assert overview.credits.allowance.period_start is None
+    assert overview.credits.allowance.period_end is None
+
+
+@pytest.mark.asyncio
 async def test_account_overview_interleaves_allowance_with_bucket_priorities() -> None:
     commerce, _billing, credits, _provider = make_harness()
     credits.bucket_balances = BucketBalancesResult(
@@ -1168,5 +1194,5 @@ def test_public_commerce_inputs_do_not_expose_provider_product_ids() -> None:
 def test_custom_provider_only_requires_the_js_core_contract() -> None:
     provider = MinimalProvider()
 
-    with pytest.raises(NotImplementedError, match="cancel_subscription"):
-        run(provider.cancel_subscription("sub_1"))
+    assert isinstance(provider, PaymentProvider)
+    assert not isinstance(provider, SubscriptionCancellationProvider)

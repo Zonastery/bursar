@@ -1,5 +1,6 @@
 ---
 title: Billing and commerce
+sidebar_label: Billing and commerce
 description: How billing connects the credit ledger to a payment provider — offer catalog, normalized events, and auto-recharge guardrails.
 ---
 
@@ -59,16 +60,16 @@ bounded `quantity`, a target `bucket`, and `lot_behavior` (`separate_lots`
 keeps each purchase as its own lot; `merge_and_refresh` merges):
 
 ```yaml
-  credits_10k:
-    type: topup
-    display_name: "10,000 Credits"
-    price: { amount_minor: 500, currency: USD }
-    providers:
-      stripe: { type: stripe_price, price_id: price_credits_10k }
-    credits_per_unit: "10000"
-    quantity: { minimum: 1, maximum: 10, default: 1 }
-    bucket: purchased
-    lot_behavior: separate_lots
+credits_10k:
+  type: topup
+  display_name: "10,000 Credits"
+  price: { amount_minor: 500, currency: USD }
+  providers:
+    stripe: { type: stripe_price, price_id: price_credits_10k }
+  credits_per_unit: "10000"
+  quantity: { minimum: 1, maximum: 10, default: 1 }
+  bucket: purchased
+  lot_behavior: separate_lots
 ```
 
 ## Checkout
@@ -119,13 +120,13 @@ downgrade may wait for renewal, while an upgrade applies immediately.
 `commerce.auto_recharge` turns a low balance into a topup purchase without
 user interaction. Guardrails bound every decision:
 
-| Field | Meaning |
-| --- | --- |
-| `eligible_topups` | Topup offers auto-recharge may buy |
-| `balance_below` | Threshold that triggers a purchase (`min`/`max`/`default` credits) |
-| `rearm_above` | Balance that arms auto-recharge again (must exceed `balance_below.maximum`) |
-| `quantity` | Units per purchase |
-| `limits` | `max_purchases` per window, `max_charge_minor`, cooldown, and failure handling (`max_consecutive_failures`, `failure_action: pause`) |
+| Field             | Meaning                                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `eligible_topups` | Topup offers auto-recharge may buy                                                                                                   |
+| `balance_below`   | Threshold that triggers a purchase (`min`/`max`/`default` credits)                                                                   |
+| `rearm_above`     | Balance that arms auto-recharge again (must exceed `balance_below.maximum`)                                                          |
+| `quantity`        | Units per purchase                                                                                                                   |
+| `limits`          | `max_purchases` per window, `max_charge_minor`, cooldown, and failure handling (`max_consecutive_failures`, `failure_action: pause`) |
 
 ```yaml
 auto_recharge:

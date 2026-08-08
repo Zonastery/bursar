@@ -3,7 +3,11 @@
   overflow: hidden;
   padding: clamp(4rem, 9vw, 7.5rem) 0;
   background:
-    radial-gradient(circle at 85% 12%, rgba(247, 148, 30, 0.18), transparent 28rem),
+    radial-gradient(
+      circle at 85% 12%,
+      rgba(247, 148, 30, 0.18),
+      transparent 28rem
+    ),
     linear-gradient(145deg, #f7fafc 0%, #ffffff 52%, #fff8ef 100%);
   border-bottom: 1px solid var(--bursar-border);
 }
@@ -12,7 +16,7 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
-  content: '';
+  content: "";
   background-image:
     linear-gradient(rgba(16, 42, 67, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(16, 42, 67, 0.035) 1px, transparent 1px);
@@ -93,7 +97,7 @@
   height: 0.38rem;
   margin-right: 0.55rem;
   vertical-align: 0.1rem;
-  content: '';
+  content: "";
   background: var(--bursar-accent);
   border-radius: 50%;
 }
@@ -193,7 +197,8 @@
 .capabilityCard:focus-visible {
   color: inherit;
   text-decoration: none;
-  outline: 3px solid color-mix(in srgb, var(--ifm-color-primary) 42%, transparent);
+  outline: 3px solid
+    color-mix(in srgb, var(--ifm-color-primary) 42%, transparent);
   outline-offset: 3px;
 }
 
@@ -231,7 +236,7 @@
 .cardLink::after,
 .textLink::after {
   margin-left: 0.35rem;
-  content: '→';
+  content: "→";
 }
 
 .systemSection {
@@ -258,7 +263,9 @@
 
 .systemDiagram {
   display: grid;
-  grid-template-columns: minmax(8rem, 0.72fr) 2.5rem minmax(13rem, 1.3fr) 2.5rem minmax(10rem, 0.9fr);
+  grid-template-columns:
+    minmax(8rem, 0.72fr) 2.5rem minmax(13rem, 1.3fr)
+    2.5rem minmax(10rem, 0.9fr);
   align-items: stretch;
 }
 
@@ -338,7 +345,7 @@
   right: 0;
   width: 7px;
   height: 7px;
-  content: '';
+  content: "";
   border-top: 1px solid var(--bursar-border-strong);
   border-right: 1px solid var(--bursar-border-strong);
   transform: rotate(45deg);
@@ -458,7 +465,9 @@
   }
 
   .systemDiagram {
-    grid-template-columns: minmax(7.5rem, 0.72fr) 1.5rem minmax(12rem, 1.3fr) 1.5rem minmax(9rem, 0.9fr);
+    grid-template-columns:
+      minmax(7.5rem, 0.72fr) 1.5rem minmax(12rem, 1.3fr)
+      1.5rem minmax(9rem, 0.9fr);
   }
 
   .sdkPanelHeader {
@@ -486,40 +495,44 @@
   }
 }
 
-[data-theme='dark'] .hero {
+[data-theme="dark"] .hero {
   background:
-    radial-gradient(circle at 85% 12%, rgba(247, 148, 30, 0.13), transparent 28rem),
+    radial-gradient(
+      circle at 85% 12%,
+      rgba(247, 148, 30, 0.13),
+      transparent 28rem
+    ),
     linear-gradient(145deg, #091826 0%, #0b1f31 55%, #25190e 100%);
 }
 
-[data-theme='dark'] .hero::before {
+[data-theme="dark"] .hero::before {
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
 }
 
-[data-theme='dark'] .heroCode {
+[data-theme="dark"] .heroCode {
   background: rgba(9, 24, 38, 0.8);
   border-color: rgba(255, 255, 255, 0.12);
 }
 
-[data-theme='dark'] .status {
+[data-theme="dark"] .status {
   color: #bbf7d0;
   background: rgba(22, 101, 52, 0.28);
   border-color: rgba(134, 239, 172, 0.25);
 }
 
-[data-theme='dark'] .diagramCore {
+[data-theme="dark"] .diagramCore {
   color: #102a43;
   background: #f0f4f8;
   border-color: #f0f4f8;
 }
 
-[data-theme='dark'] .diagramCore > span:last-child {
+[data-theme="dark"] .diagramCore > span:last-child {
   color: #486581;
 }
 
-[data-theme='dark'] .cta {
+[data-theme="dark"] .cta {
   background: #20160c;
   border-color: #4a3420;
 }

@@ -21,7 +21,7 @@ const CatalogOfferRowSchema = z
     cycle_grant_bucket_key: z.string().min(1).nullable(),
     cycle_grant_renewal: z.enum(["replace_previous", "accumulate"]).nullable(),
   })
-  .passthrough()
+  .strict()
   .superRefine((row, ctx) => {
     const grantFields = [
       row.cycle_grant_amount,
@@ -39,13 +39,15 @@ const CatalogOfferRowSchema = z
     }
   });
 
-const OfferContextRowSchema = z.object({
-  offer_key: z.string().min(1),
-  plan_id: postgresUuid,
-  plan_key: z.string().min(1),
-  billing_unit: z.enum(["day", "week", "month", "year"]),
-  billing_count: z.number().int().positive(),
-});
+const OfferContextRowSchema = z
+  .object({
+    offer_key: z.string().min(1),
+    plan_id: postgresUuid,
+    plan_key: z.string().min(1),
+    billing_unit: z.enum(["day", "week", "month", "year"]),
+    billing_count: z.number().int().positive(),
+  })
+  .strict();
 
 interface BillingOfferRowBase {
   id: string;
@@ -109,7 +111,21 @@ export class BillingOfferRepository {
     }
     const raw = unwrapJsonb(rows);
     if (raw?.id == null) return null;
-    const offer = safeParse(CatalogOfferRowSchema, raw, context);
+    const offer = safeParse(
+      CatalogOfferRowSchema,
+      {
+        id: raw.id,
+        catalog_revision_id: raw.catalog_revision_id,
+        offer_key: raw.offer_key,
+        plan_key: raw.plan_key,
+        billing_unit: raw.billing_unit,
+        billing_count: raw.billing_count,
+        cycle_grant_amount: raw.cycle_grant_amount,
+        cycle_grant_bucket_key: raw.cycle_grant_bucket_key,
+        cycle_grant_renewal: raw.cycle_grant_renewal,
+      },
+      context,
+    );
 
     const contextRows = await this.query(
       "SELECT * FROM bursar.get_catalog_offer_context($1::uuid, $2::uuid)",
@@ -120,7 +136,18 @@ export class BillingOfferRepository {
         details: { offerId: offer.id, catalogRevisionId: offer.catalog_revision_id },
       });
     }
-    const offerContext = safeParse(OfferContextRowSchema, contextRows[0], `${context}.context`);
+    const rawContext = contextRows[0] as Record<string, unknown>;
+    const offerContext = safeParse(
+      OfferContextRowSchema,
+      {
+        offer_key: rawContext.offer_key,
+        plan_id: rawContext.plan_id,
+        plan_key: rawContext.plan_key,
+        billing_unit: rawContext.billing_unit,
+        billing_count: rawContext.billing_count,
+      },
+      `${context}.context`,
+    );
     if (
       offerContext.offer_key !== offer.offer_key ||
       offerContext.plan_key !== offer.plan_key ||

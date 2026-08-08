@@ -12,12 +12,13 @@ from bursar.billing.types import (
     BillingPaymentInfo,
     BillingRefundInfo,
     BillingSubscriptionInfo,
+    BillingSubscriptionStatus,
     ProviderRef,
 )
 from bursar.bursar import BillingEventSink
 from bursar.providers._shared import (
     call_billing_event_sink,
-    parse_status,
+    optional_provider_string,
     require_currency,
     require_minor_units,
     require_provider_string,
@@ -25,6 +26,16 @@ from bursar.providers._shared import (
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
 
 _log = StdlibProviderLogger(logging.getLogger(__name__))
+
+_DODO_SUBSCRIPTION_STATUS: dict[str, BillingSubscriptionStatus] = {
+    "pending": BillingSubscriptionStatus.incomplete,
+    "trialing": BillingSubscriptionStatus.trialing,
+    "active": BillingSubscriptionStatus.active,
+    "on_hold": BillingSubscriptionStatus.past_due,
+    "cancelled": BillingSubscriptionStatus.canceled,
+    "failed": BillingSubscriptionStatus.past_due,
+    "expired": BillingSubscriptionStatus.expired,
+}
 
 
 def _dispute_status(
@@ -43,21 +54,13 @@ def _dispute_status(
             return "closed"
 
 
-def _get_nested(data: dict, *keys: str) -> Any:
-    current: Any = data
-    for key in keys:
-        if isinstance(current, dict):
-            current = current.get(key)
-            if current is None:
-                return None
-        else:
-            return getattr(current, key, None)
-    return current
-
-
-def _normalize_interval(value: Any) -> str | None:
-    interval = str(value or "").lower()
-    return interval if interval in ("day", "week", "month", "year") else None
+def _normalize_interval(value: object, field: str) -> Literal["day", "week", "month", "year"] | None:
+    if value is None:
+        return None
+    interval = require_provider_string(value, field).lower()
+    if interval not in ("day", "week", "month", "year"):
+        raise ValueError(f"{field} must be day, week, month, or year")
+    return interval
 
 
 def _normalize_date(raw: Any) -> str | None:
@@ -88,25 +91,43 @@ def _normalize_date(raw: Any) -> str | None:
     return None
 
 
-def _nonempty_string(value: object) -> str | None:
+def _optional_date(raw: object, field: str) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str | datetime):
+        raise ValueError(f"{field} must be a valid instant")
+    normalized = _normalize_date(raw)
+    if normalized is None:
+        raise ValueError(f"{field} must be a valid instant")
+    return normalized
+
+
+def _optional_object(value: object, field: str) -> dict[str, Any] | None:
     if value is None:
         return None
-    normalized = str(value).strip()
-    return normalized or None
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    return value
 
 
 def _product_id(data: dict[str, Any]) -> str | None:
-    direct = _nonempty_string(data.get("product_id"))
+    direct = optional_provider_string(data.get("product_id"), "Dodo product_id")
     if direct:
         return direct
     product_cart = data.get("product_cart")
-    if not isinstance(product_cart, list):
+    if product_cart is None:
         return None
+    if not isinstance(product_cart, list):
+        raise ValueError("Dodo product_cart must be an array")
     for item in product_cart:
-        if isinstance(item, dict):
-            product_id = _nonempty_string(item.get("product_id"))
-            if product_id:
-                return product_id
+        if not isinstance(item, dict):
+            raise ValueError("Dodo product_cart item must be an object")
+        product_id = optional_provider_string(
+            item.get("product_id"),
+            "Dodo product_cart item.product_id",
+        )
+        if product_id:
+            return product_id
     return None
 
 
@@ -114,7 +135,7 @@ def _subscription_refs(data: dict[str, Any], metadata: dict[str, str]) -> Provid
     product_id = _product_id(data)
     if product_id:
         return ProviderRef(product_id=product_id)
-    lookup_key = str(metadata.get("plan_slug") or "").strip()
+    lookup_key = metadata.get("plan_slug", "").strip()
     return ProviderRef(lookup_key=lookup_key) if lookup_key else None
 
 
@@ -127,39 +148,63 @@ def _subscription_id(data: dict[str, Any]) -> str:
 
 def _subscription_fields(data: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
     interval = (
-        _normalize_interval(data.get("payment_frequency_interval"))
-        or _normalize_interval(data.get("subscription_period_interval"))
-        or _normalize_interval(metadata.get("billing_interval"))
+        _normalize_interval(
+            data.get("payment_frequency_interval"),
+            "Dodo subscription.payment_frequency_interval",
+        )
+        or _normalize_interval(
+            data.get("subscription_period_interval"),
+            "Dodo subscription.subscription_period_interval",
+        )
+        or _normalize_interval(metadata.get("billing_interval"), "Dodo metadata.billing_interval")
     )
-    raw_interval_count = data.get("payment_frequency_count") or data.get("subscription_period_count")
+    raw_interval_count = data.get("payment_frequency_count")
+    if raw_interval_count is None:
+        raw_interval_count = data.get("subscription_period_count")
     if raw_interval_count is None and interval:
         raw_interval_count = 1
+    if raw_interval_count is not None and interval is None:
+        raise ValueError("Dodo subscription interval count requires an interval")
     result: dict[str, Any] = {}
     if interval:
         result["interval"] = interval
     if raw_interval_count is not None:
-        try:
-            ic = int(raw_interval_count)
-            if ic > 0:
-                result["interval_count"] = ic
-        except (ValueError, TypeError):
-            pass
-    ps = _normalize_date(data.get("previous_billing_date"))
-    if ps:
-        result["period_start"] = ps
+        result["interval_count"] = require_minor_units(
+            raw_interval_count,
+            "Dodo subscription interval count",
+            positive=True,
+        )
+    period_start = _optional_date(
+        data.get("previous_billing_date"),
+        "Dodo subscription.previous_billing_date",
+    )
+    if period_start:
+        result["period_start"] = period_start
     return result
 
 
 def _make_customer_info(data: dict[str, Any]) -> BillingCustomerInfo | None:
-    customer = data.get("customer")
-    nested_customer = customer if isinstance(customer, dict) else {}
-    customer_id = _nonempty_string(data.get("customer_id")) or _nonempty_string(nested_customer.get("customer_id"))
+    nested_customer = _optional_object(data.get("customer"), "Dodo customer") or {}
+    customer_id = optional_provider_string(data.get("customer_id"), "Dodo customer_id") or optional_provider_string(
+        nested_customer.get("customer_id"),
+        "Dodo customer.customer_id",
+    )
     if customer_id is None:
         return None
     return BillingCustomerInfo(
         provider_customer_id=customer_id,
-        email=_nonempty_string(nested_customer.get("email")),
+        email=optional_provider_string(nested_customer.get("email"), "Dodo customer.email"),
     )
+
+
+def _subscription_status(value: object, logger: ProviderLogger) -> BillingSubscriptionStatus | None:
+    if value is None:
+        return None
+    raw = require_provider_string(value, "Dodo subscription.status")
+    status = _DODO_SUBSCRIPTION_STATUS.get(raw)
+    if status is None:
+        logger.warning("Unsupported Dodo subscription status", {"status": raw})
+    return status
 
 
 def dodo_billing_event_id(
@@ -178,7 +223,9 @@ def dodo_billing_event_id(
         if event_type.startswith("dispute.")
         else "id"
     )
-    source_id = data.get(resource_key) or data.get("id")
+    source_id = data.get(resource_key)
+    if source_id is None:
+        source_id = data.get("id")
     object_id = require_provider_string(source_id, "Dodo webhook object identifier")
     occurred_at = _normalize_date(event_timestamp)
     if occurred_at is None:
@@ -234,8 +281,15 @@ async def _handle_subscription_active(
         "event_type": BillingEventType.subscription_created,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status(data.get("status", "active")),
-            period_end=_normalize_date(data.get("next_billing_date")),
+            status=(
+                BillingSubscriptionStatus.active
+                if data.get("status") is None
+                else _subscription_status(data.get("status"), logger)
+            ),
+            period_end=_optional_date(
+                data.get("next_billing_date"),
+                "Dodo subscription.next_billing_date",
+            ),
             refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
@@ -264,8 +318,11 @@ async def _handle_subscription_renewed(
         "event_type": BillingEventType.subscription_renewed,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("active"),
-            period_end=_normalize_date(data.get("next_billing_date")),
+            status=BillingSubscriptionStatus.active,
+            period_end=_optional_date(
+                data.get("next_billing_date"),
+                "Dodo subscription.next_billing_date",
+            ),
             **_subscription_fields(data, metadata),
             refs=_subscription_refs(data, metadata),
         ),
@@ -289,7 +346,7 @@ async def _handle_subscription_cancelled(
         "event_type": BillingEventType.subscription_canceled,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("canceled"),
+            status=BillingSubscriptionStatus.canceled,
             refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
@@ -313,7 +370,7 @@ async def _handle_subscription_expired(
         "event_type": BillingEventType.subscription_expired,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("expired"),
+            status=BillingSubscriptionStatus.expired,
             refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
@@ -337,7 +394,7 @@ async def _handle_subscription_failed(
         "event_type": BillingEventType.subscription_updated,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("past_due"),
+            status=BillingSubscriptionStatus.past_due,
             refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
@@ -361,7 +418,7 @@ async def _handle_subscription_on_hold(
         "event_type": BillingEventType.subscription_updated,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("past_due"),
+            status=BillingSubscriptionStatus.past_due,
             refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
@@ -380,14 +437,16 @@ async def _handle_subscription_updated_event(
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
-    sub_status = str(data.get("status", "")) or None
     kw = {
         **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_updated,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status(sub_status),
-            period_end=_normalize_date(data.get("next_billing_date")),
+            status=_subscription_status(data.get("status"), logger),
+            period_end=_optional_date(
+                data.get("next_billing_date"),
+                "Dodo subscription.next_billing_date",
+            ),
             **_subscription_fields(data, metadata),
             refs=_subscription_refs(data, metadata),
         ),
@@ -411,7 +470,7 @@ async def _handle_subscription_plan_changed(
         "event_type": BillingEventType.subscription_plan_changed,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("active"),
+            status=BillingSubscriptionStatus.active,
             refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
@@ -430,7 +489,10 @@ async def _handle_payment_succeeded(
 ) -> None:
     customer_info = _make_customer_info(data)
     payment_id = require_provider_string(data.get("payment_id"), "Dodo payment.payment_id")
-    subscription_id = _nonempty_string(data.get("subscription_id"))
+    subscription_id = optional_provider_string(
+        data.get("subscription_id"),
+        "Dodo payment.subscription_id",
+    )
     product_id = _product_id(data)
     refs = ProviderRef(product_id=product_id) if product_id else None
 
@@ -441,7 +503,7 @@ async def _handle_payment_succeeded(
             "Dodo payment.settlement_amount",
         ),
         tax_minor=require_minor_units(
-            data.get("settlement_tax") or 0,
+            0 if data.get("settlement_tax") is None else data.get("settlement_tax"),
             "Dodo payment.settlement_tax",
         ),
         currency=require_currency(
@@ -461,9 +523,19 @@ async def _handle_payment_succeeded(
     if subscription_id:
         kw["subscription"] = BillingSubscriptionInfo(
             provider_subscription_id=subscription_id,
-            status=parse_status(data.get("subscription_status", "active")),
-            period_start=_normalize_date(data.get("previous_billing_date")),
-            period_end=_normalize_date(data.get("next_billing_date")),
+            status=(
+                BillingSubscriptionStatus.active
+                if data.get("subscription_status") is None
+                else _subscription_status(data.get("subscription_status"), logger)
+            ),
+            period_start=_optional_date(
+                data.get("previous_billing_date"),
+                "Dodo payment.previous_billing_date",
+            ),
+            period_end=_optional_date(
+                data.get("next_billing_date"),
+                "Dodo payment.next_billing_date",
+            ),
         )
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
@@ -479,7 +551,10 @@ async def _handle_payment_failed(
 ) -> None:
     customer_info = _make_customer_info(data)
     payment_id = require_provider_string(data.get("payment_id"), "Dodo payment.payment_id")
-    subscription_id = _nonempty_string(data.get("subscription_id"))
+    subscription_id = optional_provider_string(
+        data.get("subscription_id"),
+        "Dodo payment.subscription_id",
+    )
 
     kw: dict[str, Any] = {
         **_base_event(data, customer_info, event_type, event_timestamp, metadata),
@@ -497,7 +572,7 @@ async def _handle_payment_failed(
             "Dodo payment.total_amount",
         ),
         tax_minor=require_minor_units(
-            data.get("tax") or 0,
+            0 if data.get("tax") is None else data.get("tax"),
             "Dodo payment.tax",
         ),
         currency=require_currency(
@@ -521,7 +596,10 @@ async def _handle_refund(
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    refund_id = require_provider_string(data.get("refund_id") or data.get("id"), "Dodo refund.refund_id")
+    refund_id_value = data.get("refund_id")
+    if refund_id_value is None:
+        refund_id_value = data.get("id")
+    refund_id = require_provider_string(refund_id_value, "Dodo refund.refund_id")
     payment_id = require_provider_string(data.get("payment_id"), "Dodo refund.payment_id")
     reason = data.get("reason")
 
@@ -534,7 +612,7 @@ async def _handle_refund(
             positive=True,
         ),
         currency=require_currency(data.get("currency"), "Dodo refund.currency"),
-        reason=str(reason) if reason is not None else None,
+        reason=optional_provider_string(reason, "Dodo refund.reason"),
         status="succeeded" if event_type == "refund.succeeded" else "failed",
     )
 
@@ -558,10 +636,10 @@ async def _handle_dispute_created(
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    dispute_id = require_provider_string(
-        data.get("dispute_id") or data.get("id"),
-        "Dodo dispute.dispute_id",
-    )
+    dispute_id_value = data.get("dispute_id")
+    if dispute_id_value is None:
+        dispute_id_value = data.get("id")
+    dispute_id = require_provider_string(dispute_id_value, "Dodo dispute.dispute_id")
     payment_id = require_provider_string(data.get("payment_id"), "Dodo dispute.payment_id")
     reason = data.get("reason")
 
@@ -569,7 +647,7 @@ async def _handle_dispute_created(
         provider_dispute_id=dispute_id,
         provider_payment_id=payment_id,
         status=_dispute_status(event_type),
-        reason=str(reason) if reason is not None else None,
+        reason=optional_provider_string(reason, "Dodo dispute.reason"),
     )
 
     kw = {
@@ -590,10 +668,10 @@ async def _handle_dispute_closed(
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    dispute_id = require_provider_string(
-        data.get("dispute_id") or data.get("id"),
-        "Dodo dispute.dispute_id",
-    )
+    dispute_id_value = data.get("dispute_id")
+    if dispute_id_value is None:
+        dispute_id_value = data.get("id")
+    dispute_id = require_provider_string(dispute_id_value, "Dodo dispute.dispute_id")
     payment_id = require_provider_string(data.get("payment_id"), "Dodo dispute.payment_id")
     reason = data.get("reason")
 
@@ -601,7 +679,7 @@ async def _handle_dispute_closed(
         provider_dispute_id=dispute_id,
         provider_payment_id=payment_id,
         status=_dispute_status(event_type),
-        reason=str(reason) if reason is not None else None,
+        reason=optional_provider_string(reason, "Dodo dispute.reason"),
     )
 
     kw = {

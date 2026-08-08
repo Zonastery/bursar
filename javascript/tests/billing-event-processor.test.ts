@@ -37,6 +37,39 @@ function event(eventId: string, eventType: BillingEventType): BillingEvent {
 }
 
 describe("BillingEventProcessor lifecycle acknowledgements", () => {
+  it.each([
+    ["unknown top-level fields", { unexpected: true }],
+    ["invalid nested statuses", { payment: { status: "mystery" } }],
+    ["coerced nested booleans", { subscription: { cancelAtPeriodEnd: "false" } }],
+  ])("rejects %s before claiming the event", async (_description, invalid) => {
+    const store = claimedStore();
+    const processor = new BillingEventProcessor(store as unknown as BillingStore);
+    const changes = invalid as Record<string, unknown>;
+    const payment = {
+      providerPaymentId: "pay_1",
+      amountMinor: 100,
+      taxMinor: 0,
+      currency: "USD",
+      purpose: "credit_topup",
+      status: "succeeded",
+      ...(changes.payment as object | undefined),
+    };
+    const subscription = {
+      providerSubscriptionId: "sub_1",
+      ...(changes.subscription as object | undefined),
+    };
+
+    await expect(
+      processor.ingestBillingEvent({
+        ...event("evt_invalid", BillingEventType.PAYMENT_SUCCEEDED),
+        payment,
+        subscription,
+        ...(changes.unexpected === true ? { unexpected: true } : {}),
+      } as unknown as BillingEvent),
+    ).rejects.toThrow(TypeError);
+    expect(store.claimBillingEvent).not.toHaveBeenCalled();
+  });
+
   it("reports and requeues a rejected completion", async () => {
     const store = claimedStore();
     store.completeBillingEvent.mockResolvedValue(false);

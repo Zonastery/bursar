@@ -356,12 +356,7 @@ describe("credit lease workflow", () => {
         reserved: new Decimal(0),
         available: new Decimal(100),
       }),
-      checkAllowance: vi.fn().mockResolvedValue({
-        planId: "none",
-        allowanceRemaining: new Decimal(0),
-        periodStart: "",
-        periodEnd: "",
-      }),
+      checkAllowance: vi.fn().mockResolvedValue(null),
     });
 
     await expect(service.canAfford("user-1", new Decimal(25))).resolves.toMatchObject({

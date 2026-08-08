@@ -8,6 +8,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from bursar.billing.types import (
+    BillingAutoRechargeAttemptState,
     BillingEvent,
     BillingEventResult,
     BillingSubscriptionChangeState,
@@ -116,7 +117,7 @@ class AutoRechargeAttemptClaim(_BillingContract):
 
 class AutoRechargeAttemptUpdate(_BillingContract):
     id: str
-    state: str
+    state: BillingAutoRechargeAttemptState
     provider_attempt_id: str | None = None
     failure_code: str | None = None
     failure_message: str | None = None
@@ -126,7 +127,7 @@ class AutoRechargeAttemptUpdate(_BillingContract):
 class AutoRechargeProviderPaymentUpdate(_BillingContract):
     provider: str
     provider_payment_id: str
-    state: str
+    state: BillingAutoRechargeAttemptState
     failure_code: str | None = None
     failure_message: str | None = None
 

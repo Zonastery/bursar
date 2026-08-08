@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
 from uuid import UUID
 
+from bursar.billing.types import BillingCustomerRecord
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import (
     optional_mapping_row,
@@ -39,7 +39,7 @@ class BillingCustomerRepository:
             raise StoreError("BillingCustomerRepository.get: malformed customer row") from error
         return subject_id
 
-    def get_by_user_id(self, user_id: str, provider: str | None = None) -> dict[str, Any] | None:
+    def get_by_user_id(self, user_id: str, provider: str | None = None) -> BillingCustomerRecord | None:
         rows = self._execute("SELECT * FROM bursar.get_billing_customer(%s::uuid, %s)", [user_id, provider])
         row = optional_mapping_row(rows, "BillingCustomerRepository.get_by_user_id")
         if row is None:
@@ -52,4 +52,7 @@ class BillingCustomerRepository:
             or not row["provider_customer_id"]
         ):
             raise StoreError("BillingCustomerRepository.get_by_user_id: malformed customer row")
-        return {"provider": str(row["provider"]), "provider_customer_id": str(row["provider_customer_id"])}
+        return BillingCustomerRecord(
+            provider=row["provider"],
+            provider_customer_id=row["provider_customer_id"],
+        )

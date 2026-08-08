@@ -77,7 +77,7 @@ describe("DodoProvider webhook signature verification", () => {
     });
   });
 
-  it("restores extension fields from the signed body after SDK verification", async () => {
+  it("treats the SDK-verified payload as authoritative", async () => {
     const unwrap = vi.fn().mockReturnValue({
       type: "subscription.active",
       timestamp: DODO_ISO_DATE,
@@ -100,15 +100,10 @@ describe("DodoProvider webhook signature verification", () => {
       headers: { "webhook-signature": "verified-by-unwrap" },
     });
 
-    expect(resolveUser).not.toHaveBeenCalled();
-    expect(ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: USER_ID,
-        subscription: expect.objectContaining({
-          refs: { productId: "pdt_signed_extensions" },
-        }),
-      }),
-    );
+    expect(resolveUser).toHaveBeenCalledOnce();
+    const event = ingestBillingEvent.mock.calls[0]?.[0];
+    expect(event?.userId).toBeUndefined();
+    expect(event?.subscription?.refs).toBeUndefined();
   });
 
   it("processes an already verified payload without invoking SDK verification", async () => {

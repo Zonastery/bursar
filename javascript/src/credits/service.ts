@@ -38,7 +38,10 @@ import type {
   QuotaEvent,
   QuotaState,
   RefundSuccess,
+  RevokeCreditsResult,
   ReleaseResult,
+  SetUserPlanResult,
+  UnsetUserPlanResult,
   SpendByModelRow,
   SpendByUserRow,
   SweepResult,
@@ -251,11 +254,17 @@ export class CreditsService {
     return this.queries.migratePlanBatch(migrationId, batchSize);
   }
 
-  async revokeCreditsByEntryType(
-    userId: string,
-    entryType: string,
-  ): Promise<Record<string, unknown>> {
-    return this.queries.revokeCreditsByEntryType(userId, entryType);
+  async revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeCreditsResult> {
+    const result = await this.queries.revokeCreditsByEntryType(userId, entryType);
+    if (result.revoked.gt(0)) {
+      this.emit("credits.revoked", userId, {
+        userId,
+        entryType,
+        amount: result.revoked,
+        balanceAfter: result.balanceAfter,
+      });
+    }
+    return result;
   }
 
   /** Execute an application-driven catalog grant program. */
@@ -405,25 +414,32 @@ export class CreditsService {
    * The store call is awaited so a persistence failure surfaces to the caller.
    * The event is emitted only after the store write succeeds.
    */
-  async setUserPlan(userId: string, planKey: string, planAssignedAt?: Date | null): Promise<void> {
+  async setUserPlan(
+    userId: string,
+    planKey: string,
+    planAssignedAt?: Date | null,
+  ): Promise<SetUserPlanResult> {
     this.logger.info("[CreditsService] setUserPlan", { planKey, planAssignedAt });
     const result = await this.store.setUserPlan(userId, planKey, planAssignedAt);
     this.emit("credits.plan_changed", userId, {
       userId,
       planKey,
-      planAssignedAt: result.planAssignedAt ?? null,
+      planAssignedAt: result.planAssignedAt,
+      assignmentState: result.assignmentState,
       timestamp: new Date().toISOString(),
     });
+    return result;
   }
 
   /** Unset a user's subscription plan and emit the plan-change event. */
-  async unsetUserPlan(userId: string): Promise<void> {
-    await this.store.unsetUserPlan(userId);
+  async unsetUserPlan(userId: string): Promise<UnsetUserPlanResult> {
+    const result = await this.store.unsetUserPlan(userId);
     this.emit("credits.plan_changed", userId, {
       userId,
       planKey: null,
       timestamp: new Date().toISOString(),
     });
+    return result;
   }
 
   /** Pin or unpin the user's current assignment revision. */

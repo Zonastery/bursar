@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,6 +10,7 @@ import pytest
 
 from bursar.credits.service import CreditsService
 from bursar.credits.service_types import GrantSubscriptionCycleOptions
+from bursar.credits.types import SetUserPlanResult
 from bursar.engine import PricingEngine
 from bursar.metrics import UsageMetrics
 
@@ -163,7 +165,15 @@ def test_cycle_replay_repairs_an_interrupted_plan_assignment() -> None:
             )
         ),
         get_user_plan=MagicMock(return_value=SimpleNamespace(plan_key="free")),
-        set_user_plan=MagicMock(return_value=SimpleNamespace(plan_assigned_at=None)),
+        set_user_plan=MagicMock(
+            return_value=SetUserPlanResult(
+                user_id="user-1",
+                plan_id="plan-pro",
+                plan_key="pro",
+                plan_assigned_at=datetime(2026, 1, 1, tzinfo=UTC),
+                assignment_state="applied",
+            )
+        ),
     )
     credits = _service(store)
 

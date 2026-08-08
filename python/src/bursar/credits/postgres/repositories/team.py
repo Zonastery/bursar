@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import require_row, validate_amount, validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    optional_mapping_row,
+    require_mapping_row,
+    require_row,
+    validate_amount,
+    validate_non_empty,
+    validate_row,
+)
 from bursar.credits.postgres.repositories.schemas import (
     AddTeamMemberRow,
     CreateTeamRow,
     TeamBalanceRow,
     TeamDeductionRow,
+    TeamDeductionRpcRow,
     TeamMemberRow,
 )
 from bursar.errors import StoreError
@@ -28,7 +38,7 @@ class TeamRepository:
         owner_subject_id: str,
         name: str,
         initial_balance: str,
-    ) -> CreateTeamRow | None:
+    ) -> CreateTeamRow:
         """Create a new team with an initial credit balance.
 
         Args:
@@ -41,10 +51,11 @@ class TeamRepository:
         validate_non_empty(name, "name")
         validate_amount(initial_balance, "initial_balance")
         validate_non_empty(owner_subject_id, "owner_subject_id")
-        rows = self._callproc("create_team", [owner_subject_id, name, initial_balance])
-        if not rows:
-            return None
-        return CreateTeamRow.model_validate(rows[0])
+        row = require_mapping_row(
+            self._callproc("create_team", [owner_subject_id, name, initial_balance]),
+            "TeamRepository.create_team",
+        )
+        return validate_row(CreateTeamRow, row, "TeamRepository.create_team", indeterminate=True)
 
     def get_team_balance(self, team_id: str) -> TeamBalanceRow | None:
         """Get the credit balance and member count for a team.
@@ -56,10 +67,13 @@ class TeamRepository:
             TeamBalanceRow if found, None if the team does not exist.
         """
         validate_non_empty(team_id, "team_id")
-        rows = self._callproc("get_team_balance", [team_id])
-        if not rows:
+        row = optional_mapping_row(
+            self._callproc("get_team_balance", [team_id]),
+            "TeamRepository.get_team_balance",
+        )
+        if row is None:
             return None
-        return TeamBalanceRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
+        return validate_row(TeamBalanceRow, row, "TeamRepository.get_team_balance")
 
     def add_team_member(
         self,
@@ -82,9 +96,19 @@ class TeamRepository:
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("set_team_member", [team_id, user_id, role, spend_cap])
-        if require_row(rows, "TeamRepository.add_team_member") is not True:
+        result = require_row(rows, "TeamRepository.add_team_member")
+        if type(result) is not bool:
+            raise StoreError(
+                "TeamRepository.add_team_member: expected a boolean result",
+                indeterminate=True,
+            )
+        if not result:
             raise StoreError("TeamRepository.add_team_member: set_team_member returned false")
-        return AddTeamMemberRow(team_id=team_id, user_id=user_id, role=role)
+        return validate_row(
+            AddTeamMemberRow,
+            {"team_id": team_id, "user_id": user_id, "role": role},
+            "TeamRepository.add_team_member",
+        )
 
     def get_team_members(self, team_id: str) -> list[TeamMemberRow]:
         """Get all members of a team.
@@ -97,21 +121,17 @@ class TeamRepository:
         """
         validate_non_empty(team_id, "team_id")
         rows = self._callproc("list_team_members", [team_id]) or []
-        members: list[TeamMemberRow] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            # list_team_members RETURNS a `user_id` column already; the old
-            # pop("subject_id") remap found nothing and clobbered it with "".
-            members.append(TeamMemberRow.model_validate(row))
-        return members
+        return [validate_row(TeamMemberRow, row, "TeamRepository.get_team_members") for row in rows]
 
     def remove_team_member(self, team_id: str, user_id: str) -> bool:
         """Remove a member unless they are the team's final owner."""
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("remove_team_member", [team_id, user_id]) or []
-        return require_row(rows, "TeamRepository.remove_team_member") is True
+        result = require_row(rows, "TeamRepository.remove_team_member")
+        if type(result) is not bool:
+            raise StoreError("TeamRepository.remove_team_member: expected a boolean result")
+        return result
 
     def deduct_team(
         self,
@@ -121,7 +141,7 @@ class TeamRepository:
         idempotency_key: str,
         operation: str,
         metadata: str,
-    ) -> TeamDeductionRow | None:
+    ) -> TeamDeductionRow:
         """Deduct credits from a team's balance on behalf of a member.
 
         Args:
@@ -144,16 +164,27 @@ class TeamRepository:
             "deduct_team",
             [team_id, user_id, amount, idempotency_key, operation, metadata],
         )
-        if not rows or not isinstance(rows[0], dict):
-            return None
-        row = dict(rows[0])
-        # deduct_team RETURNS subject_id / balance_after / error_code; map them to
-        # the TeamDeductionRow field names (mirrors the JS repo remap).
-        return TeamDeductionRow.model_validate(
+        row = validate_row(
+            TeamDeductionRpcRow,
+            require_mapping_row(rows, "TeamRepository.deduct_team"),
+            "TeamRepository.deduct_team",
+            indeterminate=True,
+        )
+        if row.error_code is None and Decimal(str(row.amount)) != Decimal(amount):
+            raise StoreError(
+                "TeamRepository.deduct_team: committed amount differs from the request",
+                indeterminate=True,
+            )
+        return validate_row(
+            TeamDeductionRow,
             {
-                **row,
-                "user_id": row.get("subject_id", ""),
-                "team_balance_after": row.get("balance_after"),
-                "error": row.get("error_code"),
-            }
+                "entry_id": row.entry_id,
+                "team_id": row.team_id,
+                "user_id": row.subject_id,
+                "amount": amount,
+                "team_balance_after": row.balance_after,
+                "replayed": row.replayed,
+                "error": row.error_code,
+            },
+            "TeamRepository.deduct_team",
         )

@@ -1,12 +1,13 @@
 ---
-title: The credit lifecycle
-description: Follow one user's credits from signup to ledger — grants, purchases, usage charges, refunds, expiry, and revocation as canonical ledger entries.
+title: Manage the credit lifecycle
+sidebar_label: Credit lifecycle
+description: Post grants, purchases, usage charges, refunds, expiry, and revocation as canonical ledger entries.
 ---
 
-# The credit lifecycle
+# Manage the credit lifecycle
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
 
 ## Prerequisites
 
@@ -28,30 +29,30 @@ Setup first: publish the canonical configuration (see
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  from bursar import Bursar, PostgresStore
-  from shared import USER_ADA, base_config, publish_config
+```python
+from bursar import Bursar, PostgresStore
+from shared import USER_ADA, base_config, publish_config
 
-  bursar = publish_config(
-      PostgresStore(database_url, tenant_id=tenant_id),
-      base_config(),
-  )
-  user_id = USER_ADA
-  ```
+bursar = publish_config(
+    PostgresStore(database_url, tenant_id=tenant_id),
+    base_config(),
+)
+user_id = USER_ADA
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  import { Bursar, PostgresStore } from "@zonastery/bursar";
-  import { USER_ADA, baseConfig, publishConfig } from "./shared";
+```ts
+import { Bursar, PostgresStore } from "@zonastery/bursar";
+import { USER_ADA, baseConfig, publishConfig } from "./shared";
 
-  const bursar = await publishConfig(
-    new PostgresStore({ postgres: databaseUrl, tenantId }),
-    baseConfig(),
-  );
-  const userId = USER_ADA;
-  ```
+const bursar = await publishConfig(
+  new PostgresStore({ postgres: databaseUrl, tenantId }),
+  baseConfig(),
+);
+const userId = USER_ADA;
+```
 
   </TabItem>
 </Tabs>
@@ -64,24 +65,24 @@ and runs any `account_created` grant programs in one call:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  result = bursar.accounts.on_account_created(
-      user_id, event_key="signup", region="us-east-1"
-  )
-  print(result["plan_key"], result["plan_assigned"], result["grants"])
-  ```
+```python
+result = bursar.accounts.on_account_created(
+    user_id, event_key="signup", region="us-east-1"
+)
+print(result["plan_key"], result["plan_assigned"], result["grants"])
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const result = await bursar.accounts.onAccountCreated({
-    accountId: userId,
-    eventKey: "signup",
-    region: "us-east-1",
-  });
-  console.log(result.planKey, result.planAssigned, result.grants);
-  ```
+```ts
+const result = await bursar.accounts.onAccountCreated({
+  accountId: userId,
+  eventKey: "signup",
+  region: "us-east-1",
+});
+console.log(result.planKey, result.planAssigned, result.grants);
+```
 
   </TabItem>
 </Tabs>
@@ -103,26 +104,26 @@ double-granting:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  grant = bursar.credits.add_credits(
-      user_id,
-      50000,
-      entry_type="purchase",
-      idempotency_key="checkout:cs_123456",
-  )
-  print(grant.entry_id, grant.new_balance, grant.bucket, grant.idempotent)
-  ```
+```python
+grant = bursar.credits.add_credits(
+    user_id,
+    50000,
+    entry_type="purchase",
+    idempotency_key="checkout:cs_123456",
+)
+print(grant.entry_id, grant.new_balance, grant.bucket, grant.idempotent)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const grant = await bursar.credits.addCredits(userId, new Decimal(50000), {
-    type: "purchase",
-    idempotencyKey: "checkout:cs_123456",
-  });
-  console.log(grant.entryId, grant.newBalance, grant.bucket, grant.idempotent);
-  ```
+```ts
+const grant = await bursar.credits.addCredits(userId, new Decimal(50000), {
+  type: "purchase",
+  idempotencyKey: "checkout:cs_123456",
+});
+console.log(grant.entryId, grant.newBalance, grant.bucket, grant.idempotent);
+```
 
   </TabItem>
 </Tabs>
@@ -141,40 +142,44 @@ exact `Decimal`), then charges in one atomic transaction:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  from bursar.metrics import UsageMetrics
+```python
+from bursar.metrics import UsageMetrics
 
-  charge = bursar.credits.deduct(
-      user_id,
-      UsageMetrics(
-          operation="completion",
-          measures={
-              "input_tokens": 4000,
-              "output_tokens": 1200,
-              "cache_read_tokens": 6000,
-          },
-          dimensions={"model": "gpt-4o-mini"},
-      ),
-      idempotency_key="chat:turn:42",
-  )
-  print(charge.amount, charge.allowance_consumed, charge.balance_after)
-  ```
+charge = bursar.credits.deduct(
+    user_id,
+    UsageMetrics(
+        operation="completion",
+        measures={
+            "input_tokens": 4000,
+            "output_tokens": 1200,
+            "cache_read_tokens": 6000,
+        },
+        dimensions={"model": "gpt-4o-mini"},
+    ),
+    idempotency_key="chat:turn:42",
+)
+print(charge.amount, charge.allowance_consumed, charge.balance_after)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const charge = await bursar.credits.deduct(
-    userId,
-    {
-      operation: "completion",
-      measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
-      dimensions: { model: "gpt-4o-mini" },
+```ts
+const charge = await bursar.credits.deduct(
+  userId,
+  {
+    operation: "completion",
+    measures: {
+      input_tokens: 4000,
+      output_tokens: 1200,
+      cache_read_tokens: 6000,
     },
-    { idempotencyKey: "chat:turn:42" },
-  );
-  console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
-  ```
+    dimensions: { model: "gpt-4o-mini" },
+  },
+  { idempotencyKey: "chat:turn:42" },
+);
+console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
+```
 
   </TabItem>
 </Tabs>
@@ -196,28 +201,27 @@ id; pass an `amount` for a partial refund:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  refund = bursar.credits.refund_credits(
-      charge.entry_id,
-      amount=0.000030,
-      reason="user_reported_bad_output",
-  )
-  print(refund.refund_entry_id, refund.new_balance)
-  ```
+```python
+refund = bursar.credits.refund_credits(
+    charge.entry_id,
+    amount=0.000030,
+    reason="user_reported_bad_output",
+    idempotency_key="refund:chat:turn:42:partial",
+)
+print(refund.refund_entry_id, refund.new_balance)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const refund = await bursar.credits.refundCredits(
-    charge.entryId,
-    {
-      amount: new Decimal("0.000030"),
-      reason: "user_reported_bad_output",
-    },
-  );
-  console.log(refund.refundEntryId, refund.newBalance);
-  ```
+```ts
+const refund = await bursar.credits.refundCredits(charge.entryId, {
+  amount: new Decimal("0.000030"),
+  reason: "user_reported_bad_output",
+  idempotencyKey: "refund:chat:turn:42:partial",
+});
+console.log(refund.refundEntryId, refund.newBalance);
+```
 
   </TabItem>
 </Tabs>
@@ -235,24 +239,24 @@ expire, then run it:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  dry = bursar.credits.sweep_expired_credits(dry_run=True)
-  print(dry.expired_count, dry.expired_amount)
+```python
+dry = bursar.credits.sweep_expired_credits(dry_run=True)
+print(dry.expired_count, dry.expired_amount)
 
-  result = bursar.credits.sweep_expired_credits()
-  print(result.expired_count, result.expired_amount)
-  ```
+result = bursar.credits.sweep_expired_credits()
+print(result.expired_count, result.expired_amount)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const dry = await bursar.credits.sweepExpiredCredits(true);
-  console.log(dry.expiredCount, dry.expiredAmount);
+```ts
+const dry = await bursar.credits.sweepExpiredCredits(true);
+console.log(dry.expiredCount, dry.expiredAmount);
 
-  const result = await bursar.credits.sweepExpiredCredits();
-  console.log(result.expiredCount, result.expiredAmount);
-  ```
+const result = await bursar.credits.sweepExpiredCredits();
+console.log(result.expiredCount, result.expiredAmount);
+```
 
   </TabItem>
 </Tabs>
@@ -270,18 +274,21 @@ entry type rather than adjusting the balance by hand:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  revoked = bursar.credits.revoke_credits_by_entry_type(user_id, "purchase")
-  print(revoked["amount"], revoked["new_balance"])
-  ```
+```python
+revoked = bursar.credits.revoke_credits_by_entry_type(user_id, "purchase")
+print(revoked["amount"], revoked["new_balance"])
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  const revoked = await bursar.credits.revokeCreditsByEntryType(userId, "purchase");
-  console.log(revoked.amount, revoked.new_balance);
-  ```
+```ts
+const revoked = await bursar.credits.revokeCreditsByEntryType(
+  userId,
+  "purchase",
+);
+console.log(revoked.amount, revoked.new_balance);
+```
 
   </TabItem>
 </Tabs>
@@ -297,34 +304,34 @@ stable, ordered by `(created_at, entry_id)`:
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  page = bursar.credits.list_ledger_entries(user_id, limit=50)
-  while True:
-      for entry in page.items:
-          print(entry.entry_id, entry.entry_type, entry.amount, entry.created_at)
-      if not page.next_cursor:
-          break
-      page = bursar.credits.list_ledger_entries(
-          user_id, limit=50, cursor=page.next_cursor
-      )
-  ```
+```python
+page = bursar.credits.list_ledger_entries(user_id, limit=50)
+while True:
+    for entry in page.items:
+        print(entry.entry_id, entry.entry_type, entry.amount, entry.created_at)
+    if not page.next_cursor:
+        break
+    page = bursar.credits.list_ledger_entries(
+        user_id, limit=50, cursor=page.next_cursor
+    )
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  let page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
-  while (true) {
-    for (const entry of page.items) {
-      console.log(entry.entryId, entry.entryType, entry.amount, entry.createdAt);
-    }
-    if (!page.nextCursor) break;
-    page = await bursar.credits.listLedgerEntries(userId, {
-      limit: 50,
-      cursor: page.nextCursor,
-    });
+```ts
+let page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
+while (true) {
+  for (const entry of page.items) {
+    console.log(entry.entryId, entry.entryType, entry.amount, entry.createdAt);
   }
-  ```
+  if (!page.nextCursor) break;
+  page = await bursar.credits.listLedgerEntries(userId, {
+    limit: 50,
+    cursor: page.nextCursor,
+  });
+}
+```
 
   </TabItem>
 </Tabs>

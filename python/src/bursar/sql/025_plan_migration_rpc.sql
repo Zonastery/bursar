@@ -142,6 +142,86 @@ BEGIN
 END
 $$;
 
+-- Public, key-based assignment boundary used by the SDK. Resolution and
+-- mutation happen in one database statement, avoiding a catalog activation
+-- race between a client-side lookup and assign_plan.
+CREATE FUNCTION bursar.set_subject_plan(
+    p_subject_id uuid,
+    p_plan_key text,
+    p_starts_at timestamptz DEFAULT NULL
+)
+RETURNS TABLE (
+    user_id uuid,
+    plan_id uuid,
+    plan_key text,
+    plan_assigned_at timestamptz,
+    assignment_state text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_plan bursar.catalog_plans;
+    v_assignment bursar.account_plan_assignments;
+BEGIN
+    IF p_subject_id IS NULL OR NOT bursar.is_nonempty_text(p_plan_key) THEN
+        RAISE EXCEPTION 'subject id and plan key are required'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT plan.*
+    INTO v_plan
+    FROM bursar.catalog_plans AS plan
+    JOIN bursar.catalog_revisions AS revision
+      ON revision.id = plan.catalog_revision_id
+     AND revision.status = 'active'
+    WHERE plan.plan_key = p_plan_key
+    ORDER BY revision.revision_no DESC
+    LIMIT 1;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'unknown active plan key: %', p_plan_key
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF NOT bursar.assign_plan(p_subject_id, v_plan.id, p_starts_at) THEN
+        RAISE EXCEPTION 'plan assignment was rejected'
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF p_starts_at IS NOT NULL AND p_starts_at > now() THEN
+        RETURN QUERY SELECT
+            p_subject_id,
+            v_plan.id,
+            v_plan.plan_key,
+            p_starts_at,
+            'scheduled'::text;
+        RETURN;
+    END IF;
+
+    SELECT assignment.*
+    INTO v_assignment
+    FROM bursar.account_plan_assignments AS assignment
+    JOIN bursar.credit_accounts AS account
+      ON account.id = assignment.account_id
+    WHERE account.subject_id = p_subject_id
+      AND account.account_kind = 'personal';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'plan assignment committed without a current assignment'
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    RETURN QUERY SELECT
+        p_subject_id,
+        v_assignment.plan_id,
+        v_assignment.plan_key,
+        v_assignment.starts_at,
+        'applied'::text;
+END
+$$;
+
 CREATE FUNCTION bursar.unassign_plan(
     p_subject_id uuid,
     p_reason text DEFAULT 'manual_unassignment'
@@ -802,7 +882,8 @@ BEGIN
            )
        )
     THEN
-        RETURN NULL;
+        RAISE EXCEPTION 'invalid source or target plan for migration'
+            USING ERRCODE = '22023';
     END IF;
 
     INSERT INTO bursar.credit_plan_migrations(
@@ -848,8 +929,8 @@ BEGIN
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN QUERY SELECT 0, false, NULL::uuid;
-        RETURN;
+        RAISE EXCEPTION 'unknown plan migration: %', p_migration_id
+            USING ERRCODE = '22023';
     END IF;
 
     IF v_migration.status <> 'running' THEN

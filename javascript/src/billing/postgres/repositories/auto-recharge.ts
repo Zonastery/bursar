@@ -2,7 +2,11 @@ import { z } from "zod";
 import Decimal from "decimal.js";
 import { StoreError } from "../../../errors.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
-import type { BillingAutoRechargeAttempt, BillingAutoRechargeProfile } from "../../types/index.js";
+import type {
+  BillingAutoRechargeAttempt,
+  BillingAutoRechargeAttemptState,
+  BillingAutoRechargeProfile,
+} from "../../types/index.js";
 import { optionalBoundedDiagnosticMessage } from "../../../shared/diagnostics.js";
 import {
   optionalRecordRow,
@@ -45,7 +49,18 @@ const ProfileRowSchema = z
     window_timezone: z.string().min(1),
     updated_at: timestamp,
   })
-  .passthrough();
+  .strict()
+  .superRefine((row, ctx) => {
+    if (row.enabled !== (row.state !== "disabled")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "enabled and state are inconsistent" });
+    }
+    if (row.enabled && (row.provider === null || row.topup_id === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "enabled profile requires provider and topup_id",
+      });
+    }
+  });
 
 const AttemptStateSchema = z.enum([
   "claimed",
@@ -79,10 +94,69 @@ const AttemptRowSchema = z
     created_at: timestamp,
     updated_at: timestamp,
   })
-  .passthrough();
+  .strict()
+  .superRefine((row, ctx) => {
+    if (new Date(row.window_end).getTime() <= new Date(row.window_start).getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "window_end must be later than window_start",
+      });
+    }
+    if ((row.quoted_amount_minor === null) !== (row.currency === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "quoted_amount_minor and currency must be present together",
+      });
+    }
+  });
+
+function projectProfile(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    subject_id: row.subject_id,
+    enabled: row.enabled,
+    armed: row.armed,
+    state: row.state,
+    provider: row.provider,
+    topup_id: row.topup_id,
+    quantity: row.quantity,
+    threshold: row.threshold,
+    max_charges_per_window: row.max_charges_per_window,
+    window_unit: row.window_unit,
+    window_count: row.window_count,
+    window_anchor: row.window_anchor,
+    window_timezone: row.window_timezone,
+    updated_at: row.updated_at,
+  };
+}
+
+function projectAttempt(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    subject_id: row.subject_id,
+    provider: row.provider,
+    idempotency_key: row.idempotency_key,
+    provider_attempt_id: row.provider_attempt_id,
+    topup_id: row.topup_id,
+    quantity: row.quantity,
+    state: row.state,
+    window_start: row.window_start,
+    window_end: row.window_end,
+    quoted_amount_minor: row.quoted_amount_minor,
+    currency: row.currency,
+    failure_code: row.failure_code,
+    failure_message: row.failure_message,
+    metadata: row.metadata,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
 
 function profileFromRow(row: Record<string, unknown>): BillingAutoRechargeProfile {
-  const parsed = safeParse(ProfileRowSchema, row, "BillingAutoRechargeRepository.profile");
+  const parsed = safeParse(
+    ProfileRowSchema,
+    projectProfile(row),
+    "BillingAutoRechargeRepository.profile",
+  );
   return {
     userId: parsed.subject_id,
     enabled: parsed.enabled,
@@ -102,7 +176,11 @@ function profileFromRow(row: Record<string, unknown>): BillingAutoRechargeProfil
 }
 
 function attemptFromRow(row: Record<string, unknown>): BillingAutoRechargeAttempt {
-  const parsed = safeParse(AttemptRowSchema, row, "BillingAutoRechargeRepository.attempt");
+  const parsed = safeParse(
+    AttemptRowSchema,
+    projectAttempt(row),
+    "BillingAutoRechargeRepository.attempt",
+  );
   return {
     id: parsed.id,
     userId: parsed.subject_id,
@@ -181,7 +259,7 @@ export class BillingAutoRechargeRepository {
 
   private async advanceAttempt(input: {
     id: string;
-    state: string;
+    state: BillingAutoRechargeAttemptState;
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
@@ -206,7 +284,12 @@ export class BillingAutoRechargeRepository {
       currentRow.state,
       "BillingAutoRechargeRepository.advanceAttempt.current.state",
     );
-    const paths: Record<string, Record<string, string[]>> = {
+    const paths: Partial<
+      Record<
+        BillingAutoRechargeAttemptState,
+        Partial<Record<BillingAutoRechargeAttemptState, BillingAutoRechargeAttemptState[]>>
+      >
+    > = {
       claimed: {
         submitted: ["submitted"],
         processing: ["submitted", "processing"],
@@ -286,7 +369,7 @@ export class BillingAutoRechargeRepository {
 
   async updateAttempt(input: {
     id: string;
-    state: string;
+    state: BillingAutoRechargeAttemptState;
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
@@ -298,7 +381,7 @@ export class BillingAutoRechargeRepository {
   async updateAttemptByProviderPayment(input: {
     provider: string;
     providerPaymentId: string;
-    state: string;
+    state: BillingAutoRechargeAttemptState;
     failureCode?: string | null;
     failureMessage?: string | null;
   }): Promise<void> {
@@ -306,18 +389,19 @@ export class BillingAutoRechargeRepository {
       `SELECT * FROM bursar.get_auto_recharge_attempt_by_provider($1, $2)`,
       [input.provider, input.providerPaymentId],
     );
-    for (const row of rows as Array<Record<string, unknown>>) {
-      if (row.id == null) {
-        continue;
-      }
-      await this.advanceAttempt({
-        id: String(row.id),
-        state: input.state,
-        providerAttemptId: input.providerPaymentId,
-        failureCode: input.failureCode,
-        failureMessage: input.failureMessage,
-      });
-    }
+    const row = optionalRecordRow(
+      rows,
+      "BillingAutoRechargeRepository.updateAttemptByProviderPayment",
+    );
+    if (row === null) return;
+    const attempt = attemptFromRow(row);
+    await this.advanceAttempt({
+      id: attempt.id,
+      state: input.state,
+      providerAttemptId: input.providerPaymentId,
+      failureCode: input.failureCode,
+      failureMessage: input.failureMessage,
+    });
   }
 
   async countAttempts(userId: string, since: string | Date): Promise<number> {
@@ -332,7 +416,10 @@ export class BillingAutoRechargeRepository {
     return requireResultField(
       rows,
       "count",
-      z.union([z.number(), z.string()]).transform(Number).pipe(z.number().int().nonnegative()),
+      z
+        .union([z.number(), z.string().regex(/^\d+$/)])
+        .transform(Number)
+        .pipe(z.number().int().nonnegative().safe()),
       "BillingAutoRechargeRepository.countAttempts",
     );
   }

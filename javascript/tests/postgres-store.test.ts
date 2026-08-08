@@ -7,6 +7,10 @@ import { StoreUnavailableError } from "../src/errors.js";
 
 const D = (n: number | string) => new Decimal(n);
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+const TEST_USER_ID = "00000000-0000-0000-0000-000000000002";
+const TEST_PLAN_ID = "00000000-0000-0000-0000-000000000003";
+const TEST_CHARGE_ID = "00000000-0000-0000-0000-000000000004";
+const TEST_LEDGER_ID = "00000000-0000-0000-0000-000000000005";
 
 class PostgresStore extends BasePostgresStore {
   constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
@@ -32,9 +36,23 @@ function mockTransactionClient(query: ReturnType<typeof vi.fn>) {
 }
 
 /** Mock pool that returns a fixed set of rows for every query. */
-function makeMockPool(rows: unknown[]): PgPoolConstructor {
+function makeMockPool(rows: unknown[], subsequentRows: unknown[] = rows): PgPoolConstructor {
   return vi.fn(() => {
-    const query = vi.fn().mockResolvedValue({ rows });
+    let dataQueryCount = 0;
+    const query = vi.fn((text: string) => {
+      if (
+        text === "BEGIN" ||
+        text === "COMMIT" ||
+        text === "ROLLBACK" ||
+        text.startsWith("SET LOCAL ROLE") ||
+        text.startsWith("SELECT set_config(")
+      ) {
+        return Promise.resolve({ rows: [] });
+      }
+      const result = dataQueryCount === 0 ? rows : subsequentRows;
+      dataQueryCount += 1;
+      return Promise.resolve({ rows: result });
+    });
     return {
       query,
       connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
@@ -47,11 +65,15 @@ function makeMockPool(rows: unknown[]): PgPoolConstructor {
  * Mock pool that records the SQL text + params it was called with, returning a
  * caller-supplied row set. Lets us assert how the store builds RPC calls.
  */
-function makeRecordingPool(rows: unknown[]): {
+function makeRecordingPool(
+  rows: unknown[],
+  subsequentRows: unknown[] = rows,
+): {
   ctor: PgPoolConstructor;
   calls: Array<{ text: string; params: unknown[] }>;
 } {
   const calls: Array<{ text: string; params: unknown[] }> = [];
+  let dataQueryCount = 0;
   const query = vi.fn((text: string, params?: unknown[]) => {
     if (
       text === "BEGIN" ||
@@ -63,7 +85,9 @@ function makeRecordingPool(rows: unknown[]): {
       return Promise.resolve({ rows: [] });
     }
     calls.push({ text, params: params ?? [] });
-    return Promise.resolve({ rows });
+    const result = dataQueryCount === 0 ? rows : subsequentRows;
+    dataQueryCount += 1;
+    return Promise.resolve({ rows: result });
   });
   const ctor = vi.fn(
     () =>
@@ -105,20 +129,34 @@ describe("PostgresStore", () => {
       "postgresql://localhost/db",
       makeMockPool([
         {
-          user_id: "user-1",
-          plan_id: "plan-1",
+          user_id: TEST_USER_ID,
+          plan_assigned_at: "2026-01-01T00:00:00.000Z",
+          plan_assignment_ends_at: null,
+          assignment_source_type: "manual",
+          assignment_source_id: null,
+          catalog_revision_pinned: false,
+          plan_id: TEST_PLAN_ID,
           plan_key: "pro",
+          plan_label: "Pro",
+          rate_card: null,
+          allowed_operations: [],
           credit_allowance_amount: "100",
-          credit_allowance_priority: "20",
+          credit_allowance_priority: 20,
           credit_allowance_reset_unit: "month",
           credit_allowance_reset_count: 1,
           credit_allowance_reset_anchor: "calendar",
           credit_allowance_reset_timezone: "UTC",
+          entitlements: {},
+          credit_policy_type: "prepaid",
+          credit_limit: null,
+          admission_max_in_flight: null,
+          operation_admission: {},
+          catalog_revision_no: 1,
         },
       ]),
     );
 
-    const result = await store.getUserPlan("user-1");
+    const result = await store.getUserPlan(TEST_USER_ID);
 
     expect(result.allowance?.amount.toString()).toBe("100");
     expect(result.allowance?.priority).toBe(20);
@@ -138,6 +176,7 @@ describe("PostgresStore", () => {
         user_id: "user-1",
         balance_after: "200",
         lifetime_purchased: "100.5",
+        bucket_key: "purchased",
         replayed: false,
         error_code: null,
       },
@@ -154,19 +193,19 @@ describe("PostgresStore", () => {
   it("executes application-driven grant programs and maps every award", async () => {
     const { ctor, calls } = makeRecordingPool([
       {
-        grant_event_id: "event-1",
-        grant_award_id: "award-1",
-        recipient_subject_id: "user-1",
-        ledger_entry_id: "entry-1",
+        grant_event_id: "00000000-0000-0000-0000-000000000010",
+        grant_award_id: "00000000-0000-0000-0000-000000000011",
+        recipient_subject_id: TEST_USER_ID,
+        ledger_entry_id: "00000000-0000-0000-0000-000000000012",
         amount: "12.5",
         replayed: false,
         error_code: null,
       },
       {
-        grant_event_id: "event-1",
-        grant_award_id: "award-2",
-        recipient_subject_id: "user-2",
-        ledger_entry_id: "entry-2",
+        grant_event_id: "00000000-0000-0000-0000-000000000010",
+        grant_award_id: "00000000-0000-0000-0000-000000000013",
+        recipient_subject_id: "00000000-0000-0000-0000-000000000014",
+        ledger_entry_id: "00000000-0000-0000-0000-000000000015",
         amount: "2.5",
         replayed: false,
         error_code: null,
@@ -177,9 +216,9 @@ describe("PostgresStore", () => {
     const result = await store.executeGrantProgram({
       trigger: "referral_completed",
       programKey: "referral_bonus",
-      subjectId: "user-1",
+      subjectId: TEST_USER_ID,
       eventKey: "referral-42",
-      referrerSubjectId: "user-2",
+      referrerSubjectId: "00000000-0000-0000-0000-000000000014",
       region: "US",
       metadata: { campaign: "summer" },
     });
@@ -188,40 +227,45 @@ describe("PostgresStore", () => {
     expect(calls[0]!.params).toEqual([
       "referral_completed",
       "referral_bonus",
-      "user-1",
+      TEST_USER_ID,
       "referral-42",
-      "user-2",
+      "00000000-0000-0000-0000-000000000014",
       "US",
       JSON.stringify({ campaign: "summer" }),
     ]);
     expect(result).toHaveLength(2);
     expect(result[0]!).toMatchObject({
-      grantEventId: "event-1",
-      recipientSubjectId: "user-1",
+      grantEventId: "00000000-0000-0000-0000-000000000010",
+      recipientSubjectId: TEST_USER_ID,
       replayed: false,
     });
-    expect(result[0]?.amount.toString()).toBe("12.5");
+    const award = result[0]!;
+    expect(award.error).toBeNull();
+    if (award.error !== null) throw new Error("expected a committed grant award");
+    expect(award.amount.toString()).toBe("12.5");
   });
 
   it("reads the immutable lease pricing context", async () => {
     const { ctor, calls } = makeRecordingPool([
       {
         catalog_revision_no: "7",
-        plan_id: "plan-id",
+        plan_id: TEST_PLAN_ID,
         plan_key: "pro",
         rate_card: "premium",
       },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
 
-    await expect(store.getLeasePricingContext("user-1", "lease-1")).resolves.toEqual({
+    await expect(
+      store.getLeasePricingContext(TEST_USER_ID, "00000000-0000-0000-0000-000000000016"),
+    ).resolves.toEqual({
       catalogVersion: 7,
-      planId: "plan-id",
+      planId: TEST_PLAN_ID,
       planKey: "pro",
       rateCard: "premium",
     });
     expect(calls[0]!.text).toContain("get_credit_lease_pricing_context");
-    expect(calls[0]!.params).toEqual(["user-1", "lease-1"]);
+    expect(calls[0]!.params).toEqual([TEST_USER_ID, "00000000-0000-0000-0000-000000000016"]);
   });
 
   it("expires a bounded lease batch", async () => {
@@ -254,6 +298,7 @@ describe("PostgresStore", () => {
           user_id: "user-1",
           balance_after: "20",
           lifetime_purchased: "20",
+          bucket_key: "gifted",
           replayed: false,
           error_code: null,
         },
@@ -273,6 +318,7 @@ describe("PostgresStore", () => {
           user_id: "user-1",
           balance_after: "10",
           lifetime_purchased: "10",
+          bucket_key: "default",
           replayed: false,
           error_code: null,
         },
@@ -288,20 +334,26 @@ describe("PostgresStore", () => {
     it("deductWithAllowance parses bucket_breakdown into a Record<string, Decimal>", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([
-          {
-            charge_id: "usage-1",
-            ledger_entry_id: "tx-1",
-            charged: "15.0000",
-            allowance_covered: "0.0000",
-            balance_after: "5.0000",
-            replayed: false,
-            error_code: null,
-            bucket_breakdown: { gifted: "10.0000", purchased: "5.0000" },
-          },
-        ]),
+        makeMockPool(
+          [
+            {
+              charge_id: TEST_CHARGE_ID,
+              ledger_entry_id: TEST_LEDGER_ID,
+              charged: "15.0000",
+              allowance_covered: "0.0000",
+              replayed: false,
+              error_code: null,
+            },
+          ],
+          [
+            {
+              balance_after: "5.0000",
+              bucket_breakdown: { gifted: "10.0000", purchased: "5.0000" },
+            },
+          ],
+        ),
       );
-      const result = await store.deductWithAllowance("user-1", D(15));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(15));
       expect(result.bucketBreakdown).not.toBeNull();
       expect(result.bucketBreakdown!.gifted).toBeInstanceOf(Decimal);
       expect(result.bucketBreakdown!.gifted?.toString()).toBe("10");
@@ -328,19 +380,21 @@ describe("PostgresStore", () => {
     it("deductWithAllowance leaves bucketBreakdown null when absent from the row", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([
-          {
-            charge_id: "usage-2",
-            ledger_entry_id: "tx-1",
-            charged: "15.0000",
-            allowance_covered: "0.0000",
-            balance_after: "5.0000",
-            replayed: false,
-            error_code: null,
-          },
-        ]),
+        makeMockPool(
+          [
+            {
+              charge_id: TEST_CHARGE_ID,
+              ledger_entry_id: TEST_LEDGER_ID,
+              charged: "15.0000",
+              allowance_covered: "0.0000",
+              replayed: false,
+              error_code: null,
+            },
+          ],
+          [{ balance_after: "5.0000", bucket_breakdown: null }],
+        ),
       );
-      const result = await store.deductWithAllowance("user-1", D(15));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(15));
       expect(result.bucketBreakdown).toBeNull();
     });
 
@@ -368,22 +422,28 @@ describe("PostgresStore", () => {
         makeMockPool([
           {
             bucket_key: "gifted",
+            label: "Gifted",
+            priority: 10,
+            expires: true,
             balance: "20.0000",
           },
           {
             bucket_key: "purchased",
+            label: "Purchased",
+            priority: 20,
+            expires: false,
             balance: "10.0000",
           },
         ]),
       );
-      const result = await store.getBucketBalances("user-1");
-      expect(result.userId).toBe("user-1");
+      const result = await store.getBucketBalances(TEST_USER_ID);
+      expect(result.userId).toBe(TEST_USER_ID);
       expect(result.buckets).toHaveLength(2);
       expect(result.buckets[0]!).toMatchObject({
         bucketKey: "gifted",
-        label: "",
-        priority: 0,
-        expires: false,
+        label: "Gifted",
+        priority: 10,
+        expires: true,
       });
       expect(result.buckets[0]!.balance.toString()).toBe("20");
       expect(result.buckets[1]!.balance.toString()).toBe("10");
@@ -393,8 +453,8 @@ describe("PostgresStore", () => {
 
     it("getBucketBalances returns an empty bucket list and zero balance for empty results", async () => {
       const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-      const result = await store.getBucketBalances("user-1");
-      expect(result.userId).toBe("user-1");
+      const result = await store.getBucketBalances(TEST_USER_ID);
+      expect(result.userId).toBe(TEST_USER_ID);
       expect(result.buckets).toEqual([]);
       expect(result.totalBalance.toString()).toBe("0");
     });
@@ -402,19 +462,21 @@ describe("PostgresStore", () => {
 
   describe("deductWithAllowance", () => {
     it("calls charge_usage_for_operation with the normalized contract", async () => {
-      const { ctor, calls } = makeRecordingPool([
-        {
-          charge_id: "usage-3",
-          ledger_entry_id: "tx-1",
-          charged: "2.5000",
-          allowance_covered: "0.0000",
-          balance_after: "97.5000",
-          replayed: false,
-          error_code: null,
-        },
-      ]);
+      const { ctor, calls } = makeRecordingPool(
+        [
+          {
+            charge_id: TEST_CHARGE_ID,
+            ledger_entry_id: TEST_LEDGER_ID,
+            charged: "2.5000",
+            allowance_covered: "0.0000",
+            replayed: false,
+            error_code: null,
+          },
+        ],
+        [{ balance_after: "97.5000", bucket_breakdown: null }],
+      );
       const store = new PostgresStore("postgresql://localhost/db", ctor);
-      const result = await store.deductWithAllowance("user-1", D("2.5"), {
+      const result = await store.deductWithAllowance(TEST_USER_ID, D("2.5"), {
         idempotencyKey: "k1",
         operation: "completion",
         model: "gpt-4",
@@ -425,7 +487,7 @@ describe("PostgresStore", () => {
       });
       expect(calls[0]!.text).toContain("charge_usage_for_operation");
       expect(calls[0]!.params).toEqual([
-        "user-1",
+        TEST_USER_ID,
         "completion",
         "2.5",
         "k1",
@@ -447,19 +509,21 @@ describe("PostgresStore", () => {
     it("parses allowance consumption", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([
-          {
-            charge_id: "usage-4",
-            ledger_entry_id: "tx-2",
-            charged: "15.0000",
-            allowance_covered: "10.0000",
-            balance_after: "85.0000",
-            replayed: false,
-            error_code: null,
-          },
-        ]),
+        makeMockPool(
+          [
+            {
+              charge_id: TEST_CHARGE_ID,
+              ledger_entry_id: TEST_LEDGER_ID,
+              charged: "15.0000",
+              allowance_covered: "10.0000",
+              replayed: false,
+              error_code: null,
+            },
+          ],
+          [{ balance_after: "85.0000", bucket_breakdown: null }],
+        ),
       );
-      const result = await store.deductWithAllowance("user-1", D(25));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(25));
       expect(result.amount.toString()).toBe("15");
       expect(result.allowanceConsumed.toString()).toBe("10");
     });
@@ -469,6 +533,8 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
+            charge_id: null,
+            ledger_entry_id: null,
             charged: "0",
             allowance_covered: "0",
             replayed: false,
@@ -476,7 +542,7 @@ describe("PostgresStore", () => {
           },
         ]),
       );
-      const result = await store.deductWithAllowance("user-1", D(20));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(20));
       expect(result.error).toBe("quota_exceeded");
       expect(result.entryId).toBeNull();
     });
@@ -486,6 +552,8 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
+            charge_id: null,
+            ledger_entry_id: null,
             charged: "0",
             allowance_covered: "0",
             replayed: false,
@@ -493,28 +561,30 @@ describe("PostgresStore", () => {
           },
         ]),
       );
-      const result = await store.deductWithAllowance("user-1", D(20));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(20));
       expect(result.error).toBe("insufficient_credits");
     });
 
     it("surfaces idempotent replay", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([
-          {
-            charge_id: "usage-replay",
-            ledger_entry_id: "tx-orig",
-            charged: "10.0000",
-            allowance_covered: "0.0000",
-            balance_after: "90.0000",
-            replayed: true,
-            error_code: null,
-          },
-        ]),
+        makeMockPool(
+          [
+            {
+              charge_id: TEST_CHARGE_ID,
+              ledger_entry_id: TEST_LEDGER_ID,
+              charged: "10.0000",
+              allowance_covered: "0.0000",
+              replayed: true,
+              error_code: null,
+            },
+          ],
+          [{ balance_after: "90.0000", bucket_breakdown: null }],
+        ),
       );
-      const result = await store.deductWithAllowance("user-1", D(10), { idempotencyKey: "k" });
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(10), { idempotencyKey: "k" });
       expect(result.idempotent).toBe(true);
-      expect(result.entryId).toBe("tx-orig");
+      expect(result.entryId).toBe(TEST_LEDGER_ID);
     });
   });
 
@@ -522,15 +592,18 @@ describe("PostgresStore", () => {
     it("records an exact cost without a ledger debit", async () => {
       const { ctor, calls } = makeRecordingPool([
         {
-          charge_id: "usage-1",
+          charge_id: TEST_CHARGE_ID,
           requested: "12.5000",
+          ledger_entry_id: null,
+          charged: "0",
+          allowance_covered: "0",
           replayed: false,
           error_code: null,
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
 
-      const result = await store.recordUsage("user-1", "roadmap_generation", D("12.5"), {
+      const result = await store.recordUsage(TEST_USER_ID, "roadmap_generation", D("12.5"), {
         idempotencyKey: "roadmap-1:outline",
         model: "linkup",
         measures: { requests: 1 },
@@ -540,7 +613,7 @@ describe("PostgresStore", () => {
 
       expect(calls[0]!.text).toContain("record_usage");
       expect(calls[0]!.params).toEqual([
-        "user-1",
+        TEST_USER_ID,
         "roadmap_generation",
         "12.5",
         "roadmap-1:outline",
@@ -552,8 +625,8 @@ describe("PostgresStore", () => {
         JSON.stringify({ provider: "linkup" }),
       ]);
       expect(result).toMatchObject({
-        usageId: "usage-1",
-        userId: "user-1",
+        usageId: TEST_CHARGE_ID,
+        userId: TEST_USER_ID,
         idempotent: false,
         error: null,
       });
@@ -574,9 +647,9 @@ describe("PostgresStore", () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
         makeMockPool([
-          { user_id: "u1", total_spend: "10", entry_count: 1 },
-          { user_id: "u2", total_spend: "20", entry_count: 2 },
-          { user_id: "u3", total_spend: "30", entry_count: 3 },
+          { subject_id: "u1", total_spend: "10", charge_count: 1 },
+          { subject_id: "u2", total_spend: "20", charge_count: 2 },
+          { subject_id: "u3", total_spend: "30", charge_count: 3 },
         ]),
       );
       const rows = await store.spendByUser(new Date(), new Date());
@@ -670,6 +743,7 @@ describe("PostgresStore", () => {
           id: "cfg-1",
           revision_no: 1,
           source_document: config,
+          label: null,
           status: "active",
           created_at: "2026-01-01T00:00:00.000Z",
         },
@@ -716,7 +790,7 @@ describe("PostgresStore", () => {
         {
           ledger_entry_id: "00000000-0000-0000-0000-000000000020",
           balance_after: "123.4500",
-          replayed: "t",
+          replayed: true,
           error_code: null,
         },
       ],
@@ -842,22 +916,29 @@ describe("PostgresStore", () => {
   });
 
   it("hydrates subscription changes with revision-pinned offer context", async () => {
+    const subscriptionId = "00000000-0000-0000-0000-000000000030";
+    const fromOfferId = "00000000-0000-0000-0000-000000000031";
+    const fromRevisionId = "00000000-0000-0000-0000-000000000032";
+    const toOfferId = "00000000-0000-0000-0000-000000000033";
+    const toRevisionId = "00000000-0000-0000-0000-000000000034";
     const query = vi.fn((text: string, params?: unknown[]) => {
       if (text.includes("get_open_billing_subscription_change")) {
         return Promise.resolve({
           rows: [
             {
-              id: "change-1",
-              subscription_id: "subscription-1",
-              from_offer_id: "offer-old",
-              from_catalog_revision_id: "revision-old",
-              to_offer_id: "offer-new",
-              to_catalog_revision_id: "revision-new",
+              id: "1",
+              subscription_id: subscriptionId,
+              from_offer_id: fromOfferId,
+              from_catalog_revision_id: fromRevisionId,
+              to_offer_id: toOfferId,
+              to_catalog_revision_id: toRevisionId,
               effective_at: new Date("2027-01-01T00:00:00.000Z"),
               effective_behavior: "renewal",
               state: "scheduled",
               proration_behavior: "none",
               idempotency_key: "change-key",
+              provider_operation_id: null,
+              error_message: null,
             },
           ],
         });
@@ -870,7 +951,7 @@ describe("PostgresStore", () => {
               side: "from",
               offer_id: params[0]!,
               offer_key: "monk_monthly",
-              plan_id: "plan-old",
+              plan_id: "00000000-0000-0000-0000-000000000035",
               plan_key: "monk",
               billing_unit: "month",
               billing_count: 1,
@@ -879,7 +960,7 @@ describe("PostgresStore", () => {
               side: "to",
               offer_id: params[2]!,
               offer_key: "sage_yearly",
-              plan_id: "plan-new",
+              plan_id: "00000000-0000-0000-0000-000000000036",
               plan_key: "sage",
               billing_unit: "year",
               billing_count: 1,
@@ -899,16 +980,16 @@ describe("PostgresStore", () => {
     const change = await store.getOpenBillingSubscriptionChange("dodo", "provider-subscription");
 
     expect(change).toMatchObject({
-      fromOfferId: "offer-old",
-      toOfferId: "offer-new",
+      fromOfferId,
+      toOfferId,
       fromOffer: {
-        offerId: "offer-old",
+        offerId: fromOfferId,
         offerKey: "monk_monthly",
         plan: "monk",
         interval: "month",
       },
       toOffer: {
-        offerId: "offer-new",
+        offerId: toOfferId,
         offerKey: "sage_yearly",
         plan: "sage",
         interval: "year",
@@ -928,7 +1009,7 @@ describe("PostgresStore", () => {
           accounting: { unit: "credit", scale: 6, rounding: "half_up" },
         },
       }),
-    ).rejects.toThrow(/schema validation failed/);
+    ).rejects.toThrow(/expected exactly one result row/);
   });
 
   it("checkFeature treats numeric 0 as present (M6)", async () => {
@@ -937,11 +1018,15 @@ describe("PostgresStore", () => {
       makeMockPool([
         {
           feature_key: "quota",
+          feature_type: "integer",
           feature_value: 0,
+          catalog_revision_id: "00000000-0000-0000-0000-000000000040",
+          plan_key: "pro",
+          value_source: "plan",
         },
       ]),
     );
-    const result = await store.checkFeature("u1", "quota");
+    const result = await store.checkFeature(TEST_USER_ID, "quota");
     expect(result.value).toBe(0);
     expect(result.hasFeature).toBe(true);
   });
@@ -952,11 +1037,15 @@ describe("PostgresStore", () => {
       makeMockPool([
         {
           feature_key: "flag",
+          feature_type: "boolean",
           feature_value: false,
+          catalog_revision_id: "00000000-0000-0000-0000-000000000040",
+          plan_key: null,
+          value_source: "default",
         },
       ]),
     );
-    const result = await store.checkFeature("u1", "flag");
+    const result = await store.checkFeature(TEST_USER_ID, "flag");
     expect(result.hasFeature).toBe(false);
   });
 
@@ -989,6 +1078,7 @@ describe("PostgresStore", () => {
         amount: "0.0001",
         balance_after: "0.0001",
         lifetime_purchased: "0.0001",
+        bucket_key: "purchased",
         replayed: false,
         error_code: null,
       },
@@ -1009,6 +1099,7 @@ describe("PostgresStore", () => {
         amount: "50",
         balance_after: "150",
         lifetime_purchased: "150",
+        bucket_key: "purchased",
         replayed: false,
         error_code: null,
       },
@@ -1029,6 +1120,8 @@ describe("PostgresStore", () => {
       "postgresql://localhost/db",
       makeMockPool([
         {
+          charge_id: null,
+          ledger_entry_id: null,
           charged: "0",
           allowance_covered: "0",
           replayed: false,
@@ -1037,7 +1130,7 @@ describe("PostgresStore", () => {
       ]),
     );
     // deductWithAllowance maps ALL error envelopes to result.error — unknown codes included.
-    const result = await store.deductWithAllowance("user-1", D(20));
+    const result = await store.deductWithAllowance(TEST_USER_ID, D(20));
     expect(result.error).toBe("some_unknown_code_xyz");
     expect(result.entryId).toBeNull();
   });
@@ -1089,6 +1182,7 @@ describe("PostgresStore", () => {
           amount: "100.1234567890",
           balance_after: "100.1235",
           lifetime_purchased: "100.1235",
+          bucket_key: "purchased",
           replayed: false,
           error_code: null,
         },

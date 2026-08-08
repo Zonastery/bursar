@@ -25,6 +25,7 @@ from bursar.credits.postgres.repositories.deduction import DeductionRepository
 from bursar.credits.postgres.repositories.lease import LeaseRepository
 from bursar.credits.postgres.repositories.plan import PlanRepository
 from bursar.credits.postgres.repositories.schemas import (
+    CatalogRevisionRow,
     CreateLeaseParams,
     DeductParams,
     SettleLeaseParams,
@@ -71,6 +72,7 @@ from bursar.credits.types import (
     QuotaState,
     RefundResult,
     ReleaseResult,
+    RevokeCreditsResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
@@ -78,7 +80,9 @@ from bursar.credits.types import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TeamRole,
     TopUserRow,
+    UnsetUserPlanResult,
     UsageCharge,
     UsageChargeCursor,
     UsageChargePage,
@@ -239,7 +243,7 @@ class PostgresStore(CreditStore):
 
     @cached_property
     def _deduction_repo(self) -> DeductionRepository:
-        return DeductionRepository(self._callproc, self._query)
+        return DeductionRepository(self._callproc)
 
     @cached_property
     def _lease_repo(self) -> LeaseRepository:
@@ -285,9 +289,6 @@ class PostgresStore(CreditStore):
         dictionaries keyed by their declared column names.
         """
         return self._client.callproc(name, params)
-
-    def _query(self, sql: str, params: list[Any]) -> list[Any]:
-        return self._client.query(sql, params)
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -372,7 +373,7 @@ class PostgresStore(CreditStore):
             return BalanceResult(user_id=user_id, balance=Decimal(0), lifetime_purchased=Decimal(0))
 
         return BalanceResult(
-            user_id=str(getattr(result_dict, "user_id", user_id)),
+            user_id=result_dict.user_id,
             balance=_dec(result_dict.balance),
             lifetime_purchased=_dec(result_dict.lifetime_purchased),
         )
@@ -418,18 +419,16 @@ class PostgresStore(CreditStore):
             bucket,
             effective_idempotency_key,
         )
-        if result is None:
-            raise StoreError("credits_add returned no result")
         if result.error is not None:
             raise StoreError(f"post_credit failed: {result.error}")
         return AddCreditsResult(
             entry_id=_require_text(result.entry_id, "post_credit"),
-            user_id=str(getattr(result, "user_id", user_id)),
+            user_id=result.user_id,
             amount=_dec(result.amount),
             new_balance=_dec(result.new_balance),
             lifetime_purchased=_dec(result.lifetime_purchased),
-            bucket=str(getattr(result, "bucket", "default")),
-            idempotent=bool(getattr(result, "idempotent", False)),
+            bucket=result.bucket,
+            idempotent=result.idempotent,
         )
 
     def deduct_with_allowance(
@@ -465,8 +464,6 @@ class PostgresStore(CreditStore):
         )
         result = self._deduction_repo.deduct_with_allowance(params)
 
-        if result is None:
-            raise StoreError("charge_usage_for_operation returned no result")
         if result.error is not None:
             return DeductionResult(
                 entry_id=None,
@@ -487,7 +484,7 @@ class PostgresStore(CreditStore):
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
             balance_after=_dec(result.balance_after),
-            idempotent=bool(getattr(result, "idempotent", False)),
+            idempotent=result.idempotent,
             bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
@@ -524,8 +521,6 @@ class PostgresStore(CreditStore):
             ),
         )
         result = self._deduction_repo.record_usage(params)
-        if result is None:
-            raise StoreError("record_usage returned no result")
         if result.error_code is not None:
             return UsageRecordResult(
                 usage_id=None,
@@ -600,8 +595,6 @@ class PostgresStore(CreditStore):
             max_concurrent=options.max_concurrent,
         )
         result = self._lease_repo.create_lease(params)
-        if result is None:
-            raise StoreError("create_lease_for_operation returned no result")
         availability = self.get_available(user_id)
         if result.error is not None:
             return LeaseResult(
@@ -676,8 +669,6 @@ class PostgresStore(CreditStore):
         )
         result = self._lease_repo.settle_lease(params)
 
-        if result is None:
-            raise StoreError("settle_lease returned no result")
         if result.error is not None:
             return DeductionResult(
                 entry_id=None,
@@ -695,7 +686,7 @@ class PostgresStore(CreditStore):
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
             balance_after=_dec(result.balance_after),
-            idempotent=bool(getattr(result, "idempotent", False)),
+            idempotent=result.idempotent,
             bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
@@ -706,7 +697,7 @@ class PostgresStore(CreditStore):
             return None
         return LeasePricingContext(
             catalog_version=result.catalog_revision_no,
-            plan_id=result.plan_id,
+            plan_id=str(result.plan_id) if result.plan_id is not None else None,
             plan_key=result.plan_key,
             rate_card=result.rate_card,
         )
@@ -722,12 +713,10 @@ class PostgresStore(CreditStore):
             ReleaseResult indicating whether the release was successful.
         """
         result = self._lease_repo.release_lease(user_id, lease_id)
-        if result is None:
-            raise StoreError("release_lease returned no result")
         return ReleaseResult(
             lease_id=lease_id,
             user_id=user_id,
-            released=bool(getattr(result, "released", False)),
+            released=result.released,
             reason=result.reason,
         )
 
@@ -735,8 +724,6 @@ class PostgresStore(CreditStore):
         """Extend an active lease's expiry without changing its policy snapshot."""
         result = self._lease_repo.renew_lease(user_id, lease_id, ttl_seconds)
         availability = self.get_available(user_id)
-        if result is None:
-            raise StoreError("renew_lease returned no result")
         if result.error is not None:
             return LeaseResult(
                 lease_id=None,
@@ -794,11 +781,11 @@ class PostgresStore(CreditStore):
     def get_active_catalog(self) -> CatalogRevision | None:
         return self._load_active_catalog()
 
-    def _normalize_catalog_revision(self, result: Any) -> CatalogRevision | None:
+    def _normalize_catalog_revision(self, result: CatalogRevisionRow | None) -> CatalogRevision | None:
         """Normalize a raw catalog revision into CatalogRevision."""
         if result is None:
             return None
-        return CatalogRevision.model_validate(result.model_dump())
+        return CatalogRevision(id=result.id, config=result.config, version=result.version)
 
     def _load_active_catalog(self) -> CatalogRevision | None:
         return self._normalize_catalog_revision(self._catalog_repo.get_active_catalog())
@@ -836,8 +823,6 @@ class PostgresStore(CreditStore):
             label,
             rollout_document,
         )
-        if result is None:
-            raise StoreError("publish_and_activate_catalog returned no result")
         return result.id
 
     def get_catalog_history(self) -> list[CatalogRevisionSummary]:
@@ -896,9 +881,6 @@ class PostgresStore(CreditStore):
             version,
             rollout_document,
         )
-        if result is None:
-            msg = f"Version {version} not found"
-            raise StoreError(msg)
         return result.id
 
     def publish_catalog_draft(
@@ -911,8 +893,6 @@ class PostgresStore(CreditStore):
 
         canonical = canonical_bursar_config_dict(config)
         result = self._catalog_repo.publish_catalog_draft(json.dumps(canonical, cls=DecimalEncoder), label)
-        if result is None:
-            raise StoreError("publish_catalog_draft returned no result")
         return result.id
 
     # ── Plan management ────────────────────────────────────────────────
@@ -935,9 +915,16 @@ class PostgresStore(CreditStore):
                 plan_label=None,
                 allowance=None,
                 entitlements={},
+                rate_card=None,
                 credit_policy=None,
                 admission=None,
                 allowed_operations=[],
+                plan_assigned_at=None,
+                plan_assignment_ends_at=None,
+                assignment_source_type=None,
+                assignment_source_id=None,
+                catalog_revision_pinned=False,
+                catalog_version=None,
             )
         allowance = None
         if result.credit_allowance_amount is not None:
@@ -958,19 +945,16 @@ class PostgresStore(CreditStore):
                 reset_timezone=result.credit_allowance_reset_timezone,
             )
         admission_operations = {
-            str(operation): {"max_in_flight": policy.get("max_in_flight") if isinstance(policy, dict) else None}
-            for operation, policy in (result.operation_admission or {}).items()
+            operation: {"max_in_flight": policy.max_in_flight}
+            for operation, policy in result.operation_admission.items()
         }
-        plan_assigned_at = result.plan_assigned_at
-        if plan_assigned_at is not None and not isinstance(plan_assigned_at, datetime):
-            plan_assigned_at = datetime.fromisoformat(str(plan_assigned_at))
         return GetUserPlanResult(
-            user_id=str(getattr(result, "user_id", user_id)),
-            plan_id=result.plan_id or None,
-            plan_key=result.plan_key or None,
-            plan_label=result.plan_label or None,
+            user_id=str(result.user_id),
+            plan_id=str(result.plan_id),
+            plan_key=result.plan_key,
+            plan_label=result.plan_label,
             allowance=allowance,
-            entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
+            entitlements={key: Entitlement(value=value.value) for key, value in result.entitlements.items()},
             rate_card=result.rate_card,
             credit_policy=(
                 PlanCreditPolicy.model_validate(
@@ -992,17 +976,20 @@ class PostgresStore(CreditStore):
                 if result.admission_max_in_flight is not None or admission_operations
                 else None
             ),
-            allowed_operations=list(result.allowed_operations or []),
-            plan_assigned_at=plan_assigned_at,
+            allowed_operations=result.allowed_operations,
+            plan_assigned_at=result.plan_assigned_at,
+            plan_assignment_ends_at=result.plan_assignment_ends_at,
             assignment_source_type=result.assignment_source_type,
-            assignment_source_id=result.assignment_source_id,
+            assignment_source_id=(
+                str(result.assignment_source_id) if result.assignment_source_id is not None else None
+            ),
             catalog_revision_pinned=result.catalog_revision_pinned,
             catalog_version=result.catalog_revision_no,
         )
 
     def check_feature(self, user_id: str, feature: str) -> CheckFeatureResult:
         entitlement = self._plan_repo.get_entitlement(user_id, feature)
-        value = entitlement.get("feature_value") if entitlement is not None else None
+        value = entitlement.feature_value if entitlement is not None else None
         return CheckFeatureResult(
             user_id=user_id,
             feature=feature,
@@ -1029,20 +1016,22 @@ class PostgresStore(CreditStore):
         Raises:
             StoreError: If the RPC returns no result.
         """
+        if plan_assigned_at is not None and plan_assigned_at.utcoffset() is None:
+            raise ValueError("plan_assigned_at must include a timezone")
         result = self._plan_repo.set_user_plan(
             user_id,
             plan_key,
             plan_assigned_at.isoformat() if plan_assigned_at else None,
         )
-        if result is None:
-            raise StoreError("set_user_plan returned no result")
         return SetUserPlanResult(
-            user_id=str(getattr(result, "user_id", user_id)),
+            user_id=str(result.user_id),
             plan_id=str(result.plan_id),
-            plan_assigned_at=getattr(result, "plan_assigned_at", None),
+            plan_key=result.plan_key,
+            plan_assigned_at=result.plan_assigned_at,
+            assignment_state=result.assignment_state,
         )
 
-    def unset_user_plan(self, user_id: str) -> dict:
+    def unset_user_plan(self, user_id: str) -> UnsetUserPlanResult:
         """Remove the plan assignment from a user.
 
         Args:
@@ -1052,9 +1041,7 @@ class PostgresStore(CreditStore):
             Dict with the user_id.
         """
         result = self._plan_repo.unset_user_plan(user_id)
-        if result is None:
-            return {"user_id": user_id}
-        return {"user_id": str(getattr(result, "user_id", user_id))}
+        return UnsetUserPlanResult(user_id=str(result.user_id))
 
     def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
         """Pin or unpin the user's current catalog-plan revision."""
@@ -1072,8 +1059,6 @@ class PostgresStore(CreditStore):
         to_plan_id: str,
     ) -> PlanMigrationStartResult:
         migration_id = self._plan_repo.start_plan_migration(from_plan_id, to_plan_id)
-        if migration_id is None:
-            raise StoreError("start_plan_migration returned no migration id")
         return PlanMigrationStartResult(migration_id=migration_id)
 
     def migrate_plan_batch(
@@ -1082,12 +1067,10 @@ class PostgresStore(CreditStore):
         batch_size: int = 100,
     ) -> PlanMigrationBatchResult:
         result = self._plan_repo.migrate_plan_batch(migration_id, batch_size)
-        if result is None:
-            raise StoreError("migrate_plan_batch returned no data")
         return PlanMigrationBatchResult(
             migrated=result.migrated,
             done=result.done,
-            next_cursor=result.next_cursor,
+            next_cursor=str(result.next_cursor) if result.next_cursor is not None else None,
         )
 
     def get_quota_state(
@@ -1098,7 +1081,7 @@ class PostgresStore(CreditStore):
         rows = self._plan_repo.get_quota_state(user_id, quota_key)
         return [
             QuotaState(
-                user_id=row.user_id,
+                user_id=str(row.user_id),
                 quota_key=row.quota_key,
                 operation=row.operation_key,
                 measure=row.measure_key,
@@ -1108,8 +1091,8 @@ class PostgresStore(CreditStore):
                 remaining=_dec(row.remaining),
                 overage=_dec(row.overage),
                 enforcement=row.enforcement,
-                window_start=row.window_start,
-                window_end=row.window_end,
+                window_start=row.window_start.isoformat(),
+                window_end=row.window_end.isoformat(),
                 emit_at_percent=row.emit_at_percent,
             )
             for row in rows
@@ -1128,10 +1111,10 @@ class PostgresStore(CreditStore):
         if result is None:
             return None
         return AllowanceResult(
-            plan_id=result.plan_id,
+            plan_id=str(result.plan_id),
             allowance_remaining=_dec(result.allowance_remaining),
-            period_start=_require_text(result.period_start, "get_subject_allowance"),
-            period_end=_require_text(result.period_end, "get_subject_allowance"),
+            period_start=result.period_start.isoformat(),
+            period_end=result.period_end.isoformat(),
         )
 
     def list_quota_events(
@@ -1154,15 +1137,15 @@ class PostgresStore(CreditStore):
         )
         return [
             QuotaEvent(
-                event_id=row.event_id,
+                event_id=str(row.event_id),
                 quota_key=row.quota_key,
                 operation=row.operation_key,
                 measure=row.measure_key,
                 event_type=row.event_type,
                 threshold_percent=row.threshold_percent,
                 idempotency_key=row.idempotency_key,
-                usage_charge_id=row.usage_charge_id,
-                created_at=(row.created_at.isoformat() if isinstance(row.created_at, datetime) else row.created_at),
+                usage_charge_id=str(row.usage_charge_id) if row.usage_charge_id is not None else None,
+                created_at=row.created_at.isoformat(),
             )
             for row in rows
         ]
@@ -1198,13 +1181,11 @@ class PostgresStore(CreditStore):
                 cls=DecimalEncoder,
             ),
         )
-        if result is None:
-            raise StoreError("refund_credit_by_entry returned no result")
         if result.error is not None:
             return RefundResult(
                 refund_entry_id=None,
                 original_entry_id=entry_id,
-                user_id=result.user_id,
+                user_id=str(result.user_id) if result.user_id is not None else None,
                 amount=_dec(result.amount) if result.amount is not None else None,
                 new_balance=_dec(result.new_balance) if result.new_balance is not None else None,
                 error=str(result.error),
@@ -1220,7 +1201,7 @@ class PostgresStore(CreditStore):
             bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
-    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> dict:
+    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> RevokeCreditsResult:
         """Revoke credits for all transactions of a given type for a user.
 
         Args:
@@ -1228,17 +1209,17 @@ class PostgresStore(CreditStore):
             entry_type: The transaction type to revoke.
 
         Returns:
-            Dict with user_id, amount, new_balance, and bucket.
+            Typed result with the revoked amount and committed balance.
         """
         result = self._deduction_repo.revoke_credits_by_entry_type(user_id, entry_type)
-        if result is None:
-            raise StoreError("revoke_subject_credits_by_operation returned no result")
-        return {
-            "user_id": str(getattr(result, "user_id", user_id)),
-            "amount": str(_dec(result.amount)),
-            "new_balance": str(_dec(result.new_balance)),
-            "bucket": getattr(result, "bucket", None) if hasattr(result, "bucket") else None,
-        }
+        if result.error_code is not None:
+            raise StoreError(f"revoke_subject_credits_by_operation failed: {result.error_code}")
+        return RevokeCreditsResult(
+            user_id=str(result.user_id),
+            entry_type=result.entry_type,
+            revoked=_dec(result.revoked),
+            balance_after=_dec(result.balance_after),
+        )
 
     # ── Usage analytics ─────────────────────────────────────────────────
 
@@ -1315,7 +1296,7 @@ class PostgresStore(CreditStore):
         rows = self._analytics_repo.daily_spend(start.isoformat(), end.isoformat())
         return [
             DailySpendRow(
-                date=str(r.date),
+                date=r.date.isoformat() if isinstance(r.date, date) else r.date,
                 total_spend=_dec(r.total_spend),
                 entry_count=int(r.entry_count),
             )
@@ -1337,8 +1318,8 @@ class PostgresStore(CreditStore):
             total_credits_consumed=_dec(result.total_credits_consumed),
             active_users=int(result.active_users),
             avg_daily_spend=_dec(result.avg_daily_spend),
-            top_model=str(result.top_model),
-            top_user=str(result.top_user),
+            top_model=result.top_model,
+            top_user=result.top_user,
         )
 
     # ── Transaction listing ─────────────────────────────────────────────────
@@ -1482,13 +1463,11 @@ class PostgresStore(CreditStore):
             StoreError: If the RPC returns no result.
         """
         result = self._team_repo.create_team(owner_subject_id, name, str(_dec(initial_balance)))
-        if result is None:
-            raise StoreError("create_team returned no result")
         if result.error_code is not None:
             raise StoreError(result.error_code)
         return CreateTeamResult(
             team_id=_require_text(result.team_id, "create_team"),
-            name=name,
+            name=_require_text(result.name, "create_team"),
         )
 
     def get_team_balance(self, team_id: str) -> TeamBalanceResult | None:
@@ -1504,7 +1483,7 @@ class PostgresStore(CreditStore):
         if result is None:
             return None
         return TeamBalanceResult(
-            team_id=result.team_id,
+            team_id=str(result.team_id),
             name=result.name,
             balance=_dec(result.balance),
             member_count=result.member_count,
@@ -1514,7 +1493,7 @@ class PostgresStore(CreditStore):
         self,
         team_id: str,
         user_id: str,
-        role: str = "member",
+        role: TeamRole = "member",
         spend_cap: Decimal | None = None,
     ) -> AddTeamMemberResult:
         """Add a member to a team with an optional spend cap.
@@ -1537,12 +1516,10 @@ class PostgresStore(CreditStore):
             role,
             str(_dec(spend_cap)) if spend_cap is not None else None,
         )
-        if result is None:
-            raise StoreError("add_team_member returned no result")
         return AddTeamMemberResult(
-            team_id=str(getattr(result, "team_id", team_id)),
-            user_id=str(getattr(result, "user_id", user_id)),
-            role=str(getattr(result, "role", role)),
+            team_id=str(result.team_id),
+            user_id=str(result.user_id),
+            role=result.role,
         )
 
     def get_team_members(self, team_id: str) -> list[TeamMember]:
@@ -1558,7 +1535,7 @@ class PostgresStore(CreditStore):
         return [
             TeamMember(
                 user_id=str(r.user_id),
-                role=str(r.role),
+                role=r.role,
                 spend_cap=_dec(r.spend_cap) if r.spend_cap is not None else None,
                 total_spent=_dec(r.total_spent),
             )
@@ -1609,8 +1586,6 @@ class PostgresStore(CreditStore):
             operation,
             json.dumps(meta),
         )
-        if result is None:
-            raise StoreError("deduct_team returned no result")
         if result.error is not None:
             return TeamDeductionResult(
                 entry_id=None,
@@ -1623,8 +1598,8 @@ class PostgresStore(CreditStore):
             )
         return TeamDeductionResult(
             entry_id=_require_text(result.entry_id, "deduct_team"),
-            team_id=str(getattr(result, "team_id", team_id)),
-            user_id=str(getattr(result, "user_id", user_id)),
+            team_id=str(result.team_id),
+            user_id=str(result.user_id),
             amount=_dec(result.amount),
             team_balance_after=_dec(result.team_balance_after),
             idempotent=result.replayed,
@@ -1643,8 +1618,8 @@ class PostgresStore(CreditStore):
         return SweepResult(
             expired_count=result.expired_count,
             expired_amount=_dec(result.expired_amount),
-            dry_run=result.dry_run,
-            expired_by_bucket=_dec_map(result.expired_by_bucket),
+            dry_run=dry_run,
+            expired_by_bucket={key: _dec(value) for key, value in result.expired_by_bucket.items()},
         )
 
     # ── Credit buckets ────────────────────────────────────────────────
@@ -1659,20 +1634,18 @@ class PostgresStore(CreditStore):
             BucketBalancesResult with list of bucket balances and total.
         """
         result = self._bucket_repo.get_bucket_balances(user_id)
-        if result is None:
-            return BucketBalancesResult(user_id=user_id, buckets=[], total_balance=Decimal(0))
         buckets = [
             BucketBalance(
-                bucket_key=str(t.get("bucket_key", "")),
-                label=str(t.get("name", "")),
-                priority=int(t.get("priority", 0)),
-                expires=bool(t.get("expires", False)),
-                balance=_dec(t.get("balance")),
+                bucket_key=row.bucket_key,
+                label=row.label,
+                priority=row.priority,
+                expires=row.expires,
+                balance=_dec(row.balance),
             )
-            for t in (result.buckets or [])
+            for row in result.buckets
         ]
         return BucketBalancesResult(
-            user_id=str(getattr(result, "user_id", user_id)),
+            user_id=str(result.user_id),
             buckets=buckets,
             total_balance=_dec(result.total_balance),
         )
@@ -1694,11 +1667,11 @@ class PostgresStore(CreditStore):
         )
         return [
             GrantProgramAwardResult(
-                grant_event_id=row.grant_event_id,
-                grant_award_id=row.grant_award_id,
-                recipient_subject_id=row.recipient_subject_id,
-                ledger_entry_id=row.ledger_entry_id,
-                amount=_dec(row.amount),
+                grant_event_id=str(row.grant_event_id) if row.grant_event_id is not None else None,
+                grant_award_id=str(row.grant_award_id) if row.grant_award_id is not None else None,
+                recipient_subject_id=(str(row.recipient_subject_id) if row.recipient_subject_id is not None else None),
+                ledger_entry_id=str(row.ledger_entry_id) if row.ledger_entry_id is not None else None,
+                amount=_dec(row.amount) if row.amount is not None else None,
                 replayed=row.replayed,
                 error=row.error_code,
             )

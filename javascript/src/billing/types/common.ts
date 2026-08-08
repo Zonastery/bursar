@@ -1,5 +1,3 @@
-export type BillingProvider = "stripe" | "dodo" | "mock";
-
 export type BillingOfferInterval = "day" | "week" | "month" | "year";
 
 export type EntitlementMode = "allowance" | "cycle_grant";

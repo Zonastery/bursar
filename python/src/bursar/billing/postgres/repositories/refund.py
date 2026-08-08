@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import require_identifier_result, validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    optional_mapping_row,
+    require_identifier_result,
+    validate_non_empty,
+)
 from bursar.errors import StoreError
 
 
@@ -51,16 +56,21 @@ class BillingRefundRepository:
             "SELECT * FROM bursar.get_billing_payment_by_provider(%s, %s)",
             [provider, provider_payment_id],
         )
-        if not payments or not isinstance(payments[0], dict) or not payments[0].get("id"):
+        payment = optional_mapping_row(payments, "BillingRefundRepository.upsert.payment")
+        if payment is None:
             raise StoreError(
                 "refund payment not found",
                 retryable=True,
                 details={"provider": provider, "provider_payment_id": provider_payment_id},
             )
+        try:
+            payment_id = str(UUID(str(payment.get("id"))))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise StoreError("BillingRefundRepository.upsert: malformed payment identifier", cause=error) from error
         rows = self._execute(
             "SELECT bursar.upsert_billing_refund(%s::uuid, %s, %s, %s, %s, %s, %s::uuid, %s::char(3), %s::jsonb) AS id",
             [
-                payments[0]["id"],
+                payment_id,
                 provider_refund_id,
                 amount_minor,
                 status,
@@ -68,7 +78,7 @@ class BillingRefundRepository:
                 provider_updated_at,
                 user_id,
                 currency,
-                metadata or "{}",
+                metadata if metadata is not None else "{}",
             ],
         )
         return require_identifier_result(rows, "id", "BillingRefundRepository.upsert")

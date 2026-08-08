@@ -2,6 +2,7 @@ import type { AutoRechargeService } from "./auto-recharge-service.js";
 import type Decimal from "decimal.js";
 import type {
   BillingAutoRechargeAttempt,
+  BillingAutoRechargeAttemptState,
   BillingAutoRechargeProfile,
   BillingCustomerRecord,
   BillingDisputeInfo,
@@ -118,7 +119,7 @@ export interface AutoRechargeAttemptClaim {
 
 export interface AutoRechargeAttemptUpdate {
   id: string;
-  state: string;
+  state: BillingAutoRechargeAttemptState;
   providerAttemptId?: string | null;
   failureCode?: string | null;
   failureMessage?: string | null;
@@ -128,7 +129,7 @@ export interface AutoRechargeAttemptUpdate {
 export interface AutoRechargeProviderPaymentUpdate {
   provider: string;
   providerPaymentId: string;
-  state: string;
+  state: BillingAutoRechargeAttemptState;
   failureCode?: string | null;
   failureMessage?: string | null;
 }

@@ -25,6 +25,7 @@ export type { AutoRechargeOutcome, AutoRechargeProcessResult } from "./auto-rech
 
 export type {
   BillingAutoRechargeAttempt,
+  BillingAutoRechargeAttemptState,
   BillingAutoRechargeProfile,
   BillingAutoRechargeStatus,
   BillingCreditPostingResult,
@@ -41,7 +42,6 @@ export type {
   BillingPaymentInfo,
   BillingPaymentRecord,
   BillingPreferences,
-  BillingProvider,
   BillingRefundInfo,
   BillingSubscriptionInfo,
   BillingSubscriptionChange,

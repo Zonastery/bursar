@@ -5,6 +5,7 @@ import json
 from pydantic import ValidationError
 
 from bursar.credits.postgres.repositories._types import DbQuery
+from bursar.credits.postgres.repositories._utils import optional_mapping_row, require_mapping_row
 from bursar.credits.postgres.repositories.schemas import CatalogRevisionRow, CatalogRevisionSummaryRow
 from bursar.errors import StoreError
 
@@ -15,16 +16,15 @@ class CatalogRepository:
 
     @staticmethod
     def _parse_revision(row: dict[str, object]) -> CatalogRevisionRow:
-        parsed = dict(row)
-        if parsed.get("id") is not None:
-            parsed["id"] = str(parsed["id"])
-        parsed.update(
-            {
-                "config": parsed.get("source_document"),
-                "version": parsed.get("revision_no"),
-                "active": parsed.get("status") == "active",
-            }
-        )
+        parsed = {
+            "id": str(row.get("id")),
+            "config": row.get("source_document"),
+            "version": row.get("revision_no"),
+            "label": row.get("label"),
+            "active": row.get("status") == "active",
+            "status": row.get("status"),
+            "created_at": row.get("created_at"),
+        }
         try:
             return CatalogRevisionRow.model_validate(parsed)
         except ValidationError as error:
@@ -32,10 +32,8 @@ class CatalogRepository:
 
     def get_active_catalog(self) -> CatalogRevisionRow | None:
         rows = self._callproc("active_catalog_revision", []) or []
-        if not rows or not isinstance(rows[0], dict):
-            return None
-        row = dict(rows[0])
-        if not row or all(value is None for value in row.values()):
+        row = optional_mapping_row(rows, "CatalogRepository.get_active_catalog")
+        if row is None or all(value is None for value in row.values()):
             return None
         return self._parse_revision(row)
 
@@ -44,10 +42,10 @@ class CatalogRepository:
         config: str,
         label: str | None,
         rollout: dict[str, object],
-    ) -> CatalogRevisionRow | None:
+    ) -> CatalogRevisionRow:
         return self._publish_revision(config, label, rollout, activate=True)
 
-    def publish_catalog_draft(self, config: str, label: str | None) -> CatalogRevisionRow | None:
+    def publish_catalog_draft(self, config: str, label: str | None) -> CatalogRevisionRow:
         return self._publish_revision(config, label, {"plans": {}}, activate=False)
 
     def _publish_revision(
@@ -57,32 +55,44 @@ class CatalogRepository:
         rollout: dict[str, object],
         *,
         activate: bool,
-    ) -> CatalogRevisionRow | None:
-        rows = (
+    ) -> CatalogRevisionRow:
+        row = require_mapping_row(
             self._callproc(
                 "publish_and_activate_catalog",
                 [1, json.loads(config), label, activate, rollout],
-            )
-            or []
+            ),
+            "CatalogRepository.publish_revision",
         )
-        if not rows or not isinstance(rows[0], dict) or rows[0].get("revision_no") is None:
-            return None
-        return self.get_catalog_revision(int(rows[0]["revision_no"]))
+        revision_no = row.get("revision_no")
+        if not isinstance(revision_no, int):
+            raise StoreError("CatalogRepository.publish_revision returned an invalid revision_no")
+        revision = self.get_catalog_revision(revision_no)
+        if revision is None:
+            raise StoreError(f"Catalog revision {revision_no} disappeared after publication")
+        return revision
 
     def get_catalog_history(self) -> list[CatalogRevisionSummaryRow]:
         rows = self._callproc("list_catalog_revisions", [500]) or []
-        return [
-            CatalogRevisionSummaryRow.model_validate(self._parse_revision(dict(row)).model_dump())
-            for row in rows
-            if isinstance(row, dict)
-        ]
+        revisions: list[CatalogRevisionSummaryRow] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise StoreError("CatalogRepository.get_catalog_history returned a non-object row")
+            revision = self._parse_revision(row)
+            revisions.append(
+                CatalogRevisionSummaryRow(
+                    id=revision.id,
+                    version=revision.version,
+                    label=revision.label,
+                    active=revision.active,
+                    created_at=revision.created_at,
+                )
+            )
+        return revisions
 
     def get_catalog_revision(self, version: int) -> CatalogRevisionRow | None:
         rows = self._callproc("catalog_revision_by_number", [version]) or []
-        if not rows or not isinstance(rows[0], dict):
-            return None
-        row = dict(rows[0])
-        if not row or all(value is None for value in row.values()):
+        row = optional_mapping_row(rows, "CatalogRepository.get_catalog_revision")
+        if row is None or all(value is None for value in row.values()):
             return None
         return self._parse_revision(row)
 
@@ -90,11 +100,9 @@ class CatalogRepository:
         self,
         version: int,
         rollout: dict[str, object],
-    ) -> CatalogRevisionRow | None:
+    ) -> CatalogRevisionRow:
         rows = self._callproc("activate_catalog_revision", [version, rollout]) or []
-        if not rows or not isinstance(rows[0], dict):
-            return None
-        row = dict(rows[0])
-        if not row or all(value is None for value in row.values()):
-            return None
+        row = optional_mapping_row(rows, "CatalogRepository.activate_catalog_revision")
+        if row is None or all(value is None for value in row.values()):
+            raise StoreError(f"Catalog revision {version} was not found")
         return self._parse_revision(row)

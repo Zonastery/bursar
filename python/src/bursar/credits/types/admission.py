@@ -43,4 +43,4 @@ class ReleaseResult(BaseModel):
     lease_id: str
     user_id: str
     released: bool
-    reason: str | None = None
+    reason: str | None

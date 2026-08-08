@@ -1,6 +1,11 @@
 import { StoreError } from "../../../errors.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
-import { postgresUuid, requireResultField } from "../../../shared/postgres-validation.js";
+import {
+  optionalRecordRow,
+  postgresUuid,
+  requireResultField,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
 
 export class BillingRefundRepository {
   constructor(private query: QueryFn) {}
@@ -22,13 +27,18 @@ export class BillingRefundRepository {
       "SELECT * FROM bursar.get_billing_payment_by_provider($1, $2)",
       [provider, providerPaymentId],
     );
-    const paymentId = (payments[0] as Record<string, unknown> | undefined)?.id;
-    if (!paymentId) {
+    const payment = optionalRecordRow(payments, "BillingRefundRepository.upsert.payment");
+    if (payment === null) {
       throw new StoreError("refund payment not found", {
         retryable: true,
         details: { provider, providerPaymentId },
       });
     }
+    const paymentId = safeParse(
+      postgresUuid,
+      payment.id,
+      "BillingRefundRepository.upsert.payment.id",
+    );
     const rows = await this.query(
       `SELECT bursar.upsert_billing_refund(
          $1::uuid, $2, $3, $4, $5, $6, $7::uuid, $8::char(3), $9::jsonb

@@ -24,6 +24,7 @@ npx --no-install db-schema-toolkit export \
   cat <<'EOF'
 ---
 title: Database schema
+sidebar_label: Database schema
 description: Generated ERD for Bursar's PostgreSQL schema.
 ---
 

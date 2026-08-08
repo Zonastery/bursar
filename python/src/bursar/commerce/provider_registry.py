@@ -21,6 +21,7 @@ class CommerceProviderRegistry:
         self._context = context
         self._instances: dict[str, PaymentProvider] = {}
         self._loading: dict[str, asyncio.Task[PaymentProvider]] = {}
+        self._generation = 0
         if options.default_provider is not None and options.default_provider not in options.providers:
             raise ProviderSelectionError(f"Default payment provider {options.default_provider!r} is not registered")
 
@@ -36,13 +37,17 @@ class CommerceProviderRegistry:
             raise ProviderSelectionError(f"Payment provider {name!r} is not registered")
         loading = self._loading.get(name)
         if loading is None:
+            generation = self._generation
 
             async def load() -> PaymentProvider:
                 value = factory(self._context)
                 provider = await value if inspect.isawaitable(value) else value
+                if not isinstance(provider, PaymentProvider):
+                    raise ProviderSelectionError(f"Provider factory {name!r} did not return a valid payment provider")
                 if provider.provider != name:
                     raise ProviderSelectionError(f"Provider factory {name!r} returned {provider.provider!r}")
-                self._instances[name] = provider
+                if generation == self._generation:
+                    self._instances[name] = provider
                 return provider
 
             loading = asyncio.create_task(load())
@@ -87,5 +92,6 @@ class CommerceProviderRegistry:
         raise ProviderSelectionError(f"Payment provider selection is ambiguous: {', '.join(sorted(compatible))}")
 
     def clear(self) -> None:
+        self._generation += 1
         self._instances.clear()
         self._loading.clear()

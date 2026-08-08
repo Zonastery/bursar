@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from bursar.billing.types import (
     BillingCustomerInfo,
@@ -13,17 +13,21 @@ from bursar.billing.types import (
     BillingPaymentInfo,
     BillingRefundInfo,
     BillingSubscriptionInfo,
+    BillingSubscriptionStatus,
     ProviderRef,
 )
 from bursar.bursar import BillingEventSink
 from bursar.providers._shared import (
     call_billing_event_sink,
-    parse_status,
+    parse_subscription_status,
     require_currency,
     require_minor_units,
     require_provider_string,
 )
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
+
+if TYPE_CHECKING:
+    from stripe import StripeClient
 
 STRIPE_CHECKOUT_EXPAND = ("line_items",)
 
@@ -63,11 +67,7 @@ def _metadata(raw: Any) -> dict[str, str]:
 
 def _subscription_period_value(sub: Any, field: str) -> int | float | None:
     items = _value(_value(sub, "items", {}), "data", []) or []
-    item_value = _value(items[0], field) if items else None
-    if item_value is not None:
-        return item_value
-    # Compatibility for accounts deliberately pinned before 2025-03-31.basil.
-    return _value(sub, field)
+    return _value(items[0], field) if items else None
 
 
 def _build_end(sub: Any) -> str | None:
@@ -99,7 +99,7 @@ def _subscription_refs(sub: Any) -> ProviderRef | None:
 def _subscription_info(sub: Any, refs: ProviderRef | None = None) -> BillingSubscriptionInfo:
     return BillingSubscriptionInfo(
         provider_subscription_id=require_provider_string(_value(sub, "id"), "Stripe subscription.id"),
-        status=parse_status(_value(sub, "status")),
+        status=parse_subscription_status(_value(sub, "status")),
         cancel_at_period_end=_value(sub, "cancel_at_period_end"),
         period_start=_build_start(sub),
         period_end=_build_end(sub),
@@ -199,7 +199,7 @@ async def _handle_checkout_event(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
     *,
@@ -213,9 +213,9 @@ async def _handle_checkout_event(
         )
         return
 
-    expanded = await stripe.checkout.Session.retrieve_async(
+    expanded = await stripe.v1.checkout.sessions.retrieve_async(
         _value(session, "id"),
-        expand=STRIPE_CHECKOUT_EXPAND,
+        {"expand": list(STRIPE_CHECKOUT_EXPAND)},
     )
     metadata = {**event_metadata, **_metadata(_value(session, "metadata"))}
     uid = user_id or _value(session, "client_reference_id") or metadata.get("userId")
@@ -225,7 +225,7 @@ async def _handle_checkout_event(
     if outcome == "failed":
         subscription = None
         if subscription_id:
-            subscription = _subscription_info(await stripe.Subscription.retrieve_async(subscription_id))
+            subscription = _subscription_info(await stripe.v1.subscriptions.retrieve_async(subscription_id))
         call_billing_event_sink(
             sink,
             BillingEvent(
@@ -243,7 +243,7 @@ async def _handle_checkout_event(
         return
 
     if _value(session, "mode") == "subscription" and subscription_id:
-        sub = await stripe.Subscription.retrieve_async(subscription_id)
+        sub = await stripe.v1.subscriptions.retrieve_async(subscription_id)
         plan_slug = metadata.get("plan_slug")
         refs = ProviderRef(lookup_key=plan_slug) if plan_slug else _subscription_refs(sub)
         call_billing_event_sink(
@@ -282,7 +282,7 @@ async def _handle_checkout_expired(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
@@ -308,7 +308,7 @@ async def _handle_subscription_updated(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
@@ -344,7 +344,7 @@ async def _handle_subscription_deleted(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
@@ -353,7 +353,7 @@ async def _handle_subscription_deleted(
     customer_id = _expandable_id(_value(data, "customer"))
     subscription = _subscription_info(data).model_copy(
         update={
-            "status": parse_status("canceled"),
+            "status": BillingSubscriptionStatus.canceled,
             "ended_at": _timestamp(_value(data, "ended_at")) or occurred_at,
         }
     )
@@ -378,7 +378,7 @@ async def _handle_invoice_paid(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
@@ -388,7 +388,7 @@ async def _handle_invoice_paid(
         return
 
     metadata = {**event_metadata, **_invoice_metadata(data)}
-    sub = await stripe.Subscription.retrieve_async(subscription_id)
+    sub = await stripe.v1.subscriptions.retrieve_async(subscription_id)
     period_start = _build_start(sub) or _build_start_from_invoice(data)
     period_end = _build_end(sub) or _build_end_from_invoice(data)
     customer_id = _expandable_id(_value(data, "customer"))
@@ -424,7 +424,7 @@ async def _handle_invoice_payment_failed(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
@@ -436,7 +436,7 @@ async def _handle_invoice_payment_failed(
         )
         return
     metadata = {**event_metadata, **_invoice_metadata(data)}
-    sub = await stripe.Subscription.retrieve_async(subscription_id)
+    sub = await stripe.v1.subscriptions.retrieve_async(subscription_id)
     customer_id = _expandable_id(_value(data, "customer"))
     call_billing_event_sink(
         sink,
@@ -468,7 +468,7 @@ async def _handle_payment_intent_event(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
     *,
@@ -511,7 +511,7 @@ async def _handle_refund_event(
     user_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger,
     occurred_at: str,
     *,
@@ -595,7 +595,7 @@ async def handle_stripe_billing_event(
     user_id: str | None,
     metadata: dict[str, str],
     sink: BillingEventSink,
-    stripe: Any,
+    stripe: StripeClient,
     logger: ProviderLogger | None = None,
     event_created: int | float | None = None,
 ) -> None:

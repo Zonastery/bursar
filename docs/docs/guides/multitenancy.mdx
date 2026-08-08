@@ -1,12 +1,13 @@
 ---
-title: Multi-tenancy
-description: One PostgreSQL schema for every tenant — mandatory tenant_id columns, row-level security, and composite foreign keys.
+title: Isolate Bursar tenants
+sidebar_label: Multitenancy
+description: Bind each Bursar runtime to a tenant and enforce isolation with row-level security and composite foreign keys.
 ---
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
 
-# Multi-tenancy
+# Isolate Bursar tenants
 
 ## Prerequisites
 
@@ -56,39 +57,39 @@ CLI.
 Pass the tenant UUID when constructing a store. The store comes from the
 package top level; the optional runtime composition root lives in
 `bursar.storage` (Python) and the `@zonastery/bursar/node` subpath
-(JavaScript):
+(TypeScript):
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
-  ```python
-  from bursar import PostgresStore
-  from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
+```python
+from bursar import PostgresStore
+from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 
-  store = PostgresStore(database_url, tenant_id=tenant_id)
+store = PostgresStore(database_url, tenant_id=tenant_id)
 
-  runtime = create_bursar_runtime(
-      BursarRuntimeOptions(
-          postgres=database_url,
-          tenant_id=tenant_id,
-      )
-  )
-  ```
+runtime = create_bursar_runtime(
+    BursarRuntimeOptions(
+        postgres=database_url,
+        tenant_id=tenant_id,
+    )
+)
+```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
-  ```ts
-  import { PostgresStore } from "@zonastery/bursar";
-  import { createBursarRuntime } from "@zonastery/bursar/node";
+```ts
+import { PostgresStore } from "@zonastery/bursar";
+import { createBursarRuntime } from "@zonastery/bursar/node";
 
-  const store = new PostgresStore({ postgres: databaseUrl, tenantId });
+const store = new PostgresStore({ postgres: databaseUrl, tenantId });
 
-  const runtime = await createBursarRuntime({
-    postgres: databaseUrl,
-    tenantId,
-  });
-  ```
+const runtime = await createBursarRuntime({
+  postgres: databaseUrl,
+  tenantId,
+});
+```
 
   </TabItem>
 </Tabs>

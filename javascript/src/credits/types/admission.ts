@@ -38,7 +38,7 @@ export interface ReleaseResult {
   leaseId: string;
   userId: string;
   released: boolean;
-  reason?: string | null;
+  reason: string | null;
 }
 
 export interface CanAffordResult {

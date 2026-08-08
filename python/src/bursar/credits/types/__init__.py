@@ -16,7 +16,9 @@ from bursar.credits.types.account import (
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
     RefundResult,
+    RevokeCreditsResult,
     SetUserPlanResult,
+    UnsetUserPlanResult,
 )
 from bursar.credits.types.admission import (
     LeasePricingContext,
@@ -73,6 +75,7 @@ from bursar.credits.types.teams import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TeamRole,
 )
 
 __all__ = [
@@ -118,8 +121,10 @@ __all__ = [
     "QuotaEvent",
     "QuotaState",
     "RefundResult",
+    "RevokeCreditsResult",
     "ReleaseResult",
     "SetUserPlanResult",
+    "UnsetUserPlanResult",
     "SpendByModelRow",
     "SpendByUserRow",
     "SweepResult",
@@ -127,6 +132,7 @@ __all__ = [
     "TeamBalanceResult",
     "TeamDeductionResult",
     "TeamMember",
+    "TeamRole",
     "TopUserRow",
     "UsageAnalyticsStore",
     "UsageChargeStore",

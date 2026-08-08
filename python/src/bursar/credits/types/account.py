@@ -34,7 +34,8 @@ class AddCreditsResult(BaseModel):
     amount: Decimal
     new_balance: Decimal
     lifetime_purchased: Decimal
-    bucket: str
+    # Positive postings expose their destination bucket. Debits may span lots.
+    bucket: str | None
     idempotent: bool = False
 
 
@@ -75,6 +76,15 @@ class RefundResult(BaseModel):
         if self.error is not None and self.refund_entry_id is not None:
             raise ValueError("failed refunds cannot expose a committed refund_entry_id")
         return self
+
+
+class RevokeCreditsResult(BaseModel):
+    """Credits removed from all remaining lots created by one ledger operation."""
+
+    user_id: str
+    entry_type: str
+    revoked: Decimal
+    balance_after: Decimal
 
 
 class CanAffordResult(BaseModel):
@@ -129,9 +139,19 @@ class BucketDefinition(BaseModel):
 
 
 class SetUserPlanResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str
     plan_id: str
-    plan_assigned_at: datetime | None = None
+    plan_key: str
+    plan_assigned_at: datetime
+    assignment_state: Literal["applied", "scheduled"]
+
+
+class UnsetUserPlanResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
 
 
 class PlanMigrationStartResult(BaseModel):

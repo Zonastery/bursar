@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bursar.billing.types import BillingEventResult, BillingEventType
+from bursar.billing.types import BillingEventResult, BillingEventType, BillingSubscriptionStatus
 from bursar.providers.dodo.event_mapper import _normalize_date
 from tests.dodo_fixtures import (
     DODO_DISPUTE_OPENED,
@@ -174,6 +174,15 @@ async def test_subscription_active_to_subscription_created(sink):
 
 
 @pytest.mark.asyncio
+async def test_subscription_active_preserves_trialing_status(sink):
+    payload = {**DODO_SUBSCRIPTION_ACTIVE, "status": "trialing"}
+    await map_dodo_event("subscription.active", payload, "user_1", {}, sink)
+    call = sink.ingest_billing_event.call_args
+    assert call is not None
+    assert call[0][0].subscription.status == BillingSubscriptionStatus.trialing
+
+
+@pytest.mark.asyncio
 async def test_subscription_renewed_to_subscription_renewed(sink):
     await map_dodo_event("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, "user_1", {}, sink)
     call = sink.ingest_billing_event.call_args
@@ -313,18 +322,17 @@ async def test_falls_back_to_metadata_plan_slug(sink):
 
 
 @pytest.mark.asyncio
-async def test_ignores_blank_product_id_and_trims_plan_slug(sink):
+async def test_rejects_blank_product_id_instead_of_manufacturing_a_reference(sink):
     payload = {"subscription_id": "sub_trimmed_refs", "product_id": "   "}
-    await map_dodo_event(
-        "subscription.updated",
-        payload,
-        "user_1",
-        {"plan_slug": "  sage  "},
-        sink,
-    )
-    call = sink.ingest_billing_event.call_args
-    assert call is not None
-    assert call[0][0].subscription.refs.lookup_key == "sage"
+    with pytest.raises(ValueError, match="product_id"):
+        await map_dodo_event(
+            "subscription.updated",
+            payload,
+            "user_1",
+            {"plan_slug": "  sage  "},
+            sink,
+        )
+    sink.ingest_billing_event.assert_not_called()
 
 
 @pytest.mark.asyncio

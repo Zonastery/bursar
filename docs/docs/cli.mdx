@@ -1,17 +1,18 @@
 ---
-title: CLI and deployment
-description: The bursar CLI — migrations, tenant lifecycle, config validation and publishing, plus deployment notes.
+title: Bursar CLI reference
+sidebar_label: CLI
+description: Look up migration, tenant, and configuration commands, environment requirements, and operational behavior.
 ---
 
-# CLI and deployment
+# Bursar CLI reference
 
 The `bursar` CLI is the operator interface for migrations, tenant lifecycle,
 and the canonical configuration. Connection secrets come from environment
 variables, never the command line:
 
-| Variable | Required for |
-| --- | --- |
-| `DATABASE_URL` | Every command |
+| Variable           | Required for                                            |
+| ------------------ | ------------------------------------------------------- |
+| `DATABASE_URL`     | Every command                                           |
 | `BURSAR_TENANT_ID` | `config` commands and `tenant bootstrap` without `--id` |
 
 ## Migrate

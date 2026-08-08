@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import ceil, isfinite
+from threading import RLock
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
@@ -31,6 +32,44 @@ class PostgresPool(Protocol):
     def putconn(self, conn: Any = None, key: Any = None, close: bool = False) -> None: ...
 
     def closeall(self) -> None: ...
+
+
+class _LazyPostgresPool:
+    """Create the psycopg2 pool on first checkout and close it exactly once."""
+
+    def __init__(self, factory: Callable[[], PostgresPool]) -> None:
+        self._factory = factory
+        self._pool: PostgresPool | None = None
+        self._closed = False
+        self._lock = RLock()
+
+    def _get_pool(self) -> PostgresPool:
+        with self._lock:
+            if self._closed:
+                raise StoreClosedError("PostgreSQL pool has been closed")
+            if self._pool is None:
+                self._pool = self._factory()
+            return self._pool
+
+    def getconn(self) -> Any:
+        return self._get_pool().getconn()
+
+    def putconn(self, conn: Any = None, key: Any = None, close: bool = False) -> None:
+        with self._lock:
+            pool = self._pool
+        if pool is None:
+            raise StoreClosedError("PostgreSQL pool has no checked-out connection")
+        pool.putconn(conn, key, close)
+
+    def closeall(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            pool = self._pool
+            self._pool = None
+        if pool is not None:
+            pool.closeall()
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,14 +162,11 @@ class PostgresClient:
         effective_max_connections = self._options.max_connections if postgres_options is not None else max_connections
         if effective_max_connections < min_connections:
             raise ValueError("max_connections must be at least min_connections")
-        self._pool: PostgresPool | None = cast(
-            PostgresPool,
-            psycopg2.pool.ThreadedConnectionPool(
-                min_connections,
-                effective_max_connections,
-                dsn,
-                **self._connection_kwargs(),
-            ),
+        self._pool: PostgresPool | None = create_pool(
+            dsn,
+            min_connections=min_connections,
+            max_connections=effective_max_connections,
+            postgres_options=self._options,
         )
         self._owns_pool = True
         self._closed = False
@@ -357,17 +393,19 @@ def create_pool(
         or effective_max_connections < min_connections
     ):
         raise ValueError("max_connections must be at least min_connections")
-    return cast(
-        PostgresPool,
-        psycopg2.pool.ThreadedConnectionPool(
-            min_connections,
-            effective_max_connections,
-            dsn,
-            connect_timeout=0
-            if options.connection_timeout_seconds == 0
-            else max(1, ceil(options.connection_timeout_seconds)),
-            application_name=options.application_name.strip(),
-        ),
+    return _LazyPostgresPool(
+        lambda: cast(
+            PostgresPool,
+            psycopg2.pool.ThreadedConnectionPool(
+                min_connections,
+                effective_max_connections,
+                dsn,
+                connect_timeout=0
+                if options.connection_timeout_seconds == 0
+                else max(1, ceil(options.connection_timeout_seconds)),
+                application_name=options.application_name.strip(),
+            ),
+        )
     )
 
 
