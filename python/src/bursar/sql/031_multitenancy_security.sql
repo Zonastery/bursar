@@ -87,6 +87,15 @@ BEGIN
 END
 $$;
 
+-- PostgreSQL grants EXECUTE on newly created functions to PUBLIC through the
+-- global default ACL. bursar_runtime can create functions only in the bursar
+-- schema, so make that owner role fail closed before granting schema CREATE.
+-- A schema-scoped default REVOKE cannot subtract the global PUBLIC grant.
+SET LOCAL ROLE bursar_runtime;
+ALTER DEFAULT PRIVILEGES
+REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+RESET ROLE;
+
 REVOKE ALL ON SCHEMA bursar FROM bursar_client, bursar_operator;
 REVOKE ALL ON ALL TABLES IN SCHEMA bursar
 FROM bursar_client, bursar_operator;
