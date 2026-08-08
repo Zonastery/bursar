@@ -1,6 +1,6 @@
 ---
 title: Integrate subscriptions and payments
-sidebar_label: Subscriptions
+sidebar_label: Integrate subscriptions
 description: Turn verified provider events into subscription, invoice, top-up, and auto-recharge mutations.
 ---
 
@@ -12,11 +12,11 @@ import TabItem from "@theme/TabItem";
 ## Prerequisites
 
 - Follow [multi-tenancy](./multitenancy.mdx) to provision a tenant and get a `DATABASE_URL`.
-- Publish a [canonical configuration](../concepts/configuration.mdx) whose `commerce` section declares your provider, offers, and auto-recharge policy.
+- Publish a [validated configuration](../concepts/configuration.mdx) whose `commerce` section declares your provider, offers, and auto-recharge policy.
 - Read [billing concepts](../concepts/billing.mdx) for the offer model, normalized `BillingEvent`s, and subscription semantics.
 - Have provider credentials ready, for example a Stripe secret key and webhook secret.
 
-## What you'll have when you're done
+## Outcome
 
 - A facade that turns provider webhooks into canonical credit mutations — plan assignment, cycle grants, and top-ups.
 - Auto-recharge after deductions and quote-checked plan changes, driven from the same config.
@@ -90,7 +90,7 @@ fields (`providers`, optional `defaultProvider`).
 :::
 
 The active `commerce` section of `BursarConfig` supplies the offers, top-ups,
-and auto-recharge policy — see [canonical configuration](../concepts/configuration.mdx).
+and auto-recharge policy — see [configuration and catalog revisions](../concepts/configuration.mdx).
 The event model and subscription semantics are covered in
 [billing concepts](../concepts/billing.mdx).
 

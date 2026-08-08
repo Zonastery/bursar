@@ -1,6 +1,6 @@
 ---
 title: Isolate Bursar tenants
-sidebar_label: Multitenancy
+sidebar_label: Provision and isolate tenants
 description: Bind each Bursar runtime to a tenant and enforce isolation with row-level security and composite foreign keys.
 ---
 
@@ -12,10 +12,10 @@ import TabItem from "@theme/TabItem";
 ## Prerequisites
 
 - Install the Bursar CLI and have a PostgreSQL `DATABASE_URL` — see [CLI and deployment](../cli.mdx).
-- Read [data model](../concepts/data-model.mdx) for the tenant-scoped tables, and [storage backends](./storage-backends.mdx) for the store constructors.
-- Have a [canonical configuration](../concepts/configuration.mdx) if you want to bootstrap pricing with the tenant.
+- Read [credit accounting](../concepts/data-model.mdx) for the tenant-scoped accounting entities.
+- Have a [validated configuration](../concepts/configuration.mdx) if you want to bootstrap pricing with the tenant.
 
-## What you'll have when you're done
+## Outcome
 
 - A provisioned tenant that every store and runtime is bound to by `tenant_id`.
 - Database-level isolation: tenant-prefixed unique constraints, forced row-level security, and composite foreign keys.

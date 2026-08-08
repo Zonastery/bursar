@@ -188,7 +188,11 @@ DECLARE
     v_metadata jsonb;
 
 BEGIN
-    IF NOT bursar.is_nonempty_text(p_provider_refund_id)
+    IF p_payment_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_provider_refund_id)
+       OR p_amount_minor IS NULL
+       OR p_amount_minor <= 0
+       OR p_status IS NULL
        OR p_status NOT IN ('pending', 'succeeded', 'failed', 'canceled')
        OR p_provider_updated_at IS NULL
        OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
@@ -317,6 +321,10 @@ DECLARE
     v_environment text:=bursar.current_provider_environment();
 
 BEGIN
+    IF p_subject_id IS NULL OR p_enabled IS NULL THEN
+        RAISE EXCEPTION 'invalid auto-recharge state' USING ERRCODE='22023';
+    END IF;
+
     -- Disabling an existing profile must not depend on the active catalog.
     -- The previous implementation dereferenced the policy record below even
     -- for this branch, which PostgreSQL reports as "record v_policy is not
@@ -332,8 +340,18 @@ BEGIN
     END IF;
 
     IF p_armed IS NULL
+       OR p_state IS NULL
        OR p_state NOT IN ('active', 'paused')
        OR p_reset_cooldown IS NULL
+       OR NOT bursar.is_nonempty_text(p_provider)
+       OR p_topup_id IS NULL
+       OR p_quantity IS NULL
+       OR NOT bursar.is_finite_numeric(p_threshold)
+       OR p_max_charges_per_window IS NULL
+       OR p_window_unit IS NULL
+       OR p_window_count IS NULL
+       OR p_window_anchor IS NULL
+       OR p_window_timezone IS NULL
     THEN
         RAISE EXCEPTION 'invalid enabled auto-recharge state' USING ERRCODE='22023';
     END IF;
@@ -441,6 +459,16 @@ CREATE FUNCTION bursar.upsert_billing_preferences(
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
+    IF p_subject_id IS NULL
+       OR p_auto_recharge IS NULL
+       OR p_overage_protection IS NULL
+       OR p_email_notifications IS NULL
+       OR p_usage_alerts IS NULL
+       OR p_invoice_reminders IS NULL
+    THEN
+        RAISE EXCEPTION 'invalid billing preferences' USING ERRCODE='22023';
+    END IF;
+
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;

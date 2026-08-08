@@ -22,13 +22,20 @@ DECLARE
     v_environment text:=bursar.current_provider_environment();
 
 BEGIN
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+    THEN
+        RETURN;
+    END IF;
+
     SELECT * INTO v_profile
     FROM bursar.billing_auto_recharge_profiles
     WHERE subject_id=p_subject_id
       AND provider_environment=v_environment
     FOR UPDATE;
 
- IF NOT bursar.is_nonempty_text(p_idempotency_key) OR NOT FOUND THEN RETURN;
+ IF NOT FOUND THEN RETURN;
  END IF;
 
  SELECT * INTO v_attempt
@@ -139,7 +146,9 @@ DECLARE
     v_environment text;
 
 BEGIN
-    IF (
+    IF p_attempt_id IS NULL
+       OR p_state IS NULL
+       OR (
            p_provider_attempt_id IS NOT NULL
            AND NOT bursar.is_nonempty_text(p_provider_attempt_id)
        )

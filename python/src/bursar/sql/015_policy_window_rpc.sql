@@ -74,9 +74,12 @@ DECLARE
     v_start_month integer;
 
 BEGIN
-    IF p_unit NOT IN ('second','minute','hour','day','week','month','year')
+    IF p_unit IS NULL
+       OR p_unit NOT IN ('second','minute','hour','day','week','month','year')
        OR p_count IS NULL OR p_count < 1
+       OR p_anchor IS NULL
        OR p_anchor NOT IN ('calendar','plan_assignment','rolling')
+       OR p_timezone IS NULL
        OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = p_timezone) THEN
         RAISE EXCEPTION 'invalid policy period' USING ERRCODE = '22023';
 

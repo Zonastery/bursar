@@ -1,6 +1,6 @@
 ---
 title: Configure storage backends
-sidebar_label: Storage backends
+sidebar_label: Configure storage backends
 description: PostgreSQL is the production credit store; optional ClickHouse and S3 adapters route high-cardinality data through a transactional outbox.
 ---
 
@@ -12,10 +12,9 @@ import TabItem from "@theme/TabItem";
 ## Prerequisites
 
 - Run migrations and provision a tenant before constructing a store — see [CLI and deployment](../cli.mdx) and [multi-tenancy](./multitenancy.mdx).
-- Read [the credit lifecycle](./credit-lifecycle.mdx) to see the store in use.
 - For the optional adapters in Python, install the `postgres` extra (and the `s3` extra for the native S3 adapter); in TypeScript, import them from the Node-only `@zonastery/bursar/node` subpath.
 
-## What you'll have when you're done
+## Outcome
 
 - A `PostgresStore` credit ledger that owns all account state.
 - Optional ClickHouse usage history and S3 billing archives delivered through a transactional outbox on the same connection pool.

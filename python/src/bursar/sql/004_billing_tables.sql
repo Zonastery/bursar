@@ -520,16 +520,28 @@ CREATE TABLE bursar.catalog_auto_recharge_policies (
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     catalog_revision_id uuid PRIMARY KEY
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    eligible_topup_keys text [] NOT NULL CHECK (cardinality(eligible_topup_keys) > 0),
+    eligible_topup_keys text[] NOT NULL CHECK (cardinality(eligible_topup_keys) > 0),
     default_topup_key text NOT NULL,
     quantity_min integer NOT NULL CHECK (quantity_min > 0),
     quantity_max integer NOT NULL CHECK (quantity_max >= quantity_min),
     quantity integer NOT NULL CHECK (quantity BETWEEN quantity_min AND quantity_max),
-    balance_min numeric(20, 6) NOT NULL CHECK (balance_min >= 0),
-    balance_max numeric(20, 6) NOT NULL CHECK (balance_max >= balance_min),
+    balance_min numeric(20, 6) NOT NULL
+    CHECK (bursar.is_finite_numeric(balance_min) AND balance_min >= 0),
+    balance_max numeric(20, 6) NOT NULL
+    CHECK (
+        bursar.is_finite_numeric(balance_max)
+        AND balance_max >= balance_min
+    ),
     balance_below numeric(20, 6) NOT NULL
-    CHECK (balance_below BETWEEN balance_min AND balance_max),
-    rearm_above numeric(20, 6) NOT NULL CHECK (rearm_above > balance_below),
+    CHECK (
+        bursar.is_finite_numeric(balance_below)
+        AND balance_below BETWEEN balance_min AND balance_max
+    ),
+    rearm_above numeric(20, 6) NOT NULL
+    CHECK (
+        bursar.is_finite_numeric(rearm_above)
+        AND rearm_above > balance_below
+    ),
     max_purchases integer NOT NULL CHECK (max_purchases > 0),
     max_charge_minor bigint NOT NULL CHECK (max_charge_minor > 0),
     cooldown_seconds integer NOT NULL CHECK (cooldown_seconds > 0),

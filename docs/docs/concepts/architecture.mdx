@@ -39,8 +39,8 @@ deduction.
 - **commerce** — checkout intents, offers (subscriptions and topups), and
   auto-recharge guardrails.
 
-See [The data model](./data-model.mdx) for the concepts, and
-[Canonical configuration](./configuration.mdx) for the document that drives
+See [Credit accounting](./data-model.mdx) for the accounting entities, and
+[Configuration and catalog revisions](./configuration.mdx) for the document that drives
 them.
 
 ## Database model
@@ -60,39 +60,11 @@ composite foreign keys keep tenants isolated even under buggy code. See
 [Multi-tenancy](../guides/multitenancy.mdx) for provisioning and
 [Storage backends](../guides/storage-backends.mdx) for the store interface.
 
-## Migrations
+## Migration ownership
 
-The baseline ships as ordered SQL files under `bursar/sql/`, ordered by
-dependency and domain — schema and types, tables, constraints, triggers, and
-indexes, followed by the RPC families (catalog, credit account, usage charge,
-credit lot, team, lease, policy window, operation, billing lifecycle,
-auto-recharge, billing customer/recharge/document, query, plan migration,
-catalog plan, and storage lifecycle), then privileges, documentation, and the
-multi-tenancy security lockdown:
+The Bursar command-line interface applies ordered, append-only SQL migrations from the SDK package. Recorded checksums protect applied migrations, and `bursar migrate` fails when an installed migration no longer matches its recorded checksum.
 
-```text
-001_schema_and_types.sql          017_operation_lease_rpc.sql
-002_schema_types_tables.sql       018_team_rpc.sql
-003_financial_policy_tables.sql   019_billing_lifecycle_rpc.sql
-004_billing_tables.sql            020_auto_recharge_rpc.sql
-005_constraints.sql               021_billing_customer_rpc.sql
-006_triggers.sql                  022_billing_credit_recharge_rpc.sql
-007_indexes.sql                   023_billing_document_rpc.sql
-008_catalog_rpc.sql               024_query_rpc.sql
-009_credit_account_rpc.sql        025_plan_migration_rpc.sql
-010_usage_charge_rpc.sql          026_privileges.sql
-011_credit_lot_rpc.sql            027_documentation.sql
-012_team_credit_rpc.sql           028_catalog_plan_rpc.sql
-013_allowance_charge_rpc.sql      029_catalog_plan_privileges.sql
-014_lease_capacity_rpc.sql        030_storage_lifecycle_rpc.sql
-015_policy_window_rpc.sql         031_multitenancy_security.sql
-016_operation_charge_rpc.sql
-```
-
-Each object is created once. Future production changes append migration files
-and recorded checksums protect them; `bursar migrate` fails if an
-already-applied file changed. The CLI is the only installation path — stores
-and facades never create database objects.
+Stores and facades never create database objects. Use the [CLI reference](../cli.mdx) for migration commands and the [database schema](./database-schema.md) for generated table relationships.
 
 ## Concurrency and safety
 
@@ -111,7 +83,7 @@ migrated schema — see [Storage backends](../guides/storage-backends.mdx).
 
 ## Related
 
-- [The data model](./data-model.mdx) — accounts, the ledger, lots, and leases on one schema
-- [Canonical configuration](./configuration.mdx) — the document the catalog publishes and activates
-- [Multi-tenancy](../guides/multitenancy.mdx) — tenant context and isolation
-- [Storage backends](../guides/storage-backends.mdx) — the store interface and the Postgres implementation
+- [Credit accounting](./data-model.mdx): accounts, the ledger, lots, and leases on one schema
+- [Configuration and catalog revisions](./configuration.mdx): the document the catalog publishes and activates
+- [Provision and isolate tenants](../guides/multitenancy.mdx): tenant context and isolation
+- [Configure storage backends](../guides/storage-backends.mdx): the store interface and the PostgreSQL implementation

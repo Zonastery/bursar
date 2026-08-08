@@ -477,8 +477,6 @@ DECLARE
     v_quota record;
     v_window record;
     v_amount numeric;
-    v_consumed numeric;
-    v_reserved numeric;
     v_window_id uuid;
 BEGIN
     SELECT *
@@ -597,6 +595,7 @@ BEGIN
         FROM bursar.credit_lease_quota_reservations
         WHERE lease_id = p_lease_id
           AND released_at IS NULL
+        ORDER BY quota_window_id NULLS LAST, catalog_quota_id
         FOR UPDATE
     LOOP
         IF v_reservation.quota_window_id IS NOT NULL THEN
@@ -955,8 +954,13 @@ BEGIN
            p_feature IS NOT NULL
            AND NOT bursar.is_bounded_text(p_feature, 255)
        )
+       OR p_ttl IS NULL
        OR p_ttl <= interval '0'
        OR (p_max_concurrent IS NOT NULL AND p_max_concurrent < 1)
+       OR (
+           p_minimum_balance IS NOT NULL
+           AND NOT bursar.is_finite_numeric(p_minimum_balance)
+       )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_policy_snapshot, '{}'::jsonb),
            32768
@@ -1970,6 +1974,18 @@ BEGIN
         RAISE EXCEPTION 'invalid lease expiry limit'
             USING ERRCODE = '22023';
     END IF;
+
+    -- Batches may contain overlapping allowance/quota windows. Serialize
+    -- sweepers per tenant so independent SKIP LOCKED batches cannot update
+    -- those shared windows in opposite orders and deadlock.
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'bursar.tenant:'
+            || bursar.require_tenant_id()::text
+            || ':leases.expire',
+            0
+        )
+    );
 
     WITH claimed AS (
         SELECT id

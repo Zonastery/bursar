@@ -25,7 +25,9 @@ DECLARE
 
 BEGIN
     IF p_owner_subject_id IS NULL OR length(trim(COALESCE(p_name,'')))=0
-       OR p_initial_credits<0
+       OR length(trim(COALESCE(p_name, ''))) > 200
+       OR NOT bursar.is_finite_numeric(p_initial_credits)
+       OR p_initial_credits < 0
     THEN
         RETURN QUERY SELECT NULL::uuid,NULL::text,NULL::uuid,NULL::uuid,'invalid_request';
 
@@ -79,8 +81,13 @@ CREATE FUNCTION bursar.set_team_member(
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_existing_role text;
 BEGIN
-    IF p_role NOT IN ('owner','admin','member')
+    IF p_team_id IS NULL
+       OR p_subject_id IS NULL
+       OR p_role IS NULL
+       OR p_role NOT IN ('owner','admin','member')
        OR (
            p_spend_cap IS NOT NULL
            AND (
@@ -88,10 +95,20 @@ BEGIN
                OR p_spend_cap < 0
            )
        )
-       OR NOT EXISTS (SELECT 1 FROM bursar.credit_teams WHERE id=p_team_id)
     THEN
         RETURN false;
 
+    END IF;
+
+    -- Serialize membership mutations on the team so two concurrent owner
+    -- demotions/removals cannot both observe another owner and leave none.
+    PERFORM 1
+    FROM bursar.credit_teams
+    WHERE id = p_team_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
     END IF;
 
     INSERT INTO bursar.subjects(id)
@@ -99,6 +116,25 @@ BEGIN
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+        RETURN false;
+    END IF;
+
+    SELECT role
+    INTO v_existing_role
+    FROM bursar.credit_team_members
+    WHERE team_id = p_team_id
+      AND subject_id = p_subject_id
+    FOR UPDATE;
+
+    IF v_existing_role = 'owner'
+       AND p_role <> 'owner'
+       AND (
+           SELECT count(*)
+           FROM bursar.credit_team_members
+           WHERE team_id = p_team_id
+             AND role = 'owner'
+       ) <= 1
+    THEN
         RETURN false;
     END IF;
 
@@ -123,9 +159,23 @@ CREATE FUNCTION bursar.remove_team_member(
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-DECLARE v_role text;
+DECLARE
+    v_role text;
 
 BEGIN
+    IF p_team_id IS NULL OR p_subject_id IS NULL THEN
+        RETURN false;
+    END IF;
+
+    PERFORM 1
+    FROM bursar.credit_teams
+    WHERE id = p_team_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
     SELECT role INTO v_role
     FROM bursar.credit_team_members
     WHERE team_id=p_team_id AND subject_id=p_subject_id

@@ -456,7 +456,7 @@ CREATE TABLE bursar.catalog_plans (
     display_name text NOT NULL CHECK (bursar.is_nonempty_text(display_name)),
     description text,
     rate_card text,
-    allowed_operations text [] NOT NULL DEFAULT ARRAY[]::text [],
+    allowed_operations text[] NOT NULL DEFAULT ARRAY[]::text[],
     credit_policy_key text,
     admission_policy_key text,
     default_rollout text NOT NULL DEFAULT 'immediate'
@@ -583,7 +583,7 @@ CREATE TABLE bursar.catalog_plan_quotas (
         )
     ),
     enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
-    emit_at_percent integer [] NOT NULL DEFAULT ARRAY[]::integer [],
+    emit_at_percent integer[] NOT NULL DEFAULT ARRAY[]::integer[],
     definition jsonb NOT NULL
     CHECK (
         bursar.is_bounded_json_object(definition, 262144)

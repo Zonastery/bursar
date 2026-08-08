@@ -36,7 +36,8 @@ DECLARE
     v_quota_error text;
     v_event_at timestamptz;
 BEGIN
-    IF NOT bursar.is_finite_numeric(p_requested)
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_finite_numeric(p_requested)
        OR p_requested < 0
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)

@@ -1,0 +1,36 @@
+---
+title: How-to guides
+sidebar_label: How-to guides
+description: Complete focused production tasks for deployment, credit operations, billing, and agent integrations.
+keywords:
+  - Bursar deployment
+  - credit integration
+  - subscription billing
+  - Google ADK metering
+---
+
+import DocCardList from "@theme/DocCardList";
+
+# Complete a production integration
+
+These guides assume you understand the Bursar boundary and have completed the quickstart. Each page addresses one production task and links to reference material for exact software development kit (SDK) signatures.
+
+## Follow the production sequence
+
+For a new integration, complete these tasks in order:
+
+1. [Provision and isolate tenants](./multitenancy.mdx) before constructing tenant-bound stores.
+2. [Configure storage backends](./storage-backends.mdx) and verify the migrated PostgreSQL connection.
+3. [Protect monetary operations](./financial-safety.mdx) with stable idempotency keys and atomic admission.
+4. [Manage credits](./credit-lifecycle.mdx) through grants, purchases, charges, refunds, expiry, and revocation.
+5. [Integrate subscriptions and payments](./subscription-integration.mdx) after the credit boundary is stable.
+
+Add [Google ADK metering](./google-adk.mdx) or the [Bursar coding-agent skill](../agent-skills.mdx) only when the host application uses those surfaces.
+
+## Browse by task area
+
+<DocCardList />
+
+## Learn or look up exact behavior
+
+Use the [executable tutorials](/docs/tutorials) for guided learning. Use the [reference section](/docs/reference) for commands, configuration, expressions, database schema, and SDK signatures.

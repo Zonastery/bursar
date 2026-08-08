@@ -25,7 +25,9 @@ DECLARE
     v_status bursar.catalog_revision_status;
 BEGIN
     IF p_activate IS NULL
+       OR p_yaml_schema_version IS NULL
        OR p_yaml_schema_version <> 1
+       OR p_source_document IS NULL
     THEN
         RAISE EXCEPTION 'invalid_catalog' USING ERRCODE = '22023';
     END IF;
@@ -1244,7 +1246,8 @@ BEGIN
         INTO v_expiry
         FROM bursar.billing_subscriptions
         WHERE id = p_subscription_id
-          AND subject_id = p_subject_id;
+          AND subject_id = p_subject_id
+          AND catalog_revision_id = p_catalog_revision_id;
 
         RETURN v_expiry;
     END IF;
@@ -1289,6 +1292,7 @@ BEGIN
               ON account.id = assignment.account_id
             WHERE account.subject_id = p_subject_id
               AND account.account_kind = 'personal'
+              AND assignment.catalog_revision_id = p_catalog_revision_id
               AND assignment.starts_at <= p_granted_at
               AND (
                   assignment.ends_at IS NULL

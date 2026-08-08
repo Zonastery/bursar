@@ -34,7 +34,9 @@ BEGIN
        OR NOT bursar.is_finite_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
            16384
@@ -234,19 +236,54 @@ DECLARE v_old bursar.credit_ledger_entries;
  v_priority integer;
  v_expiry_policy jsonb;
  v_lot_id uuid;
+ v_allocation_id uuid;
+ v_source record;
+ v_source_remaining numeric;
+ v_source_take numeric;
 
 BEGIN
  IF p_account_id IS NULL
+    OR p_kind IS NULL
     OR NOT bursar.is_finite_numeric(p_amount)
     OR p_amount=0
     OR NOT bursar.is_nonempty_text(p_idempotency_key)
+    OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
     OR NOT bursar.is_nonempty_text(p_operation)
+    OR NOT bursar.is_bounded_text(p_operation, 255)
     OR NOT bursar.is_bounded_json_object(
         COALESCE(p_metadata, '{}'::jsonb),
         16384
     )
+    OR (
+        p_amount > 0
+        AND p_kind NOT IN (
+            'grant', 'purchase', 'refund', 'release', 'adjustment'
+        )
+    )
+    OR (
+        p_amount < 0
+        AND p_kind NOT IN (
+            'usage',
+            'expiry',
+            'revocation',
+            'refund_clawback',
+            'reservation',
+            'adjustment'
+        )
+    )
  THEN RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'invalid_request';
  RETURN;
+ END IF;
+
+ SELECT balance,subject_id
+ INTO v_balance,v_subject
+ FROM bursar.credit_accounts
+ WHERE id=p_account_id
+ FOR UPDATE;
+
+ IF NOT FOUND THEN
+     RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'invalid_account';
+     RETURN;
  END IF;
 
     v_digest:=extensions.digest(
@@ -262,15 +299,13 @@ BEGIN
         'sha256'
     );
 
- SELECT * INTO v_old FROM bursar.credit_ledger_entries WHERE account_id=p_account_id AND idempotency_key=p_idempotency_key FOR UPDATE;
+ SELECT * INTO v_old FROM bursar.credit_ledger_entries WHERE account_id=p_account_id AND idempotency_key=p_idempotency_key;
 
  IF FOUND THEN IF v_old.request_digest<>v_digest THEN RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'idempotency_conflict';
  ELSE RETURN QUERY SELECT v_old.id,v_old.balance_after,true,NULL::text;
  END IF;
  RETURN;
  END IF;
-
-    SELECT balance,subject_id INTO v_balance,v_subject FROM bursar.credit_accounts WHERE id=p_account_id FOR UPDATE;
 
  IF p_amount<0 THEN SELECT COALESCE(SUM(granted-consumed),0) INTO v_available FROM bursar.credit_lots WHERE account_id=p_account_id AND consumed<granted AND (expires_at IS NULL OR expires_at>now());
  IF v_available < -p_amount OR v_balance+p_amount<0 THEN RETURN QUERY SELECT NULL::uuid,v_balance,false,'insufficient_credits';
@@ -321,8 +356,72 @@ BEGIN
 
             UPDATE bursar.credit_lots SET consumed=consumed+v_take WHERE id=r.id;
 
-            INSERT INTO bursar.credit_lot_allocations(debit_entry_id,lot_id,amount,allocation_kind)
-            VALUES(v_entry,r.id,v_take,'spend');
+            INSERT INTO bursar.credit_lot_allocations(
+                debit_entry_id,
+                lot_id,
+                amount,
+                allocation_kind
+            )
+            VALUES(v_entry,r.id,v_take,'spend')
+            RETURNING id INTO v_allocation_id;
+
+            v_source_remaining := v_take;
+
+            FOR v_source IN
+                SELECT
+                    source.id,
+                    source.amount
+                        - COALESCE(allocated.amount, 0)
+                        + COALESCE(restored.amount, 0) AS available
+                FROM bursar.credit_lot_sources AS source
+                LEFT JOIN LATERAL (
+                    SELECT sum(source_allocation.amount) AS amount
+                    FROM bursar.credit_lot_source_allocations
+                        AS source_allocation
+                    WHERE source_allocation.lot_source_id = source.id
+                ) AS allocated ON true
+                LEFT JOIN LATERAL (
+                    SELECT sum(source_restoration.amount) AS amount
+                    FROM bursar.credit_lot_source_restorations
+                        AS source_restoration
+                    JOIN bursar.credit_lot_source_allocations
+                        AS source_allocation
+                      ON source_allocation.id =
+                         source_restoration.source_allocation_id
+                    WHERE source_allocation.lot_source_id = source.id
+                ) AS restored ON true
+                WHERE source.lot_id = r.id
+                  AND source.amount
+                        - COALESCE(allocated.amount, 0)
+                        + COALESCE(restored.amount, 0) > 0
+                ORDER BY source.created_at, source.id
+                FOR UPDATE OF source
+            LOOP
+                v_source_take := LEAST(
+                    v_source_remaining,
+                    v_source.available
+                );
+
+                INSERT INTO bursar.credit_lot_source_allocations(
+                    lot_allocation_id,
+                    lot_source_id,
+                    amount
+                )
+                VALUES (
+                    v_allocation_id,
+                    v_source.id,
+                    v_source_take
+                );
+
+                v_source_remaining :=
+                    v_source_remaining - v_source_take;
+                EXIT WHEN v_source_remaining <= 0;
+            END LOOP;
+
+            IF v_source_remaining > 0 THEN
+                RAISE EXCEPTION 'credit lot source balance mismatch'
+                    USING ERRCODE = '23514';
+            END IF;
 
             v_remaining:=v_remaining-v_take;
 
@@ -376,8 +475,13 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE v_account uuid;
 
 BEGIN
- IF NOT bursar.is_finite_numeric(p_amount)
+ IF p_subject_id IS NULL
+    OR NOT bursar.is_nonempty_text(p_allowance_key)
+    OR NOT bursar.is_bounded_text(p_allowance_key, 255)
+    OR NOT bursar.is_finite_numeric(p_amount)
     OR p_amount<0
+    OR p_window_start IS NULL
+    OR p_window_end IS NULL
     OR p_window_end<=p_window_start
  THEN RETURN false;
  END IF;

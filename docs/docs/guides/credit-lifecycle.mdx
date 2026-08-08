@@ -1,6 +1,6 @@
 ---
 title: Manage the credit lifecycle
-sidebar_label: Credit lifecycle
+sidebar_label: Manage credits
 description: Post grants, purchases, usage charges, refunds, expiry, and revocation as canonical ledger entries.
 ---
 
@@ -11,20 +11,18 @@ import TabItem from "@theme/TabItem";
 
 ## Prerequisites
 
-- Publish a [canonical configuration](../concepts/configuration.mdx) and provision a tenant — see [multi-tenancy](./multitenancy.mdx) and [storage backends](./storage-backends.mdx).
-- Read [data model](../concepts/data-model.mdx) for buckets, lots, allowances, and ledger entries.
+- Publish a [validated configuration](../concepts/configuration.mdx) and provision a tenant — see [multi-tenancy](./multitenancy.mdx) and [storage backends](./storage-backends.mdx).
+- Read [credit accounting](../concepts/data-model.mdx) for buckets, lots, allowances, and ledger entries.
 
-## What you'll have when you're done
+## Outcome
 
 - A facade you can run end to end: signup grants, a purchased lot, priced usage, a refund, an expiry sweep, and a revocation — every step auditable in the ledger.
 
 Every credit that enters or leaves an account posts a canonical ledger entry:
 grants, purchases, usage charges, refunds, expiries, and revocations are all
-the same append-only history. This guide follows one example account through
-signup, purchase, usage, refund, expiry, and revocation.
+the same append-only history. Apply the procedures below at the application boundaries that own signup, payments, usage, refunds, and maintenance jobs.
 
-Setup first: publish the canonical configuration (see
-[canonical configuration](../concepts/configuration.mdx)) and bind a facade.
+Setup first: publish a [validated configuration](../concepts/configuration.mdx) and bind a facade.
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -59,8 +57,7 @@ const userId = USER_ADA;
 
 ## 1. Signup
 
-Ada creates an account. The signup handler assigns the catalog's default plan
-and runs any `account_created` grant programs in one call:
+Call the account-created boundary from the durable signup handler. It assigns the catalog's default plan and runs eligible `account_created` grant programs in one operation:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -87,19 +84,11 @@ console.log(result.planKey, result.planAssigned, result.grants);
   </TabItem>
 </Tabs>
 
-The result reports the assigned plan (`free`, from `catalog.default_plan`) and
-any grant-program awards. The free plan carries a 10,000-credit monthly
-allowance, so Ada can use the product before she pays. The call is idempotent:
-a second signup event with the same key does not re-anchor the plan or
-double-grant.
+The result reports the assigned plan and any grant-program awards. The call is idempotent: a second signup event with the same key does not re-anchor the plan or post the grant twice.
 
 ## 2. Buying credits
 
-Ada buys a 50,000-credit pack through Stripe checkout. When the payment
-webhook lands, credit the account as a `purchase` into the `purchased` bucket
-(priority 10, the configured default). Pass the provider event id as the
-idempotency key so a redelivered webhook replays the same entry instead of
-double-granting:
+Post purchased credits only after the payment adapter verifies and normalizes a successful provider event. Credit the account as a `purchase` in the configured bucket, and derive the idempotency key from the provider event identifier so redelivery replays the same entry:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -135,9 +124,7 @@ the sweep in step 5. TypeScript amounts are `decimal.js` `Decimal` values.
 
 ## 3. Spending
 
-Ada asks for a completion. `deduct` prices the metrics with the `standard`
-rate card (input 0.0025 / output 0.01 / cache 0.00125 per 1M tokens, all
-exact `Decimal`), then charges in one atomic transaction:
+Call `deduct` when the final usage measurement is known. It selects the account's rate card, evaluates the metrics, applies plan policy, and posts the charge in one transaction:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -195,8 +182,7 @@ projects to HTTP 402 (`payment_required`).
 
 ## 4. Refunds
 
-Ada's request returned a broken completion. Refund the charge by its entry
-id; pass an `amount` for a partial refund:
+Refund a charge by its entry identifier. Pass an `amount` only for a partial refund:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -341,5 +327,4 @@ the operation, the measures, the `charged` amount, and how much the allowance
 covered. Filter by entry type or date range in either call; offset pagination
 is not supported.
 
-At the end of the day, `get_balance` and the ledger agree: the balance is the
-sum of its entries, always.
+After these operations, `get_balance` and the ledger must agree: the balance equals the sum of its entries.

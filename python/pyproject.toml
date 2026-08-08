@@ -50,7 +50,7 @@ s3 = [
     "boto3>=1.43.66,<2",
 ]
 google-adk = [
-    "google-adk>=2.6.2,<2.7.0",
+    "google-adk>=2.6.3,<2.7.0",
 ]
 test = [
     "pytest>=9.1.1",
@@ -68,7 +68,7 @@ test = [
     "stripe>=15.4.0",
     "dodopayments[webhooks]>=1.111.0",
     "boto3>=1.43.66,<2",
-    "google-adk>=2.6.2,<2.7.0",
+    "google-adk>=2.6.3,<2.7.0",
 ]
 
 [tool.setuptools.package-data]
@@ -106,6 +106,9 @@ reportMissingModuleSource = "none"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:^BaseAgentConfig is deprecated and will be removed in future versions\\.:DeprecationWarning",
+]
 markers = [
     "integration: requires a real Postgres (real DSN or a testcontainers-managed one)",
     "concurrency: exercises thread/connection races; slower, may be timeout-sensitive",
@@ -153,5 +156,5 @@ test-deps = [
     "stripe>=15.4.0",
     "dodopayments[webhooks]>=1.111.0",
     "boto3>=1.43.66,<2",
-    "google-adk>=2.6.2,<2.7.0",
+    "google-adk>=2.6.3,<2.7.0",
 ]

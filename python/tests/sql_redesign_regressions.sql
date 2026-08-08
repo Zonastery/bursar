@@ -605,4 +605,650 @@ BEGIN
     END IF;
 END $$;
 
+-- Exact retries are resolved from immutable caller input before current plan
+-- policy or due-expiry work. Targeted lot retries likewise resolve before the
+-- lot's now-consumed availability is revalidated.
+DO $$
+DECLARE
+    v_doc jsonb := $json$
+    {
+      "version": 1,
+      "credits": {
+        "buckets": {"default": {"priority": 10}},
+        "default_bucket": "default",
+        "policies": {
+          "prepaid": {"type": "prepaid"},
+          "line": {"type": "credit_line", "limit": "20"}
+        }
+      },
+      "plans": {
+        "prepaid": {
+          "display_name": "Prepaid",
+          "credit_policy": "prepaid"
+        },
+        "line": {
+          "display_name": "Credit line",
+          "credit_policy": "line"
+        }
+      }
+    }
+    $json$::jsonb;
+    v_doc_2 jsonb;
+    v_revision_1 uuid;
+    v_revision_2 uuid;
+    v_prepaid_plan uuid;
+    v_line_plan uuid;
+    v_policy_subject uuid := '00000000-0000-0000-0000-000000000140';
+    v_expiry_subject uuid := '00000000-0000-0000-0000-000000000141';
+    v_lot_subject uuid := '00000000-0000-0000-0000-000000000142';
+    v_first record;
+    v_replay record;
+    v_expiring_entry uuid;
+    v_expiring_lot uuid;
+    v_explicit_expiry timestamptz := now() + interval '1 day';
+    v_lot uuid;
+    v_first_revoke uuid;
+    v_second_revoke uuid;
+BEGIN
+    SELECT revision_id
+    INTO v_revision_1
+    FROM bursar.publish_and_activate_catalog(
+        1,
+        v_doc,
+        'idempotency-ordering-v1'
+    );
+
+    SELECT id
+    INTO v_prepaid_plan
+    FROM bursar.catalog_plans
+    WHERE catalog_revision_id = v_revision_1
+      AND plan_key = 'prepaid';
+
+    SELECT id
+    INTO v_line_plan
+    FROM bursar.catalog_plans
+    WHERE catalog_revision_id = v_revision_1
+      AND plan_key = 'line';
+
+    PERFORM bursar.assign_plan(
+        v_policy_subject,
+        v_prepaid_plan,
+        now(),
+        NULL
+    );
+    PERFORM bursar.post_credit(
+        v_policy_subject,
+        'grant',
+        10,
+        'policy-retry-seed',
+        'policy-retry-seed'
+    );
+
+    SELECT *
+    INTO v_first
+    FROM bursar.post_credit(
+        v_policy_subject,
+        'usage',
+        -1,
+        'policy-retry-debit',
+        'policy-retry-debit'
+    );
+
+    PERFORM bursar.assign_plan(
+        v_policy_subject,
+        v_line_plan,
+        now(),
+        NULL
+    );
+
+    SELECT *
+    INTO v_replay
+    FROM bursar.post_credit(
+        v_policy_subject,
+        'usage',
+        -1,
+        'policy-retry-debit',
+        'policy-retry-debit'
+    );
+
+    IF v_first.error_code IS NOT NULL
+       OR v_replay.error_code IS NOT NULL
+       OR NOT v_replay.replayed
+       OR v_replay.entry_id <> v_first.entry_id
+    THEN
+        RAISE EXCEPTION
+            'post_credit did not replay before mutable plan policy: % / %',
+            row_to_json(v_first),
+            row_to_json(v_replay);
+    END IF;
+
+    SELECT entry_id
+    INTO v_expiring_entry
+    FROM bursar.post_credit(
+        v_expiry_subject,
+        'grant',
+        5,
+        'expiry-retry-grant',
+        'expiry-retry-grant',
+        p_expires_at => v_explicit_expiry
+    );
+
+    SELECT id
+    INTO v_expiring_lot
+    FROM bursar.credit_lots
+    WHERE source_entry_id = v_expiring_entry;
+
+    PERFORM set_config('bursar.mutation_context', 'internal', true);
+    UPDATE bursar.credit_lots
+    SET expires_at = now() - interval '1 second'
+    WHERE id = v_expiring_lot;
+
+    SELECT *
+    INTO v_replay
+    FROM bursar.post_credit(
+        v_expiry_subject,
+        'grant',
+        5,
+        'expiry-retry-grant',
+        'expiry-retry-grant',
+        p_expires_at => v_explicit_expiry
+    );
+
+    IF v_replay.error_code IS NOT NULL
+       OR NOT v_replay.replayed
+       OR v_replay.entry_id <> v_expiring_entry
+       OR EXISTS (
+           SELECT 1
+           FROM bursar.credit_ledger_entries
+           WHERE account_id = bursar.account_for_subject(v_expiry_subject)
+             AND kind = 'expiry'
+       )
+       OR (
+           SELECT consumed
+           FROM bursar.credit_lots
+           WHERE id = v_expiring_lot
+       ) <> 0
+    THEN
+        RAISE EXCEPTION
+            'post_credit retry performed expiry work before replay';
+    END IF;
+
+    PERFORM bursar.post_credit(
+        v_lot_subject,
+        'grant',
+        4,
+        'targeted-retry-seed',
+        'targeted-retry-seed'
+    );
+    SELECT id
+    INTO v_lot
+    FROM bursar.credit_lots
+    WHERE account_id = bursar.account_for_subject(v_lot_subject)
+      AND consumed = 0
+    ORDER BY created_at, id
+    LIMIT 1;
+
+    SELECT entry_id
+    INTO v_first_revoke
+    FROM bursar.revoke_lot(v_lot, 4, 'targeted-retry-revoke');
+    SELECT entry_id
+    INTO v_second_revoke
+    FROM bursar.revoke_lot(v_lot, 4, 'targeted-retry-revoke');
+
+    IF v_first_revoke IS NULL
+       OR v_second_revoke IS DISTINCT FROM v_first_revoke
+       OR (
+           SELECT count(*)
+           FROM bursar.credit_ledger_entries
+           WHERE account_id = bursar.account_for_subject(v_lot_subject)
+             AND idempotency_key = 'targeted-retry-revoke'
+       ) <> 1
+    THEN
+        RAISE EXCEPTION 'targeted lot debit was not exactly replayable';
+    END IF;
+
+    v_doc_2 := jsonb_set(
+        v_doc,
+        '{plans,prepaid,display_name}',
+        '"Prepaid v2"'::jsonb
+    );
+    SELECT revision_id
+    INTO v_revision_2
+    FROM bursar.publish_and_activate_catalog(
+        1,
+        v_doc_2,
+        'idempotency-ordering-v2',
+        false
+    );
+
+    BEGIN
+        PERFORM bursar.expiry_policy_at(
+            v_policy_subject,
+            v_revision_2,
+            '{
+              "type":"end_of_window",
+              "window":{
+                "type":"plan_assignment",
+                "interval":{"unit":"month","count":1},
+                "timezone":"UTC"
+              }
+            }'::jsonb,
+            now(),
+            NULL
+        );
+        RAISE EXCEPTION
+            'expiry policy crossed catalog revisions to find an assignment';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            IF SQLERRM NOT LIKE '%plan assignment required%' THEN
+                RAISE;
+            END IF;
+    END;
+END
+$$;
+
+-- PostgreSQL orders NaN above every finite numeric, so relational checks alone
+-- can accept non-finite upper/rearm values. The financial projection must
+-- reject every such value at its table boundary.
+DO $$
+DECLARE
+    v_policy bursar.catalog_auto_recharge_policies;
+    v_case integer;
+    v_nonfinite numeric;
+BEGIN
+    SELECT policy.*
+    INTO v_policy
+    FROM bursar.catalog_auto_recharge_policies AS policy
+    ORDER BY policy.catalog_revision_id DESC
+    LIMIT 1;
+
+    IF v_policy.catalog_revision_id IS NULL THEN
+        RAISE EXCEPTION 'auto-recharge fixture policy is missing';
+    END IF;
+
+    FOR v_case IN 1..4 LOOP
+        v_nonfinite := CASE
+            WHEN v_case IN (1, 3) THEN 'NaN'::numeric
+            ELSE 'Infinity'::numeric
+        END;
+
+        BEGIN
+            INSERT INTO bursar.catalog_auto_recharge_policies(
+                catalog_revision_id,
+                eligible_topup_keys,
+                default_topup_key,
+                quantity_min,
+                quantity_max,
+                quantity,
+                balance_min,
+                balance_max,
+                balance_below,
+                rearm_above,
+                max_purchases,
+                max_charge_minor,
+                cooldown_seconds,
+                max_consecutive_failures,
+                failure_action,
+                period_unit,
+                period_count,
+                period_anchor,
+                period_timezone,
+                definition
+            )
+            VALUES (
+                v_policy.catalog_revision_id,
+                v_policy.eligible_topup_keys,
+                v_policy.default_topup_key,
+                v_policy.quantity_min,
+                v_policy.quantity_max,
+                v_policy.quantity,
+                v_policy.balance_min,
+                CASE
+                    WHEN v_case <= 2 THEN v_nonfinite
+                    ELSE v_policy.balance_max
+                END,
+                v_policy.balance_below,
+                CASE
+                    WHEN v_case > 2 THEN v_nonfinite
+                    ELSE v_policy.rearm_above
+                END,
+                v_policy.max_purchases,
+                v_policy.max_charge_minor,
+                v_policy.cooldown_seconds,
+                v_policy.max_consecutive_failures,
+                v_policy.failure_action,
+                v_policy.period_unit,
+                v_policy.period_count,
+                v_policy.period_anchor,
+                v_policy.period_timezone,
+                v_policy.definition
+            );
+
+            RAISE EXCEPTION
+                'auto-recharge policy accepted non-finite numeric case %',
+                v_case;
+        EXCEPTION
+            WHEN check_violation THEN
+                NULL;
+        END;
+    END LOOP;
+END
+$$;
+
+-- NULLs must be rejected by the checkout boundary itself rather than falling
+-- through three-valued predicates into table NOT NULL failures after subject
+-- provisioning has begun.
+DO $$
+DECLARE
+    v_subject uuid := '00000000-0000-0000-0000-000000000143';
+    v_case integer;
+BEGIN
+    FOR v_case IN 1..3 LOOP
+        BEGIN
+            PERFORM bursar.create_checkout_intent(
+                v_subject,
+                'test-provider',
+                CASE WHEN v_case = 1 THEN NULL ELSE 'credit_topup' END,
+                'test-product',
+                CASE
+                    WHEN v_case = 2 THEN NULL
+                    ELSE decode(repeat('00', 32), 'hex')
+                END,
+                CASE
+                    WHEN v_case = 3 THEN NULL
+                    ELSE now() + interval '1 hour'
+                END
+            );
+            RAISE EXCEPTION 'checkout accepted NULL required field case %',
+                v_case;
+        EXCEPTION
+            WHEN invalid_parameter_value THEN
+                NULL;
+        END;
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM bursar.subjects
+        WHERE id = v_subject
+    ) THEN
+        RAISE EXCEPTION 'invalid checkout provisioned a subject';
+    END IF;
+END
+$$;
+
+-- Required enum, boolean, interval, and batch arguments must not exploit SQL's
+-- three-valued logic to reach mutation code as NULL.
+DO $$
+DECLARE
+    v_subject uuid := '00000000-0000-0000-0000-000000000144';
+    v_team uuid := '00000000-0000-0000-0000-000000000145';
+    v_result record;
+BEGIN
+    BEGIN
+        PERFORM bursar.account_for_subject(v_subject, NULL);
+        RAISE EXCEPTION 'account_for_subject accepted a NULL account kind';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.targeted_lot_debit(
+            '00000000-0000-0000-0000-000000000001',
+            NULL,
+            1,
+            'null-targeted-kind'
+        );
+        RAISE EXCEPTION 'targeted_lot_debit accepted a NULL kind';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.policy_period_window(
+            now(),
+            NULL,
+            1,
+            'rolling',
+            'UTC'
+        );
+        RAISE EXCEPTION 'policy_period_window accepted a NULL unit';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.policy_period_window(
+            now(),
+            'day',
+            1,
+            NULL,
+            'UTC'
+        );
+        RAISE EXCEPTION 'policy_period_window accepted a NULL anchor';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    IF bursar.set_team_member(v_team, v_subject, NULL) THEN
+        RAISE EXCEPTION 'set_team_member accepted a NULL role';
+    END IF;
+
+    BEGIN
+        PERFORM bursar.upsert_billing_refund(
+            '00000000-0000-0000-0000-000000000001',
+            'null-refund-status',
+            1,
+            NULL,
+            NULL,
+            now(),
+            NULL,
+            NULL,
+            '{}'::jsonb
+        );
+        RAISE EXCEPTION 'upsert_billing_refund accepted a NULL status';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.upsert_billing_refund(
+            '00000000-0000-0000-0000-000000000001',
+            'zero-refund-amount',
+            0,
+            'pending',
+            NULL,
+            now(),
+            NULL,
+            NULL,
+            '{}'::jsonb
+        );
+        RAISE EXCEPTION 'upsert_billing_refund accepted a zero amount';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.upsert_auto_recharge_profile(
+            v_subject,
+            NULL,
+            'test-provider',
+            '00000000-0000-0000-0000-000000000001',
+            1,
+            1,
+            1,
+            'day',
+            1,
+            'rolling',
+            'UTC'
+        );
+        RAISE EXCEPTION 'auto-recharge profile accepted NULL enabled';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.upsert_auto_recharge_profile(
+            v_subject,
+            true,
+            'test-provider',
+            '00000000-0000-0000-0000-000000000001',
+            1,
+            1,
+            1,
+            'day',
+            1,
+            'rolling',
+            'UTC',
+            true,
+            NULL
+        );
+        RAISE EXCEPTION 'auto-recharge profile accepted NULL state';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    IF bursar.advance_auto_recharge_attempt(
+        '00000000-0000-0000-0000-000000000001',
+        NULL
+    ) THEN
+        RAISE EXCEPTION 'advance_auto_recharge_attempt accepted NULL state';
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.open_subscription_change(
+        '00000000-0000-0000-0000-000000000001',
+        '00000000-0000-0000-0000-000000000002',
+        now(),
+        NULL,
+        'null-effective-behavior'
+    );
+    IF v_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'open_subscription_change accepted NULL behavior';
+    END IF;
+
+    IF bursar.advance_subscription_change(1, NULL) THEN
+        RAISE EXCEPTION 'advance_subscription_change accepted NULL state';
+    END IF;
+
+    SELECT *
+    INTO v_result
+    FROM bursar.create_lease_for_operation(
+        v_subject,
+        'null-ttl',
+        1,
+        'null-ttl',
+        NULL
+    );
+    IF v_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'create_lease accepted NULL TTL';
+    END IF;
+
+    BEGIN
+        PERFORM bursar.claim_outbox_events(
+            NULL::integer,
+            60,
+            NULL::text[]
+        );
+        RAISE EXCEPTION 'claim_outbox_events accepted NULL limit';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.fail_outbox_event(
+            1,
+            '00000000-0000-0000-0000-000000000001',
+            'failure',
+            NULL,
+            10
+        );
+        RAISE EXCEPTION 'fail_outbox_event accepted NULL retry delay';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    BEGIN
+        PERFORM bursar.run_storage_partition_maintenance(NULL, now());
+        RAISE EXCEPTION 'partition maintenance accepted a NULL parent';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            NULL;
+    END;
+
+    IF EXISTS (
+        SELECT 1
+        FROM bursar.subjects
+        WHERE id = v_subject
+    ) THEN
+        RAISE EXCEPTION 'invalid NULL-boundary requests provisioned a subject';
+    END IF;
+END
+$$;
+
+-- Full-refund remainder is recalculated under the account lock. A distinct
+-- key after the full amount was returned must observe no remainder rather than
+-- attempting a second refund.
+DO $$
+DECLARE
+    v_subject uuid := '00000000-0000-0000-0000-000000000146';
+    v_debit uuid;
+    v_first record;
+    v_second record;
+BEGIN
+    PERFORM bursar.post_credit(
+        v_subject,
+        'grant',
+        5,
+        'refund-lock-seed',
+        'refund-lock-seed'
+    );
+    SELECT entry_id
+    INTO v_debit
+    FROM bursar.post_credit(
+        v_subject,
+        'usage',
+        -5,
+        'refund-lock-debit',
+        'refund-lock-debit'
+    );
+
+    SELECT *
+    INTO v_first
+    FROM bursar.refund_credit_by_entry(
+        v_debit,
+        NULL,
+        'refund-lock-first'
+    );
+    SELECT *
+    INTO v_second
+    FROM bursar.refund_credit_by_entry(
+        v_debit,
+        NULL,
+        'refund-lock-second'
+    );
+
+    IF v_first.error_code IS NOT NULL
+       OR v_first.replayed
+       OR v_second.error_code <> 'nothing_to_refund'
+    THEN
+        RAISE EXCEPTION
+            'full refund remainder was not serialized: % / %',
+            row_to_json(v_first),
+            row_to_json(v_second);
+    END IF;
+END
+$$;
+
 ROLLBACK;

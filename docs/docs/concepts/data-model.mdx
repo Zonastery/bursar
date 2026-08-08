@@ -1,17 +1,12 @@
 ---
-title: The data model
-sidebar_label: Data model
-description: Accounts, the append-only ledger, lots, leases, and allowances — every concept mapped to tables on one PostgreSQL schema.
+title: Credit accounting model
+sidebar_label: Credit accounting
+description: Understand accounts, the append-only ledger, credit lots, leases, allowances, and the invariants that connect them.
 ---
 
-# The data model
+# Credit accounting model
 
-import Tabs from "@theme/Tabs";
-import TabItem from "@theme/TabItem";
-
-Before the API details, here is the shape of the money. One `Bursar` facade
-talks to one Postgres schema, and every concept maps to tables you can point a
-dashboard at.
+Bursar records monetary state in one tenant-isolated PostgreSQL schema. This page explains the accounting entities and invariants; use the database schema and SDK references for exact tables and method signatures.
 
 ## Accounts
 
@@ -89,51 +84,19 @@ so quotas and analytics cannot be bypassed by a free rate.
    deleted, and `(account_id, idempotency_key)` is unique, so a retried write
    replays the original entry instead of double-posting.
 
-## Reading balances
+## Transaction boundary
 
-Balance reads are cheap — one locked row. Availability subtracts active
-holds; buckets break the balance into tiers:
+Every monetary mutation runs in one store transaction that locks the account before it checks idempotency, policy, and available value. Concurrent deductions therefore cannot authorize against the same balance snapshot, and application code never maintains a second financial counter.
 
-<Tabs groupId="lang">
-  <TabItem value="python" label="Python">
+## Balances and availability
 
-```python
-balance = bursar.credits.get_balance(ada)
-available = bursar.credits.get_available(ada)
-buckets = bursar.credits.get_bucket_balances(ada)
+The account balance is the canonical posted value. Availability subtracts active lease holds, and bucket balances divide spendable credits by priority and expiry policy. Availability reads are suitable for display, but only an atomic deduction or reservation can authorize work under concurrency.
 
-print(balance.balance)              # 1000.000000
-print(available.available)          # balance minus active holds
-for bucket in buckets.buckets:
-    print(bucket.bucket_key, bucket.priority, bucket.balance)
-```
-
-  </TabItem>
-  <TabItem value="ts" label="TypeScript">
-
-```ts
-const balance = await bursar.credits.getBalance(ada);
-const available = await bursar.credits.getAvailable(ada);
-const buckets = await bursar.credits.getBucketBalances(ada);
-
-console.log(balance.balance); // 1000.000000
-console.log(available.available); // balance minus active holds
-for (const bucket of buckets.buckets) {
-  console.log(bucket.bucketKey, bucket.priority, bucket.balance);
-}
-```
-
-  </TabItem>
-</Tabs>
-
-`get_available` is advisory (UI only) — only `reserve` is authoritative for
-admission. See [Architecture](./architecture.mdx) for the full schema layout,
-or [Canonical configuration](./configuration.mdx) for the document that shapes
-it.
+Use the [credit lifecycle guide](../guides/credit-lifecycle.mdx) for balance and ledger procedures. Use the Python or TypeScript API reference for exact query signatures.
 
 ## Related
 
-- [Architecture](./architecture.mdx) — the facade and how capabilities map to the schema
-- [Canonical configuration](./configuration.mdx) — the document that defines buckets, lots, and plans
-- [Financial safety](../guides/financial-safety.mdx) — holds, leases, and the money invariants in action
-- [Manage the credit lifecycle](../notebooks/credits-and-controls/04_credit_lifecycle.mdx) — every entry kind on one ledger
+- [Architecture](./architecture.mdx): the facade and how capabilities map to the schema
+- [Configuration and catalog revisions](./configuration.mdx): the document that defines buckets, lots, and plans
+- [Protect monetary operations](../guides/financial-safety.mdx): holds, leases, and the money invariants in action
+- [Credit lifecycle tutorial](../notebooks/credits-and-controls/04_credit_lifecycle.mdx): every entry kind on one ledger

@@ -43,15 +43,24 @@ DECLARE v_account uuid;
  v_ledger_metadata jsonb;
 
 BEGIN
-  v_account:=bursar.account_for_subject(p_subject_id);
-
     p_allowance_requested:=COALESCE(p_allowance_requested,p_allowance);
 
-    IF NOT bursar.is_finite_numeric(p_requested)
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_finite_numeric(p_requested)
        OR NOT bursar.is_finite_numeric(p_allowance)
        OR NOT bursar.is_finite_numeric(p_allowance_requested)
+       OR p_requested < 0
+       OR p_allowance < 0
+       OR p_allowance > p_requested
+       OR p_allowance_requested < p_allowance
+       OR p_allowance_requested > p_requested
+       OR (
+           p_minimum_balance IS NOT NULL
+           AND NOT bursar.is_finite_numeric(p_minimum_balance)
+       )
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
+       OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (
            p_feature IS NOT NULL
@@ -85,6 +94,8 @@ BEGIN
         RETURN;
     END IF;
 
+    v_account:=bursar.account_for_subject(p_subject_id);
+
     v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',COALESCE(p_metadata,'{}'::jsonb))::text,'UTF8'),'sha256');
 
   SELECT account.tenant_id, account.subject_id
@@ -98,13 +109,6 @@ BEGIN
   IF FOUND THEN IF v_existing.request_digest<>v_digest THEN RETURN QUERY SELECT NULL::uuid,NULL::uuid,0::numeric,0::numeric,false,'idempotency_conflict';
  ELSE RETURN QUERY SELECT v_existing.id,v_existing.ledger_entry_id,v_existing.charged,v_existing.allowance_covered,true,NULL::text;
  END IF;
- RETURN;
- END IF;
-
-    IF p_requested < 0 OR p_allowance < 0 OR p_allowance > p_requested
-       OR p_allowance_requested < p_allowance OR p_allowance_requested > p_requested
-       OR p_idempotency_key IS NULL OR p_idempotency_key = ''
-    THEN RETURN QUERY SELECT NULL::uuid,NULL::uuid,0::numeric,0::numeric,false,'invalid_request';
  RETURN;
  END IF;
 
@@ -358,7 +362,8 @@ DECLARE
     v_rate_card text;
     v_event_at timestamptz := now();
 BEGIN
-    IF NOT bursar.is_finite_numeric(p_requested)
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_finite_numeric(p_requested)
        OR p_requested < 0
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)

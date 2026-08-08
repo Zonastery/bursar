@@ -27,7 +27,9 @@ DECLARE
 BEGIN
     IF p_provider IS NULL OR p_provider='' OR p_event_id IS NULL OR p_event_id=''
        OR p_event_type IS NULL OR p_event_type=''
+       OR p_lease_seconds IS NULL
        OR p_lease_seconds<1 OR p_lease_seconds>3600
+       OR p_attempt_limit IS NULL
        OR p_attempt_limit<1 OR p_attempt_limit>20
     THEN
         RETURN QUERY SELECT 'invalid_request',NULL::uuid,NULL::uuid;
@@ -191,8 +193,12 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE
     v_updated boolean;
 BEGIN
-    IF p_error IS NOT NULL
+    IF p_provider IS NULL
+       OR p_event_id IS NULL
+       OR p_claim_token IS NULL
+       OR (p_error IS NOT NULL
        AND NOT bursar.is_nonempty_bounded_text(p_error, 8192)
+       )
     THEN
         RETURN false;
     END IF;
@@ -334,6 +340,25 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE
     v_environment text := bursar.current_provider_environment();
 BEGIN
+    IF p_subject_id IS NULL OR p_subscription_id IS NULL THEN
+        RETURN false;
+    END IF;
+
+    -- The selected-source uniqueness constraint is subject scoped. Lock that
+    -- logical scope before touching a subscription so concurrent selections of
+    -- different subscriptions cannot race into the partial unique index.
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'bursar.tenant:'
+            || bursar.require_tenant_id()::text
+            || ':entitlement:'
+            || p_subject_id::text
+            || ':'
+            || v_environment,
+            0
+        )
+    );
+
     PERFORM 1
     FROM bursar.billing_subscriptions
     WHERE id = p_subscription_id
@@ -626,7 +651,13 @@ DECLARE
     v_result record;
 
 BEGIN
-    IF p_amount_minor<=0 OR p_idempotency_key IS NULL OR p_idempotency_key='' THEN
+    IF p_refund_id IS NULL
+       OR p_grant_id IS NULL
+       OR p_amount_minor IS NULL
+       OR p_amount_minor <= 0
+       OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+    THEN
         RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'invalid_request';
 
         RETURN;

@@ -15,7 +15,10 @@ DECLARE
     v_revision uuid;
     v_program_key text;
 BEGIN
-    IF p_subject_id IS NULL OR p_kind NOT IN ('personal', 'team') THEN
+    IF p_subject_id IS NULL
+       OR p_kind IS NULL
+       OR p_kind NOT IN ('personal', 'team')
+    THEN
         RAISE EXCEPTION 'invalid account subject or kind'
             USING ERRCODE = '22023';
     END IF;
@@ -118,6 +121,7 @@ DECLARE
     v_expires_at timestamptz;
 BEGIN
     IF p_subject_id IS NULL
+       OR p_trigger_type IS NULL
        OR p_trigger_type NOT IN (
            'account_created',
            'referral_completed',
@@ -659,12 +663,20 @@ DECLARE
     v_source_remaining numeric;
     v_source_take numeric;
     v_settling_minimum numeric;
+    v_requested_minimum_balance numeric := p_minimum_balance;
 BEGIN
     IF p_subject_id IS NULL
+       OR p_kind IS NULL
        OR NOT bursar.is_finite_numeric(p_amount)
        OR p_amount = 0
        OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR (
+           p_minimum_balance IS NOT NULL
+           AND NOT bursar.is_finite_numeric(p_minimum_balance)
+       )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_request, '{}'::jsonb),
            16384
@@ -702,6 +714,44 @@ BEGIN
     FROM bursar.credit_accounts
     WHERE id = v_account
     FOR UPDATE;
+
+    -- Idempotency is a property of caller input, not of the plan policy that
+    -- happens to be active when a retry arrives. Check it before expiry or
+    -- policy work so an exact retry has no new accounting side effects.
+    v_digest := extensions.digest(
+        convert_to(
+            jsonb_build_object(
+                'amount', bursar.digest_numeric_text(p_amount),
+                'kind', p_kind::text,
+                'operation', p_operation,
+                'bucket', p_bucket_key,
+                'catalog_revision_id', p_catalog_revision_id,
+                'expires_at', p_expires_at,
+                'minimum_balance',
+                    bursar.digest_numeric_text(v_requested_minimum_balance),
+                'request', COALESCE(p_request, '{}'::jsonb)
+            )::text,
+            'UTF8'
+        ),
+        'sha256'
+    );
+
+    SELECT *
+    INTO v_old
+    FROM bursar.credit_ledger_entries
+    WHERE account_id = v_account
+      AND idempotency_key = p_idempotency_key;
+
+    IF FOUND THEN
+        IF v_old.request_digest <> v_digest THEN
+            RETURN QUERY
+            SELECT NULL::uuid, NULL::numeric, false, 'idempotency_conflict';
+        ELSE
+            RETURN QUERY
+            SELECT v_old.id, v_old.balance_after, true, NULL::text;
+        END IF;
+        RETURN;
+    END IF;
 
     -- Expiry is an accounting event, not merely a read filter. Settle this
     -- account's due lots before using its cached balance so a credit line
@@ -777,41 +827,6 @@ BEGIN
     THEN
         RETURN QUERY
         SELECT NULL::uuid, v_balance, false, 'policy_mismatch';
-        RETURN;
-    END IF;
-
-    v_digest := extensions.digest(
-        convert_to(
-            jsonb_build_object(
-                'amount', bursar.digest_numeric_text(p_amount),
-                'kind', p_kind::text,
-                'operation', p_operation,
-                'bucket', p_bucket_key,
-                'catalog_revision_id', p_catalog_revision_id,
-                'expires_at', p_expires_at,
-                'minimum_balance',
-                    bursar.digest_numeric_text(p_minimum_balance),
-                'request', COALESCE(p_request, '{}'::jsonb)
-            )::text,
-            'UTF8'
-        ),
-        'sha256'
-    );
-
-    SELECT *
-    INTO v_old
-    FROM bursar.credit_ledger_entries
-    WHERE account_id = v_account
-      AND idempotency_key = p_idempotency_key;
-
-    IF FOUND THEN
-        IF v_old.request_digest <> v_digest THEN
-            RETURN QUERY
-            SELECT NULL::uuid, NULL::numeric, false, 'idempotency_conflict';
-        ELSE
-            RETURN QUERY
-            SELECT v_old.id, v_old.balance_after, true, NULL::text;
-        END IF;
         RETURN;
     END IF;
 

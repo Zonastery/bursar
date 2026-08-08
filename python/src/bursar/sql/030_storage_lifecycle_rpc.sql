@@ -159,7 +159,7 @@ $$;
 CREATE FUNCTION bursar.claim_outbox_events(
     p_limit integer DEFAULT 100,
     p_lease_seconds integer DEFAULT 60,
-    p_topics text [] DEFAULT NULL
+    p_topics text[] DEFAULT NULL
 )
 RETURNS TABLE (
     event_id bigint,
@@ -180,7 +180,9 @@ AS $$
 DECLARE
     v_token uuid := gen_random_uuid();
 BEGIN
-    IF p_limit NOT BETWEEN 1 AND 1000
+    IF p_limit IS NULL
+       OR p_lease_seconds IS NULL
+       OR p_limit NOT BETWEEN 1 AND 1000
        OR p_lease_seconds NOT BETWEEN 1 AND 3600
        OR (
            p_topics IS NOT NULL
@@ -246,7 +248,7 @@ CREATE FUNCTION bursar.claim_outbox_events(
     p_tenant_id uuid,
     p_limit integer DEFAULT 100,
     p_lease_seconds integer DEFAULT 60,
-    p_topics text [] DEFAULT NULL
+    p_topics text[] DEFAULT NULL
 )
 RETURNS TABLE (
     event_id bigint,
@@ -268,6 +270,8 @@ DECLARE
     v_token uuid := gen_random_uuid();
 BEGIN
     IF p_tenant_id IS NULL
+       OR p_limit IS NULL
+       OR p_lease_seconds IS NULL
        OR p_limit NOT BETWEEN 1 AND 1000
        OR p_lease_seconds NOT BETWEEN 1 AND 3600
        OR (
@@ -491,7 +495,11 @@ AS $$
 DECLARE
     v_updated boolean;
 BEGIN
-    IF p_retry_delay_seconds NOT BETWEEN 0 AND 86400
+    IF p_event_id IS NULL
+       OR p_claim_token IS NULL
+       OR p_retry_delay_seconds IS NULL
+       OR p_attempt_limit IS NULL
+       OR p_retry_delay_seconds NOT BETWEEN 0 AND 86400
        OR p_attempt_limit NOT BETWEEN 1 AND 100
        OR NOT bursar.is_nonempty_bounded_text(p_error, 8192)
     THEN
@@ -542,7 +550,8 @@ DECLARE
     v_default_partition regclass;
     v_default_has_rows boolean := false;
 BEGIN
-    IF p_parent_table NOT IN (
+    IF p_parent_table IS NULL
+       OR p_parent_table NOT IN (
         'usage_charge_payloads',
         'billing_event_payloads'
     )
@@ -1204,10 +1213,10 @@ COMMENT ON FUNCTION bursar.configure_storage(
     integer, integer
 )
 IS 'Configure bounded PostgreSQL event retention and maintenance work budgets while preserving quota correctness.';
-COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text [])
+COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
 IS 'Claim a bounded cross-tenant batch and return each event tenant UUID.';
 COMMENT ON FUNCTION bursar.claim_outbox_events(
-    uuid, integer, integer, text []
+    uuid, integer, integer, text[]
 )
 IS 'Claim a bounded outbox batch for one active tenant.';
 COMMENT ON FUNCTION bursar.export_usage_charge(uuid)
@@ -1237,9 +1246,9 @@ REVOKE ALL ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
     integer, integer
 ) FROM PUBLIC;
-REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.claim_outbox_events(
-    uuid, integer, integer, text []
+    uuid, integer, integer, text[]
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_usage_charge(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_billing_event_payload(uuid) FROM PUBLIC;

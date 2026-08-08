@@ -257,7 +257,7 @@ CREATE FUNCTION bursar.list_ledger(
     p_after_created_at timestamptz DEFAULT NULL,
     p_after_id uuid DEFAULT NULL,
     p_page_size integer DEFAULT 50,
-    p_entry_types text [] DEFAULT NULL,
+    p_entry_types text[] DEFAULT NULL,
     p_from_at timestamptz DEFAULT NULL,
     p_to_at timestamptz DEFAULT NULL,
     p_usage_only boolean DEFAULT FALSE
@@ -923,7 +923,7 @@ RETURNS TABLE (
     plan_key text,
     plan_label text,
     rate_card text,
-    allowed_operations text [],
+    allowed_operations text[],
     credit_allowance_amount numeric,
     credit_allowance_priority integer,
     credit_allowance_reset_unit text,
@@ -1146,7 +1146,7 @@ RETURNS TABLE (
     enforcement text,
     window_start timestamptz,
     window_end timestamptz,
-    emit_at_percent integer []
+    emit_at_percent integer[]
 )
 LANGUAGE sql
 STABLE

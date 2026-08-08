@@ -24,40 +24,64 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "How-to guides",
-      link: {
-        type: "generated-index",
-        slug: "guides",
-        title: "Complete production integration tasks",
-        description:
-          "Task-oriented guides for credits, subscriptions, multitenancy, storage, and agent integrations.",
-      },
+      link: { type: "doc", id: "guides/index" },
       items: [
-        "guides/credit-lifecycle",
-        "guides/financial-safety",
-        "guides/subscription-integration",
-        "guides/multitenancy",
-        "guides/storage-backends",
-        "guides/google-adk",
-        "agent-skills",
+        {
+          type: "category",
+          label: "Deployment and operations",
+          collapsed: false,
+          link: {
+            type: "generated-index",
+            slug: "guides/deployment-and-operations",
+            title: "Deploy and operate Bursar",
+            description:
+              "Provision isolated tenants and configure the production storage boundary.",
+          },
+          items: ["guides/multitenancy", "guides/storage-backends"],
+        },
+        {
+          type: "category",
+          label: "Credits and billing",
+          collapsed: false,
+          link: {
+            type: "generated-index",
+            slug: "guides/credits-and-billing",
+            title: "Operate credits and billing",
+            description:
+              "Protect monetary operations, manage the credit lifecycle, and connect subscriptions and payments.",
+          },
+          items: [
+            "guides/financial-safety",
+            "guides/credit-lifecycle",
+            "guides/subscription-integration",
+          ],
+        },
+        {
+          type: "category",
+          label: "Integrations and tooling",
+          collapsed: false,
+          link: {
+            type: "generated-index",
+            slug: "guides/integrations-and-tooling",
+            title: "Integrate Bursar with agent tooling",
+            description:
+              "Meter Google ADK calls and install the Bursar skill in supported coding agents.",
+          },
+          items: ["guides/google-adk", "agent-skills"],
+        },
       ],
     },
     {
       type: "category",
-      label: "Core concepts",
-      link: {
-        type: "generated-index",
-        slug: "concepts",
-        title: "Understand the Bursar model",
-        description:
-          "Explanations of the ledger, pricing, configuration, plans, billing, and system architecture.",
-      },
+      label: "Concepts",
+      link: { type: "doc", id: "concepts/index" },
       items: [
-        "concepts/data-model",
         "concepts/architecture",
-        "concepts/configuration",
+        "concepts/data-model",
         "concepts/pricing",
         "concepts/plans",
         "concepts/billing",
+        "concepts/configuration",
       ],
     },
     {

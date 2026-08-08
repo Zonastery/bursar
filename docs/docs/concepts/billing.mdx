@@ -150,17 +150,14 @@ deduction. Processing outcomes are `not_configured`, `disabled`,
 quantity, window counts, and payment method, so recharges are idempotent and
 bounded even across process restarts.
 
-## The billing store
+## Billing persistence boundary
 
-Billing state persists in a `PostgresBillingStore` that must be constructed
-**alongside** the credit store — the two stores share the same database,
-tenant, and migrations, and billing only exists when both are passed to
-`Bursar.create(credit_store=..., billing_store=..., commerce_options=...)`.
-Without `billing_store`, `billing` and `commerce` are `None` on the facade and
-`ingest_billing_event` raises.
+Billing and credit state share the same migrated PostgreSQL database and tenant boundary. Billing and commerce capabilities remain unavailable when an integration constructs only the credit store, which keeps payment-provider concerns optional.
+
+Use [Configure storage backends](../guides/storage-backends.mdx) for store construction and [Integrate subscriptions and payments](../guides/subscription-integration.mdx) for provider wiring.
 
 ## Related
 
-- [Canonical configuration](./configuration.mdx) — the `commerce` section in the full document
-- [Billing and subscriptions](../guides/subscription-integration.mdx) — wiring the stores
-- [Plans, entitlements, quotas, and admission](./plans.mdx) — what a subscription entitles
+- [Configuration and catalog revisions](./configuration.mdx): the `commerce` section and immutable publication lifecycle
+- [Integrate subscriptions and payments](../guides/subscription-integration.mdx): production provider and store procedures
+- [Plans and access control](./plans.mdx): what a subscription entitles

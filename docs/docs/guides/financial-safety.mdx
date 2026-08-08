@@ -1,6 +1,6 @@
 ---
 title: Protect financial invariants
-sidebar_label: Financial safety
+sidebar_label: Protect monetary operations
 description: Apply exact money, atomic leases, and idempotent mutations at the account boundary.
 ---
 
@@ -12,10 +12,10 @@ import TabItem from "@theme/TabItem";
 ## Prerequisites
 
 - Provision a tenant and a store first — see [multi-tenancy](./multitenancy.mdx) and [storage backends](./storage-backends.mdx).
-- Read [the credit lifecycle](./credit-lifecycle.mdx) to see the entry types these invariants protect.
+- Read [credit accounting](../concepts/data-model.mdx) for the entries and balances these invariants protect.
 - Read [billing concepts](../concepts/billing.mdx) if you plan to use provider webhook ids as idempotency keys.
 
-## What you'll have when you're done
+## Outcome
 
 - A billing path you can retry: the same idempotency key always replays the same ledger entry.
 - Leases that admit long-running work without charging it twice.
@@ -73,15 +73,6 @@ Reusing a key with a different request is a conflict, not a silent pass:
 the store rejects it, because two different payloads cannot share one ledger
 row. Use provider event ids as keys in webhook handlers so redelivery is a
 no-op — never a double charge. Keys are scoped per account.
-
-## The account row lock
-
-Every mutation runs inside one store transaction that takes a row lock on the
-account before snapshotting the balance and checking idempotency. That makes
-the account single-writer: two concurrent deductions cannot both read the
-same balance, so the invariant "balance equals the sum of ledger entries" is
-maintained under concurrency. There is no read-modify-write in application
-code, and no application-level counter that could drift from the ledger.
 
 ## Leases: the safe path for long-running AI work
 

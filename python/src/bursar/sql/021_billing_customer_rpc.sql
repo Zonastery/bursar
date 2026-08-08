@@ -85,7 +85,10 @@ BEGIN
     FROM bursar.catalog_offers
     WHERE id=p_offer_id;
 
-    IF NOT FOUND
+    IF p_subject_id IS NULL
+       OR p_status IS NULL
+       OR p_cancel_at_period_end IS NULL
+       OR NOT FOUND
        OR NOT bursar.is_nonempty_text(p_provider)
        OR NOT bursar.is_nonempty_text(p_provider_subscription_id)
        OR (
@@ -303,10 +306,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     FROM bursar.billing_subscriptions AS subscription
     WHERE subscription.status = 'past_due'
       AND subscription.grace_ends_at IS NOT NULL
-      AND subscription.grace_ends_at <= p_as_of
+      AND subscription.grace_ends_at <= COALESCE(p_as_of, now())
       AND subscription.grace_expired_at IS NULL
     ORDER BY subscription.grace_ends_at, subscription.id
-    LIMIT LEAST(GREATEST(p_limit, 1), 1000)
+    LIMIT LEAST(GREATEST(COALESCE(p_limit, 100), 1), 1000)
 $$;
 
 CREATE FUNCTION bursar.mark_subscription_grace_expired(
@@ -347,7 +350,19 @@ DECLARE
     v_existing bursar.billing_payments;
     v_metadata jsonb;
 BEGIN
-    IF p_provider_updated_at IS NULL
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_provider)
+       OR NOT bursar.is_nonempty_text(p_provider_payment_id)
+       OR p_amount_minor IS NULL
+       OR p_amount_minor < 0
+       OR p_tax_minor IS NULL
+       OR p_tax_minor < 0
+       OR p_currency IS NULL
+       OR p_currency !~ '^[A-Z]{3}$'
+       OR p_purpose IS NULL
+       OR p_purpose NOT IN ('subscription', 'credit_topup')
+       OR p_status IS NULL
+       OR p_provider_updated_at IS NULL
        OR (p_provider_invoice_id IS NOT NULL
            AND NOT bursar.is_nonempty_text(p_provider_invoice_id))
        OR NOT bursar.is_bounded_json_object(p_metadata, 16384)

@@ -268,7 +268,6 @@ IMMUTABLE
 SET search_path TO ''
 AS $$
 DECLARE
-    v_key text;
     v_value jsonb;
     v_number numeric;
 BEGIN
@@ -282,8 +281,8 @@ BEGIN
         RETURN false;
     END IF;
 
-    FOR v_key, v_value IN
-        SELECT entry.key, entry.value
+    FOR v_value IN
+        SELECT entry.value
         FROM jsonb_each(COALESCE(p_value, '{}'::jsonb)) AS entry
     LOOP
         BEGIN

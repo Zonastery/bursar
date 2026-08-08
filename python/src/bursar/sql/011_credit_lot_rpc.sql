@@ -23,10 +23,12 @@ DECLARE
     v_source_remaining numeric;
     v_source_take numeric;
 BEGIN
-    IF p_kind NOT IN ('expiry', 'revocation', 'refund_clawback')
+    IF p_kind IS NULL
+       OR p_kind NOT IN ('expiry', 'revocation', 'refund_clawback')
        OR NOT bursar.is_finite_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
     THEN
         RAISE EXCEPTION 'invalid_targeted_debit'
             USING ERRCODE = '22023';
@@ -47,17 +49,6 @@ BEGIN
     WHERE id = v_account_id
     FOR UPDATE;
 
-    SELECT *
-    INTO v_lot
-    FROM bursar.credit_lots
-    WHERE id = p_lot_id
-      AND account_id = v_account_id
-    FOR UPDATE;
-
-    IF NOT FOUND OR v_lot.granted - v_lot.consumed < p_amount THEN
-        RAISE EXCEPTION 'lot_unavailable' USING ERRCODE = '22023';
-    END IF;
-
     v_digest := extensions.digest(
         convert_to(
             jsonb_build_object(
@@ -73,7 +64,7 @@ BEGIN
     SELECT *
     INTO v_old
     FROM bursar.credit_ledger_entries
-    WHERE account_id = v_lot.account_id
+    WHERE account_id = v_account_id
       AND idempotency_key = p_idempotency_key;
 
     IF FOUND THEN
@@ -82,6 +73,17 @@ BEGIN
                 USING ERRCODE = '23505';
         END IF;
         RETURN v_old.id;
+    END IF;
+
+    SELECT *
+    INTO v_lot
+    FROM bursar.credit_lots
+    WHERE id = p_lot_id
+      AND account_id = v_account_id
+    FOR UPDATE;
+
+    IF NOT FOUND OR v_lot.granted - v_lot.consumed < p_amount THEN
+        RAISE EXCEPTION 'lot_unavailable' USING ERRCODE = '22023';
     END IF;
 
     PERFORM set_config('bursar.mutation_context', 'internal', true);
@@ -625,7 +627,8 @@ CREATE FUNCTION bursar.refund_credit(
     p_subject_id uuid,
     p_amount numeric,
     p_idempotency_key text,
-    p_original_entry_id uuid
+    p_original_entry_id uuid,
+    p_request_digest bytea DEFAULT NULL
 )
 RETURNS TABLE (
     entry_id uuid,
@@ -661,9 +664,16 @@ DECLARE
     v_source_restore numeric;
     v_restore_remaining numeric;
 BEGIN
-    IF NOT bursar.is_finite_numeric(p_amount)
+    IF p_subject_id IS NULL
+       OR p_original_entry_id IS NULL
+       OR NOT bursar.is_finite_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR (
+           p_request_digest IS NOT NULL
+           AND octet_length(p_request_digest) <> 32
+       )
     THEN
         RETURN QUERY
         SELECT NULL::uuid, NULL::numeric, false, 'invalid_request';
@@ -693,15 +703,18 @@ BEGIN
         RETURN;
     END IF;
 
-    v_digest := extensions.digest(
-        convert_to(
-            jsonb_build_object(
-                'amount', bursar.digest_numeric_text(p_amount),
-                'original_entry_id', p_original_entry_id
-            )::text,
-            'UTF8'
-        ),
-        'sha256'
+    v_digest := COALESCE(
+        p_request_digest,
+        extensions.digest(
+            convert_to(
+                jsonb_build_object(
+                    'amount', bursar.digest_numeric_text(p_amount),
+                    'original_entry_id', p_original_entry_id
+                )::text,
+                'UTF8'
+            ),
+            'sha256'
+        )
     );
 
     SELECT *
@@ -739,22 +752,6 @@ BEGIN
         SELECT NULL::uuid, NULL::numeric, false, 'refund_exceeds_original';
         RETURN;
     END IF;
-
-    SELECT bucket.*
-    INTO v_bucket
-    FROM bursar.catalog_buckets AS bucket
-    JOIN bursar.catalog_revisions AS revision
-      ON revision.id = bucket.catalog_revision_id
-     AND revision.status = 'active'
-    WHERE bucket.is_default;
-
-    IF NOT FOUND THEN
-        RETURN QUERY
-        SELECT NULL::uuid, NULL::numeric, false, 'missing_catalog_bucket';
-        RETURN;
-    END IF;
-
-    v_revision := v_bucket.catalog_revision_id;
 
     PERFORM set_config('bursar.mutation_context', 'internal', true);
 
@@ -917,6 +914,20 @@ BEGIN
     END IF;
 
     IF v_remaining > 0 THEN
+        SELECT bucket.*
+        INTO v_bucket
+        FROM bursar.catalog_buckets AS bucket
+        JOIN bursar.catalog_revisions AS revision
+          ON revision.id = bucket.catalog_revision_id
+         AND revision.status = 'active'
+        WHERE bucket.is_default;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'active default bucket missing'
+                USING ERRCODE = '23503';
+        END IF;
+
+        v_revision := v_bucket.catalog_revision_id;
         v_expiry := bursar.expiry_policy_at(
             p_subject_id,
             v_revision,
@@ -1018,10 +1029,16 @@ DECLARE
     v_result record;
     v_quota_event record;
     v_correction_event_id uuid;
+    v_request_digest bytea;
 BEGIN
     IF p_original_entry_id IS NULL
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (p_reason IS NOT NULL AND NOT bursar.is_nonempty_text(p_reason))
+       OR (
+           p_reason IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_reason, 2048)
+       )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
            16384
@@ -1062,10 +1079,27 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Serialize replay and remaining-amount calculation with every posting on
+    -- this account. In particular, two omitted-amount refunds with different
+    -- keys must not both calculate the same refundable remainder.
     SELECT account.subject_id
     INTO v_subject_id
     FROM bursar.credit_accounts AS account
-    WHERE account.id = v_original.account_id;
+    WHERE account.id = v_original.account_id
+    FOR UPDATE;
+
+    v_request_digest := extensions.digest(
+        convert_to(
+            jsonb_build_object(
+                'amount', bursar.digest_numeric_text(p_amount),
+                'original_entry_id', p_original_entry_id,
+                'reason', p_reason,
+                'metadata', COALESCE(p_metadata, '{}'::jsonb)
+            )::text,
+            'UTF8'
+        ),
+        'sha256'
+    );
 
     SELECT *
     INTO v_existing
@@ -1073,22 +1107,32 @@ BEGIN
     WHERE account_id = v_original.account_id
       AND idempotency_key = p_idempotency_key;
 
-    -- An omitted amount means "refund the currently remaining amount". Check
-    -- replay before recalculating it so a retried full refund is idempotent
-    -- instead of becoming an invalid zero-amount request.
-    IF p_amount IS NULL
-       AND FOUND
-       AND v_existing.kind = 'refund'
-       AND v_existing.reference_entry_id = p_original_entry_id
-    THEN
-        RETURN QUERY
-        SELECT
-            v_existing.id,
-            v_subject_id,
-            v_existing.amount,
-            v_existing.balance_after,
-            true,
-            NULL::text;
+    -- Resolve replay from the original caller request before recalculating an
+    -- omitted amount. Reason and metadata are part of the idempotency contract
+    -- even though they do not change arithmetic.
+    IF FOUND THEN
+        IF v_existing.kind = 'refund'
+           AND v_existing.reference_entry_id = p_original_entry_id
+           AND v_existing.request_digest = v_request_digest
+        THEN
+            RETURN QUERY
+            SELECT
+                v_existing.id,
+                v_subject_id,
+                v_existing.amount,
+                v_existing.balance_after,
+                true,
+                NULL::text;
+        ELSE
+            RETURN QUERY
+            SELECT
+                NULL::uuid,
+                v_subject_id,
+                NULL::numeric,
+                NULL::numeric,
+                false,
+                'idempotency_conflict'::text;
+        END IF;
         RETURN;
     END IF;
 
@@ -1122,7 +1166,8 @@ BEGIN
         v_subject_id,
         v_refund_amount,
         p_idempotency_key,
-        p_original_entry_id
+        p_original_entry_id,
+        v_request_digest
     );
 
     IF v_result.error_code IS NULL AND NOT v_result.replayed THEN

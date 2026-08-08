@@ -100,6 +100,18 @@ BEGIN
     IF p_subject_id IS NULL
        OR NOT bursar.is_nonempty_text(p_provider)
        OR NOT bursar.is_nonempty_text(p_provider_invoice_id)
+       OR NOT bursar.is_nonempty_text(p_status)
+       OR p_amount_due_minor IS NULL
+       OR p_amount_due_minor < 0
+       OR p_amount_paid_minor IS NULL
+       OR p_amount_paid_minor < 0
+       OR p_currency IS NULL
+       OR p_currency !~ '^[A-Z]{3}$'
+       OR (
+           p_period_start IS NOT NULL
+           AND p_period_end IS NOT NULL
+           AND p_period_end <= p_period_start
+       )
        OR p_provider_updated_at IS NULL
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
@@ -232,6 +244,7 @@ BEGIN
     IF NOT bursar.is_nonempty_text(p_provider)
        OR NOT bursar.is_nonempty_text(p_provider_dispute_id)
        OR p_payment_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_status)
        OR p_provider_updated_at IS NULL
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
@@ -339,9 +352,12 @@ DECLARE v_id uuid;
 BEGIN
     IF p_subject_id IS NULL
        OR NOT bursar.is_nonempty_text(p_provider)
+       OR p_checkout_kind IS NULL
        OR p_checkout_kind NOT IN ('subscription', 'credit_topup')
        OR NOT bursar.is_nonempty_text(p_product_key)
+       OR p_request_digest IS NULL
        OR octet_length(p_request_digest) <> 32
+       OR p_expires_at IS NULL
        OR p_expires_at <= now()
        OR (
            p_provider_session_id IS NOT NULL

@@ -1,10 +1,10 @@
 ---
-title: Plans, entitlements, quotas, and admission
+title: Plans and access control
 sidebar_label: Plans and access
-description: What a paid tier gets — allowed operations, rate cards, free credit allowances, features, quotas, and admission policies.
+description: Understand how plans combine allowed operations, rate cards, allowances, entitlements, quotas, credit policies, and admission controls.
 ---
 
-# Plans, entitlements, quotas, and admission
+# Plans and access control
 
 A plan bundles everything a paid tier gets: which operations are allowed,
 which rate card prices them, what credits come free, which features unlock,
@@ -146,49 +146,9 @@ users.
 
 ## Plan assignment
 
-New accounts get a plan via `accounts.on_account_created(...)`, which assigns
-`catalog.default_plan` (or the lowest-rank plan) and applies eligible
-`account_created` grant programs. Assignments change at runtime through the
-credits service:
+Account creation assigns `catalog.default_plan`, or the lowest-rank plan when no default is declared, and applies eligible `account_created` grants. Runtime changes update the assignment, re-anchor the applicable policy windows, and emit a plan-change event.
 
-```python
-from bursar import Bursar
-
-bursar = Bursar.create(credit_store=store)
-bursar.accounts.on_account_created(user_id, "signup:1")   # assigns the default plan
-
-bursar.credits.set_user_plan(user_id, "pro")
-allowance = bursar.credits.check_allowance(user_id)
-print(allowance.allowance_remaining)
-
-feature = bursar.credits.check_feature(user_id, "voice_mode")
-if not feature.has_feature:
-    raise RuntimeError("voice mode is not enabled on this plan")
-```
-
-```ts
-import { Bursar } from "@zonastery/bursar";
-
-const bursar = new Bursar({ creditStore: store });
-await bursar.accounts.onAccountCreated({
-  accountId: userId,
-  eventKey: "signup:1",
-});
-
-await bursar.credits.setUserPlan(userId, "pro");
-const allowance = await bursar.credits.checkAllowance(userId);
-console.log(allowance.allowanceRemaining);
-
-const feature = await bursar.credits.checkFeature(userId, "voice_mode");
-if (!feature.hasFeature) {
-  throw new Error("voice mode is not enabled on this plan");
-}
-```
-
-`set_user_plan` emits `credits.plan_changed`; `unset_user_plan` clears the
-assignment and pauses the allowance. For large installs, `start_plan_migration(from_plan_id, to_plan_id)`
-opens a resumable migration and `migrate_plan_batch(migration_id, batch_size)`
-advances it one bounded batch at a time.
+Large installations use resumable, bounded plan-migration batches instead of one unbounded transaction. Use the generated credits-service reference for exact assignment and migration signatures.
 
 ## Revision policy
 
@@ -200,7 +160,7 @@ version in effect at assignment. When omitted, subscription-backed plans use
 
 ## Related
 
-- [Canonical configuration](./configuration.mdx) — plans and policy references in one document
-- [Financial safety](../guides/financial-safety.mdx) — floors, holds, and the lease lifecycle
-- [Manage the credit lifecycle](../notebooks/credits-and-controls/04_credit_lifecycle.mdx) — end-to-end walkthrough
+- [Configuration and catalog revisions](./configuration.mdx): plans and policy references in one document
+- [Protect monetary operations](../guides/financial-safety.mdx): floors, holds, and the lease lifecycle
+- [Credit lifecycle tutorial](../notebooks/credits-and-controls/04_credit_lifecycle.mdx): end-to-end walkthrough
 - API reference: [Credits service (Python)](../python-api/credit-manager.mdx) and [Credits service (TypeScript)](../javascript-api/credit-manager.mdx)

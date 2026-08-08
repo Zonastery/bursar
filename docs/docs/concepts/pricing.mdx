@@ -1,10 +1,10 @@
 ---
-title: Pricing
-sidebar_label: Pricing
-description: How usage becomes money — operations, measures, rate cards, and price rules with exact decimal charges.
+title: Pricing model
+sidebar_label: Pricing model
+description: Understand how operations, measures, rate cards, and price rules produce exact decimal charges.
 ---
 
-# Pricing
+# Pricing model
 
 import Tabs from "@theme/Tabs";
 import TabItem from "@theme/TabItem";
@@ -192,40 +192,11 @@ The engine:
 evaluates a list of events with the same card selection.
 `get_rate_card_for_plan(plan_key)` returns the card a plan references.
 
-## UsageMetrics
+## Evaluation contract
 
-`UsageMetrics` (`bursar.metrics` / `@zonastery/bursar`) is the engine input:
+The engine receives one declared operation, its non-negative measures, typed dimensions, and optional caller metadata. It returns an exact `CostBreakdown` with the selected rule, rate card, input evidence, and quantized total.
 
-| Field        | Type                                | Meaning                                                    |
-| ------------ | ----------------------------------- | ---------------------------------------------------------- |
-| `operation`  | `str` / `string`                    | A key declared in `pricing.operations`                     |
-| `measures`   | `dict[str, Decimal]`                | Non-negative billable quantities declared by the operation |
-| `dimensions` | `dict[str, str \| Decimal \| bool]` | Typed values selecting the first matching rule             |
-| `metadata`   | `dict[str, Any]`                    | Caller metadata; it does not participate in pricing        |
-
-Declared measures omitted by the caller are treated as zero. The caller's
-operation name is the only way an event is attributed to a price.
-
-## CostBreakdown
-
-`calculate` returns a `CostBreakdown` whose monetary fields are all exact,
-six-decimal `Decimal` values:
-
-| Field               | Meaning                                                                             |
-| ------------------- | ----------------------------------------------------------------------------------- |
-| `model_credits`     | Model-component cost                                                                |
-| `tool_credits`      | Tool-component cost                                                                 |
-| `search_credits`    | Search-component cost                                                               |
-| `cache_savings`     | Cache savings credit                                                                |
-| `fixed_credits`     | Fixed-component cost                                                                |
-| `operation_credits` | The charge this operation produced                                                  |
-| `total`             | Quantized sum, clamped to zero                                                      |
-| `breakdown`         | `dict` with the matched operation, rate card, charge type, measures, and dimensions |
-
-The first five buckets are generic component buckets so host applications can
-classify costs uniformly; the engine reports the operation's charge in
-`operation_credits` and `total`. In the current engine the operation charge is
-the only nonzero bucket.
+Use the [Python pricing reference](../python-api/pricing-engine.mdx) or [TypeScript pricing reference](../javascript-api/pricing-engine.mdx) for field-level input and output contracts.
 
 ## Worked example
 
@@ -245,6 +216,6 @@ the same number in Python and TypeScript.
 
 ## Related
 
-- [Expressions](./expressions.mdx) — the safe formula language for `expression` charges
+- [Expressions](./expressions.mdx): the safe formula language for `expression` charges
 - API reference: [PricingEngine (Python)](../python-api/pricing-engine.mdx) and [PricingEngine (TypeScript)](../javascript-api/pricing-engine.mdx)
-- [Canonical configuration](./configuration.mdx) — where operations and rate cards live
+- [Configuration and catalog revisions](./configuration.mdx): where operations and rate cards live

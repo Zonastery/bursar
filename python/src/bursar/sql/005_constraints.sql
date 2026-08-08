@@ -1138,7 +1138,8 @@ BEGIN
         UPDATE bursar.catalog_revisions
         SET status = 'retired',
             retired_at = now()
-        WHERE status = 'active'
+        WHERE tenant_id = NEW.tenant_id
+          AND status = 'active'
           AND id <> NEW.id;
 
         IF OLD.status <> 'active' THEN

@@ -58,7 +58,7 @@ COMMENT ON FUNCTION bursar.catalog_document_shape_schema() IS
 'Canonical versioned JSON Schema for the complete Bursar pricing catalog.';
 COMMENT ON FUNCTION bursar.matches_catalog_fragment(jsonb, jsonb) IS
 'Validates a projected catalog fragment against a canonical sub-schema with the catalog definitions in scope.';
-COMMENT ON FUNCTION bursar.matches_catalog_definitions(jsonb, VARIADIC text []) IS
+COMMENT ON FUNCTION bursar.matches_catalog_definitions(jsonb, VARIADIC text[]) IS
 'Validates a catalog projection against one or more named definitions from the canonical catalog JSON Schema.';
 COMMENT ON FUNCTION bursar.entitlement_value_schema(jsonb) IS
 'Builds the JSON Schema for a value from a validated boolean, integer, string, or enum entitlement definition.';

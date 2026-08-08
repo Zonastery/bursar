@@ -32,9 +32,67 @@ DECLARE v_result record;
  v_consumed boolean:=false;
 
 BEGIN
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_finite_numeric(p_requested)
+       OR p_requested < 0
+       OR NOT bursar.is_finite_numeric(p_allowance)
+       OR p_allowance < 0
+       OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
+       OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR NOT bursar.is_nonempty_text(p_allowance_key)
+       OR NOT bursar.is_bounded_text(p_allowance_key, 255)
+       OR p_window_start IS NULL
+       OR p_window_end IS NULL
+       OR p_window_end <= p_window_start
+       OR (
+           p_charge_feature IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_charge_feature, 255)
+       )
+       OR (
+           p_model IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_model, 255)
+       )
+       OR (
+           p_region IS NOT NULL
+           AND NOT bursar.is_bounded_text(p_region, 255)
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           1048576
+       )
+       OR NOT bursar.valid_measure_object(
+           COALESCE(p_measures, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.valid_dimension_object(
+           COALESCE(p_dimensions, '{}'::jsonb),
+           65536
+       )
+    THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            0::numeric,
+            0::numeric,
+            false,
+            'invalid_request'::text;
+        RETURN;
+    END IF;
+
     v_allowance:=LEAST(p_requested,GREATEST(p_allowance,0));
 
     v_account:=bursar.account_for_subject(p_subject_id);
+
+    -- Account-scoped serialization makes the pre-charge idempotency check and
+    -- allowance consumption one admission decision. Without it, two first
+    -- attempts can both consume allowance before charge_usage sees the replay.
+    PERFORM 1
+    FROM bursar.credit_accounts
+    WHERE id = v_account
+    FOR UPDATE;
 
     IF EXISTS (SELECT 1 FROM bursar.credit_usage_charges WHERE account_id=v_account AND idempotency_key=p_idempotency_key) THEN
         SELECT * INTO v_result
@@ -78,6 +136,11 @@ BEGIN
         SET consumed=aw.consumed-v_allowance
         WHERE aw.account_id=v_account AND aw.allowance_key=p_allowance_key AND aw.window_start=p_window_start
           AND aw.window_end=p_window_end AND aw.consumed>=v_allowance;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'allowance rollback is inconsistent'
+                USING ERRCODE = '23514';
+        END IF;
 
     END IF;
 

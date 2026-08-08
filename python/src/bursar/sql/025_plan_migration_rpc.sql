@@ -17,8 +17,11 @@ DECLARE
     v_current bursar.account_plan_assignments;
     v_starts_at timestamptz := COALESCE(p_starts_at, now());
 BEGIN
-    IF p_ends_at IS NOT NULL
+    IF p_subject_id IS NULL
+       OR p_plan_id IS NULL
+       OR (p_ends_at IS NOT NULL
        AND p_ends_at <= v_starts_at
+       )
     THEN
         RETURN false;
     END IF;
@@ -324,6 +327,11 @@ DECLARE
     v_to bursar.catalog_plans;
     v_allowance_compatible boolean;
 BEGIN
+    IF p_require_compatible IS NULL THEN
+        RAISE EXCEPTION 'compatibility requirement must be explicit'
+            USING ERRCODE = '22023';
+    END IF;
+
     SELECT * INTO v_from
     FROM bursar.catalog_plans
     WHERE id = p_from_plan_id;
@@ -1025,9 +1033,14 @@ DECLARE
     target_offer bursar.catalog_offers;
     change_row bursar.billing_subscription_changes;
 BEGIN
-    IF NOT bursar.is_nonempty_text(p_idempotency_key)
+    IF p_subscription_id IS NULL
+       OR p_to_offer_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR p_effective_at IS NULL
+       OR p_effective_behavior IS NULL
        OR p_effective_behavior NOT IN ('immediate', 'renewal')
+       OR p_proration_behavior IS NULL
        OR p_proration_behavior NOT IN (
            'provider_default',
            'invoice_immediately',
@@ -1148,7 +1161,9 @@ DECLARE
     target_plan bursar.catalog_plans;
     v_account uuid;
 BEGIN
-    IF p_state NOT IN (
+    IF p_change_id IS NULL
+       OR p_state IS NULL
+       OR p_state NOT IN (
         'awaiting_payment', 'scheduled', 'applied', 'canceled', 'failed'
     )
        OR (

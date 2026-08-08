@@ -1,257 +1,103 @@
 ---
-title: Canonical configuration
+title: Configuration and catalog revisions
 sidebar_label: Configuration
-description: The strict, versioned BursarConfig document — operations, rate cards, credits, plans, and validation — shared by both SDKs.
+description: Understand how one validated BursarConfig document defines pricing, credits, plans, commerce, and immutable catalog revisions.
+keywords:
+  - BursarConfig
+  - configuration schema
+  - catalog revisions
+  - pricing configuration
 ---
 
-# Canonical configuration
+# Configuration and catalog revisions
 
-`BursarConfig` is one strict versioned document. Pydantic defines the Python
-contract, generates the published JSON Schema, and AJV validates the same
-contract in TypeScript. Unknown fields and legacy shapes are rejected, and the
-same document bills identically in both SDKs.
+`BursarConfig` brings the pricing, credit, access, and commerce models together in one strict versioned document. Python and TypeScript validate the same schema, so one active catalog revision produces the same policy decisions in both SDKs.
 
-The top-level sections are organized by responsibility:
+## One document owns product policy
 
-| Section        | Purpose                                                         |
-| -------------- | --------------------------------------------------------------- |
-| `pricing`      | Usage operations, measures, dimensions, and reusable rate cards |
-| `credits`      | Buckets, spending policies, grants, and display conversion      |
-| `entitlements` | Typed product features                                          |
-| `admission`    | Reusable concurrency policies                                   |
-| `plans`        | Product access, allowances, quotas, and policy references       |
-| `commerce`     | Providers, offers, and auto-recharge guardrails                 |
-| `catalog`      | Catalog-wide settings such as the default signup plan           |
+Each top-level section owns one part of the product model:
 
-Only `version` and `credits` are required. Fixed v1 accounting defaults to
-`credit`, six decimal places, and half-up rounding, so authors do not need to
-repeat that block. Plan `rank` defaults to `0`.
+| Section        | Responsibility                                                        |
+| -------------- | --------------------------------------------------------------------- |
+| `pricing`      | Metered operations, measures, dimensions, and reusable rate cards     |
+| `credits`      | Credit buckets, spending policies, grants, and display conversion     |
+| `entitlements` | Typed product features                                                |
+| `admission`    | Reusable concurrency policies                                         |
+| `plans`        | Product access, allowances, quotas, and policy references             |
+| `commerce`     | Payment providers, offers, plan changes, and auto-recharge guardrails |
+| `catalog`      | Catalog-wide settings, including the default signup plan              |
 
-The canonical demo configuration below matches `base_config()` from the shared
-sample code: two operations, one rate card, two credit buckets, two
-entitlements, an admission policy, the `free`/`pro` plans, and Stripe offers
-with auto-recharge guardrails.
+Keeping these domains in one document lets validation reject broken cross-references before publication. A plan cannot name an unknown rate card, an offer cannot name an unknown plan, and a price rule cannot use a measure or dimension that its operation does not declare.
 
-:::note
+## Validation is shared across SDKs
 
-This is the same canonical configuration the [quickstart](../quickstart.mdx)
-publishes, shown in full. The quickstart uses a trimmed version with one
-operation and no entitlements, admission, or commerce sections; the document
-below is the complete shape.
+Pydantic defines the Python contract and generates the published JSON Schema. TypeScript validates the same contract with Ajv. Unknown fields and legacy shapes are rejected instead of being ignored.
 
-:::
+The validation boundary also enforces these accounting rules:
+
+- Exact decimal values use strings instead of binary floating-point numbers
+- Offer prices use integer minor units with an explicit currency
+- Matcher operators agree with their declared dimension types
+- Expressions reference only measures declared by their operation
+- Credit buckets and allowance priorities share one collision-free ordering namespace
+- Subscription-backed plans declare when catalog revisions take effect
+
+The smallest valid document declares its schema version and credit boundary:
 
 ```yaml
 version: 1
-catalog:
-  default_plan: free
-
-pricing:
-  operations:
-    completion:
-      measures:
-        input_tokens: { unit: token }
-        output_tokens: { unit: token }
-        cache_read_tokens: { unit: token }
-      dimensions:
-        model: { type: string }
-    execution:
-      measures:
-        jobs: { unit: job }
-        compute_seconds: { unit: second }
-      dimensions:
-        model: { type: string }
-  rate_cards:
-    standard:
-      operations:
-        completion:
-          rules:
-            - when:
-                model: { op: in, values: [gpt-4o, gpt-4o-mini] }
-              charge:
-                type: sum
-                components:
-                  - {
-                      type: per_unit,
-                      measure: input_tokens,
-                      rate: "0.0025",
-                      unit_size: "1000000",
-                    }
-                  - {
-                      type: per_unit,
-                      measure: output_tokens,
-                      rate: "0.0100",
-                      unit_size: "1000000",
-                    }
-                  - {
-                      type: per_unit,
-                      measure: cache_read_tokens,
-                      rate: "0.00125",
-                      unit_size: "1000000",
-                    }
-          unmatched:
-            action: charge
-            charge:
-              type: expression
-              formula: input_tokens * 0.005 + output_tokens * 0.015
-        execution:
-          rules:
-            - when:
-                model: { op: eq, value: gpt-4o }
-              charge: { type: per_unit, measure: jobs, rate: "0.04" }
-          unmatched: { action: reject }
-
 credits:
   buckets:
-    promotional: { priority: 1 }
     purchased: { priority: 10 }
   default_bucket: purchased
-
-entitlements:
-  features:
-    voice_mode: { type: boolean, default: false }
-    max_context:
-      { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
-
-admission:
-  policies:
-    default: { max_in_flight: 4 }
-
-plans:
-  free:
-    display_name: Free
-    rank: 0
-    rate_card: standard
-    allowed_operations: [completion]
-    credit_allowance:
-      amount: "10000"
-      priority: 5
-      window: { type: calendar, unit: month, count: 1 }
-  pro:
-    display_name: Pro
-    rank: 1
-    rate_card: standard
-    allowed_operations: [completion, execution]
-    features: { voice_mode: true, max_context: 200000 }
-    quotas:
-      daily_tokens:
-        operation: completion
-        measure: output_tokens
-        limit: "500000"
-        window: { type: calendar, unit: day, count: 1 }
-        enforcement: block
-        emit_at_percent: [80, 100]
-    admission_policy: default
-
-commerce:
-  providers:
-    stripe: { type: stripe }
-  offers:
-    pro_monthly:
-      type: subscription
-      display_name: Pro Monthly
-      price: { amount_minor: 2000, currency: USD }
-      providers:
-        stripe: { type: stripe_price, price_id: price_pro_monthly }
-      plan: pro
-      billing_interval: { unit: month, count: 1 }
-      cycle_grant:
-        amount: "50000"
-        bucket: purchased
-        renewal: replace_previous
-    credits_10k:
-      type: topup
-      display_name: "10,000 Credits"
-      price: { amount_minor: 500, currency: USD }
-      providers:
-        stripe: { type: stripe_price, price_id: price_credits_10k }
-      credits_per_unit: "10000"
-      quantity: { minimum: 1, maximum: 10, default: 1 }
-      bucket: purchased
-      lot_behavior: separate_lots
-  auto_recharge:
-    eligible_topups: [credits_10k]
-    balance_below: { minimum: "1000", maximum: "5000", default: "2000" }
-    rearm_above: "20000"
-    quantity: { minimum: 1, maximum: 10, default: 1 }
-    limits:
-      max_purchases: 5
-      window: { type: calendar, unit: day, count: 1 }
-      max_charge_minor: 5000
-      cooldown: { unit: hour, count: 1 }
-      max_consecutive_failures: 3
-      failure_action: pause
 ```
 
-All exact decimal values are strings; offer prices are integer minor units with
-an explicit currency. Rate matcher operators must agree with their dimension
-type: `prefix` is for strings, `range` is for numbers, and matcher values must
-have the declared string, number, or boolean type. Expression charges may
-reference only the measures declared by their operation.
+Run validation before publication:
 
-For subscription-backed plans, explicitly setting `revision_policy` is
-recommended. When omitted, subscription-backed plans use `next_renewal` and
-other plans use `immediate`.
-
-Credit bucket priorities and `credit_allowance.priority` share one ordering
-namespace, with lower numbers consumed first. Priorities cannot collide. When
-an allowance omits `priority`, it retains the legacy behavior of spending before
-all buckets.
-
-Validate before publication:
-
-```bash
+```bash title="Terminal"
 bursar config validate bursar.yaml
 ```
 
-Use `--json` to receive native Pydantic diagnostics suitable for CI and editor
-integrations.
+Use `--json` for structured diagnostics in continuous integration (CI) and editor integrations. Use the [published JSON Schema](https://zonastery.github.io/bursar/pricing-config.schema.json) for editor completion and the [validated complete example](https://github.com/zonastery/bursar/blob/main/skills/bursar/assets/pricing.config.example.yaml) as the canonical full configuration sample.
 
-## How configuration reaches the database
+## Catalog revisions are immutable
 
-Publishing writes an immutable catalog revision; activating selects it.
+Publishing validates the document and stores an immutable catalog revision. Activation selects the revision used for new pricing and policy decisions within one tenant.
 
-| Step                 | API                                                                         | Effect                                                                                      |
-| -------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Publish a draft      | `bursar.catalog.publish_draft(config, label)` / `publishDraft`              | Validates the document and inserts a `published` revision; the live catalog does not change |
-| Activate             | `bursar.catalog.activate(version)` / `activate(version)`                    | Marks one revision `active`; exactly one active revision exists per tenant                  |
-| Publish and activate | `bursar.catalog.publish_and_activate(config, label)` / `publishAndActivate` | One-shot: validate, insert, and activate                                                    |
-
-Revisions are immutable and identified by a SHA-256 digest of the canonical
-document: publishing a document whose digest matches an existing revision
-reuses it instead of inserting a duplicate. Activation deactivates the
-previous revision, records the activation in history, and schedules the plan
-rollout for subscribers. `catalog.get_config()` / `getConfig()` returns the
-active document as a validated `BursarConfig`, and `public_view()` /
-`publicView()` projects the public subset.
-
-For operations, the `bursar config` CLI covers the same lifecycle: `validate`
-checks a file without applying it, `set` always creates a new version, `get`
-prints the active config, `list` shows all versions (`*` marks the active
-one), `activate` switches the active version, `diff` compares two versions,
-and `schema` prints the JSON Schema.
-
-## Signup account trigger
-
-For immediate plan assignment and `account_created` grants, attach Bursar's
-tenant-aware trigger function to the SaaS principal table and pass the
-provisioned tenant slug:
-
-```sql
-DROP TRIGGER IF EXISTS bursar_account_created ON app.users;
-CREATE TRIGGER bursar_account_created
-AFTER INSERT ON app.users
-FOR EACH ROW
-EXECUTE FUNCTION bursar.provision_subject_account_on_insert('acme');
+```mermaid
+flowchart LR
+    F[Configuration file] --> V[Validate]
+    V --> P[Publish immutable revision]
+    P --> A[Activate for tenant]
+    A --> R[Apply revision policy]
+    R --> N[New and existing accounts]
 ```
 
-The hook resolves the active tenant, binds transaction-local tenant context,
-assigns the active default plan, and applies eligible `account_created` grant
-programs. The principal UUID must be available as `NEW.id`; host migrations
-need no wrapper function or access to Bursar-owned tables.
+Each revision has a SHA-256 digest of its canonical document. Publishing the same digest reuses the existing revision, while activation records history and leaves prior revisions available for audit and rollback.
+
+The catalog exposes three lifecycle operations:
+
+| Operation            | Effect                                                                  |
+| -------------------- | ----------------------------------------------------------------------- |
+| Publish a draft      | Validate and store a revision without changing the active catalog       |
+| Activate a revision  | Select one active revision for the tenant and schedule applicable moves |
+| Publish and activate | Validate, store, and activate one document in a single workflow         |
+
+Use the [CLI reference](../cli.mdx) for exact `config validate`, `set`, `get`, `list`, `activate`, `diff`, and `schema` commands. Use the generated SDK reference for programmatic catalog signatures.
+
+## Revision policy controls rollout
+
+Plans define when an activated revision reaches assigned accounts. `immediate` applies the new revision at activation, `next_renewal` waits for the next subscription renewal, and `pinned` keeps the assigned revision until an explicit migration.
+
+Subscription-backed plans default to `next_renewal`; other plans default to `immediate`. Declare the policy explicitly when a rollout delay changes customer-visible pricing or access.
+
+## Public projections exclude private configuration
+
+The active configuration remains the internal policy document. Catalog projection methods expose only the product fields needed by a client application and keep provider identifiers, internal policies, and private configuration out of public responses.
 
 ## Related
 
-- [Pricing](./pricing.mdx) — operations, rate cards, and charge types
-- [Plans, entitlements, quotas, and admission](./plans.mdx) — access bundles and policy references
-- [Billing and commerce](./billing.mdx) — providers, offers, and auto-recharge
+- [Pricing model](./pricing.mdx): operations, rate cards, and charge types
+- [Plans and access control](./plans.mdx): allowances, entitlements, quotas, and revision policy
+- [Billing and commerce](./billing.mdx): providers, offers, subscriptions, and auto-recharge
+- [Create your first metered charge](../quickstart.mdx): validate and publish a minimal configuration

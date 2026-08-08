@@ -11,10 +11,10 @@ The site follows the [Diátaxis](https://diataxis.fr/) content model. Each page 
 | Get started   | Understand the product boundary and complete the first integration | `docs/intro.mdx`, `docs/quickstart.mdx`             |
 | Tutorials     | Learn through a complete, reproducible exercise                    | `../samples/python/notebooks/`                      |
 | How-to guides | Complete a production task                                         | `docs/guides/`                                      |
-| Core concepts | Understand design decisions and system behavior                    | `docs/concepts/`                                    |
-| Reference     | Look up exact commands, types, and schema details                  | `docs/cli.mdx`, `docs/*-api/`, generated references |
+| Concepts      | Understand design decisions and system behavior                    | `docs/concepts/`                                    |
+| Reference     | Look up exact commands, configuration, types, and schema details   | `docs/cli.mdx`, `docs/*-api/`, generated references |
 
-The sidebar exposes these categories in that order. Do not organize pages around internal package names unless the page is API reference.
+The sidebar exposes these categories in that order. Authored category landing pages define the recommended reading and production sequences, while Docusaurus renders their child pages with native document cards. Do not organize pages around internal package names unless the page is API reference.
 
 ## Canonical sources
 
