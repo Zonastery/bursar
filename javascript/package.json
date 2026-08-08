@@ -1,6 +1,6 @@
 {
   "name": "@zonastery/bursar",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "packageManager": "bun@1.3.14",
   "description": "Usage metering, credits, subscriptions, and payments for AI applications",
   "type": "module",

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Bursar",
+  "description": "Open-source credit-ledger and billing SDK for AI SaaS applications, with synchronized Python and JavaScript clients.",
+  "folders": ["docs", "javascript", "python"],
+  "excludeFolders": [
+    ".docusaurus",
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "coverage",
+    "dist",
+    "node_modules",
+    "python-coverage-report"
+  ],
+  "excludeFiles": ["package-lock.json", "uv.lock"],
+  "rules": [
+    "Keep the Python bursar package and the @zonastery/bursar JavaScript package behaviorally aligned.",
+    "Treat python/src/bursar/sql/*.sql as the source of truth for the PostgreSQL schema.",
+    "Use the shared tests/parity/expression_cases.json fixture when documenting expression behavior.",
+    "Use Python 3.12+ and Node.js 22+ examples unless a page states otherwise."
+  ]
+}
