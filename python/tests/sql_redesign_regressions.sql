@@ -928,7 +928,10 @@ BEGIN
                 'auto-recharge policy accepted non-finite numeric case %',
                 v_case;
         EXCEPTION
-            WHEN check_violation THEN
+            -- Fixed-scale numeric columns can reject Infinity during the
+            -- cast before the table CHECK runs; either SQLSTATE proves the
+            -- persistence boundary rejected the non-finite value.
+            WHEN check_violation OR numeric_value_out_of_range THEN
                 NULL;
         END;
     END LOOP;
