@@ -1486,6 +1486,10 @@ DECLARE
     v_exact record;
     v_conflict record;
     v_bucket_result record;
+    v_large_metadata jsonb := jsonb_build_object(
+        'padding',
+        repeat('x', 16365)
+    );
 BEGIN
     SELECT revision_id
     INTO v_revision
@@ -1547,7 +1551,7 @@ BEGIN
         v_subject,
         'event-1',
         v_referrer,
-        'US',
+        ' us ',
         '{"source":"campaign-a"}'::jsonb
     );
 
@@ -1561,6 +1565,70 @@ BEGIN
             'exact grant-program retry did not replay: % / %',
             row_to_json(v_first),
             row_to_json(v_exact);
+    END IF;
+
+    IF NOT bursar.is_bounded_json_object(v_large_metadata, 16384) THEN
+        RAISE EXCEPTION 'grant metadata boundary fixture is not valid';
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-invalid-blank-region',
+        v_referrer,
+        '   ',
+        '{}'::jsonb
+    );
+    IF v_conflict.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'blank grant region was accepted';
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-invalid-large-region',
+        v_referrer,
+        repeat('U', 256),
+        '{}'::jsonb
+    );
+    IF v_conflict.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'oversized grant region was accepted';
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-invalid-malformed-region',
+        v_referrer,
+        'US1',
+        '{}'::jsonb
+    );
+    IF v_conflict.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'malformed grant region was accepted';
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-enriched-metadata-too-large',
+        v_referrer,
+        'US',
+        v_large_metadata
+    );
+    IF v_conflict.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'enriched grant event metadata exceeded its budget';
     END IF;
 
     SELECT *

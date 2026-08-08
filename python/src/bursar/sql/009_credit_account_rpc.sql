@@ -15,6 +15,14 @@ DECLARE
     v_revision uuid;
     v_program_key text;
 BEGIN
+    -- Canonicalize short ISO-like region codes once. The raw-size guard keeps
+    -- pathological inputs out of upper()/btrim() while still accepting modest
+    -- surrounding whitespace from HTTP clients.
+    v_region := CASE
+        WHEN p_region IS NULL OR octet_length(p_region) > 16 THEN NULL
+        ELSE upper(btrim(p_region))
+    END;
+
     IF p_subject_id IS NULL
        OR p_kind IS NULL
        OR p_kind NOT IN ('personal', 'team')
@@ -137,6 +145,13 @@ BEGIN
            16384
        )
        OR (
+           p_region IS NOT NULL
+           AND (
+               octet_length(p_region) > 16
+               OR v_region !~ '^[A-Z]{2,3}$'
+           )
+       )
+       OR (
            p_trigger_type = 'referral_completed'
            AND p_referrer_subject_id IS NULL
        )
@@ -153,9 +168,20 @@ BEGIN
         RETURN;
     END IF;
 
-    v_region := upper(p_region);
     v_event_metadata := COALESCE(p_metadata, '{}'::jsonb)
         || jsonb_build_object('region', v_region);
+    IF NOT bursar.is_bounded_json_object(v_event_metadata, 16384) THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'invalid_request';
+        RETURN;
+    END IF;
 
     SELECT id
     INTO v_revision
@@ -206,7 +232,7 @@ BEGIN
             COALESCE(v_program.availability->'regions', '[]'::jsonb)
         ) > 0
         AND (
-            p_region IS NULL
+            v_region IS NULL
             OR NOT (
                 v_program.availability->'regions' ? v_region
             )
@@ -261,7 +287,7 @@ BEGIN
             COALESCE(v_program.eligibility->'regions', '[]'::jsonb)
         ) > 0
         AND (
-            p_region IS NULL
+            v_region IS NULL
             OR NOT (
                 v_program.eligibility->'regions' ? v_region
             )
@@ -438,13 +464,12 @@ BEGIN
                 v_award.id,
                 v_recipient
             ),
-            COALESCE(p_metadata, '{}'::jsonb)
+            v_event_metadata
                 || jsonb_build_object(
                     'grant_event_id', v_event.id,
                     'grant_program_id', v_program.id,
                     'grant_award_id', v_award.id,
-                    'trigger', p_trigger_type,
-                    'region', v_region
+                    'trigger', p_trigger_type
                 ),
             v_award.bucket_key,
             v_revision,
