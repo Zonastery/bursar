@@ -215,7 +215,7 @@ $$;
 
 CREATE FUNCTION bursar.matches_catalog_definitions(
     p_value jsonb,
-    VARIADIC p_definition_names text[]
+    VARIADIC p_definition_names text []
 ) RETURNS boolean
 LANGUAGE sql
 IMMUTABLE

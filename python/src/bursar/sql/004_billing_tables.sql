@@ -520,7 +520,7 @@ CREATE TABLE bursar.catalog_auto_recharge_policies (
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     catalog_revision_id uuid PRIMARY KEY
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    eligible_topup_keys text[] NOT NULL CHECK (cardinality(eligible_topup_keys) > 0),
+    eligible_topup_keys text [] NOT NULL CHECK (cardinality(eligible_topup_keys) > 0),
     default_topup_key text NOT NULL,
     quantity_min integer NOT NULL CHECK (quantity_min > 0),
     quantity_max integer NOT NULL CHECK (quantity_max >= quantity_min),

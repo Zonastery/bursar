@@ -618,10 +618,10 @@ GRANT EXECUTE ON FUNCTION bursar.configure_storage(
     integer, integer
 ) TO bursar_operator;
 GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
-    integer, integer, text[]
+    integer, integer, text []
 ) TO bursar_operator;
 GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
-    uuid, integer, integer, text[]
+    uuid, integer, integer, text []
 ) TO bursar_operator;
 GRANT EXECUTE ON FUNCTION bursar.export_usage_charge(uuid)
 TO bursar_operator;
@@ -664,10 +664,10 @@ COMMENT ON FUNCTION bursar.current_tenant_is_active() IS
 COMMENT ON FUNCTION bursar.secure_tenant_partition(regclass) IS
 'Revokes direct access and applies forced tenant RLS to a managed partition.';
 
-COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text[]) IS
+COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) IS
 'Claims cross-tenant outbox work and returns the owning tenant UUID.';
 
-COMMENT ON FUNCTION bursar.claim_outbox_events(uuid, integer, integer, text[]) IS
+COMMENT ON FUNCTION bursar.claim_outbox_events(uuid, integer, integer, text []) IS
 'Claims outbox work for one active tenant and returns the owning tenant UUID.';
 
 COMMENT ON FUNCTION bursar.create_tenant(uuid, text, text) IS

@@ -159,7 +159,7 @@ $$;
 CREATE FUNCTION bursar.claim_outbox_events(
     p_limit integer DEFAULT 100,
     p_lease_seconds integer DEFAULT 60,
-    p_topics text[] DEFAULT NULL
+    p_topics text [] DEFAULT NULL
 )
 RETURNS TABLE (
     event_id bigint,
@@ -248,7 +248,7 @@ CREATE FUNCTION bursar.claim_outbox_events(
     p_tenant_id uuid,
     p_limit integer DEFAULT 100,
     p_lease_seconds integer DEFAULT 60,
-    p_topics text[] DEFAULT NULL
+    p_topics text [] DEFAULT NULL
 )
 RETURNS TABLE (
     event_id bigint,
