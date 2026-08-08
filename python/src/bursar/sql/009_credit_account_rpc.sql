@@ -15,14 +15,6 @@ DECLARE
     v_revision uuid;
     v_program_key text;
 BEGIN
-    -- Canonicalize short ISO-like region codes once. The raw-size guard keeps
-    -- pathological inputs out of upper()/btrim() while still accepting modest
-    -- surrounding whitespace from HTTP clients.
-    v_region := CASE
-        WHEN p_region IS NULL OR octet_length(p_region) > 16 THEN NULL
-        ELSE upper(btrim(p_region))
-    END;
-
     IF p_subject_id IS NULL
        OR p_kind IS NULL
        OR p_kind NOT IN ('personal', 'team')
@@ -130,6 +122,14 @@ DECLARE
     v_region text;
     v_event_metadata jsonb;
 BEGIN
+    -- Canonicalize short ISO-like region codes once. The raw-size guard keeps
+    -- pathological inputs out of upper()/btrim() while still accepting modest
+    -- surrounding whitespace from HTTP clients.
+    v_region := CASE
+        WHEN p_region IS NULL OR octet_length(p_region) > 16 THEN NULL
+        ELSE upper(btrim(p_region))
+    END;
+
     IF p_subject_id IS NULL
        OR p_trigger_type IS NULL
        OR p_trigger_type NOT IN (
