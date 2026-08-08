@@ -18,6 +18,7 @@ from bursar.billing.types import (
 from bursar.bursar import BillingEventSink
 from bursar.providers._shared import (
     call_billing_event_sink,
+    optional_provider_boolean,
     optional_provider_string,
     require_currency,
     require_minor_units,
@@ -180,6 +181,12 @@ def _subscription_fields(data: dict[str, Any], metadata: dict[str, str]) -> dict
     )
     if period_start:
         result["period_start"] = period_start
+    cancel_at_period_end = optional_provider_boolean(
+        data.get("cancel_at_next_billing_date"),
+        "Dodo subscription.cancel_at_next_billing_date",
+    )
+    if cancel_at_period_end is not None:
+        result["cancel_at_period_end"] = cancel_at_period_end
     return result
 
 

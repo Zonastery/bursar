@@ -91,6 +91,7 @@ export const DODO_SUBSCRIPTION_ON_HOLD = {
 export const DODO_SUBSCRIPTION_PLAN_CHANGED = {
   subscription_id: "sub_dodo_plan_change_001",
   product_id: "prod_sage",
+  cancel_at_next_billing_date: true,
 };
 
 export const DODO_PAYMENT_SUCCEEDED = {

@@ -40,39 +40,6 @@ BEGIN
     WHERE account_id = v_account
     FOR UPDATE;
 
-    IF FOUND
-       AND p_starts_at IS NOT NULL
-       AND p_starts_at > now()
-    THEN
-        INSERT INTO bursar.plan_assignment_changes(
-            account_id,
-            from_plan_id,
-            to_plan_id,
-            change_kind,
-            strategy,
-            effective_at,
-            reason
-        )
-        VALUES (
-            v_account,
-            v_current.plan_id,
-            p_plan_id,
-            'manual',
-            'next_renewal',
-            p_starts_at,
-            'manual_schedule'
-        )
-        ON CONFLICT (account_id, change_kind) WHERE state = 'scheduled' DO UPDATE
-        SET from_plan_id = EXCLUDED.from_plan_id,
-            to_plan_id = EXCLUDED.to_plan_id,
-            strategy = EXCLUDED.strategy,
-            effective_at = EXCLUDED.effective_at,
-            reason = EXCLUDED.reason,
-            error_message = NULL;
-
-        RETURN true;
-    END IF;
-
     -- Billing providers may re-provision the same commercial plan on every
     -- webhook. Keep catalog rollout timing authoritative: a same-key
     -- reassignment may refresh the assignment period, but it must not jump to
@@ -102,6 +69,43 @@ BEGIN
                   ELSE p_ends_at
               END
           );
+
+        RETURN true;
+    END IF;
+
+    -- Evaluate same-plan idempotency before scheduling. Otherwise a harmless
+    -- refresh whose timestamp is slightly ahead of the database clock tries
+    -- to insert a from-plan == to-plan transition, which is intentionally
+    -- forbidden by plan_assignment_changes.
+    IF FOUND
+       AND p_starts_at IS NOT NULL
+       AND p_starts_at > now()
+    THEN
+        INSERT INTO bursar.plan_assignment_changes(
+            account_id,
+            from_plan_id,
+            to_plan_id,
+            change_kind,
+            strategy,
+            effective_at,
+            reason
+        )
+        VALUES (
+            v_account,
+            v_current.plan_id,
+            p_plan_id,
+            'manual',
+            'next_renewal',
+            p_starts_at,
+            'manual_schedule'
+        )
+        ON CONFLICT (account_id, change_kind) WHERE state = 'scheduled' DO UPDATE
+        SET from_plan_id = EXCLUDED.from_plan_id,
+            to_plan_id = EXCLUDED.to_plan_id,
+            strategy = EXCLUDED.strategy,
+            effective_at = EXCLUDED.effective_at,
+            reason = EXCLUDED.reason,
+            error_message = NULL;
 
         RETURN true;
     END IF;

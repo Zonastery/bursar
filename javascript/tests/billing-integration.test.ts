@@ -1857,7 +1857,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   // ── Subscription plan changed ───────────────────────────────────────────
 
   it("subscription plan changed", async () => {
-    const { cm, bm } = await makePgComponents(pool);
+    const { cm, bm, bs } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_pc_1",
@@ -1867,8 +1867,20 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       subscription: {
         providerSubscriptionId: "sub_pc",
         status: "active",
+        periodStart: TEST_INSTANT,
         refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
       },
+    });
+    const originalPlan = await cm.getUserPlan(USER_ID);
+    const target = await bs.resolveBillingOffer(PROVIDER, null, "price_yearly_10000");
+    expect(target).not.toBeNull();
+    await bm.createBillingSubscriptionChange({
+      provider: PROVIDER,
+      providerSubscriptionId: "sub_pc",
+      toOfferId: target!.offerId,
+      effectiveAt: "2030-01-01T00:00:00.000Z",
+      effective: "immediate",
+      idempotencyKey: "change:sub_pc:enterprise",
     });
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
@@ -1879,12 +1891,15 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       subscription: {
         providerSubscriptionId: "sub_pc",
         status: "active",
-        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+        refs: { priceId: "price_yearly_10000" },
       },
     });
     expect(result.action).toBe("subscription_plan_changed");
     const plan = await cm.getUserPlan(USER_ID);
-    expect(plan.planId).not.toBeNull();
+    expect(plan.planKey).toBe("enterprise");
+    expect(plan.planAssignedAt?.toISOString()).toBe(originalPlan.planAssignedAt?.toISOString());
+    expect(await bm.getOpenBillingSubscriptionChange(PROVIDER, "sub_pc")).toBeNull();
+    expect((await bm.getActiveSubscription(USER_ID))?.offerKey).toBe("enterprise_yearly");
   });
 
   // ── Ignored event types ─────────────────────────────────────────────────

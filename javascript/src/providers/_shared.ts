@@ -20,6 +20,14 @@ export function optionalProviderString(value: unknown, field: string): string | 
   return requireProviderString(value, field);
 }
 
+export function optionalProviderBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TypeError(`${field} must be a boolean`);
+  }
+  return value;
+}
+
 export function requireMinorUnits(value: unknown, field: string, positive = false): number {
   const amount =
     typeof value === "number"

@@ -96,6 +96,7 @@ DODO_SUBSCRIPTION_ON_HOLD = {
 DODO_SUBSCRIPTION_PLAN_CHANGED = {
     "subscription_id": "sub_dodo_plan_change_001",
     "product_id": "prod_sage",
+    "cancel_at_next_billing_date": True,
 }
 
 DODO_PAYMENT_SUCCEEDED = {

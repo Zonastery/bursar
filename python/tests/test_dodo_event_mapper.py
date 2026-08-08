@@ -239,6 +239,7 @@ async def test_subscription_plan_changed_with_product_id(sink):
     call = sink.ingest_billing_event.call_args
     assert call is not None
     assert call[0][0].event_type == BillingEventType.subscription_plan_changed
+    assert call[0][0].subscription.cancel_at_period_end is True
     assert call[0][0].subscription.refs.product_id == "prod_sage"
 
 
@@ -412,6 +413,17 @@ async def test_uses_official_nested_customer_identity(sink):
 
 
 # ── Edge cases ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rejects_non_boolean_cancellation_flag(sink):
+    payload = {
+        **DODO_SUBSCRIPTION_PLAN_CHANGED,
+        "cancel_at_next_billing_date": "true",
+    }
+    with pytest.raises(ValueError, match="cancel_at_next_billing_date"):
+        await map_dodo_event("subscription.plan_changed", payload, "user_1", {}, sink)
+    sink.ingest_billing_event.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -816,6 +816,18 @@ class BillingService:
         if resolve_offers:
             offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
 
+        preserved_allowance_anchor = None
+        if action == "plan_changed" and self._provisioning:
+            get_user_plan = getattr(
+                self._provisioning,
+                "get_user_plan",
+                None,
+            )
+            current_plan = get_user_plan(uid) if callable(get_user_plan) else None
+            preserved_allowance_anchor = (
+                getattr(current_plan, "plan_assigned_at", None) if current_plan is not None else None
+            )
+
         pending = None
         if action == "plan_changed":
             pending = self._store.get_open_billing_subscription_change(
@@ -858,6 +870,7 @@ class BillingService:
                 event,
                 plan_key_override=plan_key if plan_key is not None else (existing.plan if existing else None),
                 preserve_allowance_anchor=action == "plan_changed",
+                preserved_allowance_anchor=preserved_allowance_anchor,
             )
 
         return BillingEventResult(handled=True, action=action)
@@ -1413,6 +1426,7 @@ class BillingService:
         *,
         plan_key_override: str | None = None,
         preserve_allowance_anchor: bool = False,
+        preserved_allowance_anchor: datetime | str | None = None,
     ) -> None:
         if not self._provisioning:
             return
@@ -1421,15 +1435,20 @@ class BillingService:
         if not plan_key:
             return
 
-        period_start = None
+        period_start: datetime | None = None
         if preserve_allowance_anchor:
-            get_user_plan = getattr(
-                self._provisioning,
-                "get_user_plan",
-                None,
-            )
-            current_plan = get_user_plan(uid) if callable(get_user_plan) else None
-            period_start = getattr(current_plan, "plan_assigned_at", None) if current_plan is not None else None
+            if preserved_allowance_anchor:
+                try:
+                    anchor = (
+                        preserved_allowance_anchor
+                        if isinstance(preserved_allowance_anchor, datetime)
+                        else datetime.fromisoformat(preserved_allowance_anchor.replace("Z", "+00:00"))
+                    )
+                    if anchor.tzinfo is None:
+                        anchor = anchor.replace(tzinfo=UTC)
+                    period_start = datetime.now(UTC) if anchor > datetime.now(UTC) else anchor
+                except (ValueError, TypeError):
+                    period_start = None
         elif event.subscription:
             ps = event.subscription.period_start
             if ps:

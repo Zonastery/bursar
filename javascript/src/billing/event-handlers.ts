@@ -559,6 +559,13 @@ export class BillingEventHandlers {
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
     const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
+    // Capture the current allowance anchor before advancing the durable
+    // change. The Postgres transition updates the assignment atomically, so
+    // reading it afterwards would return the new assignment's timestamp and
+    // silently reset the learner's current allowance window.
+    const preservedAllowanceAnchor = this.provisioning?.getUserPlan
+      ? ((await this.provisioning.getUserPlan(uid))?.planAssignedAt ?? null)
+      : undefined;
     const pending = await this.store.getOpenBillingSubscriptionChange(
       event.provider,
       event.subscription.providerSubscriptionId,
@@ -591,6 +598,7 @@ export class BillingEventHandlers {
         event,
         plan ?? existing?.plan ?? undefined,
         true,
+        preservedAllowanceAnchor,
       );
     }
     return { handled: true, action: "subscription_plan_changed" };
@@ -735,6 +743,7 @@ export class BillingEventHandlers {
     event: BillingEvent,
     planKeyOverride?: string,
     preserveAllowanceAnchor = false,
+    preservedAllowanceAnchor?: Date | string | null,
   ): Promise<void> {
     if (!this.provisioning) {
       this.logger.debug(
@@ -750,9 +759,12 @@ export class BillingEventHandlers {
     this.logger.debug("[BillingService] provisionSubscription setting plan", { uid, plan });
     let periodStart: Date | string | null | undefined;
     if (preserveAllowanceAnchor) {
-      const existingAnchor = this.provisioning.getUserPlan
-        ? (await this.provisioning.getUserPlan(uid))?.planAssignedAt
-        : undefined;
+      const existingAnchor =
+        preservedAllowanceAnchor !== undefined
+          ? preservedAllowanceAnchor
+          : this.provisioning.getUserPlan
+            ? (await this.provisioning.getUserPlan(uid))?.planAssignedAt
+            : undefined;
       if (existingAnchor) {
         const anchor = new Date(existingAnchor);
         // A provider's subscription period start may actually be its next

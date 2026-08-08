@@ -9,6 +9,7 @@ import type { DodoWebhookPayload } from "./client-contract.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import {
   callBillingEventSink,
+  optionalProviderBoolean,
   optionalProviderString,
   requireCurrency,
   requireMinorUnits,
@@ -192,10 +193,15 @@ function subscriptionFields(data: Record<string, unknown>, metadata: Record<stri
     data.previous_billing_date,
     "Dodo subscription.previous_billing_date",
   );
+  const cancelAtPeriodEnd = optionalProviderBoolean(
+    data.cancel_at_next_billing_date,
+    "Dodo subscription.cancel_at_next_billing_date",
+  );
   return {
     ...(interval ? { interval } : {}),
     ...(intervalCount !== undefined ? { intervalCount } : {}),
     ...(periodStart ? { periodStart } : {}),
+    ...(cancelAtPeriodEnd !== undefined ? { cancelAtPeriodEnd } : {}),
   };
 }
 

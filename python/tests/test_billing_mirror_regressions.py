@@ -578,6 +578,59 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
     assert state.metadata == {"pendingPlanChange": None}
 
 
+def test_plan_change_captures_allowance_anchor_before_advancing() -> None:
+    anchor = datetime(2026, 7, 1, tzinfo=UTC)
+    provisioning = MagicMock()
+    provisioning.get_user_plan.return_value = SimpleNamespace(plan_assigned_at=anchor)
+    store = MagicMock()
+    store.get_billing_subscription.return_value = BillingSubscriptionState(
+        subscription_id="00000000-0000-0000-0000-000000000011",
+        user_id="00000000-0000-0000-0000-000000000001",
+        provider="dodo",
+        provider_subscription_id="sub_1",
+        offer_id="00000000-0000-0000-0000-000000000012",
+        offer_key="monk_monthly",
+        plan="monk",
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
+    )
+    store.resolve_billing_offer.return_value = BillingOfferResult(
+        offer_id="00000000-0000-0000-0000-000000000013",
+        offer_key="sage_monthly",
+        plan_id="00000000-0000-0000-0000-000000000014",
+        plan="sage",
+        interval="month",
+        interval_count=1,
+        grant=None,
+    )
+    store.get_open_billing_subscription_change.return_value = SimpleNamespace(id="12")
+    service = BillingService(store, provisioning=provisioning)
+    event = BillingEvent(
+        provider="dodo",
+        event_id="evt_plan_change_anchor",
+        event_type=BillingEventType.subscription_plan_changed,
+        occurred_at="2026-07-29T00:00:00Z",
+        user_id="00000000-0000-0000-0000-000000000001",
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_1",
+            status=BillingSubscriptionStatus.active,
+            refs=ProviderRef(product_id="prod_sage"),
+        ),
+    )
+
+    result = service._handle_subscription_plan_changed(event)
+
+    assert result.handled
+    assert provisioning.method_calls[0].args == (event.user_id,)
+    provisioning.set_user_plan.assert_called_once_with(
+        event.user_id,
+        "sage",
+        plan_assigned_at=anchor,
+    )
+    assert provisioning.get_user_plan.call_count == 1
+
+
 def test_event_claim_envelope_matches_javascript_shape() -> None:
     store = MagicMock()
     store.claim_billing_event.return_value = BillingEventClaim(status="duplicate")

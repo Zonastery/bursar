@@ -180,6 +180,61 @@ describe("billing diagnostic and repository boundaries", () => {
 });
 
 describe("subscription plan-change provisioning", () => {
+  it("captures the allowance anchor before advancing the durable change", async () => {
+    const anchor = new Date("2026-07-01T00:00:00.000Z");
+    const setUserPlan = vi.fn().mockResolvedValue(undefined);
+    const updateBillingSubscriptionChange = vi.fn().mockResolvedValue(undefined);
+    const getUserPlan = vi.fn().mockResolvedValue({ planAssignedAt: anchor });
+    const store = {
+      getBillingSubscription: vi.fn().mockResolvedValue({
+        userId: "user-1",
+        provider: "dodo",
+        providerSubscriptionId: "sub-1",
+        status: "active",
+      }),
+      resolveBillingOffer: vi.fn().mockResolvedValue({
+        offerId: "offer-sage",
+        offerKey: "sage_monthly",
+        plan: "sage",
+      }),
+      getOpenBillingSubscriptionChange: vi.fn().mockResolvedValue({ id: "change-1" }),
+      updateBillingSubscriptionChange,
+      upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
+    } as unknown as BillingStore;
+
+    const handlers = new BillingEventHandlers(store, {
+      autoSelectEntitlementSource: false,
+      provisioning: {
+        getUserPlan,
+        setUserPlan,
+        unsetUserPlan: vi.fn(),
+        addCredits: vi.fn(),
+        deductCredits: vi.fn(),
+        revokeCreditsByEntryType: vi.fn(),
+      },
+    });
+
+    const handler = handlers.getHandler(BillingEventType.SUBSCRIPTION_PLAN_CHANGED);
+    await handler?.({
+      provider: "dodo",
+      eventId: "evt_plan_change_with_pending",
+      eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
+      occurredAt: "2026-08-05T00:00:00Z",
+      userId: "user-1",
+      subscription: {
+        providerSubscriptionId: "sub-1",
+        status: "active",
+        refs: { productId: "product-sage" },
+      },
+    });
+
+    expect(getUserPlan).toHaveBeenCalledTimes(1);
+    expect(getUserPlan.mock.invocationCallOrder[0]).toBeLessThan(
+      updateBillingSubscriptionChange.mock.invocationCallOrder[0]!,
+    );
+    expect(setUserPlan).toHaveBeenCalledWith("user-1", "sage", anchor);
+  });
+
   it("starts immediately when the existing allowance anchor is unavailable", async () => {
     const setUserPlan = vi.fn().mockResolvedValue(undefined);
     const store = {

@@ -303,6 +303,7 @@ describe("event type routing", () => {
         eventType: "subscription.plan_changed",
         subscription: expect.objectContaining({
           providerSubscriptionId: "sub_dodo_plan_change_001",
+          cancelAtPeriodEnd: true,
           refs: { productId: "prod_sage" },
         }),
       }),
@@ -523,6 +524,20 @@ describe("ref resolution", () => {
 // ── Edge cases ──────────────────────────────────────────────────────
 
 describe("edge cases", () => {
+  it("rejects a non-boolean cancellation flag", async () => {
+    const sink = makeSink();
+    await expect(
+      mapDodoEvent(
+        "subscription.plan_changed",
+        { ...DODO_SUBSCRIPTION_PLAN_CHANGED, cancel_at_next_billing_date: "true" },
+        "user_1",
+        {},
+        sink,
+      ),
+    ).rejects.toThrow("cancel_at_next_billing_date");
+    expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
+  });
+
   it("rejects subscription.cancelled when subscription_id is missing", async () => {
     const sink = makeSink();
     await expect(mapDodoEvent("subscription.cancelled", {}, null, {}, sink)).rejects.toThrow(

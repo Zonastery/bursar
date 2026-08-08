@@ -30,6 +30,16 @@ def optional_provider_string(value: object, field: str) -> str | None:
     return require_provider_string(value, field)
 
 
+def optional_provider_boolean(value: object, field: str) -> bool | None:
+    """Validate an optional provider boolean without coercing provider data."""
+
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
 def require_minor_units(value: object, field: str, *, positive: bool = False) -> int:
     """Validate an integral provider amount before it crosses the billing boundary."""
 
