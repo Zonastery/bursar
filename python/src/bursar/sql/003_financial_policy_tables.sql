@@ -883,7 +883,9 @@ CREATE TABLE bursar.credit_team_members (
         )
     ),
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (team_id, subject_id)
+    left_at timestamptz,
+    PRIMARY KEY (team_id, subject_id),
+    CHECK (left_at IS NULL OR left_at >= created_at)
 );
 
 -- Team usage is attributed to the member that initiated it. This keeps the

@@ -213,6 +213,7 @@ BEGIN
       AND provider_event_id=p_event_id
       AND status='processing'
       AND claim_token=p_claim_token
+      AND claim_expires_at>now()
     RETURNING true INTO v_updated;
 
     RETURN COALESCE(v_updated, false);
@@ -430,7 +431,7 @@ DECLARE
     v_prior_lot record;
 
 BEGIN
-    IF p_idempotency_key IS NULL OR p_idempotency_key='' THEN
+    IF NOT bursar.is_nonempty_text(p_idempotency_key) THEN
         RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'invalid_request';
 
         RETURN;

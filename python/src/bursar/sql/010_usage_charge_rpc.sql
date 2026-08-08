@@ -191,7 +191,7 @@ BEGIN
             'usage',
             -(p_requested-p_allowance),
             p_operation,
-            p_idempotency_key||':ledger',
+            'usage-ledger:' || v_id::text,
             v_ledger_metadata,
             'default',
             v_revision,

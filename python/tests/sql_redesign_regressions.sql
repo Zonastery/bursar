@@ -1200,6 +1200,225 @@ BEGIN
 END
 $$;
 
+-- Removing a member preserves historical usage provenance without leaving an
+-- authorization path open. Re-adding reactivates the same durable identity
+-- and deliberately retains lifetime spend-cap consumption.
+DO $$
+DECLARE
+    v_owner uuid := '00000000-0000-0000-0000-000000000148';
+    v_member uuid := '00000000-0000-0000-0000-000000000149';
+    v_team uuid;
+    v_membership_created_at timestamptz;
+    v_first record;
+    v_replay record;
+    v_denied record;
+    v_cap_denied record;
+    v_after_rejoin record;
+    v_balance numeric;
+    v_member_count bigint;
+    v_total_spent numeric;
+BEGIN
+    SELECT team_id
+    INTO v_team
+    FROM bursar.create_team(v_owner, 'Membership history team', 10);
+
+    IF v_team IS NULL
+       OR NOT bursar.set_team_member(v_team, v_member, 'member', 3)
+    THEN
+        RAISE EXCEPTION 'team membership history fixture failed';
+    END IF;
+
+    SELECT created_at
+    INTO v_membership_created_at
+    FROM bursar.credit_team_members
+    WHERE team_id = v_team
+      AND subject_id = v_member;
+
+    SELECT *
+    INTO v_first
+    FROM bursar.deduct_team(
+        v_team,
+        v_member,
+        2,
+        'membership-history-first'
+    );
+
+    IF v_first.error_code IS NOT NULL OR v_first.replayed THEN
+        RAISE EXCEPTION
+            'initial team deduction failed: %',
+            row_to_json(v_first);
+    END IF;
+
+    IF NOT bursar.remove_team_member(v_team, v_member) THEN
+        RAISE EXCEPTION 'active team member was not removed';
+    END IF;
+
+    IF bursar.remove_team_member(v_team, v_member) THEN
+        RAISE EXCEPTION 'inactive team member was removed twice';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM bursar.credit_team_members AS member
+        WHERE member.team_id = v_team
+          AND member.subject_id = v_member
+          AND member.left_at IS NOT NULL
+          AND member.created_at = v_membership_created_at
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM bursar.credit_team_usage_charges AS team_usage
+        WHERE team_usage.team_id = v_team
+          AND team_usage.subject_id = v_member
+          AND team_usage.ledger_entry_id = v_first.entry_id
+    )
+    THEN
+        RAISE EXCEPTION 'removal discarded membership or usage provenance';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM bursar.list_team_members(v_team) AS member
+        WHERE member.user_id = v_member
+    ) THEN
+        RAISE EXCEPTION 'inactive member remained in the active member list';
+    END IF;
+
+    SELECT balance, member_count
+    INTO v_balance, v_member_count
+    FROM bursar.get_team_balance(v_team);
+
+    IF v_balance <> 8 OR v_member_count <> 1 THEN
+        RAISE EXCEPTION
+            'removal changed balance or active member count: % / %',
+            v_balance,
+            v_member_count;
+    END IF;
+
+    -- An exact retry reports the already-committed result; it does not create
+    -- new usage and remains safe after authorization has been revoked.
+    SELECT *
+    INTO v_replay
+    FROM bursar.deduct_team(
+        v_team,
+        v_member,
+        2,
+        'membership-history-first'
+    );
+
+    SELECT *
+    INTO v_denied
+    FROM bursar.deduct_team(
+        v_team,
+        v_member,
+        1,
+        'membership-history-removed'
+    );
+
+    IF v_replay.error_code IS NOT NULL
+       OR NOT v_replay.replayed
+       OR v_replay.entry_id <> v_first.entry_id
+       OR v_denied.error_code <> 'not_team_member'
+    THEN
+        RAISE EXCEPTION
+            'removed-member replay/new-charge semantics failed: % / %',
+            row_to_json(v_replay),
+            row_to_json(v_denied);
+    END IF;
+
+    IF NOT bursar.set_team_member(v_team, v_member, 'member', 3)
+       OR NOT bursar.set_team_member(v_team, v_member, 'member', 3)
+    THEN
+        RAISE EXCEPTION 'membership reactivation was not idempotent';
+    END IF;
+
+    IF (
+        SELECT count(*)
+        FROM bursar.credit_team_members AS member
+        WHERE member.team_id = v_team
+          AND member.subject_id = v_member
+          AND member.left_at IS NULL
+          AND member.created_at = v_membership_created_at
+    ) <> 1
+    THEN
+        RAISE EXCEPTION 'reactivation created a second membership identity';
+    END IF;
+
+    SELECT member.total_spent
+    INTO v_total_spent
+    FROM bursar.list_team_members(v_team) AS member
+    WHERE member.user_id = v_member;
+
+    SELECT *
+    INTO v_cap_denied
+    FROM bursar.deduct_team(
+        v_team,
+        v_member,
+        2,
+        'membership-history-cap-denied'
+    );
+    SELECT *
+    INTO v_after_rejoin
+    FROM bursar.deduct_team(
+        v_team,
+        v_member,
+        1,
+        'membership-history-after-rejoin'
+    );
+
+    IF v_total_spent <> 2
+       OR v_cap_denied.error_code <> 'member_spend_cap_exceeded'
+       OR v_after_rejoin.error_code IS NOT NULL
+       OR v_after_rejoin.replayed
+    THEN
+        RAISE EXCEPTION
+            'reactivation did not retain lifetime spend semantics: % / % / %',
+            v_total_spent,
+            row_to_json(v_cap_denied),
+            row_to_json(v_after_rejoin);
+    END IF;
+END
+$$;
+
+-- A caller key may use the full documented 255-character budget. Internal
+-- ledger keys must remain bounded rather than appending a suffix to that key.
+DO $$
+DECLARE
+    v_subject uuid := '00000000-0000-0000-0000-000000000147';
+    v_charge record;
+BEGIN
+    PERFORM bursar.post_credit(
+        v_subject,
+        'grant',
+        5,
+        'max-key-seed',
+        'max-key-seed'
+    );
+
+    SELECT *
+    INTO v_charge
+    FROM bursar.charge_usage(
+        v_subject,
+        'max-key-operation',
+        1,
+        repeat('k', 255)
+    );
+
+    IF v_charge.error_code IS NOT NULL
+       OR v_charge.charged <> 1
+       OR NOT EXISTS (
+           SELECT 1
+           FROM bursar.credit_ledger_entries AS entry
+           WHERE entry.id = v_charge.ledger_entry_id
+             AND length(entry.idempotency_key) <= 255
+       )
+    THEN
+        RAISE EXCEPTION
+            'max-length usage idempotency key failed: %',
+            row_to_json(v_charge);
+    END IF;
+END
+$$;
+
 -- Full-refund remainder is recalculated under the account lock. A distinct
 -- key after the full amount was returned must observe no remainder rather than
 -- attempting a second refund.
@@ -1250,6 +1469,339 @@ BEGIN
             'full refund remainder was not serialized: % / %',
             row_to_json(v_first),
             row_to_json(v_second);
+    END IF;
+END
+$$;
+
+-- Event-scoped grants bind every semantic input to the event key. Exact
+-- retries normalize region case, while divergent referrer, region, or metadata
+-- cannot silently replay an earlier financial award.
+DO $$
+DECLARE
+    v_revision uuid;
+    v_subject uuid := '00000000-0000-0000-0000-000000000150';
+    v_referrer uuid := '00000000-0000-0000-0000-000000000151';
+    v_other_referrer uuid := '00000000-0000-0000-0000-000000000152';
+    v_first record;
+    v_exact record;
+    v_conflict record;
+    v_bucket_result record;
+BEGIN
+    SELECT revision_id
+    INTO v_revision
+    FROM bursar.publish_and_activate_catalog(
+        1,
+        $json$
+        {
+          "version": 1,
+          "credits": {
+            "accounting": {
+              "unit": "credit",
+              "scale": 6,
+              "rounding": "half_up"
+            },
+            "buckets": {
+              "default": {
+                "priority": 10,
+                "expiry": {"type": "never"}
+              }
+            },
+            "default_bucket": "default",
+            "grant_programs": {
+              "event-grant": {
+                "trigger": "manual",
+                "awards": [
+                  {
+                    "recipient": "subject",
+                    "amount": "1",
+                    "bucket": "default"
+                  }
+                ],
+                "availability": {"regions": ["US", "CA"]},
+                "max_awards_per_subject": 10,
+                "idempotency_scope": "event"
+              }
+            }
+          }
+        }
+        $json$::jsonb,
+        'grant-event-idempotency'
+    );
+
+    SELECT *
+    INTO v_first
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-1',
+        v_referrer,
+        'us',
+        '{"source":"campaign-a"}'::jsonb
+    );
+    SELECT *
+    INTO v_exact
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-1',
+        v_referrer,
+        'US',
+        '{"source":"campaign-a"}'::jsonb
+    );
+
+    IF v_first.error_code IS NOT NULL
+       OR v_first.replayed
+       OR v_exact.error_code IS NOT NULL
+       OR NOT v_exact.replayed
+       OR v_exact.ledger_entry_id <> v_first.ledger_entry_id
+    THEN
+        RAISE EXCEPTION
+            'exact grant-program retry did not replay: % / %',
+            row_to_json(v_first),
+            row_to_json(v_exact);
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-1',
+        v_other_referrer,
+        'US',
+        '{"source":"campaign-a"}'::jsonb
+    );
+    IF v_conflict.error_code <> 'idempotency_conflict'
+       OR EXISTS (
+           SELECT 1
+           FROM bursar.subjects
+           WHERE id = v_other_referrer
+       )
+    THEN
+        RAISE EXCEPTION
+            'grant referrer conflict was replayed or provisioned state: %',
+            row_to_json(v_conflict);
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-1',
+        v_referrer,
+        'CA',
+        '{"source":"campaign-a"}'::jsonb
+    );
+    IF v_conflict.error_code <> 'idempotency_conflict' THEN
+        RAISE EXCEPTION 'grant region conflict was silently replayed';
+    END IF;
+
+    SELECT *
+    INTO v_conflict
+    FROM bursar.execute_grant_program(
+        'manual',
+        'event-grant',
+        v_subject,
+        'event-1',
+        v_referrer,
+        'US',
+        '{"source":"campaign-b"}'::jsonb
+    );
+    IF v_conflict.error_code <> 'idempotency_conflict' THEN
+        RAISE EXCEPTION 'grant metadata conflict was silently replayed';
+    END IF;
+
+    SELECT *
+    INTO v_bucket_result
+    FROM bursar.post_credit(
+        v_subject,
+        'grant',
+        1,
+        'bucket-validation',
+        'bucket-null',
+        '{}'::jsonb,
+        NULL,
+        v_revision
+    );
+    IF v_bucket_result.error_code IS NOT NULL THEN
+        RAISE EXCEPTION 'NULL bucket no longer resolves the catalog default';
+    END IF;
+
+    SELECT *
+    INTO v_bucket_result
+    FROM bursar.post_credit(
+        v_subject,
+        'grant',
+        1,
+        'bucket-validation',
+        'bucket-too-long',
+        '{}'::jsonb,
+        repeat('b', 256),
+        v_revision
+    );
+    IF v_bucket_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'oversized bucket key reached catalog resolution';
+    END IF;
+
+    SELECT *
+    INTO v_bucket_result
+    FROM bursar.post_credit(
+        v_subject,
+        'grant',
+        1,
+        'bucket-validation',
+        'bucket-not-canonical',
+        '{}'::jsonb,
+        ' default ',
+        v_revision
+    );
+    IF v_bucket_result.error_code <> 'invalid_request' THEN
+        RAISE EXCEPTION 'non-canonical bucket key was accepted';
+    END IF;
+END
+$$;
+
+-- Failure transitions are fenced by a live lease just like completion.
+-- Expired workers cannot reschedule/dead-letter work before or after a new
+-- claimant rotates the token.
+DO $$
+DECLARE
+    v_billing_first record;
+    v_billing_second record;
+    v_outbox_id bigint;
+    v_outbox_first record;
+    v_outbox_second record;
+    v_stale_failed boolean;
+    v_current_failed boolean;
+BEGIN
+    SELECT *
+    INTO v_billing_first
+    FROM bursar.claim_billing_event(
+        'stripe',
+        'evt-stale-failure-fence',
+        'test.event',
+        '{}'::jsonb,
+        60,
+        3
+    );
+
+    UPDATE bursar.billing_events
+    SET claim_expires_at = now() - interval '1 second'
+    WHERE id = v_billing_first.event_id;
+
+    v_stale_failed := bursar.fail_billing_event(
+        'stripe',
+        'evt-stale-failure-fence',
+        v_billing_first.claim_token,
+        'stale worker'
+    );
+    IF v_stale_failed THEN
+        RAISE EXCEPTION 'expired billing worker retained failure authority';
+    END IF;
+
+    SELECT *
+    INTO v_billing_second
+    FROM bursar.claim_billing_event(
+        'stripe',
+        'evt-stale-failure-fence',
+        'test.event',
+        '{}'::jsonb,
+        60,
+        3
+    );
+
+    v_stale_failed := bursar.fail_billing_event(
+        'stripe',
+        'evt-stale-failure-fence',
+        v_billing_first.claim_token,
+        'superseded worker'
+    );
+    v_current_failed := bursar.fail_billing_event(
+        'stripe',
+        'evt-stale-failure-fence',
+        v_billing_second.claim_token,
+        'current worker'
+    );
+    IF v_billing_second.result <> 'claimed'
+       OR v_billing_second.claim_token = v_billing_first.claim_token
+       OR v_stale_failed
+       OR NOT v_current_failed
+    THEN
+        RAISE EXCEPTION 'billing failure fencing did not rotate authority';
+    END IF;
+
+    INSERT INTO bursar.event_outbox(
+        topic,
+        aggregate_type,
+        aggregate_id,
+        idempotency_key,
+        payload
+    )
+    VALUES (
+        'test.stale-failure-fence',
+        'test',
+        '00000000-0000-0000-0000-000000000153',
+        'test-stale-failure-fence',
+        '{}'::jsonb
+    )
+    RETURNING id INTO v_outbox_id;
+
+    SELECT *
+    INTO v_outbox_first
+    FROM bursar.claim_outbox_events(
+        1,
+        60,
+        ARRAY['test.stale-failure-fence']::text[]
+    );
+
+    UPDATE bursar.event_outbox
+    SET claim_expires_at = now() - interval '1 second'
+    WHERE id = v_outbox_id;
+
+    v_stale_failed := bursar.fail_outbox_event(
+        v_outbox_id,
+        v_outbox_first.claim_token,
+        'stale worker',
+        0,
+        10
+    );
+    IF v_stale_failed THEN
+        RAISE EXCEPTION 'expired outbox worker retained failure authority';
+    END IF;
+
+    SELECT *
+    INTO v_outbox_second
+    FROM bursar.claim_outbox_events(
+        1,
+        60,
+        ARRAY['test.stale-failure-fence']::text[]
+    );
+
+    v_stale_failed := bursar.fail_outbox_event(
+        v_outbox_id,
+        v_outbox_first.claim_token,
+        'superseded worker',
+        0,
+        10
+    );
+    v_current_failed := bursar.fail_outbox_event(
+        v_outbox_id,
+        v_outbox_second.claim_token,
+        'current worker',
+        0,
+        10
+    );
+    IF v_outbox_second.event_id <> v_outbox_id
+       OR v_outbox_second.claim_token = v_outbox_first.claim_token
+       OR v_stale_failed
+       OR NOT v_current_failed
+    THEN
+        RAISE EXCEPTION 'outbox failure fencing did not rotate authority';
     END IF;
 END
 $$;

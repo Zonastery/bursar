@@ -352,6 +352,11 @@ WHERE ledger_entry_id IS NOT null;
 CREATE INDEX credit_team_members_subject_idx
 ON bursar.credit_team_members (subject_id);
 
+CREATE INDEX credit_team_members_active_team_idx
+ON bursar.credit_team_members (team_id, role, subject_id)
+INCLUDE (spend_cap, created_at)
+WHERE left_at IS null;
+
 CREATE INDEX credit_team_usage_member_created_idx
 ON bursar.credit_team_usage_charges (
     team_id,

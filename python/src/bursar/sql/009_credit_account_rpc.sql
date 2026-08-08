@@ -119,6 +119,8 @@ DECLARE
     v_award_count integer;
     v_expiry_policy jsonb;
     v_expires_at timestamptz;
+    v_region text;
+    v_event_metadata jsonb;
 BEGIN
     IF p_subject_id IS NULL
        OR p_trigger_type IS NULL
@@ -150,6 +152,10 @@ BEGIN
             'invalid_request';
         RETURN;
     END IF;
+
+    v_region := upper(p_region);
+    v_event_metadata := COALESCE(p_metadata, '{}'::jsonb)
+        || jsonb_build_object('region', v_region);
 
     SELECT id
     INTO v_revision
@@ -202,7 +208,7 @@ BEGIN
         AND (
             p_region IS NULL
             OR NOT (
-                v_program.availability->'regions' ? upper(p_region)
+                v_program.availability->'regions' ? v_region
             )
         )
     )
@@ -222,12 +228,6 @@ BEGIN
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
-
-    IF p_referrer_subject_id IS NOT NULL THEN
-        INSERT INTO bursar.subjects(id)
-        VALUES (p_referrer_subject_id)
-        ON CONFLICT (tenant_id, id) DO NOTHING;
-    END IF;
 
     -- Account locking serializes the award-limit check, event insertion, and
     -- all resulting ledger mutations for a recipient.
@@ -263,7 +263,7 @@ BEGIN
         AND (
             p_region IS NULL
             OR NOT (
-                v_program.eligibility->'regions' ? upper(p_region)
+                v_program.eligibility->'regions' ? v_region
             )
         )
     )
@@ -293,6 +293,26 @@ BEGIN
       AND event.idempotency_key = v_idempotency_key;
 
     IF FOUND THEN
+        IF v_program.idempotency_scope = 'event'
+           AND (
+               v_event.event_key IS DISTINCT FROM p_event_key
+               OR v_event.referrer_subject_id
+                    IS DISTINCT FROM p_referrer_subject_id
+               OR v_event.metadata IS DISTINCT FROM v_event_metadata
+           )
+        THEN
+            RETURN QUERY
+            SELECT
+                NULL::uuid,
+                NULL::uuid,
+                NULL::uuid,
+                NULL::uuid,
+                NULL::numeric,
+                false,
+                'idempotency_conflict';
+            RETURN;
+        END IF;
+
         RETURN QUERY
         SELECT
             v_event.id,
@@ -329,6 +349,14 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Defer referrer provisioning until after an event-scope retry has been
+    -- proven to match. A conflicting retry must not create unrelated state.
+    IF p_referrer_subject_id IS NOT NULL THEN
+        INSERT INTO bursar.subjects(id)
+        VALUES (p_referrer_subject_id)
+        ON CONFLICT (tenant_id, id) DO NOTHING;
+    END IF;
+
     INSERT INTO bursar.grant_program_events(
         catalog_revision_id,
         grant_program_id,
@@ -349,8 +377,7 @@ BEGIN
         v_program.idempotency_scope,
         v_idempotency_key,
         p_referrer_subject_id,
-        COALESCE(p_metadata, '{}'::jsonb)
-            || jsonb_build_object('region', upper(p_region))
+        v_event_metadata
     )
     RETURNING * INTO v_event;
 
@@ -394,13 +421,21 @@ BEGIN
             v_recipient,
             'grant',
             v_award.amount,
-            'grant_program:' || v_program.program_key,
+            -- Catalog keys may consume their full 255-character budget. Use
+            -- a stable digest so the derived ledger operation stays bounded
+            -- without conflating long keys that share a prefix.
+            'grant_program:' || encode(
+                extensions.digest(
+                    convert_to(v_program.program_key, 'UTF8'),
+                    'sha256'
+                ),
+                'hex'
+            ),
             concat_ws(
                 ':',
-                'grant',
-                v_program.program_key,
+                'grant-award',
                 v_event.id,
-                v_award.award_index,
+                v_award.id,
                 v_recipient
             ),
             COALESCE(p_metadata, '{}'::jsonb)
@@ -409,7 +444,7 @@ BEGIN
                     'grant_program_id', v_program.id,
                     'grant_award_id', v_award.id,
                     'trigger', p_trigger_type,
-                    'region', upper(p_region)
+                    'region', v_region
                 ),
             v_award.bucket_key,
             v_revision,
@@ -673,6 +708,13 @@ BEGIN
        OR NOT bursar.is_bounded_text(p_operation, 255)
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       -- Bucket keys are canonical catalog identifiers. NULL retains the
+       -- documented default/all-buckets behavior; non-NULL values must
+       -- already be trimmed and fit the catalog key budget before hashing.
+       OR (
+           p_bucket_key IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_bucket_key, 255)
+       )
        OR (
            p_minimum_balance IS NOT NULL
            AND NOT bursar.is_finite_numeric(p_minimum_balance)

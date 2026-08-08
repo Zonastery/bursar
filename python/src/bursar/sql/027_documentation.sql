@@ -88,7 +88,12 @@ COMMENT ON TABLE bursar.quota_events IS 'Idempotent quota threshold and blocked-
 COMMENT ON TABLE bursar.credit_leases IS 'Temporary credit and concurrent-operation admission reservations.';
 COMMENT ON TABLE bursar.credit_lease_quota_reservations IS 'Per-quota capacity reserved by an active credit lease.';
 COMMENT ON TABLE bursar.credit_teams IS 'Team principals backed by team credit accounts.';
-COMMENT ON TABLE bursar.credit_team_members IS 'Subject membership and role assignments for teams.';
+COMMENT ON TABLE bursar.credit_team_members IS
+'Durable memberships; inactive rows retain historical usage and lifetime spend.';
+COMMENT ON COLUMN bursar.credit_team_members.created_at IS
+'Timestamp of the subject first joining this team; preserved across reactivation.';
+COMMENT ON COLUMN bursar.credit_team_members.left_at IS
+'Most recent removal timestamp, or NULL while the membership is active.';
 COMMENT ON TABLE bursar.credit_team_usage_charges IS
 'Member-attributed team usage used for audit and atomic member spend-cap enforcement.';
 COMMENT ON TABLE bursar.grant_program_events IS 'Idempotent business events that can execute catalog grant programs.';

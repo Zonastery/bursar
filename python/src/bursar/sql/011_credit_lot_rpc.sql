@@ -232,6 +232,7 @@ BEGIN
     IF NOT bursar.is_finite_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
            16384
@@ -1318,6 +1319,7 @@ DECLARE
 BEGIN
     IF p_subject_id IS NULL
        OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
     THEN
         RETURN QUERY
         SELECT 0::numeric, NULL::numeric, 'invalid_request';
@@ -1353,10 +1355,7 @@ BEGIN
         FROM bursar.revoke_lot(
             lot_row.id,
             lot_row.amount,
-            'operation-revocation:'
-                || p_operation
-                || ':'
-                || lot_row.id::text
+            'operation-revocation:' || lot_row.id::text
         );
 
         IF v_result.error_code IS NOT NULL THEN

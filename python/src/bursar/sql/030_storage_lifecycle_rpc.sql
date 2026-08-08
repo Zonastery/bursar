@@ -519,6 +519,7 @@ BEGIN
     WHERE id = p_event_id
       AND status = 'processing'
       AND claim_token = p_claim_token
+      AND claim_expires_at > now()
     RETURNING true INTO v_updated;
 
     RETURN COALESCE(v_updated, false);
@@ -1213,10 +1214,10 @@ COMMENT ON FUNCTION bursar.configure_storage(
     integer, integer
 )
 IS 'Configure bounded PostgreSQL event retention and maintenance work budgets while preserving quota correctness.';
-COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
+COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text [])
 IS 'Claim a bounded cross-tenant batch and return each event tenant UUID.';
 COMMENT ON FUNCTION bursar.claim_outbox_events(
-    uuid, integer, integer, text[]
+    uuid, integer, integer, text []
 )
 IS 'Claim a bounded outbox batch for one active tenant.';
 COMMENT ON FUNCTION bursar.export_usage_charge(uuid)
@@ -1246,9 +1247,9 @@ REVOKE ALL ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
     integer, integer
 ) FROM PUBLIC;
-REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.claim_outbox_events(
-    uuid, integer, integer, text[]
+    uuid, integer, integer, text []
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_usage_charge(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_billing_event_payload(uuid) FROM PUBLIC;

@@ -54,11 +54,25 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT *
-    INTO v_member
-    FROM bursar.credit_team_members AS member
-    WHERE member.team_id = p_team_id
-      AND member.subject_id = p_subject_id
+    v_digest := extensions.digest(
+        convert_to(
+            jsonb_build_object(
+                'subject_id', p_subject_id,
+                'amount', bursar.digest_numeric_text(p_amount),
+                'operation', p_operation,
+                'metadata', COALESCE(p_metadata, '{}'::jsonb)
+            )::text,
+            'UTF8'
+        ),
+        'sha256'
+    );
+
+    -- Team membership mutations take this lock before touching a membership.
+    -- Match that order so removal/reactivation and a new charge have one clear
+    -- serialization point. Replays are resolved while holding the same lock.
+    PERFORM 1
+    FROM bursar.credit_teams AS team
+    WHERE team.id = p_team_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
@@ -73,19 +87,6 @@ BEGIN
             'not_team_member';
         RETURN;
     END IF;
-
-    v_digest := extensions.digest(
-        convert_to(
-            jsonb_build_object(
-                'subject_id', p_subject_id,
-                'amount', bursar.digest_numeric_text(p_amount),
-                'operation', p_operation,
-                'metadata', COALESCE(p_metadata, '{}'::jsonb)
-            )::text,
-            'UTF8'
-        ),
-        'sha256'
-    );
 
     SELECT *
     INTO v_existing
@@ -117,6 +118,27 @@ BEGIN
             FROM bursar.credit_ledger_entries AS ledger
             WHERE ledger.id = v_existing.ledger_entry_id;
         END IF;
+        RETURN;
+    END IF;
+
+    SELECT *
+    INTO v_member
+    FROM bursar.credit_team_members AS member
+    WHERE member.team_id = p_team_id
+      AND member.subject_id = p_subject_id
+      AND member.left_at IS NULL
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            p_team_id,
+            p_subject_id,
+            0::numeric,
+            NULL::numeric,
+            false,
+            'not_team_member';
         RETURN;
     END IF;
 

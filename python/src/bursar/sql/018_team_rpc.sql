@@ -83,6 +83,7 @@ RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE
     v_existing_role text;
+    v_existing_left_at timestamptz;
 BEGIN
     IF p_team_id IS NULL
        OR p_subject_id IS NULL
@@ -119,20 +120,22 @@ BEGIN
         RETURN false;
     END IF;
 
-    SELECT role
-    INTO v_existing_role
+    SELECT role, left_at
+    INTO v_existing_role, v_existing_left_at
     FROM bursar.credit_team_members
     WHERE team_id = p_team_id
       AND subject_id = p_subject_id
     FOR UPDATE;
 
-    IF v_existing_role = 'owner'
+    IF v_existing_left_at IS NULL
+       AND v_existing_role = 'owner'
        AND p_role <> 'owner'
        AND (
            SELECT count(*)
            FROM bursar.credit_team_members
            WHERE team_id = p_team_id
              AND role = 'owner'
+             AND left_at IS NULL
        ) <= 1
     THEN
         RETURN false;
@@ -147,7 +150,8 @@ BEGIN
     VALUES (p_team_id,p_subject_id,p_role,p_spend_cap)
     ON CONFLICT (team_id,subject_id) DO UPDATE
     SET role=EXCLUDED.role,
-        spend_cap=EXCLUDED.spend_cap;
+        spend_cap=EXCLUDED.spend_cap,
+        left_at=NULL;
 
     RETURN true;
 
@@ -178,7 +182,9 @@ BEGIN
 
     SELECT role INTO v_role
     FROM bursar.credit_team_members
-    WHERE team_id=p_team_id AND subject_id=p_subject_id
+    WHERE team_id=p_team_id
+      AND subject_id=p_subject_id
+      AND left_at IS NULL
     FOR UPDATE;
 
     IF NOT FOUND THEN RETURN false;
@@ -186,14 +192,19 @@ BEGIN
 
     IF v_role='owner' AND (
         SELECT count(*) FROM bursar.credit_team_members
-        WHERE team_id=p_team_id AND role='owner'
+        WHERE team_id=p_team_id
+          AND role='owner'
+          AND left_at IS NULL
     )<=1 THEN
         RETURN false;
 
     END IF;
 
-    DELETE FROM bursar.credit_team_members
-    WHERE team_id=p_team_id AND subject_id=p_subject_id;
+    UPDATE bursar.credit_team_members
+    SET left_at=now()
+    WHERE team_id=p_team_id
+      AND subject_id=p_subject_id
+      AND left_at IS NULL;
 
     RETURN true;
 
@@ -223,6 +234,7 @@ AS $$
       ON team_usage.team_id = member.team_id
      AND team_usage.subject_id = member.subject_id
     WHERE member.team_id=p_team_id
+      AND member.left_at IS NULL
     GROUP BY
         member.subject_id,
         member.role,
@@ -256,6 +268,7 @@ AS $$
      AND account.account_kind='team'
     LEFT JOIN bursar.credit_team_members AS member
       ON member.team_id = team.id
+     AND member.left_at IS NULL
     WHERE team.id=p_team_id
     GROUP BY team.id, team.name, account.balance
 $$;
