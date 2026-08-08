@@ -1,0 +1,29 @@
+name: Refresh Context7 Docs
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Context7 refresh
+        env:
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+          CONTEXT7_LIBRARY: /${{ github.repository }}
+        run: |
+          set -euo pipefail
+          : "${CONTEXT7_API_KEY:?CONTEXT7_API_KEY secret is required}"
+
+          request_body="$(jq -cn --arg libraryName "$CONTEXT7_LIBRARY" '{libraryName: $libraryName}')"
+          curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \
+            --request POST \
+            --url https://context7.com/api/v1/refresh \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer $CONTEXT7_API_KEY" \
+            --data "$request_body"
