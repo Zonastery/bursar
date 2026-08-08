@@ -2,23 +2,25 @@
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Bursar",
   "description": "Open-source credit-ledger and billing SDK for AI SaaS applications, with synchronized Python and JavaScript clients.",
-  "folders": ["docs", "javascript", "python"],
+  "folders": ["docs/docs"],
   "excludeFolders": [
-    ".docusaurus",
-    ".git",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    "coverage",
-    "dist",
-    "node_modules",
-    "python-coverage-report"
+    "**/.docusaurus",
+    "**/.git",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/.venv",
+    "**/__pycache__",
+    "**/coverage",
+    "**/dist",
+    "**/node_modules",
+    "**/python-coverage-report"
   ],
-  "excludeFiles": ["package-lock.json", "uv.lock"],
+  "excludeFiles": ["package-lock.json", "bun.lock", "uv.lock"],
   "rules": [
-    "Keep the Python bursar package and the @zonastery/bursar JavaScript package behaviorally aligned.",
-    "Treat python/src/bursar/sql/*.sql as the source of truth for the PostgreSQL schema.",
-    "Use the shared tests/parity/expression_cases.json fixture when documenting expression behavior.",
-    "Use Python 3.12+ and Node.js 22+ examples unless a page states otherwise."
-  ]
+    "Use the bursar package for Python and @zonastery/bursar for JavaScript or TypeScript.",
+    "Run the Bursar database migrations before using a PostgreSQL-backed store.",
+    "Use the same versioned configuration document with both SDKs; the Python and JavaScript clients share the canonical PostgreSQL schema and behavioral contracts.",
+    "Treat PostgreSQL as authoritative; S3 and ClickHouse are optional analytics delivery backends."
+  ],
+  "previousVersions": [{ "tag": "v1.0.1" }, { "tag": "v1.0.0" }]
 }
