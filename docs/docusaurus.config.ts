@@ -57,7 +57,7 @@ const config: Config = {
       {
         title: "Bursar documentation",
         description: siteDescription,
-        version: "1.x",
+        version: "2.x",
         docsDir: "docs",
         generateLLMsTxt: true,
         generateLLMsFullTxt: true,
@@ -120,7 +120,7 @@ const config: Config = {
           lastVersion: "current",
           versions: {
             current: {
-              label: "1.x",
+              label: "2.x",
               badge: true,
               banner: "none",
             },
@@ -203,8 +203,8 @@ const config: Config = {
         {
           href: `${repositoryUrl}/releases`,
           position: "right",
-          label: "1.x",
-          "aria-label": "Bursar 1.x releases",
+          label: "2.x",
+          "aria-label": "Bursar 2.x releases",
         },
         {
           href: repositoryUrl,
