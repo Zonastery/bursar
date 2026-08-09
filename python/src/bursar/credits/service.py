@@ -44,7 +44,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -127,6 +126,7 @@ from bursar.errors import (
 )
 from bursar.metrics import UsageMetrics
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
+from bursar.shared.idempotency import require_stable_key, scope_stable_key
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 #: Default lease TTL (seconds) for ``reserve`` and ``run_billed``.
@@ -169,7 +169,7 @@ class BilledOperation:
             self.lease_id,
             actual,
             SettleOptions(
-                idempotency_key=f"{self.operation_key}:settle",
+                idempotency_key=scope_stable_key(self.operation_key, "settle", field="operation_key"),
                 feature=self.feature,
                 metadata=metadata or self.metadata,
             ),
@@ -533,11 +533,11 @@ class CreditsService:
         user_id: str,
         amount: Decimal | int,
         *,
+        idempotency_key: str,
         entry_type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         bucket: str | None = None,
-        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         """Add credits to a user's account (``amount`` is a ``Decimal``).
 
@@ -545,6 +545,7 @@ class CreditsService:
         :meth:`get_bucket_balances`); omitted resolves to the configured
         ``is_default`` bucket, or ``"default"`` when no buckets are configured.
         """
+        effective_idempotency_key = require_stable_key(idempotency_key, "add_credits idempotency_key")
         result = self._store.add_credits(
             user_id,
             self._positive_amount(amount, "add_credits"),
@@ -552,7 +553,7 @@ class CreditsService:
             metadata,
             expires_at,
             bucket,
-            idempotency_key,
+            idempotency_key=effective_idempotency_key,
         )
         self._emit(
             "credits.added",
@@ -580,10 +581,10 @@ class CreditsService:
         user_id: str,
         amount: Decimal | int,
         *,
+        idempotency_key: str,
         entry_type: str = "adjustment",
         bucket: str | None = None,
         metadata: CreditMetadata | None = None,
-        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         """Deduct a raw credit amount from a user's account.
 
@@ -600,6 +601,7 @@ class CreditsService:
             metadata: Extra metadata (Pydantic model, passed through to the store).
             idempotency_key: Stable replay key for the ledger mutation.
         """
+        effective_idempotency_key = require_stable_key(idempotency_key, "deduct_credits idempotency_key")
         result = self._store.add_credits(
             user_id,
             -self._positive_amount(amount, "deduct_credits"),
@@ -607,7 +609,7 @@ class CreditsService:
             metadata,
             None,
             bucket,
-            idempotency_key,
+            idempotency_key=effective_idempotency_key,
         )
         self._emit(
             "credits.deducted",
@@ -639,7 +641,7 @@ class CreditsService:
         self,
         user_id: str,
         amount: Decimal | int,
-        options: GrantSubscriptionCycleOptions | None = None,
+        options: GrantSubscriptionCycleOptions,
     ) -> AddCreditsResult:
         """Grant a subscription cycle's credits idempotently (safe for webhook redelivery).
 
@@ -674,7 +676,6 @@ class CreditsService:
         Raises:
             ValueError: If both ``expires_at`` and ``ttl_days`` are given.
         """
-        options = options or GrantSubscriptionCycleOptions()
         expires_at = options.expires_at
         if expires_at is not None and options.ttl_days is not None:
             raise ValueError("grant_subscription_cycle: expires_at and ttl_days are mutually exclusive")
@@ -861,7 +862,7 @@ class CreditsService:
     # ── Lease lifecycle: atomic admission ───────────────────────────────
 
     def _preset_policy(self) -> OperationPolicy:
-        """The default :class:`OperationPolicy` from the constructor preset (§2)."""
+        """Build the default operation policy from the constructor preset."""
         if self._policy == "overdraft":
             return OperationPolicy(
                 billing_mode="overdraft",
@@ -880,7 +881,7 @@ class CreditsService:
         operation_type: str,
         billing_mode_override: BillingMode | None = None,
     ) -> OperationPolicy:
-        """Resolve the effective policy: explicit arg → catalog plan → preset (§1).
+        """Resolve policy in precedence order: per-call override, plan, preset.
 
         A **planless** user (``plan_id`` is ``None``) always gets the constructor
         preset, never silently unlimited. A user *with* a plan gets
@@ -990,7 +991,7 @@ class CreditsService:
         self,
         user_id: str,
         metrics_or_amount: MetricsOrAmount,
-        options: ReserveOptions | None = None,
+        options: ReserveOptions,
     ) -> LeaseResult:
         """Atomically acquire a lease — the only authoritative admission control.
 
@@ -1011,7 +1012,6 @@ class CreditsService:
         On any business failure raises the coherent typed exception; on success emits
         ``credits.reserved`` and returns the :class:`LeaseResult`.
         """
-        options = options or ReserveOptions()
         effective_operation = (
             options.operation_type
             if options.operation_type is not None
@@ -1032,7 +1032,7 @@ class CreditsService:
         ttl_seconds = options.ttl if options.ttl is not None else self._default_ttl
         measures = dict(metrics_or_amount.measures) if isinstance(metrics_or_amount, UsageMetrics) else {}
         dimensions = dict(metrics_or_amount.dimensions) if isinstance(metrics_or_amount, UsageMetrics) else {}
-        lease_idempotency_key = options.idempotency_key or f"lease:{uuid4()}"
+        lease_idempotency_key = options.idempotency_key
 
         result = self._store.create_lease(
             user_id,
@@ -1299,7 +1299,7 @@ class CreditsService:
         ``feature`` names an entitlement required by both admission and
         settlement. The database remains the authoritative policy gate.
         """
-        operation_key = options.operation_key or f"billed:{uuid4()}"
+        operation_key = options.operation_key
         operation = self.begin_billed_operation(
             user_id,
             BeginBilledOperationOptions(
@@ -1334,7 +1334,7 @@ class CreditsService:
     ) -> RunBilledResult:
         """Async counterpart to :meth:`run_billed`."""
 
-        operation_key = options.operation_key or f"billed:{uuid4()}"
+        operation_key = options.operation_key
         operation = await asyncio.to_thread(
             self.begin_billed_operation,
             user_id,
@@ -1377,7 +1377,7 @@ class CreditsService:
                 ttl=options.ttl,
                 feature=options.feature,
                 metadata=options.metadata,
-                idempotency_key=f"{options.operation_key}:reserve",
+                idempotency_key=scope_stable_key(options.operation_key, "reserve", field="operation_key"),
             ),
         )
         if lease.lease_id is None:
@@ -1402,8 +1402,7 @@ class CreditsService:
     ) -> BilledOperation:
         """Recreate a handle from durable callback/job state."""
 
-        if not operation_key:
-            raise ValueError("operation_key must not be empty")
+        operation_key = require_stable_key(operation_key, "operation_key")
         return BilledOperation(
             _service=self,
             user_id=user_id,
@@ -1439,13 +1438,13 @@ class CreditsService:
         # net debit to the balance; allowance does not touch the balance, so:
         #   balance_before = balance_after + net  (always correct, unchanged)
         # This comment exists to document that allowance_consumed is intentionally
-        # excluded: balance only moves by net (Fix #3).
+        # excluded: balance only moves by the net debit.
         balance_after = result.balance_after
         balance_before = balance_after + result.amount
         self._emit_low_balance(user_id, balance_before, balance_after)
 
     def _emit_low_balance(self, user_id: str, balance_before: Decimal, balance_after: Decimal) -> None:
-        """Edge-triggered low_balance: multi-level if configured, else single (§6)."""
+        """Emit an edge-triggered low-balance event at the deepest crossed level."""
         if self._low_balance_thresholds:
             with self._lb_lock:
                 below = self._low_balance_state(user_id)
@@ -1486,7 +1485,7 @@ class CreditsService:
         self,
         metrics: UsageMetrics,
         breakdown_total: Decimal,
-        idempotency_key: str | None,
+        idempotency_key: str,
         metadata: CreditMetadata | None,
     ) -> CreditMetadata:
         """Build ledger metadata: caller fields first, system fields last.
@@ -1503,8 +1502,7 @@ class CreditsService:
         base["measures"] = {key: str(value) for key, value in metrics.measures.items()}
         base["dimensions"] = dict(metrics.dimensions)
         base["breakdown_total"] = str(breakdown_total)
-        if idempotency_key:
-            base["idempotency_key"] = idempotency_key
+        base["idempotency_key"] = idempotency_key
         return CreditMetadata(**base)
 
     def _raise_deduct_error(
@@ -1544,7 +1542,7 @@ class CreditsService:
         user_id: str,
         metrics: UsageMetrics,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         metadata: CreditMetadata | None = None,
         feature: str | None = None,
     ) -> DeductionResult:
@@ -1561,7 +1559,7 @@ class CreditsService:
         Args:
             user_id: The user to charge.
             metrics: Usage metrics (model, tokens, tool calls, etc.).
-            idempotency_key: Optional user-scoped key for idempotent replay.
+            idempotency_key: Stable user-scoped key for idempotent replay.
             metadata: Extra metadata to attach to the transaction.
             feature: Optional entitlement key checked by the store.
 
@@ -1583,7 +1581,7 @@ class CreditsService:
         # 2) One atomic transaction records zero-cost usage too, so
         # authorization, quotas, and usage history cannot be bypassed by a free
         # rate.
-        effective_idempotency_key = idempotency_key or f"usage:{uuid4()}"
+        effective_idempotency_key = require_stable_key(idempotency_key, "deduct idempotency_key")
         tx_meta = self._build_tx_metadata(
             metrics,
             breakdown.total,
@@ -1645,7 +1643,7 @@ class CreditsService:
         user_id: str,
         metrics: UsageMetrics,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         metadata: CreditMetadata | None = None,
     ) -> UsageRecordResult:
         """Record priced usage without debiting the account again.
@@ -1655,7 +1653,7 @@ class CreditsService:
         """
         engine = self._engine_for_user(user_id)
         plan = self._store.get_user_plan(user_id)
-        effective_idempotency_key = idempotency_key or f"usage-record:{uuid4()}"
+        effective_idempotency_key = require_stable_key(idempotency_key, "record_usage idempotency_key")
         breakdown = engine.calculate(metrics, rate_card=plan.rate_card)
         tx_meta = self._build_tx_metadata(
             metrics,
@@ -1687,7 +1685,7 @@ class CreditsService:
         user_id: str,
         job_name: str,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         metadata: CreditMetadata | None = None,
         feature: str | None = None,
     ) -> DeductionResult:
@@ -1704,10 +1702,10 @@ class CreditsService:
         self,
         entry_id: str,
         *,
+        idempotency_key: str,
         amount: Decimal | int | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
-        idempotency_key: str | None = None,
     ) -> RefundResult:
         """Refund a previous credit deduction.
 
@@ -1716,8 +1714,7 @@ class CreditsService:
             amount: Optional partial refund amount. Full refund if omitted.
             reason: Optional reason for the refund.
             metadata: Extra metadata to attach to the refund entry.
-            idempotency_key: Stable replay key. Omitted full refunds use a
-                deterministic key derived from the original entry.
+            idempotency_key: Stable replay key for the refund mutation.
 
         Returns:
             ``RefundResult`` with the refund ledger entry details.
@@ -1727,13 +1724,14 @@ class CreditsService:
                 failures. ``credits.refund_failed`` is emitted and no success
                 event fires.
         """
+        effective_idempotency_key = require_stable_key(idempotency_key, "refund_credits idempotency_key")
         refund_amount = self._positive_amount(amount, "refund_credits") if amount is not None else None
         result = self._store.refund_credits(
             entry_id,
-            refund_amount,
-            reason,
-            metadata,
-            idempotency_key,
+            idempotency_key=effective_idempotency_key,
+            amount=refund_amount,
+            reason=reason,
+            metadata=metadata,
         )
 
         # Check the error before emitting: a failed, duplicate, or over-refund
@@ -1778,7 +1776,7 @@ class CreditsService:
         user_id: str,
         metrics: UsageMetrics,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         metadata: CreditMetadata | None = None,
     ) -> TeamDeductionResult:
         """Deduct from a team's shared balance pool.
@@ -1789,12 +1787,13 @@ class CreditsService:
             team_id: The team's UUID.
             user_id: The user to attribute the deduction to.
             metrics: Usage metrics (model, tokens, etc.).
-            idempotency_key: Optional idempotency key.
+            idempotency_key: Stable replay key for the team debit.
             metadata: Extra metadata.
 
         Returns:
             ``TeamDeductionResult`` with ledger entry details.
         """
+        effective_idempotency_key = require_stable_key(idempotency_key, "deduct_team idempotency_key")
         self._maybe_lazy_expire(user_id)
         engine = self._engine_for_user(user_id)
         plan = self._store.get_user_plan(user_id)
@@ -1829,7 +1828,7 @@ class CreditsService:
             user_id,
             cost,
             team_metadata,
-            idempotency_key=idempotency_key,
+            idempotency_key=effective_idempotency_key,
         )
 
         # Consistent with deduct(): on error emit a failure event and raise

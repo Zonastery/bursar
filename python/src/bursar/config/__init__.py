@@ -115,7 +115,129 @@ def _validate_feature_value(
         raise ValueError(f"{path}: '{value}' must be one of {definition.values}")
 
 
-def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
+def _validate_plan_pricing(config: BursarConfig, plan_key: str, plan: PlanDefinition) -> None:
+    pricing = config.pricing
+    if plan.rate_card is not None and (pricing is None or plan.rate_card not in pricing.rate_cards):
+        raise ValueError(f"plans.{plan_key}.rate_card references unknown rate card '{plan.rate_card}'")
+    if plan.allowed_operations and pricing is None:
+        raise ValueError(f"plans.{plan_key}.allowed_operations requires pricing")
+    for operation in plan.allowed_operations:
+        if pricing is None or operation not in pricing.operations:
+            raise ValueError(f"plans.{plan_key} references unknown operation '{operation}'")
+        if plan.rate_card is None or not pricing.resolves_operation(plan.rate_card, operation):
+            raise ValueError(f"plans.{plan_key} enables operation '{operation}' without pricing in its rate card")
+
+
+def _validate_plan_entitlements(config: BursarConfig, plan_key: str, plan: PlanDefinition) -> None:
+    for feature_key, value in plan.features.items():
+        definition = config.entitlements.features.get(feature_key)
+        if definition is None:
+            raise ValueError(f"plans.{plan_key}.features.{feature_key} references unknown feature '{feature_key}'")
+        _validate_feature_value(plan_key, feature_key, value, definition)
+    for quota_key, quota in plan.quotas.items():
+        if config.pricing is None or quota.operation not in config.pricing.operations:
+            raise ValueError(f"plans.{plan_key}.quotas.{quota_key} references unknown operation '{quota.operation}'")
+        measures = config.pricing.operations[quota.operation].measures
+        if quota.measure not in measures:
+            raise ValueError(f"plans.{plan_key}.quotas.{quota_key} references unknown measure '{quota.measure}'")
+
+
+def _validate_plan_credit_policies(config: BursarConfig, plan_key: str, plan: PlanDefinition) -> None:
+    if plan.credit_allowance is not None:
+        if config.credits.default_bucket is None:
+            raise ValueError(f"plans.{plan_key}.credit_allowance requires credits.default_bucket")
+        allowance_priority = plan.credit_allowance.priority
+        if any(bucket.priority == allowance_priority for bucket in config.credits.buckets.values()):
+            raise ValueError(
+                f"plans.{plan_key}.credit_allowance.priority conflicts with credit bucket priority {allowance_priority}"
+            )
+    if plan.credit_policy is not None and plan.credit_policy not in config.credits.policies:
+        raise ValueError(f"plans.{plan_key}.credit_policy references unknown policy '{plan.credit_policy}'")
+    if plan.admission_policy is not None and plan.admission_policy not in config.admission.policies:
+        raise ValueError(f"plans.{plan_key}.admission_policy references unknown policy '{plan.admission_policy}'")
+
+
+def _validate_configured_plan(
+    config: BursarConfig,
+    plan_key: str,
+    plan: PlanDefinition,
+    subscription_plans: set[str],
+) -> None:
+    _validate_plan(plan)
+    if plan.evolution is None:
+        plan.evolution = PlanEvolution(
+            default_rollout="next_renewal" if plan_key in subscription_plans else "immediate"
+        )
+    if plan.evolution.default_rollout == "next_renewal" and plan_key not in subscription_plans:
+        raise ValueError(f"plans.{plan_key}.evolution.default_rollout=next_renewal requires a subscription offer")
+    _validate_plan_pricing(config, plan_key, plan)
+    _validate_plan_entitlements(config, plan_key, plan)
+    _validate_plan_credit_policies(config, plan_key, plan)
+
+
+def _validate_bucket_priorities(config: BursarConfig) -> None:
+    priorities = list(config.credits.buckets.values())
+    if len({b.priority for b in priorities}) != len(priorities):
+        raise ValueError("bucket priorities must be unique")
+
+
+def _validate_admission_operations(config: BursarConfig) -> None:
+    if config.pricing is not None:
+        for policy_key, policy in config.admission.policies.items():
+            unknown = set(policy.operations) - set(config.pricing.operations)
+            if unknown:
+                raise ValueError(
+                    f"admission.policies.{policy_key}.operations references unknown operations {sorted(unknown)}"
+                )
+
+
+def _validate_grant_programs(config: BursarConfig) -> None:
+    for program_key, program in config.credits.grant_programs.items():
+        unknown_plans = set(program.eligibility.plans) - set(config.plans)
+        if unknown_plans:
+            raise ValueError(
+                f"credits.grant_programs.{program_key}.eligibility references unknown plans {sorted(unknown_plans)}"
+            )
+        for award in program.awards:
+            if award.bucket not in config.credits.buckets:
+                raise ValueError(
+                    f"credits.grant_programs.{program_key}.awards bucket '{award.bucket}' references unknown bucket"
+                )
+
+
+def _validate_commerce_offers(config: BursarConfig) -> None:
+    for offer_key, offer in config.commerce.offers.items():
+        if isinstance(offer, SubscriptionOffer):
+            if offer.plan not in config.plans:
+                raise ValueError(f"commerce.offers.{offer_key}.plan references unknown plan '{offer.plan}'")
+            if offer.cycle_grant is not None and offer.cycle_grant.bucket not in config.credits.buckets:
+                raise ValueError(f"commerce.offers.{offer_key}.cycle_grant references unknown bucket")
+        else:
+            if offer.bucket not in config.credits.buckets:
+                raise ValueError(f"commerce.offers.{offer_key}.bucket references unknown bucket")
+            if isinstance(offer.expiry, SubscriptionEndExpiry):
+                raise ValueError(f"commerce.offers.{offer_key} top-up cannot use subscription_end expiry")
+
+
+def _validate_auto_recharge(config: BursarConfig) -> None:
+    auto = config.commerce.auto_recharge
+    if auto is None:
+        return
+    currencies: set[str] = set()
+    for topup_key in auto.eligible_topups:
+        offer = config.commerce.offers.get(topup_key)
+        if not isinstance(offer, TopupOffer):
+            raise ValueError(f"commerce.auto_recharge references non-top-up offer '{topup_key}'")
+        currencies.add(offer.price.currency)
+        if auto.quantity.minimum < offer.quantity.minimum or auto.quantity.maximum > offer.quantity.maximum:
+            raise ValueError(f"commerce.auto_recharge.quantity must fit commerce.offers.{topup_key}.quantity")
+    if len(currencies) != 1:
+        raise ValueError("commerce.auto_recharge eligible top-ups must use one currency")
+    if auto.rearm_above <= auto.balance_below.maximum:
+        raise ValueError("commerce.auto_recharge.rearm_above must exceed balance_below.maximum")
+
+
+def validate_bursar_config(config: BursarConfig) -> BursarConfig:
     if config.pricing is not None:
         _validate_pricing(config.pricing)
     _validate_credits(config.credits)
@@ -129,94 +251,12 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
         offer.plan for offer in config.commerce.offers.values() if isinstance(offer, SubscriptionOffer)
     }
     for plan_key, plan in config.plans.items():
-        _validate_plan(plan)
-        if plan.evolution is None:
-            plan.evolution = PlanEvolution(
-                default_rollout="next_renewal" if plan_key in subscription_plans else "immediate"
-            )
-        if plan.evolution.default_rollout == "next_renewal" and plan_key not in subscription_plans:
-            raise ValueError(f"plans.{plan_key}.evolution.default_rollout=next_renewal requires a subscription offer")
-        if plan.rate_card is not None and (config.pricing is None or plan.rate_card not in config.pricing.rate_cards):
-            raise ValueError(f"plans.{plan_key}.rate_card references unknown rate card '{plan.rate_card}'")
-        if plan.allowed_operations and config.pricing is None:
-            raise ValueError(f"plans.{plan_key}.allowed_operations requires pricing")
-        for operation in plan.allowed_operations:
-            if config.pricing is None or operation not in config.pricing.operations:
-                raise ValueError(f"plans.{plan_key} references unknown operation '{operation}'")
-            if plan.rate_card is None or not config.pricing.resolves_operation(plan.rate_card, operation):
-                raise ValueError(f"plans.{plan_key} enables operation '{operation}' without pricing in its rate card")
-        for feature_key, value in plan.features.items():
-            definition = config.entitlements.features.get(feature_key)
-            if definition is None:
-                raise ValueError(f"plans.{plan_key}.features.{feature_key} references unknown feature '{feature_key}'")
-            _validate_feature_value(plan_key, feature_key, value, definition)
-        for quota_key, quota in plan.quotas.items():
-            if config.pricing is None or quota.operation not in config.pricing.operations:
-                raise ValueError(
-                    f"plans.{plan_key}.quotas.{quota_key} references unknown operation '{quota.operation}'"
-                )
-            measures = config.pricing.operations[quota.operation].measures
-            if quota.measure not in measures:
-                raise ValueError(f"plans.{plan_key}.quotas.{quota_key} references unknown measure '{quota.measure}'")
-        if plan.credit_allowance is not None:
-            if config.credits.default_bucket is None:
-                raise ValueError(f"plans.{plan_key}.credit_allowance requires credits.default_bucket")
-            allowance_priority = plan.credit_allowance.priority
-            if any(bucket.priority == allowance_priority for bucket in config.credits.buckets.values()):
-                raise ValueError(
-                    f"plans.{plan_key}.credit_allowance.priority conflicts with "
-                    f"credit bucket priority {allowance_priority}"
-                )
-        if plan.credit_policy is not None and plan.credit_policy not in config.credits.policies:
-            raise ValueError(f"plans.{plan_key}.credit_policy references unknown policy '{plan.credit_policy}'")
-        if plan.admission_policy is not None and plan.admission_policy not in config.admission.policies:
-            raise ValueError(f"plans.{plan_key}.admission_policy references unknown policy '{plan.admission_policy}'")
-    priorities = list(config.credits.buckets.values())
-    if len({b.priority for b in priorities}) != len(priorities):
-        raise ValueError("bucket priorities must be unique")
-    if config.pricing is not None:
-        for policy_key, policy in config.admission.policies.items():
-            unknown = set(policy.operations) - set(config.pricing.operations)
-            if unknown:
-                raise ValueError(
-                    f"admission.policies.{policy_key}.operations references unknown operations {sorted(unknown)}"
-                )
-    for program_key, program in config.credits.grant_programs.items():
-        unknown_plans = set(program.eligibility.plans) - set(config.plans)
-        if unknown_plans:
-            raise ValueError(
-                f"credits.grant_programs.{program_key}.eligibility references unknown plans {sorted(unknown_plans)}"
-            )
-        for award in program.awards:
-            if award.bucket not in config.credits.buckets:
-                raise ValueError(
-                    f"credits.grant_programs.{program_key}.awards bucket '{award.bucket}' references unknown bucket"
-                )
-    for offer_key, offer in config.commerce.offers.items():
-        if isinstance(offer, SubscriptionOffer):
-            if offer.plan not in config.plans:
-                raise ValueError(f"commerce.offers.{offer_key}.plan references unknown plan '{offer.plan}'")
-            if offer.cycle_grant is not None and offer.cycle_grant.bucket not in config.credits.buckets:
-                raise ValueError(f"commerce.offers.{offer_key}.cycle_grant references unknown bucket")
-        else:
-            if offer.bucket not in config.credits.buckets:
-                raise ValueError(f"commerce.offers.{offer_key}.bucket references unknown bucket")
-            if isinstance(offer.expiry, SubscriptionEndExpiry):
-                raise ValueError(f"commerce.offers.{offer_key} top-up cannot use subscription_end expiry")
-    auto = config.commerce.auto_recharge
-    if auto is not None:
-        currencies: set[str] = set()
-        for topup_key in auto.eligible_topups:
-            offer = config.commerce.offers.get(topup_key)
-            if not isinstance(offer, TopupOffer):
-                raise ValueError(f"commerce.auto_recharge references non-top-up offer '{topup_key}'")
-            currencies.add(offer.price.currency)
-            if auto.quantity.minimum < offer.quantity.minimum or auto.quantity.maximum > offer.quantity.maximum:
-                raise ValueError(f"commerce.auto_recharge.quantity must fit commerce.offers.{topup_key}.quantity")
-        if len(currencies) != 1:
-            raise ValueError("commerce.auto_recharge eligible top-ups must use one currency")
-        if auto.rearm_above <= auto.balance_below.maximum:
-            raise ValueError("commerce.auto_recharge.rearm_above must exceed balance_below.maximum")
+        _validate_configured_plan(config, plan_key, plan, subscription_plans)
+    _validate_bucket_priorities(config)
+    _validate_admission_operations(config)
+    _validate_grant_programs(config)
+    _validate_commerce_offers(config)
+    _validate_auto_recharge(config)
     return config
 
 

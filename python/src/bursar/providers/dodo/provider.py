@@ -38,6 +38,7 @@ from bursar.providers.types import (
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
+from bursar.shared.idempotency import require_stable_key
 
 if TYPE_CHECKING:
     from dodopayments import AsyncDodoPayments
@@ -92,8 +93,8 @@ def _normalize_metadata(value: object) -> dict[str, str]:
     return normalized
 
 
-def _idempotency_headers(key: str | None) -> dict[str, str] | None:
-    return {"Idempotency-Key": key} if key else None
+def _idempotency_headers(key: str) -> dict[str, str]:
+    return {"Idempotency-Key": require_stable_key(key)}
 
 
 def _require_provider_text(value: object, operation: str, field: str) -> str:
@@ -177,8 +178,7 @@ class DodoProvider:
         elif params.email:
             session_kwargs["customer"] = {"email": params.email}
 
-        if params.idempotency_key:
-            session_kwargs["extra_headers"] = _idempotency_headers(params.idempotency_key)
+        session_kwargs["extra_headers"] = _idempotency_headers(params.idempotency_key)
         session = await client.checkout_sessions.create(**session_kwargs)
         return CheckoutSessionResult(
             url=_require_provider_text(session.checkout_url, "create_checkout_session", "checkout_url"),
@@ -273,21 +273,23 @@ class DodoProvider:
             event_type=str(event_type) or None,
         )
 
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         client = self._get_client()
-        kwargs: dict[str, Any] = {"cancel_at_next_billing_date": True}
-        if idempotency_key:
-            kwargs["extra_headers"] = _idempotency_headers(idempotency_key)
+        kwargs: dict[str, Any] = {
+            "cancel_at_next_billing_date": True,
+            "extra_headers": _idempotency_headers(idempotency_key),
+        }
         await client.subscriptions.update(
             subscription_id,
             **kwargs,
         )
 
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         client = self._get_client()
-        kwargs: dict[str, Any] = {"cancel_at_next_billing_date": False}
-        if idempotency_key:
-            kwargs["extra_headers"] = _idempotency_headers(idempotency_key)
+        kwargs: dict[str, Any] = {
+            "cancel_at_next_billing_date": False,
+            "extra_headers": _idempotency_headers(idempotency_key),
+        }
         await client.subscriptions.update(
             subscription_id,
             **kwargs,
@@ -297,12 +299,11 @@ class DodoProvider:
         self,
         subscription_id: str,
         provider_operation_id: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> None:
         client = self._get_client()
-        kwargs: dict[str, Any] = {}
-        if idempotency_key:
-            kwargs["extra_headers"] = _idempotency_headers(idempotency_key)
+        kwargs: dict[str, Any] = {"extra_headers": _idempotency_headers(idempotency_key)}
         await client.subscriptions.cancel_change_plan(subscription_id, **kwargs)
 
     async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
@@ -489,6 +490,7 @@ class DodoProvider:
         kwargs: dict[str, Any] = {
             "email": params.email,
             "name": params.name,
+            "extra_headers": _idempotency_headers(params.idempotency_key),
         }
         if params.metadata:
             kwargs["metadata"] = params.metadata
@@ -517,8 +519,7 @@ class DodoProvider:
             kwargs["on_payment_failure"] = params.on_payment_failure
         if params.metadata:
             kwargs["metadata"] = params.metadata
-        if params.idempotency_key:
-            kwargs["extra_headers"] = _idempotency_headers(params.idempotency_key)
+        kwargs["extra_headers"] = _idempotency_headers(params.idempotency_key)
         await client.subscriptions.change_plan(params.provider_subscription_id, **kwargs)
         return ChangePlanResult()
 

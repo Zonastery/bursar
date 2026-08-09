@@ -18,7 +18,7 @@ from bursar.credits.types.catalog import (
 class OperationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
     billing_mode: Literal["strict", "overdraft"]
-    max_concurrent: int | None = Field(default=None, gt=0)
+    max_concurrent: int | None = Field(default=None, strict=True, gt=0)
     overdraft_floor: Decimal | None = None
 
     @model_validator(mode="after")
@@ -73,7 +73,7 @@ class QuotaEvent(BaseModel):
 class ListQuotaEventsOptions(BaseModel):
     after: datetime | None = None
     after_id: str | None = None
-    limit: int | None = Field(default=None, ge=1, le=500)
+    limit: int | None = Field(default=None, strict=True, ge=1, le=500)
     idempotency_key: str | None = None
 
 

@@ -42,6 +42,7 @@ describe("payment provider adapter contracts", () => {
 
   it("maps Dodo requests, idempotency, and response DTOs", async () => {
     const calls: unknown[][] = [];
+    const customerCreate = vi.fn(async () => ({ customer_id: "cus_1" }));
     const client = {
       webhooks: {
         unwrap: () => ({ type: "payment.succeeded", data: {} }),
@@ -85,7 +86,7 @@ describe("payment provider adapter contracts", () => {
             { payment_method: "paypal", payment_method_id: "pm_2" },
           ],
         }),
-        create: async () => ({ customer_id: "cus_1" }),
+        create: customerCreate,
       },
       payments: {
         retrieve: async (id: string) =>
@@ -159,6 +160,18 @@ describe("payment provider adapter contracts", () => {
       }),
     ).resolves.toMatchObject({ providerPaymentId: "pay_auto", status: "succeeded" });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({ url: "https://invoice.test" });
+    await expect(
+      provider.createCustomer({
+        email: "u1@example.com",
+        name: "User One",
+        metadata: {},
+        idempotencyKey: "customer:user-1",
+      }),
+    ).resolves.toEqual({ customerId: "cus_1" });
+    expect(customerCreate).toHaveBeenCalledWith(
+      { email: "u1@example.com", name: "User One", metadata: {} },
+      { idempotencyKey: "customer:user-1" },
+    );
     await expect(
       provider.previewChangePlan({
         providerSubscriptionId: "sub_1",
@@ -243,6 +256,32 @@ describe("payment provider adapter contracts", () => {
       line_items: [{ price: "price_1", quantity: 1 }],
     });
     expect(checkoutCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1" });
+    await expect(
+      provider.createCustomer({
+        email: "u1@example.com",
+        name: "User One",
+        metadata: {},
+        idempotencyKey: "customer:user-1",
+      }),
+    ).resolves.toEqual({ customerId: "cus_1" });
+    expect(customerCalls.at(-1)?.[1]).toEqual({ idempotencyKey: "customer:user-1" });
+    const longKeyPrefix = "operation:" + "x".repeat(244);
+    for (const suffix of ["a", "b"]) {
+      await provider.createCheckoutSession({
+        userId: "u1",
+        productId: "price_1",
+        type: "subscription",
+        returnUrl: "https://ok",
+        cancelUrl: "https://cancel",
+        metadata: {},
+        idempotencyKey: `${longKeyPrefix}${suffix}`,
+      });
+    }
+    const scopedKeys = customerCalls
+      .slice(-2)
+      .map((call) => String((call[1] as { idempotencyKey: string }).idempotencyKey));
+    expect(scopedKeys[0]).not.toBe(scopedKeys[1]);
+    expect(scopedKeys.every((key) => key.length <= 255)).toBe(true);
     await expect(provider.getCheckoutSessionStatus("sess_1")).resolves.toEqual({
       paymentStatus: "cancelled",
     });
@@ -430,6 +469,7 @@ describe("payment provider adapter contracts", () => {
         returnUrl: "https://return",
         cancelUrl: "https://cancel",
         metadata: {},
+        idempotencyKey: "checkout_1",
       }),
     ).resolves.toEqual({ url: "https://return" });
     await expect(
@@ -473,13 +513,19 @@ describe("payment provider adapter contracts", () => {
       }),
     ).resolves.toMatchObject({ providerPaymentId: "mock_pay_topup_1", status: "succeeded" });
     await expect(
-      provider.createCustomer({ email: "u1@example.com", name: "User One", metadata: {} }),
+      provider.createCustomer({
+        email: "u1@example.com",
+        name: "User One",
+        metadata: {},
+        idempotencyKey: "customer:user-1",
+      }),
     ).resolves.toMatchObject({ customerId: expect.stringMatching(/^mock_cus_/) });
     await expect(
       provider.changePlan({
         providerSubscriptionId: "sub_1",
         productId: "prod_2",
         prorationBillingMode: "prorated_immediately",
+        idempotencyKey: "change_1",
       }),
     ).resolves.toBeUndefined();
     await expect(
@@ -489,8 +535,8 @@ describe("payment provider adapter contracts", () => {
         prorationBillingMode: "prorated_immediately",
       }),
     ).resolves.toMatchObject({ totalAmount: 0, settlementAmount: 0, currency: "USD" });
-    await expect(provider.cancelSubscription("sub_1")).resolves.toBeUndefined();
-    await expect(provider.reactivateSubscription("sub_1")).resolves.toBeUndefined();
+    await expect(provider.cancelSubscription("sub_1", "cancel_1")).resolves.toBeUndefined();
+    await expect(provider.reactivateSubscription("sub_1", "reactivate_1")).resolves.toBeUndefined();
     await expect(
       provider.cancelScheduledPlanChange("sub_1", "op_1", "idem_1"),
     ).resolves.toBeUndefined();

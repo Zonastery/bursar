@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from functools import cached_property
 from typing import Any, Literal, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg2
 
@@ -89,6 +89,7 @@ from bursar.credits.types import (
     UsageRecordResult,
 )
 from bursar.errors import BursarError
+from bursar.shared.idempotency import require_stable_key
 from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, PostgresPool
 from bursar.sql import _get_sql_files
 
@@ -317,6 +318,7 @@ class PostgresStore(CreditStore):
         try:
             conn.autocommit = False
             with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
                 cur.execute("CREATE SCHEMA IF NOT EXISTS bursar")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS bursar.schema_migrations (
@@ -325,8 +327,14 @@ class PostgresStore(CreditStore):
                         applied_at timestamptz NOT NULL DEFAULT now()
                     )
                 """)
-                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
                 sql_files = _get_sql_files()
+                known_versions = {sql_file.name for sql_file in sql_files}
+                cur.execute("SELECT version FROM bursar.schema_migrations ORDER BY version")
+                unknown_versions = [row[0] for row in cur.fetchall() if row[0] not in known_versions]
+                if unknown_versions:
+                    raise StoreError(
+                        "migration ledger contains versions absent from this release: " + ", ".join(unknown_versions)
+                    )
 
                 for sql_file in sql_files:
                     sql = sql_file.read_text(encoding="utf-8")
@@ -386,7 +394,8 @@ class PostgresStore(CreditStore):
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         bucket: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> AddCreditsResult:
         """Add credits to a user's balance.
 
@@ -409,7 +418,7 @@ class PostgresStore(CreditStore):
         meta = metadata.model_dump(mode="json") if metadata else {}
         if expires_at:
             meta["expires_at"] = expires_at.isoformat()
-        effective_idempotency_key = idempotency_key or f"credit:{uuid4()}"
+        effective_idempotency_key = require_stable_key(idempotency_key)
         result = self._balance_repo.add_credits(
             user_id,
             str(amount),
@@ -436,7 +445,7 @@ class PostgresStore(CreditStore):
         user_id: str,
         amount: Decimal,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         operation: str = "usage",
         feature: str | None = None,
         model: str | None = None,
@@ -448,7 +457,7 @@ class PostgresStore(CreditStore):
         """Call the plan-aware atomic usage-charge RPC."""
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        effective_idempotency_key = idempotency_key or f"usage:{uuid4()}"
+        effective_idempotency_key = require_stable_key(idempotency_key)
 
         params = DeductParams(
             user_id=user_id,
@@ -494,7 +503,7 @@ class PostgresStore(CreditStore):
         operation: str,
         requested: Decimal,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         feature: str | None = None,
         model: str | None = None,
         region: str | None = None,
@@ -504,7 +513,7 @@ class PostgresStore(CreditStore):
     ) -> UsageRecordResult:
         """Append priced usage telemetry without creating another debit."""
         requested = _dec(requested)
-        effective_idempotency_key = idempotency_key or f"usage-record:{uuid4()}"
+        effective_idempotency_key = require_stable_key(idempotency_key)
         params = DeductParams(
             user_id=user_id,
             operation=operation,
@@ -544,7 +553,7 @@ class PostgresStore(CreditStore):
         user_id: str,
         amount: Decimal,
         operation_type: str,
-        options: CreateLeaseOptions | None = None,
+        options: CreateLeaseOptions,
     ) -> LeaseResult:
         """Create a credit lease (reservation) for admission control.
 
@@ -568,10 +577,9 @@ class PostgresStore(CreditStore):
         Raises:
             StoreError: If the RPC returns no result (admission denied).
         """
-        options = options or CreateLeaseOptions()
         amount = _dec(amount)
         floor = _dec(options.floor)
-        effective_idempotency_key = options.idempotency_key or f"lease:{uuid4()}"
+        effective_idempotency_key = options.idempotency_key
         effective_dimensions = dict(options.dimensions or {})
         if options.model is not None:
             effective_dimensions.setdefault("model", options.model)
@@ -1155,10 +1163,11 @@ class PostgresStore(CreditStore):
     def refund_credits(
         self,
         entry_id: str,
+        *,
+        idempotency_key: str,
         amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
-        idempotency_key: str | None = None,
     ) -> RefundResult:
         """Refund a previous ledger entry.
 
@@ -1174,7 +1183,7 @@ class PostgresStore(CreditStore):
         result = self._deduction_repo.refund_credits(
             entry_id,
             str(_dec(amount)) if amount is not None else None,
-            idempotency_key or f"refund:{entry_id}:{_dec(amount) if amount is not None else 'remaining'}",
+            require_stable_key(idempotency_key),
             reason,
             json.dumps(
                 metadata.model_dump(mode="json", exclude_none=True) if metadata else {},
@@ -1552,7 +1561,8 @@ class PostgresStore(CreditStore):
         user_id: str,
         amount: Decimal,
         metadata: CreditMetadata | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> TeamDeductionResult:
         """Deduct credits from a team's balance on behalf of a member.
 
@@ -1571,10 +1581,7 @@ class PostgresStore(CreditStore):
         """
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        # Generate a default idempotency key when the caller supplies none, so two
-        # otherwise-identical team charges are not collapsed into a single replay
-        # (mirrors the JS store). deduct_team dedupes on the key argument.
-        effective_key = idempotency_key or f"team-usage:{uuid4()}"
+        effective_key = require_stable_key(idempotency_key)
         meta["idempotency_key"] = effective_key
         operation_meta = meta.get("operation")
         operation = operation_meta if isinstance(operation_meta, str) and operation_meta else "team_usage"

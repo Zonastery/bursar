@@ -215,6 +215,16 @@ describe("evaluateExpression (Decimal results)", () => {
     ).toBe("20");
   });
 
+  it("gives 'and' higher precedence than 'or'", () => {
+    expect(
+      evaluateExpression("1 if input_tokens > 0 or output_tokens > 0 and tool_calls > 0 else 0", {
+        input_tokens: 1,
+        output_tokens: 0,
+        tool_calls: 0,
+      }).toString(),
+    ).toBe("1");
+  });
+
   it("handles floor division", () => {
     expect(evaluateExpression("input_tokens // 3", { input_tokens: 10 }).toString()).toBe("3");
   });
@@ -362,7 +372,7 @@ describe("evaluateExpression (Decimal results)", () => {
   });
 });
 
-// ── Decimal precision / money (contract §1, §8) ──
+// ── Decimal precision and deterministic money behavior ──
 describe("Decimal precision & money safety", () => {
   it("0.1 + 0.2 is exact (no binary float drift)", () => {
     // Famous IEEE-754 footgun: 0.1+0.2 === 0.30000000000000004 in float.
@@ -388,7 +398,7 @@ describe("Decimal precision & money safety", () => {
   });
 });
 
-// ── Sandbox-escape & safety table (contract §8) ──
+// ── Expression sandbox safety ──
 describe("sandbox safety", () => {
   const escapes: Array<[string, Record<string, number>]> = [
     ["__proto__ * 1", { input_tokens: 1 }],
@@ -429,14 +439,14 @@ describe("sandbox safety", () => {
   });
 
   it("modulo by zero throws (not NaN)", () => {
-    // CHANGED: previously returned NaN; now raises ExpressionError.
+    // Division-like operators consistently reject a zero divisor.
     expect(() => evaluateExpression("input_tokens % 0", { input_tokens: 5 })).toThrow(
       ExpressionError,
     );
   });
 });
 
-// ── Helper arity / range errors (H6, contract §8) ──
+// ── Helper arity and range validation ──
 describe("helper arity & range validation", () => {
   it("clamp requires exactly 3 args", () => {
     expect(() => validateExpression("clamp(input_tokens)")).toThrow(ExpressionError);
@@ -453,9 +463,8 @@ describe("helper arity & range validation", () => {
   });
 
   it("tier requires an even arg count >= 4 (value + N>=1 pairs + default)", () => {
-    // CHANGED rule (REFACTOR_CONTRACT.md §1): arg count must be EVEN and >= 4.
-    // value + N>=1 (threshold, rate) pairs + trailing default. Odd counts and
-    // < 4 are rejected.
+    // The signature is a value, one or more (threshold, rate) pairs, and a
+    // trailing default. Therefore valid calls have an even argument count.
     expect(() => validateExpression("tier(input_tokens, 100, 1, 9)")).not.toThrow(); // 4 args ok (1 pair + default)
     expect(() => validateExpression("tier(input_tokens, 100, 1, 500, 2, 3)")).not.toThrow(); // 6 args ok (2 pairs + default)
     expect(() => validateExpression("tier(input_tokens)")).toThrow(ExpressionError); // 1 arg
@@ -683,7 +692,7 @@ describe("malformed number literals (H11)", () => {
   });
 });
 
-// ── Cross-SDK parity fixture (contract §7) ──
+// ── Cross-SDK parity fixture ──
 // Loaded from the repo-root canonical fixture; Python and JS MUST produce
 // byte-identical 6dp decimal strings or both raise for expect_error.
 const __dirname = dirname(fileURLToPath(import.meta.url));

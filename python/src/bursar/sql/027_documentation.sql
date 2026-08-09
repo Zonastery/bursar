@@ -188,6 +188,12 @@ COMMENT ON FUNCTION bursar.list_billing_invoices(
     integer
 )
 IS 'List one bounded keyset page of invoices for a subject and provider environment.';
+COMMENT ON FUNCTION bursar.resolve_catalog_offer(text, text, text)
+IS 'Resolve an active provider reference to its catalog subscription offer.';
+COMMENT ON FUNCTION bursar.resolve_catalog_topup(text, text, text)
+IS 'Resolve an active provider reference to its catalog credit top-up.';
+COMMENT ON FUNCTION bursar.resolve_catalog_plan(text, text, text)
+IS 'Resolve the plan attached to an active provider-referenced catalog offer.';
 COMMENT ON FUNCTION bursar.create_checkout_intent(
     uuid,
     text,

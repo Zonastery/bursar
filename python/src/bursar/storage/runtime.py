@@ -110,21 +110,11 @@ class BursarRuntimeOptions(_RuntimeModel):
 
 
 class BursarRuntimeStartOptions(_RuntimeModel):
-    load_catalog: bool = True
-    max_attempts: int = 1
-    retry_delay_seconds: float = 0.25
-    max_elapsed_seconds: float = 30.0
-    should_retry: SkipValidation[Callable[[BaseException], bool]] | None = None
-
-    @model_validator(mode="after")
-    def validate_retry(self) -> BursarRuntimeStartOptions:
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be a positive integer")
-        if self.retry_delay_seconds < 0:
-            raise ValueError("retry_delay_seconds must not be negative")
-        if self.max_elapsed_seconds < 0:
-            raise ValueError("max_elapsed_seconds must not be negative")
-        return self
+    load_catalog: bool = Field(default=True, strict=True)
+    max_attempts: int = Field(default=1, strict=True, ge=1)
+    retry_delay_seconds: float = Field(default=0.25, strict=True, ge=0, le=5.0, allow_inf_nan=False)
+    max_elapsed_seconds: float = Field(default=30.0, strict=True, ge=0, allow_inf_nan=False)
+    should_retry: Callable[[BaseException], bool] | None = None
 
 
 class BursarRuntimeHealth(_RuntimeModel):

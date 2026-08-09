@@ -3,8 +3,8 @@
  * PostgreSQL 17 image with pg_partman 5 and pg_jsonschema 0.3
  * testcontainer when `DATABASE_URL` isn't already set, so `bun run test`
  * exercises the real PostgresStore integration/concurrency suite by default
- * (Docker permitting) instead of silently skipping it. CI sets `DATABASE_URL`
- * to its own service container, so this is a no-op there.
+ * (Docker permitting) instead of silently skipping it. CI requires this path
+ * to succeed unless the job supplies an existing database explicitly.
  *
  * The connection string is handed to test files via Vitest's `provide`/
  * `inject` context (not `process.env`): globalSetup runs in the main
@@ -32,6 +32,19 @@ const POSTGRES_BUILD_CONTEXT = resolve(
   "../../tests/postgres",
 );
 
+function postgresTestsAreRequired(): boolean {
+  return process.env.BURSAR_REQUIRE_POSTGRES_TESTS === "1";
+}
+
+function assertExternalDatabaseResetAllowed(): void {
+  if (process.env.BURSAR_ALLOW_DATABASE_RESET !== "1") {
+    throw new Error(
+      "Refusing to reset externally supplied DATABASE_URL. Set " +
+        "BURSAR_ALLOW_DATABASE_RESET=1 only for a disposable test database.",
+    );
+  }
+}
+
 async function resolvePostgresImage(): Promise<string> {
   const configuredImage = process.env.BURSAR_TEST_PG_IMAGE;
   if (configuredImage) return configuredImage;
@@ -44,8 +57,10 @@ async function resolvePostgresImage(): Promise<string> {
 }
 
 export async function setup(project: TestProject): Promise<void> {
-  if (process.env.DATABASE_URL) {
-    project.provide("DATABASE_URL", process.env.DATABASE_URL);
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (databaseUrl) {
+    assertExternalDatabaseResetAllowed();
+    project.provide("DATABASE_URL", databaseUrl);
     return;
   }
 
@@ -62,12 +77,15 @@ export async function setup(project: TestProject): Promise<void> {
     // guarantee is unclear when setup() itself throws.
     if (container) {
       await container.stop().catch(() => {});
+      container = undefined;
     }
-    console.warn(
-      `[global-setup] testcontainers could not start ${image} (${String(err)}); ` +
-        "DB integration tests will skip. Set DATABASE_URL to point at an already-running " +
-        "Postgres instead.",
-    );
+    const message =
+      `[global-setup] testcontainers could not start ${image} (${String(err)}). ` +
+      "Set DATABASE_URL to point at an already-running Postgres instead.";
+    if (postgresTestsAreRequired()) {
+      throw new Error(`PostgreSQL integration tests are required. ${message}`, { cause: err });
+    }
+    console.warn(`${message} DB integration tests will skip.`);
     project.provide("DATABASE_URL", undefined);
   }
 }

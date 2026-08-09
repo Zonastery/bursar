@@ -12,6 +12,8 @@ from bursar.config.types import (
     InMatcher,
     MatcherScalar,
     NotInMatcher,
+    OperationDefinition,
+    OperationPricing,
     PrefixMatcher,
     PricingConfig,
     RangeMatcher,
@@ -61,49 +63,61 @@ def _validate_matcher(
         matcher.values = normalized
 
 
-def _validate_pricing(pricing: PricingConfig) -> PricingConfig:  # noqa: C901
-    if not pricing.operations:
-        raise ValueError("pricing.operations must not be empty")
-    if not pricing.rate_cards:
-        raise ValueError("pricing.rate_cards must not be empty")
-    _validate_map_keys(pricing.operations, "pricing.operations")
-    _validate_map_keys(pricing.rate_cards, "pricing.rate_cards")
+def _validate_price_rules(
+    card_key: str,
+    operation: str,
+    operation_price: OperationPricing,
+    definition: OperationDefinition,
+) -> None:
+    for index, rule in enumerate(operation_price.rules):
+        unknown_dimensions = set(rule.when) - set(definition.dimensions)
+        if unknown_dimensions:
+            raise ValueError(
+                f"pricing.rate_cards.{card_key}.operations.{operation}.rules[{index}] "
+                f"matches undeclared dimensions {sorted(unknown_dimensions)}"
+            )
+        for dimension_key, matcher in rule.when.items():
+            _validate_matcher(
+                matcher,
+                definition.dimensions[dimension_key],
+                f"pricing.rate_cards.{card_key}.operations.{operation}.rules[{index}].when.{dimension_key}",
+            )
 
+
+def _validate_price_charges(
+    operation: str,
+    operation_price: OperationPricing,
+    definition: OperationDefinition,
+) -> None:
+    charges = [rule.charge for rule in operation_price.rules]
+    if isinstance(operation_price.unmatched, ChargeUnmatched):
+        charges.append(operation_price.unmatched.charge)
+    for charge in charges:
+        unknown_measures = _charge_measure_names(charge) - set(definition.measures)
+        if unknown_measures:
+            raise ValueError(
+                f"pricing for operation '{operation}' references undeclared measures {sorted(unknown_measures)}"
+            )
+        for expression in _expression_charges(charge):
+            try:
+                validate_expression(expression.formula, known_variables=set(definition.measures))
+            except ExpressionError as exc:
+                raise ValueError(f"invalid expression charge for operation '{operation}': {exc}") from exc
+
+
+def _validate_rate_cards(pricing: PricingConfig) -> None:
     for card_key, card in pricing.rate_cards.items():
         if card.extends is not None and card.extends not in pricing.rate_cards:
             raise ValueError(f"pricing.rate_cards.{card_key}.extends references unknown rate card '{card.extends}'")
         for operation, operation_price in card.operations.items():
-            if operation not in pricing.operations:
+            definition = pricing.operations.get(operation)
+            if definition is None:
                 raise ValueError(f"pricing.rate_cards.{card_key}.operations references unknown operation '{operation}'")
-            definition = pricing.operations[operation]
-            charges = [rule.charge for rule in operation_price.rules]
-            if isinstance(operation_price.unmatched, ChargeUnmatched):
-                charges.append(operation_price.unmatched.charge)
-            for index, rule in enumerate(operation_price.rules):
-                unknown_dimensions = set(rule.when) - set(definition.dimensions)
-                if unknown_dimensions:
-                    raise ValueError(
-                        f"pricing.rate_cards.{card_key}.operations.{operation}.rules[{index}] "
-                        f"matches undeclared dimensions {sorted(unknown_dimensions)}"
-                    )
-                for dimension_key, matcher in rule.when.items():
-                    _validate_matcher(
-                        matcher,
-                        definition.dimensions[dimension_key],
-                        f"pricing.rate_cards.{card_key}.operations.{operation}.rules[{index}].when.{dimension_key}",
-                    )
-            for charge in charges:
-                unknown_measures = _charge_measure_names(charge) - set(definition.measures)
-                if unknown_measures:
-                    raise ValueError(
-                        f"pricing for operation '{operation}' references undeclared measures {sorted(unknown_measures)}"
-                    )
-                for expression in _expression_charges(charge):
-                    try:
-                        validate_expression(expression.formula, known_variables=set(definition.measures))
-                    except ExpressionError as exc:
-                        raise ValueError(f"invalid expression charge for operation '{operation}': {exc}") from exc
+            _validate_price_rules(card_key, operation, operation_price, definition)
+            _validate_price_charges(operation, operation_price, definition)
 
+
+def _validate_rate_card_inheritance(pricing: PricingConfig) -> None:
     visiting: set[str] = set()
     visited: set[str] = set()
 
@@ -121,5 +135,16 @@ def _validate_pricing(pricing: PricingConfig) -> PricingConfig:  # noqa: C901
 
     for key in pricing.rate_cards:
         visit(key)
+
+
+def _validate_pricing(pricing: PricingConfig) -> PricingConfig:
+    if not pricing.operations:
+        raise ValueError("pricing.operations must not be empty")
+    if not pricing.rate_cards:
+        raise ValueError("pricing.rate_cards must not be empty")
+    _validate_map_keys(pricing.operations, "pricing.operations")
+    _validate_map_keys(pricing.rate_cards, "pricing.rate_cards")
+    _validate_rate_cards(pricing)
+    _validate_rate_card_inheritance(pricing)
 
     return pricing

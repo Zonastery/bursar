@@ -1,30 +1,37 @@
 """Bundled, grouped SQL migrations for bursar."""
 
+import re
 from pathlib import Path
 
 _SQL_DIR = Path(__file__).resolve().parent
+_MIGRATION_NAME = re.compile(r"^(?P<prefix>[0-9]{3})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$")
 
 
 def _get_sql_files() -> list[Path]:
     """Return bundled SQL migration file paths in apply order.
 
-        Conventions
-        -----------
-        - Each migration file MUST have a unique leading ``NNN_`` numeric prefix
-          (zero-padded to the same width — currently 3 digits). A duplicate prefix
-          (which caused a non-deterministic apply order between the Python and JS
-          harnesses) is treated as a sequencing bug.
-        - The JS harness (``javascript/tests/helpers/bootstrap.ts``) sorts the same
-          directory with ``readdirSync(...).sort()`` (lexicographic on the full
-          filename). To guarantee Python and JS apply migrations in the same order
-          for every duplicate-free prefix set, the key here is ``(numeric_prefix,
-          full_filename)`` — the lexicographic tie-break mirrors the JS sort.
+    Every migration must use a canonical ``NNN_snake_case.sql`` filename. The
+    numeric prefixes are unique and contiguous from ``001`` so adding a bad or
+    ambiguously ordered migration fails before any database connection is made.
 
     Migrations are applied transactionally by the ``bursar migrate`` CLI and
-        tracked in ``bursar.schema_migrations`` with a SHA-256 checksum. Reusing a
-        version with changed contents is rejected instead of silently replayed.
+    tracked in ``bursar.schema_migrations`` with a SHA-256 checksum. Reusing a
+    version with changed contents is rejected instead of silently replayed.
     """
-    return sorted(
-        _SQL_DIR.glob("[0-9]*.sql"),
-        key=lambda p: (int(p.stem.split("_", 1)[0]), p.name),
-    )
+    files = sorted(_SQL_DIR.glob("*.sql"), key=lambda path: path.name)
+    if not files:
+        raise RuntimeError("Bursar package contains no SQL migrations")
+
+    prefixes: list[int] = []
+    for path in files:
+        match = _MIGRATION_NAME.fullmatch(path.name)
+        if match is None:
+            raise RuntimeError(f"Invalid Bursar migration filename: {path.name}")
+        prefixes.append(int(match.group("prefix")))
+
+    if len(prefixes) != len(set(prefixes)):
+        raise RuntimeError("Bursar migration numeric prefixes must be unique")
+    expected = list(range(1, len(files) + 1))
+    if prefixes != expected:
+        raise RuntimeError(f"Bursar migration prefixes must be contiguous from 001; found {prefixes}")
+    return files

@@ -563,7 +563,7 @@ export class BillingEventHandlers {
     // change. The Postgres transition updates the assignment atomically, so
     // reading it afterwards would return the new assignment's timestamp and
     // silently reset the learner's current allowance window.
-    const preservedAllowanceAnchor = this.provisioning?.getUserPlan
+    const preservedAllowanceAnchor = this.provisioning
       ? ((await this.provisioning.getUserPlan(uid))?.planAssignedAt ?? null)
       : undefined;
     const pending = await this.store.getOpenBillingSubscriptionChange(
@@ -762,9 +762,7 @@ export class BillingEventHandlers {
       const existingAnchor =
         preservedAllowanceAnchor !== undefined
           ? preservedAllowanceAnchor
-          : this.provisioning.getUserPlan
-            ? (await this.provisioning.getUserPlan(uid))?.planAssignedAt
-            : undefined;
+          : (await this.provisioning.getUserPlan(uid))?.planAssignedAt;
       if (existingAnchor) {
         const anchor = new Date(existingAnchor);
         // A provider's subscription period start may actually be its next

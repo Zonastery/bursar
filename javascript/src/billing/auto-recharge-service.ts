@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import { loadConfigFromDict } from "../config.js";
 import {
@@ -257,13 +256,16 @@ export class AutoRechargeService {
         "chargeSavedPaymentMethod",
       );
     }
-    const idempotencyKey = `auto-recharge:${input.userId}:${randomUUID()}`;
+    const idempotencyKey = `auto-recharge:${input.userId}:${globalThis.crypto.randomUUID()}`;
     const attempt = await this.billing.claimAutoRechargeAttempt({
       userId: input.userId,
       idempotencyKey,
     });
     if (!attempt) return { outcome: "limit_reached" };
-    if (attempt.idempotencyKey !== idempotencyKey) {
+    // A transport error leaves the provider outcome unknown. The database
+    // returns that in-flight attempt on the next claim; replay the provider
+    // request with its original key so a committed charge cannot be duplicated.
+    if (attempt.idempotencyKey !== idempotencyKey && attempt.state !== "unknown") {
       return { outcome: "already_processing" };
     }
 

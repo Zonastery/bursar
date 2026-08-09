@@ -7,8 +7,8 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel superseded PR/branch runs, but NEVER cancel a release (tag) run — a
-# half-cancelled publish desyncs the PyPI/npm registries (audit H13).
+# Cancel superseded PR/branch runs, but never cancel a release tag: stopping a
+# publish midway can leave the PyPI and npm registries out of sync.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -30,7 +30,9 @@ jobs:
           cache-dependency-path: python/pyproject.toml
       - run: pip install ruff sqlfluff==4.2.2
       - working-directory: python
-        run: ruff check src/ tests/
+        run: |
+          ruff check src/ tests/ scripts/
+          ruff format --check src/ tests/ scripts/
       - run: sqlfluff lint python/src/bursar/sql --config .sqlfluff --nocolor
 
   typecheck:
@@ -48,6 +50,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      BURSAR_REQUIRE_POSTGRES_TESTS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -64,15 +68,18 @@ jobs:
           cache: pip
           cache-dependency-path: python/pyproject.toml
       - run: pip install -e "python/[test,postgres]"
-      # Loads tests/parity/expression_cases.json (parity gate, §7) and runs the
-      # real-Postgres concurrency/double-spend suite through testcontainers.
+      # Loads the shared expression vectors and runs the real-Postgres
+      # concurrency and double-spend suite through testcontainers.
       # --cov-fail-under is the floor in pyproject.toml (ratchet up, never down).
       - working-directory: python
         run: pytest --cov=bursar --cov-branch --cov-report=term-missing --cov-report=xml
       - name: Verify pricing JSON schema is up to date
         run: |
           python python/scripts/generate_pricing_json_schema.py
-          git diff --exit-code -- docs/pricing-config.schema.json
+          git diff --exit-code -- \
+            docs/pricing-config.schema.json \
+            javascript/src/generated/pricing-config.schema.json \
+            python/src/bursar/sql/001_schema_and_types.sql
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.python-version == '3.13'
         with:
@@ -81,6 +88,8 @@ jobs:
 
   js-test:
     runs-on: ubuntu-latest
+    env:
+      BURSAR_REQUIRE_POSTGRES_TESTS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +112,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-bun-1.3.14-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-bun-1.3.14-
-      # Also loads tests/parity/expression_cases.json (parity gate, §7).
+      # Also loads the shared expression vectors used by the Python suite.
       # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
       - working-directory: javascript
         run: |
@@ -116,7 +125,8 @@ jobs:
           name: js-coverage-report
           path: javascript/coverage/
 
-  js-typecheck:
+  js-quality:
+    name: JavaScript quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -136,7 +146,12 @@ jobs:
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
+          bun run generate:config-types
+          git diff --exit-code -- src/generated/pricing-config.types.ts
           bun run typecheck
+          bun run lint
+          bun run format
+          bun run knip
 
   sdk-contract-parity:
     name: Cross-SDK deterministic contract parity
@@ -220,9 +235,9 @@ jobs:
           /tmp/bursar-python-consumer/bin/pip install /tmp/bursar-wheel/*.whl
           /tmp/bursar-python-consumer/bin/python -c 'import bursar; assert bursar.Bursar and bursar.PricingEngine'
 
-  # Cross-SDK parity gate (§7): both SDK test suites load the SAME
-  # tests/parity/expression_cases.json fixture, so a divergence between the
-  # Python and JS engines fails one of them. This aggregating job makes that
+  # Both SDK test suites load the same tests/parity/expression_cases.json
+  # fixture, so a divergence between the Python and JS engines fails one of
+  # them. This aggregating job makes that
   # explicit and is a convenient single required status check.
   parity-gate:
     needs: [test, js-test, sdk-contract-parity]
@@ -237,7 +252,7 @@ jobs:
 
   release-preflight:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, typecheck, test, js-test, js-typecheck, sdk-contract-parity, package-smoke]
+    needs: [lint, typecheck, test, js-test, js-quality, sdk-contract-parity, package-smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

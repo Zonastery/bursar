@@ -1,4 +1,4 @@
-.PHONY: build clean lint typecheck test test-concurrency publish publish-test release release-ci help
+.PHONY: build clean lint typecheck test test-concurrency release-ci help
 .DEFAULT_GOAL := help
 
 # Single source of truth for the version: pyproject.toml (H9). Read it directly
@@ -29,19 +29,6 @@ test: lint typecheck  ## Lint, typecheck, then run the test suite
 
 test-concurrency:  ## Run the real-Postgres concurrency subset (set DATABASE_URL)
 	BURSAR_RACE_ITERATIONS=$${BURSAR_RACE_ITERATIONS:-1} uv run python -m pytest tests/ -m concurrency -q
-
-publish-test: test build  ## Publish to TestPyPI
-	. ./.env && uv publish --publish-url https://test.pypi.org/legacy/
-
-# Manual publish (prefer the CI release for automated publishing):
-#   1. git tag v$(VERSION)
-#   2. git push origin v$(VERSION)
-#   CI runs lint -> typecheck -> test -> build -> publish
-publish: build  ## Publish to PyPI
-	. ./.env && uv publish
-
-release: publish  ## Publish, then print the released version (tag = pyproject version)
-	@echo "Released bursar v$(VERSION)"
 
 release-ci:  ## Print the git tag commands for a CI-driven release
 	@echo "Release via CI: git tag v$(VERSION) && git push origin v$(VERSION)"

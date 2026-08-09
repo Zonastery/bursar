@@ -67,8 +67,17 @@ from bursar import Bursar, PostgresStore
 store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)
 
-added = bursar.credits.add_credits(user_id, 1_000, entry_type="purchase")
-charged = bursar.credits.deduct_credits(user_id, 25)
+added = bursar.credits.add_credits(
+    user_id,
+    1_000,
+    entry_type="purchase",
+    idempotency_key="checkout:order-42",
+)
+charged = bursar.credits.deduct_credits(
+    user_id,
+    25,
+    idempotency_key="request:job-42",
+)
 entry = bursar.credits.get_ledger_entry(user_id, charged.entry_id)
 ```
 
@@ -84,8 +93,11 @@ const bursar = new Bursar({
 
 const added = await bursar.credits.addCredits(userId, 1_000, {
   type: "purchase",
+  idempotencyKey: "checkout:order-42",
 });
-const charged = await bursar.credits.deductCredits(userId, 25);
+const charged = await bursar.credits.deductCredits(userId, 25, {
+  idempotencyKey: "request:job-42",
+});
 const entry = await bursar.credits.getLedgerEntry(userId, charged.entryId);
 ```
 

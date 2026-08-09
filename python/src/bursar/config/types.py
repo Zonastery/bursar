@@ -77,7 +77,7 @@ def _validate_timezone(value: str, path: str) -> str:
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class Duration(StrictModel):

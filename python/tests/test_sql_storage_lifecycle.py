@@ -10,6 +10,8 @@ from psycopg2.extras import Json
 
 from tests.conftest import TEST_TENANT_ID
 
+pytestmark = [pytest.mark.integration]
+
 
 def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
     cursor.execute(

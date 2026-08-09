@@ -692,6 +692,38 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  LIMIT 1
 $$;
 
+CREATE FUNCTION bursar.resolve_catalog_plan(
+    p_provider text,
+    p_lookup_type text,
+    p_lookup_value text
+)
+RETURNS bursar.catalog_plans
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT plan.*
+    FROM bursar.catalog_provider_refs AS provider_ref
+    JOIN bursar.catalog_revisions AS revision
+      ON revision.id = provider_ref.catalog_revision_id
+    JOIN bursar.catalog_offers AS offer
+      ON offer.catalog_revision_id = provider_ref.catalog_revision_id
+     AND offer.offer_key = provider_ref.object_key
+    JOIN bursar.catalog_plans AS plan
+      ON plan.catalog_revision_id = offer.catalog_revision_id
+     AND plan.plan_key = offer.plan_key
+    WHERE provider_ref.provider = p_provider
+      AND revision.status = 'active'
+      AND provider_ref.provider_environment =
+          bursar.current_provider_environment()
+      AND provider_ref.lookup_type = p_lookup_type
+      AND provider_ref.lookup_value = p_lookup_value
+      AND provider_ref.object_type = 'offer'
+    ORDER BY revision.revision_no DESC
+    LIMIT 1
+$$;
+
 CREATE FUNCTION bursar.get_credit_state(
     p_subject_id uuid
 )

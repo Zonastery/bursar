@@ -4,16 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
 from bursar.billing.types import BillingEventHandler, BillingEventType
 from bursar.credits.types import (
-    AddCreditsResult,
-    CreditMetadata,
-    RevokeCreditsResult,
+    GetUserPlanResult,
     SetUserPlanResult,
     UnsetUserPlanResult,
 )
@@ -24,6 +21,8 @@ ResolveUser = Callable[[str, str | None, str | None], str | None]
 
 @runtime_checkable
 class BillingProvisioningPort(Protocol):
+    def get_user_plan(self, user_id: str) -> GetUserPlanResult: ...
+
     def set_user_plan(
         self,
         user_id: str,
@@ -33,30 +32,6 @@ class BillingProvisioningPort(Protocol):
     ) -> SetUserPlanResult: ...
 
     def unset_user_plan(self, user_id: str) -> UnsetUserPlanResult: ...
-
-    def add_credits(
-        self,
-        user_id: str,
-        amount: Decimal | int,
-        *,
-        entry_type: str = "adjustment",
-        metadata: CreditMetadata | None = None,
-        expires_at: datetime | None = None,
-        bucket: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> AddCreditsResult: ...
-
-    def deduct_credits(
-        self,
-        user_id: str,
-        amount: Decimal | int,
-        *,
-        entry_type: str = "adjustment",
-        bucket: str | None = None,
-        metadata: CreditMetadata | None = None,
-    ) -> AddCreditsResult: ...
-
-    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> RevokeCreditsResult: ...
 
 
 class BillingServiceOptions(BaseModel):

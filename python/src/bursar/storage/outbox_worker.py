@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bursar.shared.diagnostics import bounded_diagnostic_message
 from bursar.storage.ports import OutboxEvent, OutboxHandler, OutboxStore
@@ -18,27 +18,26 @@ class _OutboxModel(BaseModel):
 
 
 class OutboxWorkerOptions(_OutboxModel):
-    batch_size: int = 100
-    concurrency: int = 4
-    lease_seconds: int = 60
-    poll_interval_ms: int = 1_000
-    retry_delay_seconds: int = 30
-    max_retry_delay_seconds: int = 3_600
-    attempt_limit: int = 10
+    batch_size: int = Field(default=100, strict=True, ge=1, le=1_000)
+    concurrency: int = Field(default=4, strict=True, ge=1, le=100)
+    lease_seconds: int = Field(default=60, strict=True, ge=1, le=3_600)
+    poll_interval_ms: int = Field(default=1_000, strict=True, ge=10, le=3_600_000)
+    retry_delay_seconds: int = Field(default=30, strict=True, ge=1, le=86_400)
+    max_retry_delay_seconds: int = Field(default=3_600, strict=True, ge=1, le=86_400)
+    attempt_limit: int = Field(default=10, strict=True, ge=1, le=1_000)
     on_error: Callable[[BaseException], None] | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_delays(self) -> OutboxWorkerOptions:
+        if self.max_retry_delay_seconds < self.retry_delay_seconds:
+            raise ValueError("max_retry_delay_seconds must be at least retry_delay_seconds")
+        return self
 
 
 class OutboxRunResult(_OutboxModel):
     claimed: int
     delivered: int
     failed: int
-
-
-def _integer_option(value: int, name: str, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        msg = f"{name} must be an integer between {minimum} and {maximum}"
-        raise ValueError(msg)
-    return value
 
 
 class OutboxWorker:
@@ -70,7 +69,6 @@ class OutboxWorker:
                 self._handlers.setdefault(topic, []).append(handler)
         self._topics = sorted(self._handlers)
         self._options = options or OutboxWorkerOptions()
-        self._validate_options(self._options)
         self._stop_event = threading.Event()
         self._run_lock = threading.Lock()
         self._active_future: Future[OutboxRunResult] | None = None
@@ -192,16 +190,3 @@ class OutboxWorker:
                 self._options.attempt_limit,
             )
             return False
-
-    @staticmethod
-    def _validate_options(options: OutboxWorkerOptions) -> None:
-        _integer_option(options.batch_size, "batch_size", 1, 1_000)
-        _integer_option(options.concurrency, "concurrency", 1, 100)
-        _integer_option(options.lease_seconds, "lease_seconds", 1, 3_600)
-        _integer_option(options.poll_interval_ms, "poll_interval_ms", 10, 3_600_000)
-        _integer_option(options.retry_delay_seconds, "retry_delay_seconds", 1, 86_400)
-        _integer_option(options.max_retry_delay_seconds, "max_retry_delay_seconds", 1, 86_400)
-        _integer_option(options.attempt_limit, "attempt_limit", 1, 1_000)
-        if options.max_retry_delay_seconds < options.retry_delay_seconds:
-            msg = "max_retry_delay_seconds must be at least retry_delay_seconds"
-            raise ValueError(msg)

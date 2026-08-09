@@ -3,7 +3,7 @@
 Credit billing engine for AI SaaS. Calculates usage costs from expressions, manages user balances, enforces financial-safety policy via an atomic lease lifecycle, and handles provider billing (Stripe, Dodo) through a unified event-driven billing subsystem.
 
 ## Stack
-Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (no float), safe `ast`-based expression engine (no eval/exec). Optional Postgres (`psycopg2`) backend — `PostgresStore` is the only store. Stripe/Dodo provider integrations in `providers/`.
+Python 3.12+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (no float), safe `ast`-based expression engine (no eval/exec). Optional Postgres (`psycopg2`) backend — `PostgresStore` is the only store. Stripe/Dodo provider integrations in `providers/`.
 
 ## Key source files
 
@@ -65,10 +65,13 @@ BillingService
 | `tests/test_config_parity.py` | Config loading parity with JavaScript SDK |
 | `tests/test_engine.py` | PricingEngine expression evaluation |
 | `tests/test_expr.py` | Expression parser/evaluator edge cases |
-| `tests/test_security_rls.py` | RLS/privilege lockdown against real Postgres roles (`anon`/`authenticated`/`service_role`) — the REVOKE/RLS checks the rest of the suite bypasses by connecting as a superuser |
-| `tests/test_store_integration.py` | Real Postgres tests, incl. facade-owned credit capability end-to-end tier coverage. The 7 real-Postgres concurrency tests are `@pytest.mark.repeat(5)` — money-critical races, rerun to surface rare interleavings |
+| `tests/test_security_rls.py` | Tenant-scoped SDK smoke test through the restricted RPC role |
+| `tests/test_multitenancy.py` | Cross-tenant isolation, suspended tenants, role boundaries, and partition RLS |
+| `tests/test_sql_migration_contract.py` | Migration ledger, role/RPC privileges, forced RLS, keys, and index invariants |
+| `tests/test_sql_storage_lifecycle.py` | Bounded retention, partition maintenance, and lock-contention behavior |
+| `tests/test_store_integration.py` | Public credit workflows plus transactional, replay, and migration-race regressions |
 
-Run: `pytest python/tests/`. Real-Postgres tests resolve a DSN from `DATABASE_URL` → `BURSAR_TEST_PG_URL` → a testcontainers-managed PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3 instance (Docker permitting) → skip; see `tests/conftest.py`.
+Run: `pytest python/tests/`. Real-Postgres tests use a testcontainers-managed PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3 instance by default. An external `DATABASE_URL` requires `BURSAR_ALLOW_DATABASE_RESET=1`; see `tests/conftest.py`.
 
-Linting: `ruff check python/src/ python/tests/` — max line length 120, complexity ≤ 15.
+Linting: `ruff check python/src/ python/tests/ python/scripts/` and `ruff format --check` — max line length 120, complexity ≤ 15.
 Types: `pyright python/src/`.

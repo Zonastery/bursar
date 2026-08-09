@@ -124,14 +124,21 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
       "SELECT payload FROM bursar.event_outbox WHERE aggregate_id = $1::uuid",
       [chargeId],
     );
-    expect(usageOutbox.rows[0]?.payload).toEqual({
+    const usageOutboxPayload = usageOutbox.rows[0]?.payload as Record<string, unknown>;
+    expect(usageOutboxPayload).toEqual({
       delivery_required: false,
       tenant_id: TEST_TENANT_ID,
       charge_id: chargeId,
       account_id: usage?.accountId,
-      event_at: usage?.eventAt,
-      created_at: usage?.createdAt,
+      event_at: expect.any(String),
+      created_at: expect.any(String),
     });
+    expect(new Date(String(usageOutboxPayload.event_at)).getTime()).toBe(
+      new Date(usage!.eventAt).getTime(),
+    );
+    expect(new Date(String(usageOutboxPayload.created_at)).getTime()).toBe(
+      new Date(usage!.createdAt).getTime(),
+    );
 
     const billingPayload = await repository.getBillingEventPayload(billingEventId);
     expect(billingPayload).toMatchObject({

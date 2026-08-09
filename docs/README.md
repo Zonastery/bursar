@@ -36,7 +36,7 @@ Generated paths are build artifacts. Edit their source instead.
 
 Install these runtimes:
 
-- Node.js 20 or newer and npm
+- Node.js 22 or newer and npm
 - Bun 1.3.14 for TypeDoc dependencies in `../javascript/`
 - Python 3.12 or 3.13 with the Bursar development group, Sphinx, and `sphinx-markdown-builder`
 
@@ -46,12 +46,14 @@ Install dependencies from the repository root and package directories:
 cd python
 uv sync --group dev
 uv pip install --python .venv sphinx sphinx-markdown-builder
-source .venv/bin/activate
 cd ../javascript
 bun ci
 cd ../docs
 npm ci
 ```
+
+The documentation scripts detect `../python/.venv/bin/python` automatically.
+Set `BURSAR_DOCS_PYTHON` only when using a different Python environment.
 
 ## Local development
 

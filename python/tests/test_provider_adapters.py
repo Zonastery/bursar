@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from dodopayments import AsyncDodoPayments
 from stripe import StripeClient
 
@@ -14,12 +15,15 @@ from bursar.billing.types import BillingEvent, BillingEventResult, BillingEventT
 from bursar.providers._shared import call_billing_event_sink
 from bursar.providers.dodo.provider import DodoProvider
 from bursar.providers.mock.provider import MockPaymentProvider
-from bursar.providers.stripe.provider import StripeProvider
+from bursar.providers.stripe.provider import StripeProvider, _scoped_idempotency_key
 from bursar.providers.types import (
+    ChangePlanLineItem,
     ChangePlanParams,
+    ChangePlanPreview,
     CheckoutParams,
     CheckoutSessionResult,
     CreateCustomerParams,
+    PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
@@ -29,6 +33,7 @@ from bursar.providers.types import (
     WebhookRequest,
     WebhookResult,
 )
+from bursar.shared.idempotency import scope_stable_key
 
 
 class MinimalProvider:
@@ -186,6 +191,99 @@ def test_custom_provider_only_requires_the_js_core_contract() -> None:
     assert not isinstance(provider, SubscriptionCancellationProvider)
 
 
+@pytest.mark.parametrize(
+    ("factory", "match"),
+    [
+        (
+            lambda: CheckoutParams(
+                product_id="product-1",
+                type="credit_pack",
+                quantity=0,
+                return_url="https://return.test",
+                cancel_url="https://cancel.test",
+                metadata={},
+                idempotency_key="invalid-quantity",
+            ),
+            "quantity",
+        ),
+        (
+            lambda: PaymentMethodInfo(
+                id="payment-method-1",
+                last4="42",
+                brand="visa",
+                expiry_month=12,
+                expiry_year=2030,
+            ),
+            "last4",
+        ),
+    ],
+)
+def test_provider_contracts_reject_malformed_payment_data(factory: Any, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        factory()
+
+
+def test_provider_mutation_keys_are_not_silently_trimmed() -> None:
+    with pytest.raises(ValueError, match="trimmed non-empty string"):
+        CheckoutParams(
+            product_id="product-1",
+            type="credit_pack",
+            return_url="https://return.test",
+            cancel_url="https://cancel.test",
+            metadata={},
+            idempotency_key=" padded-key ",
+        )
+
+
+def test_stripe_scoped_keys_hash_overlong_candidates_without_prefix_collisions() -> None:
+    first = _scoped_idempotency_key(f"{'x' * 254}a", "customer")
+    second = _scoped_idempotency_key(f"{'x' * 254}b", "customer")
+
+    assert first.startswith("bursar:customer:")
+    assert len(first) <= 255
+    assert first != second
+    assert _scoped_idempotency_key("checkout-1", "customer") == "checkout-1:customer"
+
+
+def test_scoped_keys_encode_dynamic_identity_boundaries() -> None:
+    first = scope_stable_key("operation", "cancel-all", "a", "b:c")
+    second = scope_stable_key("operation", "cancel-all", "a:b", "c")
+    hashed_first = scope_stable_key("x" * 255, "cancel-all", "a", "b:c")
+    hashed_second = scope_stable_key("x" * 255, "cancel-all", "a:b", "c")
+
+    assert first == "operation:cancel-all:1#a:3#b:c"
+    assert second == "operation:cancel-all:3#a:b:1#c"
+    assert first != second
+    assert hashed_first.startswith("bursar:cancel-all:")
+    assert hashed_second.startswith("bursar:cancel-all:")
+    assert hashed_first != hashed_second
+
+
+def test_plan_preview_contract_normalizes_currency_and_allows_signed_credits() -> None:
+    preview = ChangePlanPreview(
+        total_amount=-25,
+        settlement_amount=-25,
+        currency="usd",
+        line_items=[
+            ChangePlanLineItem(
+                product_id="product-1",
+                name="Proration credit",
+                unit_price=-25,
+                quantity=1,
+                proration_factor=1.0,
+                currency="usd",
+                tax=-2,
+                subtotal=-25,
+            )
+        ],
+        effective_at="2026-08-01T00:00:00Z",
+    )
+
+    assert preview.currency == "USD"
+    assert preview.line_items[0].currency == "USD"
+    assert preview.line_items[0].tax == -2
+
+
 def test_dodo_adapter_maps_requests_and_responses() -> None:
     client = DodoClient()
     provider = DodoProvider(
@@ -204,6 +302,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
                 cancel_url="",
                 quantity=2,
                 metadata={"plan": "pro"},
+                idempotency_key="checkout-1",
             )
         )
     )
@@ -215,6 +314,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
             "product_cart": [{"product_id": "prod_1", "quantity": 2}],
             "return_url": "https://return",
             "metadata": {"plan": "pro"},
+            "extra_headers": {"Idempotency-Key": "checkout-1"},
         },
     )
 
@@ -230,6 +330,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
                 provider_subscription_id="sub_1",
                 product_id="prod_2",
                 proration_billing_mode="prorated_immediately",
+                idempotency_key="change-plan-1",
             )
         )
     )
@@ -243,6 +344,18 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
         )
     )
     assert preview.total_amount == 12
+    customer = run(
+        provider.create_customer(
+            CreateCustomerParams(
+                email="test@example.com",
+                name="Test User",
+                metadata={},
+                idempotency_key="dodo-customer-1",
+            )
+        )
+    )
+    assert customer.customer_id == "cus_1"
+    assert client.calls[-1][1]["extra_headers"] == {"Idempotency-Key": "dodo-customer-1"}
     invoice = run(provider.get_invoice_url("pay_1"))
     assert invoice is not None
     assert invoice.url == "https://invoice.test"
@@ -323,6 +436,18 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     assert calls[0][2] == {"idempotency_key": "idem_1:customer"}
     assert calls[1][1]["line_items"] == [{"price": "price_1", "quantity": 1}]
     assert calls[1][2] == {"idempotency_key": "idem_1"}
+    customer = run(
+        provider.create_customer(
+            CreateCustomerParams(
+                email="other@example.com",
+                name="Other User",
+                metadata={},
+                idempotency_key="stripe-customer-1",
+            )
+        )
+    )
+    assert customer.customer_id == "cus_1"
+    assert calls[-1][2] == {"idempotency_key": "stripe-customer-1"}
     webhook = run(provider.handle_webhook(WebhookRequest(raw_body="{}", headers={})))
     assert webhook.received is False
     assert webhook.retryable is False
@@ -474,7 +599,7 @@ def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() ->
 
     run(provider.cancel_subscription("sub_1", "cancel_1"))
     run(provider.reactivate_subscription("sub_1", "reactivate_1"))
-    run(provider.cancel_scheduled_plan_change("sub_1", "sub_sched_1", "release_1"))
+    run(provider.cancel_scheduled_plan_change("sub_1", "sub_sched_1", idempotency_key="release_1"))
     assert subscription_updates[-2:] == [
         ("sub_1", {"cancel_at_period_end": True}, {"idempotency_key": "cancel_1"}),
         ("sub_1", {"cancel_at_period_end": False}, {"idempotency_key": "reactivate_1"}),
@@ -484,8 +609,41 @@ def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() ->
 
 def test_mock_provider_is_a_complete_deterministic_test_double() -> None:
     provider = MockPaymentProvider(event_sink=Sink())
-    customer = run(provider.create_customer(CreateCustomerParams(email="", name="", metadata={})))
-    assert customer.customer_id.startswith("mock_cus_")
+    first_customer = run(
+        provider.create_customer(
+            CreateCustomerParams(
+                email="test@example.com",
+                name="Test User",
+                metadata={},
+                idempotency_key="customer-1",
+            )
+        )
+    )
+    replayed_customer = run(
+        provider.create_customer(
+            CreateCustomerParams(
+                email="test@example.com",
+                name="Test User",
+                metadata={},
+                idempotency_key="customer-1",
+            )
+        )
+    )
+    second_customer = run(
+        provider.create_customer(
+            CreateCustomerParams(
+                email="other@example.com",
+                name="Other User",
+                metadata={},
+                idempotency_key="customer-2",
+            )
+        )
+    )
+    assert [first_customer.customer_id, replayed_customer.customer_id, second_customer.customer_id] == [
+        "mock_cus_1",
+        "mock_cus_1",
+        "mock_cus_2",
+    ]
     checkout = run(
         provider.create_checkout_session(
             CheckoutParams(
@@ -494,6 +652,7 @@ def test_mock_provider_is_a_complete_deterministic_test_double() -> None:
                 return_url="https://return",
                 cancel_url="",
                 metadata={},
+                idempotency_key="mock-checkout-1",
             )
         )
     )

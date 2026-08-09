@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from bursar.shared.idempotency import StableKey
+
 
 class CreditMetadata(BaseModel, extra="allow"):
     operation: str | None = None
@@ -165,7 +167,7 @@ class PlanMigrationBatchResult(BaseModel):
 
 
 class DeductWithAllowanceOptions(BaseModel):
-    idempotency_key: str | None = None
+    idempotency_key: StableKey
     operation: str | None = None
     feature: str | None = None
     model: str | None = None

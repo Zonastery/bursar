@@ -5,6 +5,7 @@ import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adap
 import { S3BillingArchive } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
+import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
 import { CatalogNotLoadedError, StoreClosedError } from "../src/errors.js";
 
@@ -51,6 +52,20 @@ function outboxStore(events: OutboxEvent[]): OutboxStore & {
 }
 
 describe("OutboxWorker", () => {
+  it("rejects invalid retry ranges before claiming work", () => {
+    expect(
+      () =>
+        new OutboxWorker(
+          outboxStore([]),
+          [{ topics: ["usage.charge_recorded"], handle: vi.fn() }],
+          {
+            retryDelaySeconds: 20,
+            maxRetryDelaySeconds: 10,
+          },
+        ),
+    ).toThrow(/maxRetryDelaySeconds/);
+  });
+
   it("claims only registered topics and acknowledges after delivery", async () => {
     const store = outboxStore([outboxEvent]);
     const handle = vi.fn().mockResolvedValue(undefined);
@@ -116,6 +131,30 @@ describe("OutboxWorker", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("PostgresStorageRepository", () => {
+  it("rejects malformed outbox rows instead of coercing them", async () => {
+    const query = vi.fn().mockResolvedValue([
+      {
+        event_id: "42",
+        tenant_id: TEST_TENANT_ID,
+        topic: "usage.charge_recorded",
+        aggregate_type: "credit_usage_charge",
+        aggregate_id: "00000000-0000-0000-0000-000000000042",
+        payload_version: "not-a-number",
+        payload: {},
+        claim_token: "00000000-0000-0000-0000-000000000099",
+        attempt_count: 1,
+        created_at: "2026-07-29T00:00:00.000Z",
+      },
+    ]);
+    const repository = new PostgresStorageRepository(query, TEST_TENANT_ID);
+
+    await expect(repository.claim(["usage.charge_recorded"], 1, 60)).rejects.toThrow(
+      /payload_version/,
+    );
   });
 });
 
@@ -716,7 +755,25 @@ describe("BursarRuntime", () => {
       postgres: pool,
       tenantId: TEST_TENANT_ID,
     });
-    await expect(runtime.start({ loadCatalog: true, maxAttempts: 0 })).rejects.toThrow(RangeError);
+    await expect(runtime.start({ loadCatalog: true, maxAttempts: 0 })).rejects.toThrow(
+      /maxAttempts/,
+    );
+    await runtime.close();
+  });
+
+  it("rejects non-finite catalog retry delays", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
+    await expect(runtime.start({ loadCatalog: true, retryDelayMs: Number.NaN })).rejects.toThrow(
+      /retryDelayMs/,
+    );
     await runtime.close();
   });
 

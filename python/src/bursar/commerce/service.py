@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, Protocol, cast
 
+from pydantic import ValidationError
+
 from bursar.billing.auto_recharge_service import AutoRechargeProcessResult
 from bursar.billing.contracts import (
     BillingEventSink,
@@ -86,6 +88,7 @@ from bursar.credits.types import (
     LedgerPage,
     UsageChargePage,
 )
+from bursar.errors import ProviderResponseError
 from bursar.providers.types import (
     ChangePlanLineItem,
     ChangePlanParams,
@@ -110,6 +113,7 @@ from bursar.providers.types import (
     UpdatePaymentMethodProvider,
     WebhookRequest,
 )
+from bursar.shared.idempotency import require_stable_key, scope_stable_key
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 _TERMINAL_CHECKOUT_STATUSES = {
@@ -305,6 +309,7 @@ def _quote_fingerprint(preview: ChangePlanPreview) -> str:
         "recurringCurrency": (preview.recurring_currency.upper() if preview.recurring_currency is not None else None),
         "taxAmount": preview.tax_amount,
         "customerCredits": preview.customer_credits,
+        "nextBillingDate": preview.next_billing_date,
         "lineItems": [_line_item_dict(item) for item in (preview.line_items or [])],
     }
     encoded = json.dumps(financial, separators=(",", ":"), ensure_ascii=False)
@@ -669,6 +674,7 @@ class CommerceService:
         account_id: str,
         operation_key: str,
     ) -> SubscriptionCommandResult:
+        operation_key = require_stable_key(operation_key, "operation_key")
         subscription = self.billing.get_user_subscription(account_id)
         if subscription is None or not subscription.provider_subscription_id:
             raise CommerceResourceNotFoundError("No active subscription found")
@@ -709,6 +715,7 @@ class CommerceService:
         account_id: str,
         operation_key: str,
     ) -> SubscriptionCommandResult:
+        operation_key = require_stable_key(operation_key, "operation_key")
         subscription = self.billing.get_user_subscription(account_id)
         if subscription is None or not subscription.provider_subscription_id:
             raise CommerceResourceNotFoundError("No subscription found")
@@ -748,8 +755,7 @@ class CommerceService:
         account_id: str,
         operation_key: str,
     ) -> CancelAllSubscriptionsResult:
-        if not operation_key.strip():
-            raise ValueError("operation_key must not be empty")
+        operation_key = require_stable_key(operation_key, "operation_key")
         subscriptions = self.billing.list_cancellable_subscriptions(account_id)
         results: list[CancelSubscriptionResult] = []
         failures: list[Exception] = []
@@ -761,7 +767,13 @@ class CommerceService:
                         provider.provider,
                         "cancel_subscription",
                     )
-                key = f"{operation_key}:{subscription.provider}:{subscription.provider_subscription_id}"
+                key = scope_stable_key(
+                    operation_key,
+                    "cancel-all",
+                    subscription.provider,
+                    subscription.provider_subscription_id,
+                    field="operation_key",
+                )
                 await provider.cancel_subscription(subscription.provider_subscription_id, key)
                 self.billing.ingest_billing_event(
                     BillingEvent(
@@ -954,7 +966,7 @@ class CommerceService:
                 "preview_change_plan",
             )
         effective_at, proration = _plan_change_provider_args(context["policy"])
-        return await provider.preview_change_plan(
+        raw_preview = await provider.preview_change_plan(
             PreviewChangePlanParams.model_validate(
                 {
                     "provider_subscription_id": context["subscription"].provider_subscription_id,
@@ -964,6 +976,21 @@ class CommerceService:
                 }
             )
         )
+        try:
+            preview = ChangePlanPreview.model_validate(raw_preview)
+        except ValidationError as error:
+            raise ProviderResponseError(
+                provider.provider,
+                "preview_change_plan",
+                cause=error,
+            ) from error
+        if context["policy"].effective == "renewal" and preview.next_billing_date is None:
+            raise ProviderResponseError(
+                provider.provider,
+                "preview_change_plan",
+                details={"field": "next_billing_date"},
+            )
+        return preview
 
     async def preview_plan_change(
         self,
@@ -1000,6 +1027,7 @@ class CommerceService:
         offer_key: str,
         quote_fingerprint: str,
     ) -> ConfirmPlanChangeResult:
+        operation_key = require_stable_key(operation_key, "operation_key")
         context = await self._plan_context(account_id, offer_key)
         offer = cast(SubscriptionOffer, context["offer"])
         if context["classification"] == "unchanged":
@@ -1073,7 +1101,7 @@ class CommerceService:
                 assert reactivation_provider is not None
                 await reactivation_provider.reactivate_subscription(
                     subscription.provider_subscription_id,
-                    f"{operation_key}:keep",
+                    scope_stable_key(operation_key, "keep", field="operation_key"),
                 )
                 cancellation_was_reactivated = True
             provider_effective, proration = _plan_change_provider_args(context["policy"])
@@ -1106,7 +1134,7 @@ class CommerceService:
                     assert cancellation_provider is not None
                     await cancellation_provider.cancel_subscription(
                         subscription.provider_subscription_id,
-                        f"{operation_key}:restore-cancellation",
+                        scope_stable_key(operation_key, "restore-cancellation", field="operation_key"),
                     )
                 except Exception as compensation_error:
                     failure = ExceptionGroup(
@@ -1137,6 +1165,7 @@ class CommerceService:
         account_id: str,
         operation_key: str,
     ) -> dict[str, bool]:
+        operation_key = require_stable_key(operation_key, "operation_key")
         subscription = self.billing.get_active_subscription(account_id)
         if subscription is None:
             raise CommerceResourceNotFoundError("No active subscription found")
@@ -1155,7 +1184,7 @@ class CommerceService:
         await provider.cancel_scheduled_plan_change(
             subscription.provider_subscription_id,
             change.provider_operation_id,
-            operation_key,
+            idempotency_key=operation_key,
         )
         self.billing.update_billing_subscription_change(
             change.id,

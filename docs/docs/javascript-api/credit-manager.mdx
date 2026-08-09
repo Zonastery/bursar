@@ -37,28 +37,27 @@ row (`entryId` for adjustments, `refundEntryId` for refunds). `getBalance`,
 
 ### Idempotency — read carefully
 
-All three adjustment methods accept an `idempotencyKey` for replay-safe
-retries: retrying with the same key replays the original result instead of
+All three adjustment methods require a caller-stable `idempotencyKey`:
+retrying with the same key replays the original result instead of
 double-applying.
 
-| Method              | Parameters                                                                                                            | Returns                         |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `addCredits`        | `userId: string`, `amount: Decimal \| number`, `options?: { type?, metadata?, expiresAt?, bucket?, idempotencyKey? }` | `Promise<AddCreditsResult>`     |
-| `deductCredits`     | `userId: string`, `amount: Decimal \| number`, `options?: DeductCreditsOptions`                                       | `Promise<AddCreditsResult>`     |
-| `refundCredits`     | `entryId: string`, `options?: RefundCreditsOptions`                                                                   | `Promise<RefundResult>`         |
-| `getBalance`        | `userId: string`                                                                                                      | `Promise<BalanceResult>`        |
-| `getAvailable`      | `userId: string`                                                                                                      | `Promise<AvailableResult>`      |
-| `getBucketBalances` | `userId: string`                                                                                                      | `Promise<BucketBalancesResult>` |
+| Method              | Parameters                                                                     | Returns                         |
+| ------------------- | ------------------------------------------------------------------------------ | ------------------------------- |
+| `addCredits`        | `userId: string`, `amount: Decimal \| number`, `options: AddCreditsOptions`    | `Promise<AddCreditsResult>`     |
+| `deductCredits`     | `userId: string`, `amount: Decimal \| number`, `options: DeductCreditsOptions` | `Promise<AddCreditsResult>`     |
+| `refundCredits`     | `entryId: string`, `options: RefundCreditsOptions`                             | `Promise<RefundResult>`         |
+| `getBalance`        | `userId: string`                                                               | `Promise<BalanceResult>`        |
+| `getAvailable`      | `userId: string`                                                               | `Promise<AvailableResult>`      |
+| `getBucketBalances` | `userId: string`                                                               | `Promise<BucketBalancesResult>` |
 
 ## Metered charging
 
-`deduct(userId, metrics, options?)` prices a
+`deduct(userId, metrics, options)` prices a
 `UsageMetrics` event with the active pricing engine and charges the cost in
 one atomic, idempotency-keyed transaction. The idempotency key is **the**
 replay guard for metered usage: the same key returns the same
-`DeductionResult` instead of double-charging. When omitted, a random key is
-generated (`usage:...`), which makes retries by a caller responsible for
-supplying their own stable key.
+`DeductionResult` instead of double-charging, so every replayable mutation
+requires the caller to supply a stable key.
 
 ```ts
 const result = await bursar.credits.deduct(
@@ -79,12 +78,12 @@ for flat-rate jobs and billing-cycle grants. `revokeCreditsByEntryType`
 reverses every deduction of a given entry type, and
 `sweepExpiredCredits(dryRun = false)` expires eligible credit lots.
 
-| Method                     | Parameters                                                            | Returns                            |
-| -------------------------- | --------------------------------------------------------------------- | ---------------------------------- |
-| `deduct`                   | `userId: string`, `metrics: UsageMetrics`, `options?: DeductOptions`  | `Promise<DeductionResult>`         |
-| `deductFlatJob`            | `userId: string`, `jobName: string`, `options?: DeductFlatJobOptions` | `Promise<DeductionResult>`         |
-| `revokeCreditsByEntryType` | `userId: string`, `entryType: string`                                 | `Promise<Record<string, unknown>>` |
-| `sweepExpiredCredits`      | `dryRun = false`                                                      | `Promise<SweepResult>`             |
+| Method                     | Parameters                                                           | Returns                            |
+| -------------------------- | -------------------------------------------------------------------- | ---------------------------------- |
+| `deduct`                   | `userId: string`, `metrics: UsageMetrics`, `options: DeductOptions`  | `Promise<DeductionResult>`         |
+| `deductFlatJob`            | `userId: string`, `jobName: string`, `options: DeductFlatJobOptions` | `Promise<DeductionResult>`         |
+| `revokeCreditsByEntryType` | `userId: string`, `entryType: string`                                | `Promise<Record<string, unknown>>` |
+| `sweepExpiredCredits`      | `dryRun = false`                                                     | `Promise<SweepResult>`             |
 
 ## AI and batch usage accounting
 
@@ -135,7 +134,7 @@ await bursar.credits.settle(userId, lease.leaseId, actual, {
 
 | Method      | Parameters                                                                               | Returns                                              |
 | ----------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `reserve`   | `userId: string`, `metricsOrAmount`, `options: ReserveOptions \| null`                   | `Promise<LeaseResult>`                               |
+| `reserve`   | `userId: string`, `metricsOrAmount`, `options: ReserveOptions`                           | `Promise<LeaseResult>`                               |
 | `settle`    | `userId: string`, `leaseId: string`, `metricsOrAmount`, `options: SettleOptions \| null` | `Promise<DeductionResult>`                           |
 | `release`   | `userId: string`, `leaseId: string`                                                      | `Promise<ReleaseResult>`                             |
 | `renew`     | `userId: string`, `leaseId: string`, `ttl?: number \| null`                              | `Promise<LeaseResult>`                               |
@@ -143,7 +142,9 @@ await bursar.credits.settle(userId, lease.leaseId, actual, {
 
 `ReserveOptions` carries `idempotencyKey`, `operationType`, `billingMode`,
 `ttl`, `metadata`, `feature`, and `model`; `SettleOptions` carries
-`idempotencyKey`, `metadata`, and `feature`.
+`idempotencyKey`, `metadata`, and `feature`. A caller-supplied settlement key
+is validated like every other replay key; if it is omitted, Bursar derives the
+stable key from the lease ID because a lease can settle only once.
 
 ## Plans
 
@@ -232,9 +233,9 @@ await bursar.credits.deductTeam(
 );
 ```
 
-| Method       | Parameters                                                                                 | Returns                        |
-| ------------ | ------------------------------------------------------------------------------------------ | ------------------------------ |
-| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `options?: DeductTeamOptions` | `Promise<TeamDeductionResult>` |
+| Method       | Parameters                                                                                | Returns                        |
+| ------------ | ----------------------------------------------------------------------------------------- | ------------------------------ |
+| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `options: DeductTeamOptions` | `Promise<TeamDeductionResult>` |
 
 See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account
 model, and [Leases and financial safety](/docs/guides/financial-safety) for

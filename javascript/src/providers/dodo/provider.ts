@@ -25,6 +25,7 @@ import type {
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { ProviderResponseError } from "../../errors.js";
+import { requireStableKey } from "../../shared/idempotency.js";
 import type { DodoClient, DodoWebhookPayload } from "./client-contract.js";
 import { dodoBillingEventId, handleDodoBillingEvent } from "./event-mapper.js";
 import { optionalProviderString } from "../_shared.js";
@@ -222,6 +223,7 @@ export class DodoProvider implements PaymentProvider {
   async createCheckoutSession(
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string; providerSessionId?: string }> {
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
     this.logger.info("[DodoProvider] createCheckoutSession", {
       productId: params.productId,
       type: params.type,
@@ -239,10 +241,9 @@ export class DodoProvider implements PaymentProvider {
       cancel_url: params.cancelUrl,
       metadata: params.metadata,
     };
-    const requestOptions = params.idempotencyKey
-      ? { idempotencyKey: params.idempotencyKey }
-      : undefined;
-    const session = await client.checkoutSessions.create(body, requestOptions);
+    const session = await client.checkoutSessions.create(body, {
+      idempotencyKey,
+    });
     return {
       url: requireProviderText(session.checkout_url, "createCheckoutSession", "checkout_url"),
       providerSessionId: requireProviderText(
@@ -304,38 +305,38 @@ export class DodoProvider implements PaymentProvider {
     return this.webhookProcessor.handle(payload);
   }
 
-  async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
+  async cancelSubscription(subscriptionId: string, idempotencyKey: string): Promise<void> {
+    const stableKey = requireStableKey(idempotencyKey);
     const client = this.getClient();
     await client.subscriptions.update(
       subscriptionId,
       {
         cancel_at_next_billing_date: true,
       },
-      idempotencyKey ? { idempotencyKey } : undefined,
+      { idempotencyKey: stableKey },
     );
   }
 
-  async reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
+  async reactivateSubscription(subscriptionId: string, idempotencyKey: string): Promise<void> {
+    const stableKey = requireStableKey(idempotencyKey);
     const client = this.getClient();
     await client.subscriptions.update(
       subscriptionId,
       {
         cancel_at_next_billing_date: false,
       },
-      idempotencyKey ? { idempotencyKey } : undefined,
+      { idempotencyKey: stableKey },
     );
   }
 
   async cancelScheduledPlanChange(
     subscriptionId: string,
-    _providerOperationId?: string | null,
-    idempotencyKey?: string,
+    _providerOperationId: string | null | undefined,
+    idempotencyKey: string,
   ): Promise<void> {
+    const stableKey = requireStableKey(idempotencyKey);
     const client = this.getClient();
-    await client.subscriptions.cancelChangePlan(
-      subscriptionId,
-      idempotencyKey ? { idempotencyKey } : undefined,
-    );
+    await client.subscriptions.cancelChangePlan(subscriptionId, { idempotencyKey: stableKey });
   }
 
   async createUpdatePaymentMethodSession(
@@ -501,11 +502,15 @@ export class DodoProvider implements PaymentProvider {
 
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
     const client = this.getClient();
-    const customer = await client.customers.create({
-      email: params.email,
-      name: params.name,
-      ...(params.metadata ? { metadata: params.metadata } : {}),
-    });
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
+    const customer = await client.customers.create(
+      {
+        email: params.email,
+        name: params.name,
+        ...(params.metadata ? { metadata: params.metadata } : {}),
+      },
+      { idempotencyKey },
+    );
     return {
       customerId: requireProviderText(customer.customer_id, "createCustomer", "customer_id"),
     };
@@ -518,6 +523,7 @@ export class DodoProvider implements PaymentProvider {
   }
 
   async changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string }> {
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
     const client = this.getClient();
     await client.subscriptions.changePlan(
       params.providerSubscriptionId,
@@ -529,7 +535,7 @@ export class DodoProvider implements PaymentProvider {
         ...(params.onPaymentFailure ? { on_payment_failure: params.onPaymentFailure } : {}),
         ...(params.metadata ? { metadata: params.metadata } : {}),
       },
-      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+      { idempotencyKey },
     );
     return {};
   }

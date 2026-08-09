@@ -57,7 +57,10 @@ export interface DodoClient {
     ): Promise<DodoCheckoutSessionStatus>;
   };
   customers: {
-    create(body: Parameters<DodoPayments["customers"]["create"]>[0]): Promise<DodoCustomer>;
+    create(
+      body: Parameters<DodoPayments["customers"]["create"]>[0],
+      options?: { idempotencyKey?: string },
+    ): Promise<DodoCustomer>;
     customerPortal: {
       create(
         customerId: Parameters<DodoPayments["customers"]["customerPortal"]["create"]>[0],

@@ -1,4 +1,4 @@
-# Local git hooks. CI is the real gate (M15) — these hooks are a fast local
+# Local git hooks. CI is the real gate; these hooks are a fast local
 # convenience and are intentionally bypassable (`git commit --no-verify`).
 #
 # Pre-commit runs in CHECK mode only: it never rewrites and silently stages your

@@ -23,7 +23,7 @@ export interface CheckoutParams {
   metadata: Record<string, string>;
   /** Provider-level idempotency key. Prevents duplicate checkout sessions on
    *  network retries or double-clicks. Generated server-side per request. */
-  idempotencyKey?: string;
+  idempotencyKey: string;
 }
 
 export interface PortalParams {
@@ -49,6 +49,7 @@ export interface CreateCustomerParams {
   email: string;
   name: string;
   metadata: Record<string, string>;
+  idempotencyKey: string;
 }
 
 export interface ProviderUrlResult {
@@ -176,7 +177,7 @@ export interface ChangePlanParams {
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;
   metadata?: Record<string, string>;
-  idempotencyKey?: string;
+  idempotencyKey: string;
 }
 export interface PlanSelection {
   planId: string;
@@ -237,15 +238,15 @@ export interface PaymentProvider {
 
   handleWebhook(req: WebhookRequest): Promise<WebhookResult>;
 
-  cancelSubscription?(subscriptionId: string, idempotencyKey?: string): Promise<void>;
+  cancelSubscription?(subscriptionId: string, idempotencyKey: string): Promise<void>;
 
-  reactivateSubscription?(subscriptionId: string, idempotencyKey?: string): Promise<void>;
+  reactivateSubscription?(subscriptionId: string, idempotencyKey: string): Promise<void>;
 
   /** Removes a pending plan switch while retaining the current subscription. */
   cancelScheduledPlanChange?(
     subscriptionId: string,
-    providerOperationId?: string | null,
-    idempotencyKey?: string,
+    providerOperationId: string | null | undefined,
+    idempotencyKey: string,
   ): Promise<void>;
 
   listPaymentMethods?(customerId: string): Promise<PaymentMethodInfo[]>;

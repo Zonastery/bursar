@@ -11,7 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SkipValidation
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validator
 
 from bursar.credits.events import CreditEvent
 from bursar.credits.types import (
@@ -22,11 +22,15 @@ from bursar.credits.types import (
     UsageChargeStore,
 )
 from bursar.metrics import UsageMetrics
+from bursar.shared.idempotency import StableKey
 from bursar.shared.logger import Logger
 
 PolicyPreset = Literal["strict_prepaid", "overdraft"]
 PostDeductionSource = Literal["deduct", "settle", "raw"]
 MetricsOrAmount = UsageMetrics | Decimal | int
+
+
+ReplayKey = StableKey
 
 
 class _CreditsServiceModel(BaseModel):
@@ -42,7 +46,14 @@ class PostDeductionContext(_CreditsServiceModel):
 class LowBalanceConfig(_CreditsServiceModel):
     thresholds: list[Decimal] | None = None
     on_trigger: Callable[[CreditEvent], None | Awaitable[None]] | None = None
-    max_tracked_users: int = Field(default=100_000, ge=1)
+    max_tracked_users: int = Field(default=100_000, strict=True, ge=1)
+
+    @field_validator("thresholds")
+    @classmethod
+    def validate_thresholds(cls, values: list[Decimal] | None) -> list[Decimal] | None:
+        if values is not None and any(not value.is_finite() or value < 0 for value in values):
+            raise ValueError("low-balance thresholds must be finite non-negative amounts")
+        return values
 
 
 class CreditsServiceOptions(_CreditsServiceModel):
@@ -51,26 +62,33 @@ class CreditsServiceOptions(_CreditsServiceModel):
     usage_store: UsageChargeStore | None = None
     policy: PolicyPreset = "strict_prepaid"
     overdraft_floor: Decimal | None = None
-    max_concurrent: int | None = None
+    max_concurrent: int | None = Field(default=None, strict=True, ge=1)
     low_balance: LowBalanceConfig | None = None
-    default_ttl_seconds: int = Field(default=600, ge=1)
-    lazy_expiry: bool = False
-    catalog_cache_ttl_ms: int = Field(default=300_000, ge=0)
+    default_ttl_seconds: int = Field(default=600, strict=True, ge=1)
+    lazy_expiry: bool = Field(default=False, strict=True)
+    catalog_cache_ttl_ms: int = Field(default=300_000, strict=True, ge=0)
     post_deduction: Callable[[PostDeductionContext], None | Awaitable[None]] | None = None
+
+    @field_validator("overdraft_floor")
+    @classmethod
+    def validate_overdraft_floor(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and (not value.is_finite() or value > 0):
+            raise ValueError("overdraft_floor must be finite and <= 0")
+        return value
 
 
 class ReserveOptions(_CreditsServiceModel):
-    idempotency_key: str | None = None
+    idempotency_key: ReplayKey
     operation_type: str | None = None
     billing_mode: BillingMode | None = None
-    ttl: int | None = Field(default=None, ge=1)
+    ttl: int | None = Field(default=None, strict=True, ge=1)
     metadata: CreditMetadata | None = None
     feature: str | None = None
     model: str | None = None
 
 
 class SettleOptions(_CreditsServiceModel):
-    idempotency_key: str | None = None
+    idempotency_key: ReplayKey | None = None
     metadata: CreditMetadata | None = None
     feature: str | None = None
 
@@ -84,9 +102,9 @@ class CanAffordOptions(_CreditsServiceModel):
 class GrantSubscriptionCycleOptions(_CreditsServiceModel):
     bucket: str = "subscription"
     expires_at: datetime | None = None
-    ttl_days: int | None = Field(default=None, ge=1)
+    ttl_days: int | None = Field(default=None, strict=True, ge=1)
     plan_key: str | None = None
-    idempotency_key: str | None = None
+    idempotency_key: ReplayKey
     metadata: CreditMetadata | None = None
 
 
@@ -95,11 +113,11 @@ class RunBilledOptions(_CreditsServiceModel):
     do_work: Callable[[], tuple[Any, MetricsOrAmount]]
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
-    operation_key: str | None = None
-    ttl: int | None = Field(default=None, ge=1)
+    operation_key: ReplayKey
+    ttl: int | None = Field(default=None, strict=True, ge=1)
     feature: str | None = None
     metadata: CreditMetadata | None = None
-    settlement_attempts: int = Field(default=3, ge=1)
+    settlement_attempts: int = Field(default=3, strict=True, ge=1)
 
 
 class RunBilledAsyncOptions(_CreditsServiceModel):
@@ -107,19 +125,19 @@ class RunBilledAsyncOptions(_CreditsServiceModel):
     do_work: Callable[[], Awaitable[tuple[Any, MetricsOrAmount]]]
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
-    operation_key: str | None = None
-    ttl: int | None = Field(default=None, ge=1)
+    operation_key: ReplayKey
+    ttl: int | None = Field(default=None, strict=True, ge=1)
     feature: str | None = None
     metadata: CreditMetadata | None = None
-    settlement_attempts: int = Field(default=3, ge=1)
+    settlement_attempts: int = Field(default=3, strict=True, ge=1)
 
 
 class BeginBilledOperationOptions(_CreditsServiceModel):
     estimate: MetricsOrAmount
-    operation_key: str = Field(min_length=1)
+    operation_key: ReplayKey
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
-    ttl: int | None = Field(default=None, ge=1)
+    ttl: int | None = Field(default=None, strict=True, ge=1)
     feature: str | None = None
     metadata: CreditMetadata | None = None
 

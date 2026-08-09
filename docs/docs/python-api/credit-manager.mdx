@@ -34,8 +34,8 @@ row (`entry_id` for adjustments, `refund_entry_id` for refunds). `get_balance`,
 
 ### Idempotency
 
-`add_credits`, `deduct_credits`, and `refund_credits` each accept an
-`idempotency_key` keyword argument: retrying with the same key replays the
+`add_credits`, `deduct_credits`, and `refund_credits` each require a
+caller-stable `idempotency_key`: retrying with the same key replays the
 original result instead of double-applying. `deduct_credits` threads its key
 through to the store, so administrative deductions are replay-safe too.
 
@@ -44,7 +44,7 @@ below.
 
 | Method                | Parameters                                                                                                                                     | Returns                |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `add_credits`         | `user_id: str`, `amount: Decimal \| int`, `entry_type="adjustment"`, `metadata=None`, `expires_at=None`, `bucket=None`, `idempotency_key=None` | `AddCreditsResult`     |
+| `add_credits`         | `user_id: str`, `amount: Decimal \| int`, `idempotency_key: str`, `entry_type="adjustment"`, `metadata=None`, `expires_at=None`, `bucket=None` | `AddCreditsResult`     |
 | `deduct_credits`      | `user_id: str`, `amount: Decimal \| int`, `*, entry_type="adjustment"`, `bucket`, `metadata`, `idempotency_key`                                | `AddCreditsResult`     |
 | `refund_credits`      | `entry_id: str`, `amount=None`, `reason`, `metadata`, `idempotency_key`                                                                        | `RefundResult`         |
 | `get_balance`         | `user_id: str`                                                                                                                                 | `BalanceResult`        |
@@ -53,7 +53,7 @@ below.
 
 ## Metered charging
 
-`deduct(user_id, metrics, idempotency_key=None, metadata=None, *, feature=None)`
+`deduct(user_id, metrics, idempotency_key, metadata=None, *, feature=None)`
 prices a `UsageMetrics` event with the active pricing engine and charges the
 cost in one atomic, idempotency-keyed transaction. The idempotency key is
 **the** replay guard for metered usage: the same key returns the same
@@ -80,8 +80,8 @@ and `sweep_expired_credits(dry_run=False)` expires eligible credit lots.
 
 | Method                         | Parameters                                                                                          | Returns           |
 | ------------------------------ | --------------------------------------------------------------------------------------------------- | ----------------- |
-| `deduct`                       | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None`, `*, feature=None` | `DeductionResult` |
-| `deduct_flat_job`              | `user_id: str`, `job_name: str`, `idempotency_key=None`, `metadata=None`, `feature=None`            | `DeductionResult` |
+| `deduct`                       | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key: str`, `metadata=None`, `*, feature=None` | `DeductionResult` |
+| `deduct_flat_job`              | `user_id: str`, `job_name: str`, `idempotency_key: str`, `metadata=None`, `feature=None`            | `DeductionResult` |
 | `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str`                                                                   | `dict[str, Any]`  |
 | `sweep_expired_credits`        | `dry_run=False`                                                                                     | `SweepResult`     |
 
@@ -140,7 +140,7 @@ bursar.credits.settle(
 
 | Method       | Parameters                                                                             | Returns           |
 | ------------ | -------------------------------------------------------------------------------------- | ----------------- |
-| `reserve`    | `user_id: str`, `metrics_or_amount`, `options: ReserveOptions \| None`                 | `LeaseResult`     |
+| `reserve`    | `user_id: str`, `metrics_or_amount`, `options: ReserveOptions`                         | `LeaseResult`     |
 | `settle`     | `user_id: str`, `lease_id: str`, `metrics_or_amount`, `options: SettleOptions \| None` | `DeductionResult` |
 | `release`    | `user_id: str`, `lease_id: str`                                                        | `ReleaseResult`   |
 | `renew`      | `user_id: str`, `lease_id: str`, `ttl: int \| None = None`                             | `LeaseResult`     |
@@ -148,7 +148,9 @@ bursar.credits.settle(
 
 `ReserveOptions` carries `idempotency_key`, `operation_type`, `billing_mode`,
 `ttl`, `metadata`, `feature`, and `model`; `SettleOptions` carries
-`idempotency_key`, `metadata`, and `feature`.
+`idempotency_key`, `metadata`, and `feature`. A caller-supplied settlement key
+is validated like every other replay key; if it is omitted, Bursar derives the
+stable key from the lease ID because a lease can settle only once.
 
 ## Plans
 
@@ -229,7 +231,7 @@ bursar.credits.deduct_team(
 
 | Method        | Parameters                                                                                       | Returns               |
 | ------------- | ------------------------------------------------------------------------------------------------ | --------------------- |
-| `deduct_team` | `team_id: str`, `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None` | `TeamDeductionResult` |
+| `deduct_team` | `team_id: str`, `user_id: str`, `metrics: UsageMetrics`, `idempotency_key: str`, `metadata=None` | `TeamDeductionResult` |
 
 See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account
 model, and [Leases and financial safety](/docs/guides/financial-safety) for

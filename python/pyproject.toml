@@ -106,9 +106,6 @@ reportMissingModuleSource = "none"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-filterwarnings = [
-    "ignore:^BaseAgentConfig is deprecated and will be removed in future versions\\.:DeprecationWarning",
-]
 markers = [
     "integration: requires a real Postgres (real DSN or a testcontainers-managed one)",
     "concurrency: exercises thread/connection races; slower, may be timeout-sensitive",
@@ -125,7 +122,7 @@ branch = true
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "def __repr__", "raise NotImplementedError"]
 # Keep a release-blocking coverage floor; raise it as coverage improves.
-fail_under = 62
+fail_under = 65
 
 # Editable development dependencies, including notebook tooling.
 [dependency-groups]

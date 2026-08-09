@@ -5,10 +5,11 @@ PostgreSQL 17 with pg_partman 5 and pg_jsonschema 0.3** from a single,
 consistent mechanism
 (resolution order):
 
-1. ``DATABASE_URL`` — the env var CI and the JS (vitest) suite already use
-   (see ``.github/workflows/ci.yml`` and ``javascript/tests/store-integration.test.ts``).
-   Preferred so the Python and JS suites point at the same DB::
+1. ``DATABASE_URL`` — an explicitly supplied database shared by the Python
+   and JavaScript harnesses. Because test isolation truncates every Bursar
+   table, this path also requires ``BURSAR_ALLOW_DATABASE_RESET=1``::
 
+       BURSAR_ALLOW_DATABASE_RESET=1 \
        DATABASE_URL=postgres://bursar:bursar@localhost:5432/bursar_test uv run pytest
 
 2. **testcontainers** — a disposable, provider-neutral PostgreSQL 17 image
@@ -19,21 +20,22 @@ consistent mechanism
    SQL RPCs instead of silently skipping them, so a green run without a DB is
    no longer possible when Docker is present.
 
-Only if Docker itself is unreachable do the PostgreSQL integration tests
-**skip** with a visible reason. Every test gets a clean slate: Bursar's tables are
-TRUNCATEd before each test so cross-test state never bleeds, whether the
-underlying Postgres is a persistent DB or the session-scoped container.
+Only if Docker itself is unreachable do local PostgreSQL integration tests
+**skip** with a visible reason. CI sets ``BURSAR_REQUIRE_POSTGRES_TESTS=1`` so
+the same condition fails the suite instead. Migrations run once per session;
+every test gets a clean slate from the shared reset SQL before it starts and
+again after it finishes.
 """
 
 from __future__ import annotations
 
-import atexit
 import os
 import time
 import warnings
-from collections.abc import Generator, Iterator
+from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import psycopg2
 import pytest
@@ -44,87 +46,22 @@ TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 TEST_TENANT_SLUG = "bursar-tests"
 DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.10-pg-jsonschema-0.3.4"
 POSTGRES_BUILD_CONTEXT = Path(__file__).resolve().parents[2] / "tests" / "postgres"
+RESET_SQL = (POSTGRES_BUILD_CONTEXT / "reset_bursar.sql").read_text(encoding="utf-8")
 
 
-def _pg2_conn(dsn: str) -> Generator[Any, None, None]:
-    """Context manager yielding a fresh psycopg2 connection — auto-closes."""
-    conn = psycopg2.connect(dsn)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-def _insert_deny_cap(conn: Any, user_id: str, limit: int) -> None:
-    """Insert a daily deny spend cap at ``limit`` for ``user_id``."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) "
-            "VALUES (%s, 'daily', %s, 'deny')",
-            (user_id, limit),
-        )
-
-
-def _truncate_bursar_tables(dsn: str) -> None:
-    """Give each test a clean slate on a persistent DB so state never bleeds.
-
-    No-op the first time (tables don't exist yet); safe to call before
-    ``run_migrations()`` has ever run.
-    """
-    import psycopg2
-
+def _reset_bursar_database(dsn: str) -> None:
+    """Reset every Bursar data table without touching the migration ledger."""
     conn = psycopg2.connect(dsn)
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                DO $$
-                DECLARE v_tables text;
-                BEGIN
-                    SELECT string_agg(
-                        format('bursar.%I', tablename),
-                        ', ' ORDER BY tablename
-                    )
-                    INTO v_tables
-                    FROM pg_tables
-                        WHERE schemaname = 'bursar'
-                      AND (tablename LIKE 'credit_%' OR tablename LIKE 'account_%'
-                           OR tablename IN (
-                               'teams',
-                               'team_members',
-                               'event_outbox',
-                               'quota_events',
-                               'quota_usage_events',
-                               'usage_charge_payloads',
-                               'usage_daily_rollups'
-                           )
-                           OR tablename LIKE 'billing_%'
-                           OR tablename LIKE 'catalog_%');
-
-                    IF v_tables IS NOT NULL THEN
-                        EXECUTE 'TRUNCATE TABLE '
-                            || v_tables
-                            || ' CASCADE';
-                    END IF;
-
-                    TRUNCATE TABLE
-                        bursar.storage_settings,
-                        bursar.tenant_catalog_counters;
-                    INSERT INTO bursar.storage_settings(singleton)
-                    VALUES (true);
-                EXCEPTION WHEN undefined_table THEN NULL;
-                END $$;
-                """
-            )
+            cur.execute(RESET_SQL)
     finally:
         conn.close()
 
 
 def _wait_until_ready(dsn: str, timeout: float = 30.0) -> None:
     """Block until Postgres at ``dsn`` accepts connections (or raise)."""
-    import psycopg2
-
     deadline = time.monotonic() + timeout
     last_err: Exception | None = None
     while time.monotonic() < deadline:
@@ -140,37 +77,29 @@ def _wait_until_ready(dsn: str, timeout: float = 30.0) -> None:
 
 def _resolve_persistent_dsn() -> str | None:
     """Return the already-running-Postgres DSN from DATABASE_URL."""
-    return os.environ.get("DATABASE_URL")
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    return dsn or None
 
 
-# Session-scoped testcontainers Postgres, started lazily on first use and
-# reused for the rest of the run (starting a fresh container per test would
-# dominate wall time). ``None`` means "not yet attempted"; the sentinel
-# ``_UNAVAILABLE`` means "attempted and failed" (e.g. no Docker daemon) so we
-# only try once and skip cleanly for every subsequent test.
-_UNAVAILABLE = object()
-_container_dsn: str | object | None = None
+def _require_external_database_reset_opt_in() -> None:
+    """Refuse to truncate an externally supplied database without consent."""
+    if os.environ.get("BURSAR_ALLOW_DATABASE_RESET") != "1":
+        pytest.fail(
+            "Refusing to reset externally supplied DATABASE_URL. Set "
+            "BURSAR_ALLOW_DATABASE_RESET=1 only for a disposable test database.",
+            pytrace=False,
+        )
 
 
-def _testcontainers_dsn() -> str | None:
-    """Return a DSN for a PostgreSQL testcontainer with required extensions.
-
-    Returns ``None`` if Docker itself is unavailable (e.g. no daemon
-    reachable) so the caller can skip with a clear reason instead of erroring.
-    """
-    global _container_dsn
-    if _container_dsn is _UNAVAILABLE:
-        return None
-    if isinstance(_container_dsn, str):
-        return _container_dsn
-
+def _start_testcontainer() -> tuple[str, Any]:
+    """Start one PostgreSQL testcontainer and return its DSN and handle."""
     try:
         from testcontainers.community.postgres import PostgresContainer
-    except ModuleNotFoundError:
-        _container_dsn = _UNAVAILABLE
-        return None
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("testcontainers is not installed") from exc
 
     image = os.environ.get("BURSAR_TEST_PG_IMAGE")
+    container: Any | None = None
     try:
         if image is None:
             from testcontainers.core.image import DockerImage
@@ -184,54 +113,63 @@ def _testcontainers_dsn() -> str | None:
             image = DEFAULT_POSTGRES_IMAGE
         container = PostgresContainer(image, driver=None)
         container.start()
+        return container.get_connection_url(), container
     except Exception as exc:  # Docker daemon unreachable, image pull failed, etc.
-        warnings.warn(
-            f"testcontainers could not start {image} ({exc}); "
-            "DB integration tests will skip. Set DATABASE_URL to point at an "
-            "already-running Postgres instead.",
-            stacklevel=2,
-        )
-        _container_dsn = _UNAVAILABLE
-        return None
+        if container is not None:
+            with suppress(Exception):
+                container.stop()
+        raise RuntimeError(f"testcontainers could not start {image or DEFAULT_POSTGRES_IMAGE}: {exc}") from exc
 
-    atexit.register(container.stop)
-    dsn = container.get_connection_url()
-    _container_dsn = dsn
-    return dsn
+
+def _handle_unavailable_postgres(message: str) -> NoReturn:
+    """Fail required runs and visibly skip optional local integration tests."""
+    if os.environ.get("BURSAR_REQUIRE_POSTGRES_TESTS") == "1":
+        pytest.fail(message, pytrace=False)
+    warnings.warn(message, stacklevel=2)
+    pytest.skip(message)
+
+
+@pytest.fixture(scope="session")
+def migrated_pg_database_url() -> Iterator[str]:
+    """Yield one migrated database for the integration-test session."""
+    dsn = _resolve_persistent_dsn()
+    container: Any | None = None
+    if dsn is not None:
+        _require_external_database_reset_opt_in()
+        _wait_until_ready(dsn)
+    else:
+        try:
+            dsn, container = _start_testcontainer()
+        except RuntimeError as exc:
+            message = (
+                f"No real Postgres available: {exc}. Set DATABASE_URL to a "
+                "pg_partman 5 and pg_jsonschema-enabled database, or make "
+                "Docker available for testcontainers."
+            )
+            _handle_unavailable_postgres(message)
+
+    try:
+        # Installation is a migration-runner responsibility, never a store method.
+        run_migrations(dsn)
+        yield dsn
+    finally:
+        if container is not None:
+            container.stop()
 
 
 @pytest.fixture(scope="function")
-def pg_database_url() -> Iterator[str]:
-    """Yield a connection URL to a real Postgres, or skip if none is available.
-
-    Resolution order: ``DATABASE_URL`` → testcontainers-managed PostgreSQL
-    with pg_partman and pg_jsonschema → skip.
-    """
-    # 1: a persistent, already-running Postgres.
-    persistent = _resolve_persistent_dsn()
-    dsn = persistent
-    if dsn:
-        _wait_until_ready(dsn)
-    else:
-        # 2: disposable Postgres via testcontainers (session-scoped, lazy).
-        dsn = _testcontainers_dsn()
-        if dsn is None:
-            pytest.skip(
-                "No real Postgres available: set DATABASE_URL to a pg_partman 5 and "
-                "pg_jsonschema-enabled database, or "
-                "make Docker available for testcontainers."
-            )
-
-    # Installation is a migration-runner responsibility, never a store method.
-    run_migrations(dsn)
-    # Clean slate per test so cross-test state never bleeds.
-    _truncate_bursar_tables(dsn)
-    with psycopg2.connect(dsn) as connection, connection.cursor() as cursor:
+def pg_database_url(migrated_pg_database_url: str) -> Iterator[str]:
+    """Yield a clean real-Postgres database for one integration test."""
+    _reset_bursar_database(migrated_pg_database_url)
+    with psycopg2.connect(migrated_pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT bursar.create_tenant(%s, %s, %s)",
             (TEST_TENANT_ID, TEST_TENANT_SLUG, "Bursar tests"),
         )
-    yield dsn
+    try:
+        yield migrated_pg_database_url
+    finally:
+        _reset_bursar_database(migrated_pg_database_url)
 
 
 @pytest.fixture(scope="function")

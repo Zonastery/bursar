@@ -48,7 +48,7 @@ bursar = Bursar.create(credit_store=store)
 
 grant = bursar.credits.add_credits(user_id, 500, entry_type="purchase", idempotency_key="checkout:42")
 charge = bursar.credits.deduct_credits(user_id, 20, idempotency_key="job:42")
-refund = bursar.credits.refund_credits(charge.entry_id)
+refund = bursar.credits.refund_credits(charge.entry_id, idempotency_key="refund:job:42")
 
 page = bursar.credits.list_ledger_entries(user_id, limit=25)
 while page.next_cursor is not None:
@@ -99,8 +99,9 @@ ruff check src/ tests/
 pyright src/
 ```
 
-Real-Postgres tests resolve `DATABASE_URL`, else spin up a disposable
-PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3 testcontainer. See
+Real-Postgres tests resolve `DATABASE_URL` when
+`BURSAR_ALLOW_DATABASE_RESET=1`, else spin up a disposable PostgreSQL 17 +
+pg_partman 5 + pg_jsonschema 0.3 testcontainer. See
 [CONTRIBUTING.md](https://github.com/Zonastery/bursar/blob/main/CONTRIBUTING.md).
 
 ## License

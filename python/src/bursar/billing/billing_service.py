@@ -818,15 +818,7 @@ class BillingService:
 
         preserved_allowance_anchor = None
         if action == "plan_changed" and self._provisioning:
-            get_user_plan = getattr(
-                self._provisioning,
-                "get_user_plan",
-                None,
-            )
-            current_plan = get_user_plan(uid) if callable(get_user_plan) else None
-            preserved_allowance_anchor = (
-                getattr(current_plan, "plan_assigned_at", None) if current_plan is not None else None
-            )
+            preserved_allowance_anchor = self._provisioning.get_user_plan(uid).plan_assigned_at
 
         pending = None
         if action == "plan_changed":

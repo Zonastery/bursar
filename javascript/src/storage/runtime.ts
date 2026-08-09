@@ -1,4 +1,5 @@
 import { Bursar } from "../bursar.js";
+import { z } from "zod";
 import {
   ConfigError,
   ImportError as BursarImportError,
@@ -75,6 +76,29 @@ export interface BursarRuntimeStartOptions {
   /** Abort startup retries and pending backoff. */
   signal?: AbortSignal;
 }
+
+const runtimeStartOptionsSchema = z
+  .object({
+    loadCatalog: z.boolean().default(true),
+    maxAttempts: z.number().finite().int().min(1).max(Number.MAX_SAFE_INTEGER).default(1),
+    retryDelayMs: z.number().finite().min(0).max(5_000).default(250),
+    shouldRetry: z
+      .custom<
+        (error: unknown) => boolean
+      >((value) => typeof value === "function", "shouldRetry must be a function")
+      .optional(),
+    maxElapsedMs: z.number().finite().min(0).max(2_147_483_647).optional(),
+    signal: z
+      .custom<AbortSignal>(
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { throwIfAborted?: unknown }).throwIfAborted === "function",
+        "signal must be an AbortSignal",
+      )
+      .optional(),
+  })
+  .strict();
 
 export interface BursarRuntimeHealth {
   ready: boolean;
@@ -232,19 +256,19 @@ export class BursarRuntime {
   }
 
   private async startRuntime(options: BursarRuntimeStartOptions): Promise<void> {
+    const startOptions = runtimeStartOptionsSchema.parse(options);
     if (this.tenantSlug) await this.verifyTenantIdentity();
-    if (options.loadCatalog ?? true) {
-      const maxAttempts = options.maxAttempts ?? 1;
+    if (startOptions.loadCatalog) {
       const shouldRetry =
-        options.shouldRetry ??
+        startOptions.shouldRetry ??
         ((error: unknown) =>
           error instanceof CatalogNotLoadedError || isRetryableBursarError(error));
       await retryBursarOperation(() => this.bursar.loadCatalog(), {
-        maxAttempts,
-        baseDelayMs: options.retryDelayMs ?? 250,
+        maxAttempts: startOptions.maxAttempts,
+        baseDelayMs: startOptions.retryDelayMs,
         maxDelayMs: 5_000,
-        maxElapsedMs: options.maxElapsedMs,
-        signal: options.signal,
+        maxElapsedMs: startOptions.maxElapsedMs,
+        signal: startOptions.signal,
         shouldRetry,
       });
     }

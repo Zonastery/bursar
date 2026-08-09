@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
 import psycopg2
+import pytest
 
 from bursar.sql import _get_sql_files
 
+pytestmark = [pytest.mark.integration]
 SQL_DIR = Path(__file__).parents[1] / "src" / "bursar" / "sql"
 
 
@@ -24,10 +27,20 @@ def test_migration_files_are_contiguous_and_self_contained() -> None:
         assert content.endswith("\n"), path
 
 
+def test_migration_ledger_exactly_matches_the_greenfield_baseline(
+    pg_database_url: str,
+) -> None:
+    expected = [(path.name, hashlib.sha256(path.read_bytes()).hexdigest()) for path in _get_sql_files()]
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT version, checksum FROM bursar.schema_migrations ORDER BY version")
+        assert cursor.fetchall() == expected
+
+
 def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
     pg_database_url: str,
 ) -> None:
-    security_sql = (SQL_DIR / "031_multitenancy_security.sql").read_text(encoding="utf-8")
+    security_sql = (SQL_DIR / "029_multitenancy_security.sql").read_text(encoding="utf-8")
     client_block = re.search(
         r"v_client_functions constant text\[\] := ARRAY\[(.*?)\n\s*\];",
         security_sql,
@@ -122,6 +135,25 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
 
         cursor.execute(
             """
+            SELECT granted_role.rolname, member_role.rolname
+            FROM pg_auth_members AS membership
+            JOIN pg_roles AS granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_roles AS member_role
+              ON member_role.oid = membership.member
+            WHERE granted_role.rolname IN (
+                'bursar_runtime',
+                'bursar_client',
+                'bursar_operator'
+            )
+              AND member_role.rolname <> current_user
+            ORDER BY 1, 2
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
             SELECT c.relname, r.rolname, privilege_type
             FROM pg_class AS c
             JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -145,7 +177,22 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
               ON namespace_info.oid = table_info.relnamespace
             WHERE namespace_info.nspname = 'bursar'
               AND table_info.relkind IN ('r', 'p')
-              AND NOT table_info.relrowsecurity
+              AND (
+                  NOT table_info.relrowsecurity
+                  OR (
+                      NOT table_info.relforcerowsecurity
+                      AND (
+                          table_info.relname = 'tenants'
+                          OR EXISTS (
+                              SELECT 1
+                              FROM pg_attribute AS attribute_info
+                              WHERE attribute_info.attrelid = table_info.oid
+                                AND attribute_info.attname = 'tenant_id'
+                                AND NOT attribute_info.attisdropped
+                          )
+                      )
+                  )
+              )
             ORDER BY table_info.relname
             """
         )
@@ -198,6 +245,9 @@ def test_schema_and_public_rpc_comments_are_present(pg_database_url: str) -> Non
                   'create_lease_for_operation',
                   'settle_lease',
                   'upsert_auto_recharge_profile',
+                  'resolve_catalog_offer',
+                  'resolve_catalog_topup',
+                  'resolve_catalog_plan',
                   'list_subject_quota_events'
               )
             """
@@ -207,8 +257,28 @@ def test_schema_and_public_rpc_comments_are_present(pg_database_url: str) -> Non
         assert all(comment[0] for comment in comments)
 
 
-def test_foreign_keys_have_leading_column_indexes(pg_database_url: str) -> None:
+def test_relational_keys_have_supporting_indexes(pg_database_url: str) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT table_info.relname
+            FROM pg_class AS table_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = table_info.relnamespace
+            WHERE namespace_info.nspname = 'bursar'
+              AND table_info.relkind IN ('r', 'p')
+              AND NOT table_info.relispartition
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_constraint AS constraint_info
+                  WHERE constraint_info.conrelid = table_info.oid
+                    AND constraint_info.contype = 'p'
+              )
+            ORDER BY table_info.relname
+            """
+        )
+        assert cursor.fetchall() == []
+
         cursor.execute(
             """
             SELECT

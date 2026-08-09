@@ -208,9 +208,6 @@ describe("subscription plan-change provisioning", () => {
         getUserPlan,
         setUserPlan,
         unsetUserPlan: vi.fn(),
-        addCredits: vi.fn(),
-        deductCredits: vi.fn(),
-        revokeCreditsByEntryType: vi.fn(),
       },
     });
 
@@ -256,11 +253,9 @@ describe("subscription plan-change provisioning", () => {
     const handlers = new BillingEventHandlers(store, {
       autoSelectEntitlementSource: false,
       provisioning: {
+        getUserPlan: vi.fn().mockResolvedValue(null),
         setUserPlan,
         unsetUserPlan: vi.fn(),
-        addCredits: vi.fn(),
-        deductCredits: vi.fn(),
-        revokeCreditsByEntryType: vi.fn(),
       },
     });
 

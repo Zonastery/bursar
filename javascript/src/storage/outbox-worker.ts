@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
 import type { OutboxEvent, OutboxHandler, OutboxStore } from "./ports.js";
 
@@ -18,30 +20,30 @@ export interface OutboxRunResult {
   failed: number;
 }
 
-interface NormalizedWorkerOptions {
-  batchSize: number;
-  concurrency: number;
-  leaseSeconds: number;
-  pollIntervalMs: number;
-  retryDelaySeconds: number;
-  maxRetryDelaySeconds: number;
-  attemptLimit: number;
-  onError: ((error: unknown) => void | Promise<void>) | null;
-}
+const outboxWorkerOptionsSchema = z
+  .object({
+    batchSize: z.number().finite().int().min(1).max(1_000).default(100),
+    concurrency: z.number().finite().int().min(1).max(100).default(4),
+    leaseSeconds: z.number().finite().int().min(1).max(3_600).default(60),
+    pollIntervalMs: z.number().finite().int().min(10).max(3_600_000).default(1_000),
+    retryDelaySeconds: z.number().finite().int().min(1).max(86_400).default(30),
+    maxRetryDelaySeconds: z.number().finite().int().min(1).max(86_400).default(3_600),
+    attemptLimit: z.number().finite().int().min(1).max(1_000).default(10),
+    onError: z
+      .custom<
+        (error: unknown) => void | Promise<void>
+      >((value) => typeof value === "function", "onError must be a function")
+      .optional(),
+  })
+  .strict()
+  .refine((options) => options.maxRetryDelaySeconds >= options.retryDelaySeconds, {
+    path: ["maxRetryDelaySeconds"],
+    message: "must be at least retryDelaySeconds",
+  });
 
-function integerOption(
-  value: number | undefined,
-  fallback: number,
-  name: string,
-  minimum: number,
-  maximum: number,
-): number {
-  const normalized = value ?? fallback;
-  if (!Number.isInteger(normalized) || normalized < minimum || normalized > maximum) {
-    throw new RangeError(`${name} must be an integer between ${minimum} and ${maximum}`);
-  }
-  return normalized;
-}
+type NormalizedWorkerOptions = Omit<z.infer<typeof outboxWorkerOptionsSchema>, "onError"> & {
+  onError: ((error: unknown) => void | Promise<void>) | null;
+};
 
 /**
  * Generic leased-outbox dispatcher.
@@ -65,9 +67,7 @@ export class OutboxWorker {
     options: OutboxWorkerOptions = {},
   ) {
     if (handlers.length === 0) throw new TypeError("OutboxWorker requires at least one handler");
-    if (options.onError !== undefined && typeof options.onError !== "function") {
-      throw new TypeError("onError must be a function");
-    }
+    const parsedOptions = outboxWorkerOptionsSchema.parse(options);
     this.store = store;
     for (const handler of handlers) {
       if (handler.topics.length === 0) {
@@ -82,30 +82,9 @@ export class OutboxWorker {
     }
     this.topics = [...this.handlers.keys()].sort();
     this.options = {
-      batchSize: integerOption(options.batchSize, 100, "batchSize", 1, 1_000),
-      concurrency: integerOption(options.concurrency, 4, "concurrency", 1, 100),
-      leaseSeconds: integerOption(options.leaseSeconds, 60, "leaseSeconds", 1, 3_600),
-      pollIntervalMs: integerOption(options.pollIntervalMs, 1_000, "pollIntervalMs", 10, 3_600_000),
-      retryDelaySeconds: integerOption(
-        options.retryDelaySeconds,
-        30,
-        "retryDelaySeconds",
-        1,
-        86_400,
-      ),
-      maxRetryDelaySeconds: integerOption(
-        options.maxRetryDelaySeconds,
-        3_600,
-        "maxRetryDelaySeconds",
-        1,
-        86_400,
-      ),
-      attemptLimit: integerOption(options.attemptLimit, 10, "attemptLimit", 1, 1_000),
-      onError: options.onError ?? null,
+      ...parsedOptions,
+      onError: parsedOptions.onError ?? null,
     };
-    if (this.options.maxRetryDelaySeconds < this.options.retryDelaySeconds) {
-      throw new RangeError("maxRetryDelaySeconds must be at least retryDelaySeconds");
-    }
   }
 
   async start(): Promise<void> {

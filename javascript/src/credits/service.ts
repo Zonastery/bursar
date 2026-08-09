@@ -1,5 +1,4 @@
 import Decimal from "decimal.js";
-import { randomUUID } from "node:crypto";
 import {
   CapReachedError,
   ConfigError,
@@ -58,6 +57,7 @@ import { LowBalanceMonitor } from "./low-balance-monitor.js";
 import { CreditQueries } from "./queries.js";
 import { CatalogRuntime, toDecimal } from "./catalog-runtime.js";
 import { CreditLeaseWorkflow } from "./lease-workflow.js";
+import { requireStableKey } from "../shared/idempotency.js";
 import type {
   AddCreditsOptions,
   BeginBilledOperationOptions,
@@ -467,19 +467,16 @@ export class CreditsService {
   async addCredits(
     userId: string,
     amount: Decimal | number,
-    options?: AddCreditsOptions,
+    options: AddCreditsOptions,
   ): Promise<AddCreditsResult> {
-    const type = options?.type ?? "adjustment";
-    this.logger.info("[CreditsService] addCredits", { amount, type, bucket: options?.bucket });
-    const result = await this.store.addCredits(
-      userId,
-      positiveAmount(amount, "addCredits"),
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
+    const type = options.type ?? "adjustment";
+    this.logger.info("[CreditsService] addCredits", { amount, type, bucket: options.bucket });
+    const result = await this.store.addCredits(userId, positiveAmount(amount, "addCredits"), {
+      ...options,
       type,
-      options?.metadata,
-      options?.expiresAt,
-      options?.bucket,
-      options?.idempotencyKey,
-    );
+      idempotencyKey,
+    });
     this.emit("credits.added", userId, {
       entryId: result.entryId,
       amount: result.amount,
@@ -502,22 +499,24 @@ export class CreditsService {
   async deductCredits(
     userId: string,
     amount: Decimal | number,
-    options?: DeductCreditsOptions,
+    options: DeductCreditsOptions,
   ): Promise<AddCreditsResult> {
-    const entryType = options?.entryType ?? "adjustment";
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
+    const entryType = options.entryType ?? "adjustment";
     this.logger.info("[CreditsService] deductCredits", {
       amount,
       entryType,
-      bucket: options?.bucket,
+      bucket: options.bucket,
     });
     const result = await this.store.addCredits(
       userId,
       positiveAmount(amount, "deductCredits").neg(),
-      entryType,
-      options?.metadata ?? null,
-      null,
-      options?.bucket ?? undefined,
-      options?.idempotencyKey,
+      {
+        type: entryType,
+        metadata: options.metadata,
+        bucket: options.bucket,
+        idempotencyKey,
+      },
     );
     this.emit("credits.deducted", userId, {
       entryId: result.entryId,
@@ -562,39 +561,38 @@ export class CreditsService {
   async grantSubscriptionCycle(
     userId: string,
     amount: Decimal | number,
-    options?: GrantSubscriptionCycleOptions,
+    options: GrantSubscriptionCycleOptions,
   ): Promise<AddCreditsResult> {
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
     this.logger.info("[CreditsService] grantSubscriptionCycle", {
       amount,
-      bucket: options?.bucket,
-      planKey: options?.planKey,
+      bucket: options.bucket,
+      planKey: options.planKey,
     });
-    if (options?.expiresAt != null && options?.ttlDays != null) {
+    if (options.expiresAt != null && options.ttlDays != null) {
       throw new ConfigError(
         "grantSubscriptionCycle: specify at most one of 'expiresAt' or 'ttlDays', not both",
       );
     }
-    const bucket = options?.bucket ?? "subscription";
+    const bucket = options.bucket ?? "subscription";
     const expiresAt: Date | undefined =
-      options?.ttlDays != null
+      options.ttlDays != null
         ? new Date(Date.now() + options.ttlDays * 86_400_000)
-        : options?.expiresAt;
+        : options.expiresAt;
     const amountDec = positiveAmount(amount, "grantSubscriptionCycle");
 
-    const result = await this.store.addCredits(
-      userId,
-      amountDec,
-      "purchase",
-      options?.metadata,
+    const result = await this.store.addCredits(userId, amountDec, {
+      type: "purchase",
+      metadata: options.metadata,
       expiresAt,
       bucket,
-      options?.idempotencyKey,
-    );
+      idempotencyKey,
+    });
 
     // The store contract exposes the mutation's replay result directly, avoiding
     // a racy lifetime-balance comparison and an extra database round trip.
     const isFreshGrant = !result.idempotent;
-    if (options?.planKey) {
+    if (options.planKey) {
       // A fresh cycle intentionally re-anchors plan-assignment windows. On a
       // webhook replay, repair a previously interrupted grant->assignment saga
       // without re-anchoring an assignment that already succeeded.
@@ -608,8 +606,8 @@ export class CreditsService {
       amount: amountDec,
       newBalance: result.newBalance,
       bucket,
-      planKey: options?.planKey ?? null,
-      idempotencyKey: options?.idempotencyKey ?? null,
+      planKey: options.planKey ?? null,
+      idempotencyKey,
       idempotent: result.idempotent,
     });
 
@@ -621,7 +619,7 @@ export class CreditsService {
   async reserve(
     userId: string,
     metricsOrAmount: MetricsOrAmount,
-    options?: ReserveOptions,
+    options: ReserveOptions,
   ): Promise<LeaseSuccess> {
     return this.leases.reserve(userId, metricsOrAmount, options);
   }
@@ -687,16 +685,16 @@ export class CreditsService {
   async deduct(
     userId: string,
     metrics: UsageMetrics,
-    options?: DeductOptions,
+    options: DeductOptions,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] deduct", {
       model: metrics.dimensions?.model,
-      feature: options?.feature,
+      feature: options.feature,
     });
     const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
-    const effectiveIdempotencyKey = options?.idempotencyKey ?? `usage:${randomUUID()}`;
+    const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
 
     // 1) Calculate cost as an exact Decimal, never truncated.
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
@@ -705,7 +703,7 @@ export class CreditsService {
     // Build ledger metadata: caller fields FIRST, system fields LAST so the
     // protected system fields win.
     const meta: Record<string, unknown> = {};
-    if (options?.metadata) {
+    if (options.metadata) {
       for (const [k, v] of Object.entries(options.metadata)) {
         if (v != null) meta[k] = v;
       }
@@ -719,7 +717,7 @@ export class CreditsService {
     const deductionOptions: DeductWithAllowanceOptions = {
       idempotencyKey: effectiveIdempotencyKey,
       operation: metrics.operation,
-      feature: options?.feature ?? null,
+      feature: options.feature ?? null,
       model: typeof metrics.dimensions?.model === "string" ? metrics.dimensions.model : null,
       region: typeof metrics.dimensions?.region === "string" ? metrics.dimensions.region : null,
       measures: { ...(metrics.measures ?? {}) },
@@ -739,7 +737,7 @@ export class CreditsService {
         error: result.error,
         amount: cost,
         model: metrics.dimensions?.model,
-        feature: options?.feature,
+        feature: options.feature,
       });
       this.emit("credits.deduct_failed", userId, {
         error: result.error,
@@ -781,14 +779,14 @@ export class CreditsService {
   async recordUsage(
     userId: string,
     metrics: UsageMetrics,
-    options?: RecordUsageOptions,
+    options: RecordUsageOptions,
   ): Promise<UsageRecordResult> {
     const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
-    const effectiveIdempotencyKey = options?.idempotencyKey ?? `usage-record:${randomUUID()}`;
+    const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
     const meta: Record<string, unknown> = {};
-    if (options?.metadata) {
+    if (options.metadata) {
       for (const [key, value] of Object.entries(options.metadata)) {
         if (value != null) meta[key] = value;
       }
@@ -826,26 +824,25 @@ export class CreditsService {
   async deductFlatJob(
     userId: string,
     jobName: string,
-    options?: DeductFlatJobOptions,
+    options: DeductFlatJobOptions,
   ): Promise<DeductionResult> {
     return this.deduct(userId, { operation: jobName, measures: { jobs: 1 } }, options);
   }
 
-  async refundCredits(entryId: string, options?: RefundCreditsOptions): Promise<RefundSuccess> {
+  async refundCredits(entryId: string, options: RefundCreditsOptions): Promise<RefundSuccess> {
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const refundAmount =
-      options?.amount != null ? positiveAmount(options.amount, "refundCredits") : undefined;
+      options.amount != null ? positiveAmount(options.amount, "refundCredits") : undefined;
     this.logger.info("[CreditsService] refundCredits", {
       entryId,
       refundAmount,
-      reason: options?.reason,
+      reason: options.reason,
     });
-    const result = await this.store.refundCredits(
-      entryId,
-      refundAmount,
-      options?.reason,
-      options?.metadata,
-      options?.idempotencyKey,
-    );
+    const result = await this.store.refundCredits(entryId, {
+      ...options,
+      amount: refundAmount,
+      idempotencyKey,
+    });
 
     if (result.error !== null) {
       this.logger.warn("[CreditsService] refundCredits failed", {
@@ -856,7 +853,7 @@ export class CreditsService {
         this.emit("credits.refund_failed", result.userId, {
           entryId,
           error: result.error,
-          reason: options?.reason ?? null,
+          reason: options.reason ?? null,
         });
       }
       throw new RefundError(`Refund rejected: ${result.error}`);
@@ -867,7 +864,7 @@ export class CreditsService {
       refundEntryId: result.refundEntryId,
       amount: result.amount,
       newBalance: result.newBalance,
-      reason: options?.reason ?? null,
+      reason: options.reason ?? null,
     });
     return result;
   }
@@ -876,15 +873,16 @@ export class CreditsService {
    * Deduct from a team's shared balance pool.
    *
    * Calculates the cost via the pricing engine (exact `Decimal`, no truncation),
-   * then debits the team balance. Threads an optional ``idempotencyKey`` through
+   * then debits the team balance. Threads a required ``idempotencyKey`` through
    * to the store so retried team charges are not double-counted.
    */
   async deductTeam(
     teamId: string,
     userId: string,
     metrics: UsageMetrics,
-    options?: DeductTeamOptions,
+    options: DeductTeamOptions,
   ): Promise<TeamDeductionResult> {
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
     await this.maybeLazyExpire(userId);
     // Lazy expiry is scoped to the individual member's credits, not the team's
     // shared pool — there's no per-team expiry concept.
@@ -911,7 +909,7 @@ export class CreditsService {
     }
 
     const teamMetadata: CreditMetadata = {
-      ...(options?.metadata ?? {}),
+      ...(options.metadata ?? {}),
       operation: metrics.operation,
       measures: { ...(metrics.measures ?? {}) },
       dimensions: Object.fromEntries(
@@ -919,13 +917,10 @@ export class CreditsService {
       ),
       breakdownTotal: breakdown.total.toString(),
     };
-    const result = await this.store.deductTeam(
-      teamId,
-      userId,
-      cost,
-      teamMetadata,
-      options?.idempotencyKey,
-    );
+    const result = await this.store.deductTeam(teamId, userId, cost, {
+      metadata: teamMetadata,
+      idempotencyKey,
+    });
     // Surface store errors: emit credits.deduct_failed and throw,
     // mirroring the Python credit service implementation. Previously returned a silent
     // success-shaped object with an .error field, so failed charges looked OK.

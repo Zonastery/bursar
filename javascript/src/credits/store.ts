@@ -49,6 +49,11 @@ import type {
   LedgerEntry,
 } from "./types/index.js";
 import type { CatalogRollout } from "../config.js";
+import type {
+  AddCreditsOptions,
+  DeductTeamOptions,
+  RefundCreditsOptions,
+} from "./service-types.js";
 
 export interface OperationUsageOptions {
   /** Entitlement feature that must be enabled for the operation. */
@@ -65,7 +70,7 @@ export interface CreateLeaseOptions extends OperationUsageOptions {
    * Replay-safe acquisition key. Supplying the same key with the same request
    * returns the original lease; conflicting reuse is rejected.
    */
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
   billingMode?: BillingMode;
   floor?: Decimal;
   maxConcurrent?: number | null;
@@ -76,7 +81,7 @@ export interface CreateLeaseOptions extends OperationUsageOptions {
 
 /** Options for charging the actual cost against a lease. */
 export interface SettleLeaseOptions extends OperationUsageOptions {
-  idempotencyKey?: string | null;
+  idempotencyKey?: string;
   metadata?: CreditMetadata | null;
 }
 
@@ -99,17 +104,7 @@ export abstract class CreditStore {
   abstract addCredits(
     userId: string,
     amount: Decimal,
-    type?: string,
-    metadata?: CreditMetadata | null,
-    expiresAt?: Date | null,
-    /** Target credit bucket; omitted/`null` resolves to the config's default bucket. */
-    bucket?: string | null,
-    /**
-     * Replay-safe idempotency key (parity with the `deduct`/`settle`/`refund`
-     * idempotency idiom). When a prior grant for this `userId` carries the same
-     * key, the prior result is returned unchanged and no new credits are granted.
-     */
-    idempotencyKey?: string | null,
+    options: AddCreditsOptions,
   ): Promise<AddCreditsResult>;
   /**
    * Atomically calculate-and-charge in one server-side transaction:
@@ -119,7 +114,7 @@ export abstract class CreditStore {
   abstract deductWithAllowance(
     userId: string,
     amount: Decimal,
-    options?: DeductWithAllowanceOptions,
+    options: DeductWithAllowanceOptions,
   ): Promise<DeductionResult>;
 
   // ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -145,7 +140,7 @@ export abstract class CreditStore {
     userId: string,
     amount: Decimal,
     operationType: string,
-    options?: CreateLeaseOptions,
+    options: CreateLeaseOptions,
   ): Promise<LeaseResult>;
 
   /**
@@ -246,14 +241,7 @@ export abstract class CreditStore {
   ): Promise<RevokeCreditsResult>;
 
   // ── Refunds ────────────────────────────────────────────────────────
-  abstract refundCredits(
-    entryId: string,
-    amount?: Decimal,
-    reason?: string,
-    metadata?: CreditMetadata | null,
-    /** Replay-safe key; pass a unique key for multiple equal partial refunds. */
-    idempotencyKey?: string | null,
-  ): Promise<RefundResult>;
+  abstract refundCredits(entryId: string, options: RefundCreditsOptions): Promise<RefundResult>;
 
   // ── Credit expiry ────────────────────────────────────────────────────
   /**
@@ -326,7 +314,7 @@ export abstract class CreditStore {
     _userId: string,
     _operation: string,
     _requested: Decimal,
-    _options?: DeductWithAllowanceOptions,
+    _options: DeductWithAllowanceOptions,
   ): Promise<UsageRecordResult> {
     throw new CapabilityNotSupportedError("recordUsage is not supported by this store");
   }
@@ -369,8 +357,7 @@ export abstract class CreditStore {
     _teamId: string,
     _userId: string,
     _amount: Decimal,
-    _metadata?: CreditMetadata | null,
-    _idempotencyKey?: string | null,
+    _options: DeductTeamOptions,
   ): Promise<TeamDeductionResult> {
     throw new CapabilityNotSupportedError("deductTeam is not supported by this store");
   }

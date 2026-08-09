@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -157,3 +158,89 @@ async def test_provider_registry_validates_factories_and_clear_invalidates_in_fl
     assert stale is not current
     assert await registry.get("mock") is current
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_provider_waiter_preserves_the_shared_factory_load() -> None:
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def factory(context):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return MockPaymentProvider(event_sink=context.event_sink)
+
+    registry = CommerceProviderRegistry(
+        CommerceOptions(providers={"mock": factory}),
+        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+    )
+    cancelled_waiter = asyncio.create_task(registry.get("mock"))
+    await started.wait()
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    surviving_waiter = asyncio.create_task(registry.get("mock"))
+    release.set()
+    provider = await surviving_waiter
+
+    assert provider is await registry.get("mock")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_provider_waiter_does_not_leave_an_unobserved_factory_failure() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    reported: list[dict[str, object]] = []
+
+    async def factory(_context):
+        started.set()
+        await release.wait()
+        try:
+            raise RuntimeError("provider factory failed")
+        finally:
+            finished.set()
+
+    registry = CommerceProviderRegistry(
+        CommerceOptions(providers={"mock": factory}),
+        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+    )
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        waiter = asyncio.create_task(registry.get("mock"))
+        await started.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        release.set()
+        await finished.wait()
+        await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+
+        assert reported == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_provider_registry_propagates_factory_failure_to_active_waiter() -> None:
+    async def factory(_context):
+        await asyncio.sleep(0)
+        raise RuntimeError("provider factory failed")
+
+    registry = CommerceProviderRegistry(
+        CommerceOptions(providers={"mock": factory}),
+        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+    )
+
+    with pytest.raises(RuntimeError, match="provider factory failed"):
+        await registry.get("mock")

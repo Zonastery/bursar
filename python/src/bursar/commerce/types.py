@@ -23,6 +23,7 @@ from bursar.providers.types import (
     ResolveUserCallback,
     WebhookResult,
 )
+from bursar.shared.idempotency import StableKey
 from bursar.shared.logger import Logger
 
 CommerceCheckoutKind = Literal["subscription", "credit_pack"]
@@ -95,7 +96,7 @@ class CreateCheckoutInput(_CommerceModel):
     offer_key: NonEmptyString
     return_url: NonEmptyString
     cancel_url: NonEmptyString
-    operation_key: NonEmptyString
+    operation_key: StableKey
     account_id: NonEmptyString | None = None
     email: NonEmptyString | None = None
     provider: NonEmptyString | None = None
@@ -195,7 +196,7 @@ class PreviewPlanChangeInput(_CommerceModel):
 
 class ConfirmPlanChangeInput(PreviewPlanChangeInput):
     quote_fingerprint: NonEmptyString
-    operation_key: NonEmptyString
+    operation_key: StableKey
 
 
 class ConfirmPlanChangeResult(_CommerceModel):

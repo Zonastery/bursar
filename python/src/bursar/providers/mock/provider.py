@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from itertools import count
 
 from bursar.billing.types import BillingEvent
 from bursar.bursar import BillingEventSink
@@ -39,6 +40,8 @@ class MockPaymentProvider:
     ) -> None:
         self._sink = event_sink
         self._resolve_user = resolve_user
+        self._customer_ids = count(1)
+        self._customers_by_key: dict[str, str] = {}
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         return CheckoutSessionResult(url=params.return_url)
@@ -52,17 +55,18 @@ class MockPaymentProvider:
     async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
         return ProviderUrlResult(url=params.return_url)
 
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         pass
 
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         pass
 
     async def cancel_scheduled_plan_change(
         self,
         subscription_id: str,
         provider_operation_id: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> None:
         pass
 
@@ -81,9 +85,11 @@ class MockPaymentProvider:
         return SavedPaymentChargeQuote(amount_minor=0, currency="USD")
 
     async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
-        import time
-
-        return CreateCustomerResult(customer_id=f"mock_cus_{int(time.time() * 1000)}")
+        customer_id = self._customers_by_key.get(params.idempotency_key)
+        if customer_id is None:
+            customer_id = f"mock_cus_{next(self._customer_ids)}"
+            self._customers_by_key[params.idempotency_key] = customer_id
+        return CreateCustomerResult(customer_id=customer_id)
 
     async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         return ProviderUrlResult(url="https://example.com/invoice")

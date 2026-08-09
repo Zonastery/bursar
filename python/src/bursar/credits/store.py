@@ -82,6 +82,7 @@ from bursar.errors import (
 from bursar.errors import (
     StoreUnavailableError as StoreUnavailableError,
 )
+from bursar.shared.idempotency import StableKey
 
 
 class _CreditStoreOptions(BaseModel):
@@ -97,7 +98,7 @@ class OperationUsageOptions(_CreditStoreOptions):
 
 
 class CreateLeaseOptions(OperationUsageOptions):
-    idempotency_key: str | None = None
+    idempotency_key: StableKey
     billing_mode: BillingMode = "strict"
     floor: Decimal = Decimal(0)
     max_concurrent: int | None = None
@@ -107,7 +108,7 @@ class CreateLeaseOptions(OperationUsageOptions):
 
 
 class SettleLeaseOptions(OperationUsageOptions):
-    idempotency_key: str | None = None
+    idempotency_key: StableKey | None = None
     metadata: CreditMetadata | None = None
 
 
@@ -147,7 +148,8 @@ class CreditStore(ABC):
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         bucket: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> AddCreditsResult:
         """Atomically add credits and log a transaction.
 
@@ -158,7 +160,7 @@ class CreditStore(ABC):
                 configured, must be ``None`` or ``"default"``. When buckets are
                 configured and omitted, resolves to the bucket with
                 ``is_default=True`` (raises if none is marked default).
-            idempotency_key: Optional user-scoped replay key. A retried grant
+            idempotency_key: Required user-scoped replay key. A retried grant
                 with the same key (e.g. a webhook redelivered by the sender)
                 returns the original entry's result rather than
                 granting a second time — no double-mutation, no second
@@ -174,7 +176,7 @@ class CreditStore(ABC):
         user_id: str,
         amount: Decimal,
         *,
-        idempotency_key: str | None = None,
+        idempotency_key: str,
         operation: str = "usage",
         feature: str | None = None,
         model: str | None = None,
@@ -185,8 +187,8 @@ class CreditStore(ABC):
     ) -> DeductionResult:
         """Atomically charge a gross cost in a single server-side transaction.
 
-        This is the canonical "calculate cost then charge now" path (contract
-        §2). Within one transaction the store:
+        This is the canonical "calculate cost then charge now" path. Within one
+        transaction the store:
 
         1. Locks the user's credit row.
         2. Honors ``idempotency_key`` (user-scoped) — a replay returns the
@@ -235,7 +237,7 @@ class CreditStore(ABC):
         user_id: str,
         amount: Decimal,
         operation_type: str,
-        options: CreateLeaseOptions | None = None,
+        options: CreateLeaseOptions,
     ) -> LeaseResult:
         """Atomically acquire a lease (hold) — the only authoritative admission control.
 
@@ -501,10 +503,11 @@ class CreditStore(ABC):
     def refund_credits(
         self,
         entry_id: str,
+        *,
+        idempotency_key: str,
         amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
-        idempotency_key: str | None = None,
     ) -> RefundResult:
         """Refund a previous credit deduction.
 
@@ -513,8 +516,7 @@ class CreditStore(ABC):
             amount: Optional partial refund amount. Full refund if omitted.
             reason: Optional reason for the refund.
             metadata: Extra metadata to attach to the refund entry.
-            idempotency_key: Stable replay key. A deterministic key is generated
-                from ``entry_id`` and ``amount`` when omitted.
+            idempotency_key: Required stable replay key.
 
         Returns:
             ``RefundResult`` with the refund ledger entry details, or
@@ -746,7 +748,8 @@ class CreditStore(ABC):
         user_id: str,
         amount: Decimal,
         metadata: CreditMetadata | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> TeamDeductionResult:
         """Deduct credits from a team pool, attributed to a user.
 
@@ -755,7 +758,7 @@ class CreditStore(ABC):
             user_id: The user to attribute the deduction to.
             amount: Credits to deduct (``Decimal``).
             metadata: Extra metadata.
-            idempotency_key: Optional replay key. A retried team deduction with
+            idempotency_key: Required replay key. A retried team deduction with
                 the same key returns the original result rather than charging
                 the shared pool again.
 

@@ -33,8 +33,8 @@ release notes unless you prefer to remain anonymous.
 This is a billing and sandbox-security-sensitive library. We are particularly
 interested in:
 
-- **Expression sandbox escapes** — the evaluator (`python/src/bursar/expr.py`,
-  `javascript/src/expr.ts`) is designed to reject arbitrary code execution via
+- **Expression sandbox escapes** — the evaluators (`python/src/bursar/expr/`,
+  `javascript/src/expr/`) are designed to reject arbitrary code execution via
   an AST allowlist. Pricing expressions are loaded from the database, so they
   are a real trust boundary. Any bypass that allows unauthorized computation,
   resource exhaustion (DoS), or data access is in scope.

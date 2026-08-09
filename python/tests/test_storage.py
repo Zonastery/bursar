@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -187,6 +187,19 @@ def test_outbox_worker_claims_registered_topics_and_acknowledges() -> None:
     assert handled == [OUTBOX_EVENT]
     assert store.completed == [OUTBOX_EVENT]
     assert store.failed == []
+
+
+def test_runtime_and_worker_options_reject_coerced_or_non_finite_values() -> None:
+    with pytest.raises(ValueError, match="batch_size"):
+        OutboxWorkerOptions(batch_size=True)
+    with pytest.raises(ValueError, match="retry_delay_seconds"):
+        BursarRuntimeStartOptions(retry_delay_seconds=float("nan"))
+    with pytest.raises(ValueError, match="retry_delay_seconds"):
+        BursarRuntimeStartOptions(retry_delay_seconds=5.1)
+    with pytest.raises(ValueError, match="should_retry"):
+        BursarRuntimeStartOptions(should_retry=cast(Any, "yes"))
+    with pytest.raises(ValueError, match="on_error"):
+        OutboxWorkerOptions(on_error=cast(Any, 42))
 
 
 def test_outbox_worker_releases_failure_with_bounded_backoff() -> None:

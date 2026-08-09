@@ -74,7 +74,7 @@ export interface AddCreditsOptions {
   /** Target credit bucket; omitted resolves to the catalog's default bucket. */
   bucket?: string | null;
   /** Stable replay key for the ledger mutation. */
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
 }
 
 export interface DeductCreditsOptions {
@@ -82,11 +82,11 @@ export interface DeductCreditsOptions {
   bucket?: string | null;
   metadata?: CreditMetadata | null;
   /** Stable replay key for the ledger mutation. */
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
 }
 
 export interface DeductOptions {
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
   metadata?: CreditMetadata | null;
   /** Entitlement feature required for this operation. */
   feature?: string | null;
@@ -95,7 +95,7 @@ export interface DeductOptions {
 export type DeductFlatJobOptions = DeductOptions;
 
 export interface RecordUsageOptions {
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
   metadata?: CreditMetadata | null;
 }
 
@@ -103,17 +103,17 @@ export interface RefundCreditsOptions {
   amount?: Decimal | number;
   reason?: string;
   metadata?: CreditMetadata | null;
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
 }
 
 export interface DeductTeamOptions {
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
   metadata?: CreditMetadata | null;
 }
 
 export interface ReserveOptions {
-  /** Replay-safe acquisition key. A random key is generated when omitted. */
-  idempotencyKey?: string | null;
+  /** Caller-stable replay-safe acquisition key. */
+  idempotencyKey: string;
   operationType?: string;
   billingMode?: BillingMode | null;
   ttl?: number | null;
@@ -124,7 +124,7 @@ export interface ReserveOptions {
 }
 
 export interface SettleOptions {
-  idempotencyKey?: string | null;
+  idempotencyKey?: string;
   metadata?: CreditMetadata | null;
   /** Entitlement key supplied at reserve time. */
   feature?: string | null;
@@ -141,7 +141,7 @@ export interface GrantSubscriptionCycleOptions {
   expiresAt?: Date;
   ttlDays?: number;
   planKey?: string;
-  idempotencyKey?: string;
+  idempotencyKey: string;
   metadata?: CreditMetadata | null;
 }
 
@@ -151,7 +151,7 @@ export interface RunBilledOptions<T> {
   operationType?: string;
   billingMode?: BillingMode | null;
   /** Stable key for the complete reserve/work/settle operation. */
-  operationKey?: string | null;
+  operationKey: string;
   ttl?: number | null;
   feature?: string | null;
   metadata?: CreditMetadata | null;

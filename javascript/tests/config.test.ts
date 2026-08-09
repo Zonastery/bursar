@@ -131,6 +131,16 @@ export const baseConfig = () => ({
 });
 
 describe("typed v1 config", () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects non-finite programmatic numbers (%s)",
+    (value) => {
+      const config = baseConfig();
+      config.admission.policies.interactive.max_in_flight = value;
+
+      expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
+    },
+  );
+
   it("rejects the removed catalog activation field", () => {
     const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
     config.catalog = { activation: { mode: "on_publish" } };

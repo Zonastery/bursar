@@ -49,7 +49,7 @@ class BalanceRepository:
         metadata: str,
         expires_at: str | None,
         bucket: str | None,
-        idempotency_key: str | None,
+        idempotency_key: str,
     ) -> AddCreditsRow:
         validate_non_empty(user_id, "user_id")
         amount_dec = Decimal(amount)

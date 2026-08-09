@@ -7,7 +7,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -59,6 +59,7 @@ from bursar.credits.types import (
     PlanAllowancePolicy,
     UsageChargePage,
 )
+from bursar.errors import ProviderResponseError
 from bursar.providers.types import (
     ChangePlanParams,
     ChangePlanPreview,
@@ -107,9 +108,9 @@ class RecordingProvider:
 
     def __init__(self) -> None:
         self.checkout_params: list[CheckoutParams] = []
-        self.cancelled: list[tuple[str, str | None]] = []
-        self.reactivated: list[tuple[str, str | None]] = []
-        self.cancelled_changes: list[tuple[str, str | None, str | None]] = []
+        self.cancelled: list[tuple[str, str]] = []
+        self.reactivated: list[tuple[str, str]] = []
+        self.cancelled_changes: list[tuple[str, str | None, str]] = []
         self.change_params: list[ChangePlanParams] = []
         self.preview_params: list[PreviewChangePlanParams] = []
         self.portal_params: list[PortalParams] = []
@@ -120,6 +121,8 @@ class RecordingProvider:
         self.checkout_status: CheckoutPaymentStatus | None = None
         self.fail_checkout = False
         self.fail_change = False
+        self.preview_effective_at = "2026-08-01T00:00:00.000Z"
+        self.preview_next_billing_date = "2026-09-01T00:00:00.000Z"
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         self.checkout_params.append(params)
@@ -146,17 +149,18 @@ class RecordingProvider:
             return None
         return CheckoutSessionStatus(payment_status=self.checkout_status)
 
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         self.cancelled.append((subscription_id, idempotency_key))
 
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         self.reactivated.append((subscription_id, idempotency_key))
 
     async def cancel_scheduled_plan_change(
         self,
         subscription_id: str,
         provider_operation_id: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> None:
         self.cancelled_changes.append((subscription_id, provider_operation_id, idempotency_key))
 
@@ -195,8 +199,8 @@ class RecordingProvider:
             settlement_amount=100,
             currency="USD",
             line_items=[],
-            effective_at="2026-08-01T00:00:00.000Z",
-            next_billing_date="2026-09-01T00:00:00.000Z",
+            effective_at=self.preview_effective_at,
+            next_billing_date=self.preview_next_billing_date,
         )
 
     async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult:
@@ -704,7 +708,7 @@ async def test_checkout_rejects_unknown_catalog_offer() -> None:
 @pytest.mark.asyncio
 async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> None:
     provider = RecordingProvider()
-    commerce, billing, _credits, _provider = make_harness(provider)
+    commerce, billing, credits, _provider = make_harness(provider)
 
     with pytest.raises(UnknownOfferError):
         await commerce.create_checkout(
@@ -827,8 +831,8 @@ async def test_subscription_commands_and_cancel_all_emit_provider_neutral_events
     canceled = await commerce.cancel_all_subscriptions("user-1", "cancel-all")
     assert canceled.canceled_count == 2
     assert provider.cancelled[-2:] == [
-        ("subscription-1", "cancel-all:alpha:subscription-1"),
-        ("subscription-2", "cancel-all:alpha:subscription-2"),
+        ("subscription-1", "cancel-all:cancel-all:5#alpha:14#subscription-1"),
+        ("subscription-2", "cancel-all:cancel-all:5#alpha:14#subscription-2"),
     ]
     assert len(billing.events) == 4
 
@@ -902,6 +906,96 @@ async def test_plan_change_quote_mismatch_and_cancel_scheduled_change() -> None:
     assert await commerce.cancel_scheduled_plan_change("user-1", "cancel-scheduled") == {"success": True}
     assert provider.cancelled_changes == [("subscription-1", "provider-old-change", "cancel-scheduled")]
     assert billing.change_updates[-1] == ("change-existing", {"state": "canceled"})
+
+
+@pytest.mark.asyncio
+async def test_plan_change_quote_binds_scheduled_date_but_not_refreshed_immediate_timestamp() -> None:
+    provider = RecordingProvider()
+    commerce, billing, credits, _provider = make_harness(provider)
+    billing.active_subscription = active_subscription()
+    billing.subscription = billing.active_subscription
+
+    immediate = await commerce.preview_plan_change("user-1", offer_key="pro_month")
+    provider.preview_effective_at = "2026-08-01T00:00:30Z"
+    confirmed = await commerce.confirm_plan_change(
+        "user-1",
+        "change-immediate",
+        offer_key="pro_month",
+        quote_fingerprint=immediate.quote_fingerprint or "",
+    )
+    assert confirmed.effective_at == "2026-08-01T00:00:30+00:00"
+
+    billing.active_subscription = active_subscription(plan="pro")
+    billing.subscription = billing.active_subscription
+    credits.plan = credits.plan.model_copy(update={"plan_key": "pro", "plan_id": "plan-pro"})
+    scheduled = await commerce.preview_plan_change("user-1", offer_key="starter_month")
+    assert scheduled.scheduled is True
+    provider.preview_next_billing_date = "2026-10-01T00:00:00Z"
+
+    with pytest.raises(QuoteChangedError):
+        await commerce.confirm_plan_change(
+            "user-1",
+            "change-scheduled",
+            offer_key="starter_month",
+            quote_fingerprint=scheduled.quote_fingerprint or "",
+        )
+
+
+@pytest.mark.asyncio
+async def test_plan_change_quote_accepts_equivalent_scheduled_instant_offsets() -> None:
+    provider = RecordingProvider()
+    commerce, billing, credits, _provider = make_harness(provider)
+    billing.active_subscription = active_subscription(plan="pro")
+    billing.subscription = billing.active_subscription
+    credits.plan = credits.plan.model_copy(update={"plan_key": "pro", "plan_id": "plan-pro"})
+
+    scheduled = await commerce.preview_plan_change("user-1", offer_key="starter_month")
+    assert scheduled.scheduled is True
+    provider.preview_next_billing_date = "2026-09-01T01:00:00+01:00"
+
+    confirmed = await commerce.confirm_plan_change(
+        "user-1",
+        "change-equivalent-offset",
+        offer_key="starter_month",
+        quote_fingerprint=scheduled.quote_fingerprint or "",
+    )
+
+    assert confirmed.pending is True
+
+
+@pytest.mark.parametrize(
+    "invalid_preview_field",
+    [
+        {"total_amount": float("nan")},
+        {"effective_at": "not-an-instant"},
+    ],
+    ids=["non-finite-money", "invalid-instant"],
+)
+@pytest.mark.asyncio
+async def test_plan_change_rejects_invalid_custom_provider_preview(
+    invalid_preview_field: dict[str, Any],
+) -> None:
+    class InvalidPreviewProvider(RecordingProvider):
+        async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
+            self.preview_params.append(params)
+            return cast(
+                ChangePlanPreview,
+                {
+                    "total_amount": 100,
+                    "settlement_amount": 100,
+                    "currency": "usd",
+                    "line_items": [],
+                    "effective_at": "2026-08-01T00:00:00Z",
+                    **invalid_preview_field,
+                },
+            )
+
+    commerce, billing, _credits, _provider = make_harness(InvalidPreviewProvider())
+    billing.active_subscription = active_subscription()
+    billing.subscription = billing.active_subscription
+
+    with pytest.raises(ProviderResponseError):
+        await commerce.preview_plan_change("user-1", offer_key="pro_month")
 
 
 @pytest.mark.asyncio

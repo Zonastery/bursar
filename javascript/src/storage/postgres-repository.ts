@@ -1,4 +1,7 @@
+import { z } from "zod";
+
 import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
+import { safeParse } from "../shared/postgres-validation.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import type {
   BillingEventPayloadExport,
@@ -9,37 +12,62 @@ import type {
 
 type Row = Record<string, unknown>;
 
+const rowSchema = z.record(z.string(), z.unknown());
+const textSchema = z.string().min(1);
+const timestampSchema = z
+  .union([
+    z.date().refine((value) => !Number.isNaN(value.getTime())),
+    z.string().datetime({ offset: true }),
+  ])
+  .transform((value) => (value instanceof Date ? value : new Date(value)).toISOString());
+const nonnegativeIntegerSchema = z
+  .union([z.number(), z.string().regex(/^\d+$/u)])
+  .transform(Number)
+  .pipe(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER));
+
 function asRow(value: unknown, context: string): Row {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${context} returned an invalid row`);
-  }
-  return value as Row;
+  return safeParse(rowSchema, value, context);
 }
 
 function requiredString(row: Row, key: string, context: string): string {
-  const value = row[key];
-  if (value === null || value === undefined || String(value).length === 0) {
-    throw new Error(`${context} is missing ${key}`);
-  }
-  if (value instanceof Date) return value.toISOString();
-  return String(value);
+  return safeParse(textSchema, row[key], `${context}.${key}`);
 }
 
-function optionalString(row: Row, key: string): string | null {
+function optionalString(row: Row, key: string, context: string): string | null {
   const value = row[key];
-  return value === null || value === undefined ? null : String(value);
+  return value === null || value === undefined
+    ? null
+    : safeParse(textSchema, value, `${context}.${key}`);
 }
 
-function jsonObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+function requiredTimestamp(row: Row, key: string, context: string): string {
+  return safeParse(timestampSchema, row[key], `${context}.${key}`);
+}
+
+function optionalTimestamp(row: Row, key: string, context: string): string | null {
+  const value = row[key];
+  return value === null || value === undefined
+    ? null
+    : safeParse(timestampSchema, value, `${context}.${key}`);
+}
+
+function jsonObject(value: unknown, context: string): Record<string, unknown> {
+  return safeParse(rowSchema, value, context);
+}
+
+function nonnegativeInteger(row: Row, key: string, context: string): number {
+  return safeParse(nonnegativeIntegerSchema, row[key], `${context}.${key}`);
 }
 
 function scalarBoolean(rows: unknown[]): boolean {
-  if (rows.length !== 1) return false;
+  if (rows.length !== 1) {
+    throw new Error(`PostgreSQL boolean RPC returned ${rows.length} rows; expected one`);
+  }
   const values = Object.values(asRow(rows[0], "PostgreSQL boolean RPC"));
-  return values.length === 1 && values[0] === true;
+  if (values.length !== 1) {
+    throw new Error("PostgreSQL boolean RPC returned an invalid result envelope");
+  }
+  return safeParse(z.boolean(), values[0], "PostgreSQL boolean RPC result");
 }
 
 export class PostgresStorageRepository implements OutboxStore {
@@ -65,11 +93,11 @@ export class PostgresStorageRepository implements OutboxStore {
         topic: requiredString(row, "topic", "outbox event"),
         aggregateType: requiredString(row, "aggregate_type", "outbox event"),
         aggregateId: requiredString(row, "aggregate_id", "outbox event"),
-        payloadVersion: Number(row.payload_version),
-        payload: jsonObject(row.payload),
+        payloadVersion: nonnegativeInteger(row, "payload_version", "outbox event"),
+        payload: jsonObject(row.payload, "outbox event.payload"),
         claimToken: requiredString(row, "claim_token", "outbox event"),
-        attemptCount: Number(row.attempt_count),
-        createdAt: requiredString(row, "created_at", "outbox event"),
+        attemptCount: nonnegativeInteger(row, "attempt_count", "outbox event"),
+        createdAt: requiredTimestamp(row, "created_at", "outbox event"),
       };
     });
   }
@@ -119,30 +147,31 @@ export class PostgresStorageRepository implements OutboxStore {
       accountId: requiredString(row, "account_id", "usage charge export"),
       subjectId: requiredString(row, "subject_id", "usage charge export"),
       operation: requiredString(row, "operation", "usage charge export"),
-      feature: optionalString(row, "feature"),
-      model: optionalString(row, "model"),
-      region: optionalString(row, "region"),
-      measures: jsonObject(row.measures),
-      dimensions: jsonObject(row.dimensions),
-      metadata: jsonObject(row.metadata),
+      feature: optionalString(row, "feature", "usage charge export"),
+      model: optionalString(row, "model", "usage charge export"),
+      region: optionalString(row, "region", "usage charge export"),
+      measures: jsonObject(row.measures, "usage charge export.measures"),
+      dimensions: jsonObject(row.dimensions, "usage charge export.dimensions"),
+      metadata: jsonObject(row.metadata, "usage charge export.metadata"),
       requested: requiredString(row, "requested", "usage charge export"),
       charged: requiredString(row, "charged", "usage charge export"),
       allowanceRequested: requiredString(row, "allowance_requested", "usage charge export"),
       allowanceCovered: requiredString(row, "allowance_covered", "usage charge export"),
-      billingDisposition:
-        requiredString(row, "billing_disposition", "usage charge export") === "record_only"
-          ? "record_only"
-          : "billable",
-      catalogRevisionId: optionalString(row, "catalog_revision_id"),
-      planId: optionalString(row, "plan_id"),
-      rateCardKey: optionalString(row, "rate_card_key"),
-      pricingSnapshot: jsonObject(row.pricing_snapshot),
-      ledgerEntryId: optionalString(row, "ledger_entry_id"),
-      correctionOfChargeId: optionalString(row, "correction_of_charge_id"),
+      billingDisposition: safeParse(
+        z.enum(["billable", "record_only"]),
+        row.billing_disposition,
+        "usage charge export.billing_disposition",
+      ),
+      catalogRevisionId: optionalString(row, "catalog_revision_id", "usage charge export"),
+      planId: optionalString(row, "plan_id", "usage charge export"),
+      rateCardKey: optionalString(row, "rate_card_key", "usage charge export"),
+      pricingSnapshot: jsonObject(row.pricing_snapshot, "usage charge export.pricing_snapshot"),
+      ledgerEntryId: optionalString(row, "ledger_entry_id", "usage charge export"),
+      correctionOfChargeId: optionalString(row, "correction_of_charge_id", "usage charge export"),
       idempotencyKey: requiredString(row, "idempotency_key", "usage charge export"),
       requestDigest: requiredString(row, "request_digest", "usage charge export"),
-      eventAt: requiredString(row, "event_at", "usage charge export"),
-      createdAt: requiredString(row, "created_at", "usage charge export"),
+      eventAt: requiredTimestamp(row, "event_at", "usage charge export"),
+      createdAt: requiredTimestamp(row, "created_at", "usage charge export"),
     };
   }
 
@@ -162,13 +191,15 @@ export class PostgresStorageRepository implements OutboxStore {
       providerEventId: requiredString(row, "provider_event_id", "billing payload export"),
       eventType: requiredString(row, "event_type", "billing payload export"),
       status: requiredString(row, "status", "billing payload export"),
-      receivedAt: requiredString(row, "received_at", "billing payload export"),
-      completedAt: optionalString(row, "completed_at"),
+      receivedAt: requiredTimestamp(row, "received_at", "billing payload export"),
+      completedAt: optionalTimestamp(row, "completed_at", "billing payload export"),
       envelope:
-        row.envelope === null || row.envelope === undefined ? null : jsonObject(row.envelope),
-      objectKey: optionalString(row, "object_key"),
-      objectVersion: optionalString(row, "object_version"),
-      archivedAt: optionalString(row, "archived_at"),
+        row.envelope === null || row.envelope === undefined
+          ? null
+          : jsonObject(row.envelope, "billing payload export.envelope"),
+      objectKey: optionalString(row, "object_key", "billing payload export"),
+      objectVersion: optionalString(row, "object_version", "billing payload export"),
+      archivedAt: optionalTimestamp(row, "archived_at", "billing payload export"),
     };
   }
 

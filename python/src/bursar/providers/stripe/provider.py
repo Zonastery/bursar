@@ -38,6 +38,7 @@ from bursar.providers.types import (
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
+from bursar.shared.idempotency import require_stable_key, scope_stable_key
 
 if TYPE_CHECKING:
     from stripe.params import CustomerCreateParams, SubscriptionScheduleUpdateParams, SubscriptionUpdateParams
@@ -77,8 +78,8 @@ def _require_stripe_number(value: object, operation: str, field: str) -> float:
     return parsed
 
 
-def _request_options(idempotency_key: str | None) -> stripe_mod.RequestOptions | None:
-    return {"idempotency_key": idempotency_key} if idempotency_key else None
+def _request_options(idempotency_key: str) -> stripe_mod.RequestOptions:
+    return {"idempotency_key": require_stable_key(idempotency_key)}
 
 
 def _saved_payment_status(value: object) -> SavedPaymentChargeStatus:
@@ -115,11 +116,8 @@ def _stripe_dict(obj: Any) -> dict:
     return {k: _stripe_val(obj, k) for k in dir(obj) if not k.startswith("_")}
 
 
-def _scoped_idempotency_key(key: str | None, scope: str) -> str | None:
-    if not key:
-        return None
-    suffix = f":{scope}"
-    return f"{key[: 255 - len(suffix)]}{suffix}"
+def _scoped_idempotency_key(key: str, scope: str) -> str:
+    return scope_stable_key(key, scope)
 
 
 def _expandable_id(value: Any) -> str | None:
@@ -376,7 +374,7 @@ class StripeProvider:
             event_type=str(event.type) if event.type is not None else None,
         )
 
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         stripe = self._get_stripe()
         await stripe.v1.subscriptions.update_async(
             subscription_id,
@@ -384,7 +382,7 @@ class StripeProvider:
             _request_options(idempotency_key),
         )
 
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str) -> None:
         stripe = self._get_stripe()
         await stripe.v1.subscriptions.update_async(
             subscription_id,
@@ -396,7 +394,8 @@ class StripeProvider:
         self,
         subscription_id: str,
         provider_operation_id: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> None:
         if not provider_operation_id:
             raise ValueError("Stripe scheduled change has no schedule ID")
@@ -551,7 +550,8 @@ class StripeProvider:
     async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
         stripe = self._get_stripe()
         customer = await stripe.v1.customers.create_async(
-            {"email": params.email, "name": params.name, "metadata": params.metadata}
+            {"email": params.email, "name": params.name, "metadata": params.metadata},
+            _request_options(params.idempotency_key),
         )
         return CreateCustomerResult(customer_id=_require_stripe_text(customer.id, "create_customer", "customer.id"))
 

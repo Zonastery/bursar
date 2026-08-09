@@ -1,12 +1,5 @@
-import type Decimal from "decimal.js";
-
 import type { Logger } from "../shared/logger.js";
-import type {
-  AddCreditsResult,
-  RevokeCreditsResult,
-  SetUserPlanResult,
-  UnsetUserPlanResult,
-} from "../credits/types/index.js";
+import type { SetUserPlanResult, UnsetUserPlanResult } from "../credits/types/index.js";
 import type { BillingEventHandler, BillingEventType } from "./types/index.js";
 
 export type ResolveUser = (
@@ -32,26 +25,11 @@ export interface BillingServiceOptions {
  * provisioning. Billing does not depend on the full credit service.
  */
 export interface BillingProvisioningPort {
-  getUserPlan?(userId: string): Promise<{ planAssignedAt?: Date | string | null } | null>;
+  getUserPlan(userId: string): Promise<{ planAssignedAt?: Date | string | null } | null>;
   setUserPlan(
     userId: string,
     planKey: string,
     planAssignedAt?: Date | null,
   ): Promise<SetUserPlanResult>;
   unsetUserPlan(userId: string): Promise<UnsetUserPlanResult>;
-  addCredits(
-    userId: string,
-    amount: Decimal | number,
-    options?: {
-      type?: string;
-      bucket?: string | null;
-      idempotencyKey?: string | null;
-    },
-  ): Promise<AddCreditsResult>;
-  deductCredits(
-    userId: string,
-    amount: Decimal | number,
-    options?: { entryType?: string; bucket?: string | null },
-  ): Promise<AddCreditsResult>;
-  revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeCreditsResult>;
 }

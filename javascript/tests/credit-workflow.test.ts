@@ -4,12 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
 import type { PricingEngine } from "../src/engine.js";
-import {
-  ConfigError,
-  LeaseExpiredError,
-  LeaseNotFoundError,
-  QuotaExceededError,
-} from "../src/errors.js";
+import { LeaseExpiredError, LeaseNotFoundError, QuotaExceededError } from "../src/errors.js";
 
 const leaseResult = (overrides: Record<string, unknown> = {}) => ({
   leaseId: "lease-1",
@@ -112,7 +107,10 @@ describe("credit lease workflow", () => {
       { policy: "overdraft", overdraftFloor: new Decimal(-100) },
     );
 
-    await service.reserve("user-1", new Decimal(10), { operationType: "usage" });
+    await service.reserve("user-1", new Decimal(10), {
+      operationType: "usage",
+      idempotencyKey: "overdraft-reserve-1",
+    });
 
     expect(createLease).toHaveBeenCalledWith(
       "user-1",
@@ -144,6 +142,7 @@ describe("credit lease workflow", () => {
       ttl: 30,
       feature: "chat",
       metadata: { ref: "1" },
+      idempotencyKey: "credit-line-reserve-1",
     });
 
     expect(createLease).toHaveBeenCalledWith(
@@ -177,7 +176,9 @@ describe("credit lease workflow", () => {
       listQuotaEvents: vi.fn().mockResolvedValue([{ eventType: "blocked", quotaKey: "tokens" }]),
     });
 
-    await expect(service.reserve("user-1", new Decimal(10))).rejects.toThrow(QuotaExceededError);
+    await expect(
+      service.reserve("user-1", new Decimal(10), { idempotencyKey: "quota-reserve-1" }),
+    ).rejects.toThrow(QuotaExceededError);
   });
 
   it("records usage metadata on settle with metrics", async () => {
@@ -232,6 +233,10 @@ describe("credit lease workflow", () => {
       null,
       null,
     );
+
+    await expect(
+      service.settle("user-1", "lease-1", new Decimal(1), { idempotencyKey: " " }),
+    ).rejects.toThrow(/idempotencyKey/);
 
     await service.settle(
       "user-1",
@@ -328,7 +333,7 @@ describe("credit lease workflow", () => {
         estimate: new Decimal(1),
         operationKey: "  ",
       }),
-    ).rejects.toThrow(ConfigError);
+    ).rejects.toThrow(TypeError);
   });
 
   it("raises on renew of a finalized lease", async () => {

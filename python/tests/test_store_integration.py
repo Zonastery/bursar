@@ -1,12 +1,17 @@
 """PostgreSQL integration coverage for the public v1 Bursar configuration."""
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
+from uuid import uuid4
 
 import psycopg2
 import pytest
+from psycopg2 import sql
+from psycopg2.extensions import make_dsn
 
 from bursar.credits.postgres.store import PostgresStore, run_migrations
 from bursar.credits.service import CreditsService
@@ -146,6 +151,65 @@ def test_migrations_are_idempotent_and_detect_checksum_mismatch(
 
     run_migrations(pg_database_url)
 
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO bursar.schema_migrations(version, checksum) VALUES (%s, %s)",
+            ["999_obsolete.sql", "obsolete"],
+        )
+    try:
+        with pytest.raises(StoreError, match="absent from this release"):
+            run_migrations(pg_database_url)
+    finally:
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM bursar.schema_migrations WHERE version = %s",
+                ["999_obsolete.sql"],
+            )
+
+
+@pytest.mark.concurrency
+def test_concurrent_migrations_serialize_pristine_database(pg_database_url: str) -> None:
+    database_name = f"bursar_migration_race_{uuid4().hex}"
+    admin_dsn = make_dsn(pg_database_url, dbname="postgres")
+    pristine_dsn = make_dsn(pg_database_url, dbname=database_name)
+
+    admin = psycopg2.connect(admin_dsn)
+    try:
+        admin.autocommit = True
+        with admin.cursor() as cursor:
+            cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    finally:
+        admin.close()
+
+    try:
+        start = Barrier(2)
+
+        def migrate() -> None:
+            start.wait()
+            run_migrations(pristine_dsn)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            migrations = [executor.submit(migrate) for _ in range(2)]
+            for migration in migrations:
+                migration.result()
+
+        with psycopg2.connect(pristine_dsn) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM bursar.schema_migrations")
+            assert cursor.fetchone()[0] > 0  # type: ignore[reportOptionalSubscript]
+    finally:
+        admin = psycopg2.connect(admin_dsn)
+        try:
+            admin.autocommit = True
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()",
+                    [database_name],
+                )
+                cursor.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(database_name)))
+        finally:
+            admin.close()
+
 
 def test_post_migration_sql_is_ordered_and_transactional(
     pg_database_url: str,
@@ -201,19 +265,6 @@ def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStor
 
     assert replay.entry_id == first.entry_id
     assert service.get_balance(REPLAY_USER_ID).balance == Decimal("25")
-
-
-def test_add_credits_without_key_generates_distinct_operations(store: PostgresStore) -> None:
-    service = CreditsService(store=store)
-    service.publish_and_activate_catalog(CONFIG)
-
-    first = service.add_credits(REPLAY_USER_ID, Decimal("25"), entry_type="purchase")
-    second = service.add_credits(REPLAY_USER_ID, Decimal("25"), entry_type="purchase")
-
-    assert first.idempotent is False
-    assert second.idempotent is False
-    assert second.entry_id != first.entry_id
-    assert service.get_balance(REPLAY_USER_ID).balance == Decimal("50")
 
 
 def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore) -> None:

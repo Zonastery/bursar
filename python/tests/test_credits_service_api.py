@@ -9,7 +9,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from bursar.credits.service import CreditsService
-from bursar.credits.service_types import GrantSubscriptionCycleOptions
+from bursar.credits.service_types import (
+    CreditsServiceOptions,
+    GrantSubscriptionCycleOptions,
+    LowBalanceConfig,
+    ReserveOptions,
+)
 from bursar.credits.types import SetUserPlanResult
 from bursar.engine import PricingEngine
 from bursar.metrics import UsageMetrics
@@ -49,6 +54,15 @@ def _service(store: object) -> CreditsService:
     return CreditsService(store=cast(Any, store))
 
 
+def test_service_options_reject_unsafe_financial_and_concurrency_values() -> None:
+    with pytest.raises(ValueError, match="max_concurrent"):
+        CreditsServiceOptions(max_concurrent=0)
+    with pytest.raises(ValueError, match="overdraft_floor"):
+        CreditsServiceOptions(overdraft_floor=Decimal("Infinity"))
+    with pytest.raises(ValueError, match="thresholds"):
+        LowBalanceConfig(thresholds=[Decimal("-0.01")])
+
+
 def test_catalog_is_installed_only_after_publication_succeeds() -> None:
     original = PricingEngine.from_dict(CONFIG)
     store = SimpleNamespace(publish_and_activate_catalog=MagicMock(return_value="revision-2"))
@@ -72,14 +86,14 @@ def test_catalog_publication_failure_keeps_the_committed_engine() -> None:
 @pytest.mark.parametrize(
     "invoke",
     [
-        lambda credits: credits.add_credits("user-1", -1),
-        lambda credits: credits.deduct_credits("user-1", -1),
+        lambda credits: credits.add_credits("user-1", -1, idempotency_key="invalid:add"),
+        lambda credits: credits.deduct_credits("user-1", -1, idempotency_key="invalid:deduct"),
         lambda credits: credits.grant_subscription_cycle(
             "user-1",
             0,
-            GrantSubscriptionCycleOptions(),
+            GrantSubscriptionCycleOptions(idempotency_key="invalid:cycle"),
         ),
-        lambda credits: credits.refund_credits("entry-1", amount=0),
+        lambda credits: credits.refund_credits("entry-1", amount=0, idempotency_key="invalid:refund"),
     ],
 )
 def test_invalid_public_amounts_are_rejected_before_store_call(invoke: Any) -> None:
@@ -101,7 +115,11 @@ def test_negative_raw_lease_amount_is_rejected_before_admission() -> None:
     credits = _service(store)
 
     with pytest.raises(ValueError, match="finite and non-negative"):
-        credits.reserve("user-1", Decimal("-1"))
+        credits.reserve(
+            "user-1",
+            Decimal("-1"),
+            ReserveOptions(idempotency_key="invalid:reserve"),
+        )
 
     store.create_lease.assert_not_called()
 
@@ -111,7 +129,25 @@ def test_boolean_amount_is_not_treated_as_one_credit() -> None:
     credits = _service(store)
 
     with pytest.raises(ValueError, match="Decimal or integer"):
-        credits.add_credits("user-1", True)
+        credits.add_credits("user-1", True, idempotency_key="invalid:boolean")
+
+    store.add_credits.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "idempotency_key",
+    [None, "", " ", " leading", "trailing ", "x" * 256],
+)
+def test_replayable_mutations_require_bounded_trimmed_idempotency_keys(
+    idempotency_key: Any,
+) -> None:
+    store = SimpleNamespace(add_credits=MagicMock())
+    credits = _service(store)
+
+    with pytest.raises(ValueError, match="trimmed non-empty string of at most 255 characters"):
+        credits.add_credits("user-1", 1, idempotency_key=idempotency_key)
+    with pytest.raises(ValueError):
+        ReserveOptions(idempotency_key=idempotency_key)
 
     store.add_credits.assert_not_called()
 

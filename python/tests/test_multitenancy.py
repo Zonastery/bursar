@@ -601,13 +601,15 @@ def test_runtime_role_cannot_execute_operator_functions(
                     'partman',
                     'USAGE'
                 ),
-                has_function_privilege(
-                    'bursar_operator',
-                    'partman.run_maintenance(text,boolean,boolean)',
-                    'EXECUTE'
-                )
+                bool_or(function_info.prosecdef)
+            FROM pg_proc AS function_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = function_info.pronamespace
+            WHERE namespace_info.nspname = 'partman'
             """
         )
+        # pg_partman may retain host-owned PUBLIC EXECUTE ACLs. Neither Bursar
+        # role can resolve that schema, and its routines cannot elevate callers.
         assert cursor.fetchone() == (False, False, False)
 
         cursor.execute(

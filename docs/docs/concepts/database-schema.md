@@ -600,6 +600,7 @@ erDiagram
         TEXT role
         NUMERIC20 spend_cap
         TIMESTAMPTZ created_at
+        TIMESTAMPTZ left_at
     }
     credit_team_usage_charges {
         UUID tenant_id "FK"

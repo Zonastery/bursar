@@ -31,8 +31,8 @@ export default defineConfig({
       all: true,
       include: ["src/**/*.ts"],
       // Pure re-export barrels and type-only files (no runtime logic to test).
-      // src/providers/ are third-party payment integrations with no test suite
-      // (stripe, dodo); they would drag the global threshold below our floor.
+      // Provider adapters have a separate focused coverage gate because their
+      // dependency-heavy branches distort the package-wide domain-code signal.
       exclude: [
         "src/index.ts",
         "src/node.ts",
@@ -46,9 +46,8 @@ export default defineConfig({
       // The CI job runs with a real Postgres, so its effective coverage is
       // higher. Ratchet these up as coverage improves — never lower without a
       // documented reason.
-      // Branch threshold reflects the billing service lifecycle coverage.
-      // with 80+ handler branches (43% covered). Re-ratchet as handler tests
-      // are added.
+      // Branch coverage is dominated by the billing lifecycle handlers;
+      // re-ratchet as high-value handler scenarios are added.
       thresholds: {
         statements: 77,
         branches: 72,

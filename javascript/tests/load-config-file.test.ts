@@ -29,6 +29,7 @@ beforeAll(() => {
   writeFileSync(join(tmpDir, "empty.json"), "");
   writeFileSync(join(tmpDir, "empty.yaml"), "");
   writeFileSync(join(tmpDir, "empty-object.json"), "{}");
+  writeFileSync(join(tmpDir, "duplicate.json"), '{"outer":{"a":1,"\\u0061":2}}');
   writeFileSync(join(tmpDir, "unsupported.txt"), "{}");
   mkdirSync(join(tmpDir, "a-directory.json"), { recursive: true });
 });
@@ -42,6 +43,7 @@ afterAll(() => {
     "empty.json",
     "empty.yaml",
     "empty-object.json",
+    "duplicate.json",
     "unsupported.txt",
   ]) {
     try {
@@ -99,6 +101,13 @@ describe("loadConfigFile", () => {
   it("throws a clean ConfigError on an empty JSON object", async () => {
     const { loadConfigFile } = await import("../src/load-config-file.js");
     await expect(loadConfigFile(join(tmpDir, "empty-object.json"))).rejects.toThrow(ConfigError);
+  });
+
+  it("rejects nested duplicate JSON keys after escape decoding", async () => {
+    const { loadConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadConfigFile(join(tmpDir, "duplicate.json"))).rejects.toThrow(
+      "Invalid JSON in " + join(tmpDir, "duplicate.json") + ": duplicated mapping key",
+    );
   });
 
   it("loads YAML with Unicode string values", async () => {

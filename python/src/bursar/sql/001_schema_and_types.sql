@@ -7,30 +7,31 @@ CREATE EXTENSION IF NOT EXISTS pg_jsonschema WITH SCHEMA extensions;
 
 DO $$
 DECLARE
+    v_extension text;
     v_schema text;
 BEGIN
-    SELECT namespace_info.nspname
-    INTO v_schema
-    FROM pg_extension AS extension_info
-    JOIN pg_namespace AS namespace_info
-      ON namespace_info.oid = extension_info.extnamespace
-    WHERE extension_info.extname = 'pg_jsonschema';
+    FOREACH v_extension IN ARRAY ARRAY['pgcrypto', 'pg_jsonschema'] LOOP
+        SELECT namespace_info.nspname
+        INTO v_schema
+        FROM pg_extension AS extension_info
+        JOIN pg_namespace AS namespace_info
+          ON namespace_info.oid = extension_info.extnamespace
+        WHERE extension_info.extname = v_extension;
 
-    IF v_schema <> 'extensions' THEN
-        RAISE EXCEPTION
-            'Bursar requires pg_jsonschema in schema extensions, not %',
-            COALESCE(v_schema, '<missing>')
-            USING ERRCODE = '3F000';
-    END IF;
+        IF v_schema IS DISTINCT FROM 'extensions' THEN
+            RAISE EXCEPTION
+                'Bursar requires % in schema extensions, not %',
+                v_extension,
+                COALESCE(v_schema, '<missing>')
+                USING ERRCODE = '3F000';
+        END IF;
+    END LOOP;
 END
 $$;
 
-REVOKE ALL
-ON FUNCTION extensions.json_matches_schema(json, json),
-extensions.jsonb_matches_schema(json, jsonb),
-extensions.jsonschema_is_valid(json),
-extensions.jsonschema_validation_errors(json, json)
-FROM PUBLIC;
+-- The extensions schema may be shared with host-owned extensions. Bursar does
+-- not change its ambient ACLs; every dependency call is schema-qualified and
+-- the runtime receives only its required functions in the security migration.
 
 -- pg_partman owns the generic creation and retirement of Bursar's monthly
 -- payload partitions. Keep its configuration and operator API isolated from
@@ -67,11 +68,9 @@ BEGIN
 END
 $$;
 
-REVOKE ALL ON SCHEMA partman FROM PUBLIC;
-REVOKE ALL ON ALL TABLES IN SCHEMA partman FROM PUBLIC;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA partman FROM PUBLIC;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA partman FROM PUBLIC;
-REVOKE ALL ON ALL PROCEDURES IN SCHEMA partman FROM PUBLIC;
+-- pg_partman may already serve other applications in the host database.
+-- Preserve its ambient ACLs; Bursar does not grant its runtime roles USAGE on
+-- this schema and reaches it only through locked-search_path operator wrappers.
 
 SET client_encoding = 'UTF8';
 

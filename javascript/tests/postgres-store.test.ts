@@ -164,9 +164,17 @@ describe("PostgresStore", () => {
 
   it("addCredits fails closed for an empty mutation result", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    await expect(store.addCredits("user-1", D(100))).rejects.toThrow(
-      /expected exactly one result row/,
-    );
+    await expect(
+      store.addCredits("user-1", D(100), { idempotencyKey: "empty-result" }),
+    ).rejects.toThrow(/expected exactly one result row/);
+  });
+
+  it("rejects an invalid explicit settlement key before querying PostgreSQL", async () => {
+    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
+
+    await expect(
+      store.settleLease("user-1", "lease-1", D(1), { idempotencyKey: " " }),
+    ).rejects.toThrow(/idempotencyKey/);
   });
 
   it("addCredits parses row result and sends amount as a decimal string", async () => {
@@ -182,7 +190,10 @@ describe("PostgresStore", () => {
       },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
-    const result = await store.addCredits("user-1", D("100.5"), "purchase");
+    const result = await store.addCredits("user-1", D("100.5"), {
+      type: "purchase",
+      idempotencyKey: "purchase-100-5",
+    });
     expect(result.entryId).toBe("tx-1");
     expect(result.newBalance.toString()).toBe("200");
     // amount param serialized as a decimal string (no binary float).
@@ -304,7 +315,10 @@ describe("PostgresStore", () => {
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
-      const result = await store.addCredits("user-1", D(20), "adjustment", null, null, "gifted");
+      const result = await store.addCredits("user-1", D(20), {
+        bucket: "gifted",
+        idempotencyKey: "gifted-20",
+      });
       expect(calls[0]!.text).toContain("post_credit");
       expect(calls[0]!.params.slice(0, 4)).toEqual(["user-1", "grant", "20", "adjustment"]);
       expect(calls[0]!.params[6]!).toBe("gifted");
@@ -324,7 +338,9 @@ describe("PostgresStore", () => {
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
-      const result = await store.addCredits("user-1", D(10));
+      const result = await store.addCredits("user-1", D(10), {
+        idempotencyKey: "default-10",
+      });
       expect(calls[0]!.params[6]!).toBeNull();
       // Row omitted `tier` entirely (e.g. a no-tiers-configured deployment) —
       // the store falls back to "default" rather than surfacing `undefined`.
@@ -353,7 +369,9 @@ describe("PostgresStore", () => {
           ],
         ),
       );
-      const result = await store.deductWithAllowance(TEST_USER_ID, D(15));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(15), {
+        idempotencyKey: "bucket-breakdown-15",
+      });
       expect(result.bucketBreakdown).not.toBeNull();
       expect(result.bucketBreakdown!.gifted).toBeInstanceOf(Decimal);
       expect(result.bucketBreakdown!.gifted?.toString()).toBe("10");
@@ -373,7 +391,10 @@ describe("PostgresStore", () => {
         ]),
       );
       await expect(
-        store.addCredits("user-1", D(10), "adjustment", null, null, "bogus"),
+        store.addCredits("user-1", D(10), {
+          bucket: "bogus",
+          idempotencyKey: "bogus-bucket-10",
+        }),
       ).rejects.toThrow("post_credit: missing_catalog_bucket");
     });
 
@@ -394,7 +415,9 @@ describe("PostgresStore", () => {
           [{ balance_after: "5.0000", bucket_breakdown: null }],
         ),
       );
-      const result = await store.deductWithAllowance(TEST_USER_ID, D(15));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(15), {
+        idempotencyKey: "no-breakdown-15",
+      });
       expect(result.bucketBreakdown).toBeNull();
     });
 
@@ -523,7 +546,9 @@ describe("PostgresStore", () => {
           [{ balance_after: "85.0000", bucket_breakdown: null }],
         ),
       );
-      const result = await store.deductWithAllowance(TEST_USER_ID, D(25));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(25), {
+        idempotencyKey: "allowance-25",
+      });
       expect(result.amount.toString()).toBe("15");
       expect(result.allowanceConsumed.toString()).toBe("10");
     });
@@ -542,7 +567,9 @@ describe("PostgresStore", () => {
           },
         ]),
       );
-      const result = await store.deductWithAllowance(TEST_USER_ID, D(20));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(20), {
+        idempotencyKey: "quota-error-20",
+      });
       expect(result.error).toBe("quota_exceeded");
       expect(result.entryId).toBeNull();
     });
@@ -561,7 +588,9 @@ describe("PostgresStore", () => {
           },
         ]),
       );
-      const result = await store.deductWithAllowance(TEST_USER_ID, D(20));
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(20), {
+        idempotencyKey: "insufficient-error-20",
+      });
       expect(result.error).toBe("insufficient_credits");
     });
 
@@ -636,9 +665,11 @@ describe("PostgresStore", () => {
     it("fails closed when the RPC returns no result envelope", async () => {
       const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
 
-      await expect(store.recordUsage("user-1", "roadmap_generation", D(12))).rejects.toThrow(
-        /expected exactly one result row/,
-      );
+      await expect(
+        store.recordUsage("user-1", "roadmap_generation", D(12), {
+          idempotencyKey: "empty-record-12",
+        }),
+      ).rejects.toThrow(/expected exactly one result row/);
     });
   });
 
@@ -1064,9 +1095,9 @@ describe("PostgresStore", () => {
         },
       ]),
     );
-    await expect(store.addCredits("user-1", D(50))).rejects.toThrow(
-      "successful credit postings require entry and balance fields",
-    );
+    await expect(
+      store.addCredits("user-1", D(50), { idempotencyKey: "null-balance-50" }),
+    ).rejects.toThrow("successful credit postings require entry and balance fields");
   });
 
   // PG3 — Decimal value sent as string for non-round amounts
@@ -1084,7 +1115,10 @@ describe("PostgresStore", () => {
       },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
-    await store.addCredits("user-1", D("0.0001"), "purchase");
+    await store.addCredits("user-1", D("0.0001"), {
+      type: "purchase",
+      idempotencyKey: "exact-decimal",
+    });
     expect(calls[0]!.text).toContain("post_credit");
     // Must arrive as the string "0.0001", not a binary float like 0.00010000000000000002.
     expect(calls[0]!.params[2]!).toBe("0.0001");
@@ -1106,7 +1140,11 @@ describe("PostgresStore", () => {
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const expiresAt = new Date("2024-01-15T00:00:00.000Z");
-    await store.addCredits("user-1", D(50), "purchase", null, expiresAt);
+    await store.addCredits("user-1", D(50), {
+      type: "purchase",
+      expiresAt,
+      idempotencyKey: "expiring-50",
+    });
     // params[5]! is p_request; p_expires_at is also passed explicitly at params[8]!.
     const meta = JSON.parse(calls[0]!.params[5]! as string) as Record<string, unknown>;
     expect(typeof meta.expires_at).toBe("string");
@@ -1130,7 +1168,9 @@ describe("PostgresStore", () => {
       ]),
     );
     // deductWithAllowance maps ALL error envelopes to result.error — unknown codes included.
-    const result = await store.deductWithAllowance(TEST_USER_ID, D(20));
+    const result = await store.deductWithAllowance(TEST_USER_ID, D(20), {
+      idempotencyKey: "unknown-error-20",
+    });
     expect(result.error).toBe("some_unknown_code_xyz");
     expect(result.entryId).toBeNull();
   });
@@ -1188,7 +1228,10 @@ describe("PostgresStore", () => {
         },
       ]),
     );
-    const result = await store.addCredits("user-1", D("100.1234567890"), "purchase");
+    const result = await store.addCredits("user-1", D("100.1234567890"), {
+      type: "purchase",
+      idempotencyKey: "quantized-purchase",
+    });
     // The store parses the raw DB string "100.1234567890" via dec() into a Decimal.
     // The amount field is read directly from the DB row — Decimal("100.1234567890").
     // Quantization to 6dp ROUND_HALF_UP: 100.12345... → 100.1235.

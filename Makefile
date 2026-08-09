@@ -1,6 +1,6 @@
 # bursar root Makefile.
 #
-# Portability (L8): the `test-js-integration` recipe is multi-line and relies on
+# The `test-integration` recipe is multi-line and relies on
 # GNU make's `.ONESHELL:`, which is IGNORED by GNU make < 3.82 (notably the
 # make 3.81 that ships with macOS). Install a modern GNU make (`brew install
 # make`, then use `gmake`) or run the recipe under bash. We enforce the minimum
@@ -65,8 +65,8 @@ test-integration:                  ## Run Python and JS tests against an isolate
 	set -euo pipefail
 	$(MAKE) test-pg-up
 	trap '$(MAKE) test-pg-down' EXIT
-	DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-python
-	DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-js
+	BURSAR_ALLOW_DATABASE_RESET=1 DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-python
+	BURSAR_ALLOW_DATABASE_RESET=1 DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-js
 
 # Both suites resolve a real Postgres via DATABASE_URL (CI's service
 # container / an already-running instance) or, failing that, via

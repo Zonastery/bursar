@@ -1,12 +1,11 @@
 import Decimal from "decimal.js";
-import { randomUUID } from "node:crypto";
-import { ConfigError } from "../errors.js";
 import { retryBursarOperation } from "../retry.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEventType } from "./events.js";
 import { LowBalanceMonitor } from "./low-balance-monitor.js";
 import { isAmount, CatalogRuntime } from "./catalog-runtime.js";
 import { raiseLeaseError } from "./service-errors.js";
+import { requireStableKey, scopedStableKey } from "../shared/idempotency.js";
 import type {
   CanAffordOptions,
   BeginBilledOperationOptions,
@@ -109,29 +108,29 @@ export class CreditLeaseWorkflow {
   async reserve(
     userId: string,
     metricsOrAmount: MetricsOrAmount,
-    options?: ReserveOptions,
+    options: ReserveOptions,
   ): Promise<LeaseSuccess> {
+    const leaseIdempotencyKey = requireStableKey(options?.idempotencyKey);
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] reserve", {
-      feature: options?.feature,
-      operationType: options?.operationType,
+      feature: options.feature,
+      operationType: options.operationType,
     });
     const operationType =
-      options?.operationType ?? (isAmount(metricsOrAmount) ? "usage" : metricsOrAmount.operation);
+      options.operationType ?? (isAmount(metricsOrAmount) ? "usage" : metricsOrAmount.operation);
     const expectedPolicy = await this.expectedAdmissionPolicy(
       userId,
       operationType,
-      options?.billingMode,
+      options.billingMode,
     );
     const priced = await this.costOf(metricsOrAmount, userId);
     const amount = priced.amount;
-    const model = priced.model ?? options?.model ?? null;
-    const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
-    const feature = options?.feature ?? null;
+    const model = priced.model ?? options.model ?? null;
+    const ttlSeconds = options.ttl != null ? options.ttl : this.defaultTtl;
+    const feature = options.feature ?? null;
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
     const dimensions = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.dimensions ?? {}) };
     const region = typeof dimensions.region === "string" ? dimensions.region : null;
-    const leaseIdempotencyKey = options?.idempotencyKey ?? `lease:${randomUUID()}`;
 
     const result = await this.store.createLease(userId, amount, operationType, {
       idempotencyKey: leaseIdempotencyKey,
@@ -140,7 +139,7 @@ export class CreditLeaseWorkflow {
       maxConcurrent: expectedPolicy.maxConcurrent,
       ttlSeconds,
       model,
-      metadata: options?.metadata,
+      metadata: options.metadata,
       feature,
       region,
       measures,
@@ -192,7 +191,10 @@ export class CreditLeaseWorkflow {
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] settle", { leaseId });
-    const idempotencyKey = options?.idempotencyKey ?? `lease:${leaseId}:settle`;
+    const idempotencyKey =
+      options?.idempotencyKey === undefined
+        ? `lease:${leaseId}:settle`
+        : requireStableKey(options.idempotencyKey);
     const feature = options?.feature ?? null;
     const { amount, model } = await this.costOf(metricsOrAmount, userId, leaseId);
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
@@ -386,7 +388,7 @@ export class CreditLeaseWorkflow {
     userId: string,
     options: RunBilledOptions<T>,
   ): Promise<{ result: T; deduction: DeductionResult }> {
-    const operationKey = options.operationKey ?? `billed:${randomUUID()}`;
+    const operationKey = requireStableKey(options.operationKey, "operationKey");
     const operation = await this.beginBilledOperation(userId, {
       estimate: options.estimate,
       operationKey,
@@ -424,23 +426,21 @@ export class CreditLeaseWorkflow {
     userId: string,
     options: BeginBilledOperationOptions,
   ): Promise<BilledOperation> {
-    if (!options.operationKey.trim()) {
-      throw new ConfigError("operationKey must not be empty");
-    }
+    const operationKey = requireStableKey(options.operationKey, "operationKey");
     const lease = await this.reserve(userId, options.estimate, {
       operationType: options.operationType,
       billingMode: options.billingMode,
       ttl: options.ttl,
       feature: options.feature,
       metadata: options.metadata,
-      idempotencyKey: `${options.operationKey}:reserve`,
+      idempotencyKey: scopedStableKey(operationKey, "reserve"),
     });
     return {
       leaseId: lease.leaseId,
-      operationKey: options.operationKey,
+      operationKey,
       settle: async (actual, metadata) =>
         this.settle(userId, lease.leaseId, actual, {
-          idempotencyKey: `${options.operationKey}:settle`,
+          idempotencyKey: scopedStableKey(operationKey, "settle"),
           feature: options.feature,
           metadata: metadata ?? options.metadata,
         }),

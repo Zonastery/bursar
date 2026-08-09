@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Awaitable
-from typing import Any, Literal, Protocol, runtime_checkable
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+
+from bursar.shared.idempotency import StableKey
 
 
 @runtime_checkable
@@ -45,10 +49,14 @@ class _NormalizedProviderLogger:
     """
 
     def __init__(self, logger: Any = None) -> None:
-        self._debug = getattr(logger, "debug", _noop)
-        self._info = getattr(logger, "info", _noop)
-        self._warning = getattr(logger, "warning", _noop)
-        self._error = getattr(logger, "error", _noop)
+        def method(name: str):
+            candidate = getattr(logger, name, None)
+            return candidate if callable(candidate) else _noop
+
+        self._debug = method("debug")
+        self._info = method("info")
+        self._warning = method("warning")
+        self._error = method("error")
 
     def debug(self, msg: str, ctx: dict | None = None) -> None:
         self._debug(msg, ctx)
@@ -64,6 +72,8 @@ class _NormalizedProviderLogger:
 
 
 def normalize_provider_logger(logger: Any = None) -> ProviderLogger:
+    if isinstance(logger, logging.Logger):
+        return StdlibProviderLogger(logger)
     return _NormalizedProviderLogger(logger)
 
 
@@ -79,14 +89,56 @@ class _ProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _require_trimmed_non_empty_string(value: str) -> str:
+    if not value or value != value.strip():
+        raise ValueError("value must be a trimmed non-empty string")
+    return value
+
+
+NonEmptyString = Annotated[
+    str,
+    Field(strict=True),
+    AfterValidator(_require_trimmed_non_empty_string),
+]
+PositiveInt = Annotated[int, Field(strict=True, gt=0)]
+NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+
+
+def _require_finite_number(value: object) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(float(value)):
+        raise ValueError("value must be a finite number")
+    return value
+
+
+def _normalize_currency(value: str) -> str:
+    if len(value) != 3 or not value.isascii() or not value.isalpha():
+        raise ValueError("currency must be a three-letter ISO code")
+    return value.upper()
+
+
+def _normalize_instant(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("instant must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("instant must include a UTC offset")
+    return parsed.astimezone(UTC).isoformat()
+
+
+FiniteNumber = Annotated[int | float, BeforeValidator(_require_finite_number)]
+CurrencyCode = Annotated[str, Field(strict=True), AfterValidator(_normalize_currency)]
+ProviderInstant = Annotated[str, Field(strict=True), AfterValidator(_normalize_instant)]
+
+
 class ResolveIdentityInput(_ProviderModel):
-    provider: str
-    provider_event_type: str
-    normalized_event_type: str | None = None
-    customer_id: str | None = None
-    email: str | None = None
+    provider: NonEmptyString
+    provider_event_type: NonEmptyString
+    normalized_event_type: NonEmptyString | None = None
+    customer_id: NonEmptyString | None = None
+    email: NonEmptyString | None = None
     metadata: dict[str, str]
-    successful: bool
+    successful: bool = Field(strict=True)
     checkout_kind: Literal["subscription", "credit_topup"] | None = None
 
 
@@ -96,24 +148,24 @@ class WebhookRequest(_ProviderModel):
 
 
 class WebhookResult(_ProviderModel):
-    received: bool
-    retryable: bool
-    provider: str
-    event_id: str | None
-    event_type: str | None
+    received: bool = Field(strict=True)
+    retryable: bool = Field(strict=True)
+    provider: NonEmptyString
+    event_id: NonEmptyString | None
+    event_type: NonEmptyString | None
 
 
 class CheckoutParams(_ProviderModel):
-    user_id: str | None = None
-    customer_id: str | None = None
-    email: str | None = None
-    product_id: str
+    user_id: NonEmptyString | None = None
+    customer_id: NonEmptyString | None = None
+    email: NonEmptyString | None = None
+    product_id: NonEmptyString
     type: Literal["subscription", "credit_pack"]
-    quantity: int | None = None
-    return_url: str
+    quantity: PositiveInt | None = None
+    return_url: NonEmptyString
     cancel_url: str
     metadata: dict[str, str]
-    idempotency_key: str | None = None
+    idempotency_key: StableKey
 
 
 CheckoutPaymentStatus = Literal[
@@ -136,55 +188,56 @@ class CheckoutSessionStatus(_ProviderModel):
 
 
 class CheckoutSessionResult(_ProviderModel):
-    url: str
-    customer_id: str | None = None
-    provider_session_id: str | None = None
+    url: NonEmptyString
+    customer_id: NonEmptyString | None = None
+    provider_session_id: NonEmptyString | None = None
 
 
 class ProviderUrlResult(_ProviderModel):
-    url: str
+    url: NonEmptyString
 
 
 class CreateCustomerResult(_ProviderModel):
-    customer_id: str
+    customer_id: NonEmptyString
 
 
 class ChangePlanResult(_ProviderModel):
-    provider_operation_id: str | None = None
+    provider_operation_id: NonEmptyString | None = None
 
 
 class PortalParams(_ProviderModel):
-    customer_id: str
-    return_url: str
+    customer_id: NonEmptyString
+    return_url: NonEmptyString
 
 
 class UpdatePaymentMethodParams(_ProviderModel):
-    customer_id: str
-    subscription_id: str
-    return_url: str
-    product_id: str | None = None
+    customer_id: NonEmptyString
+    subscription_id: NonEmptyString
+    return_url: NonEmptyString
+    product_id: NonEmptyString | None = None
 
 
 class PaymentMethodSetupParams(_ProviderModel):
-    customer_id: str
-    return_url: str
+    customer_id: NonEmptyString
+    return_url: NonEmptyString
     cancel_url: str | None = None
-    product_id: str | None = None
+    product_id: NonEmptyString | None = None
 
 
 class CreateCustomerParams(_ProviderModel):
-    email: str
-    name: str
+    email: NonEmptyString
+    name: NonEmptyString
     metadata: dict[str, str]
+    idempotency_key: StableKey
 
 
 class PaymentMethodInfo(_ProviderModel):
-    id: str
-    last4: str
-    brand: str
-    expiry_month: int
-    expiry_year: int
-    is_default: bool = False
+    id: NonEmptyString
+    last4: str = Field(pattern=r"^[0-9]{4}$")
+    brand: NonEmptyString
+    expiry_month: int = Field(strict=True, ge=1, le=12)
+    expiry_year: PositiveInt
+    is_default: bool = Field(default=False, strict=True)
 
 
 def deduplicate_payment_methods(methods: list[PaymentMethodInfo]) -> list[PaymentMethodInfo]:
@@ -200,13 +253,13 @@ def deduplicate_payment_methods(methods: list[PaymentMethodInfo]) -> list[Paymen
 
 
 class SavedPaymentChargeParams(_ProviderModel):
-    customer_id: str
-    payment_method_id: str
-    product_id: str
-    quantity: int
+    customer_id: NonEmptyString
+    payment_method_id: NonEmptyString
+    product_id: NonEmptyString
+    quantity: PositiveInt
     metadata: dict[str, str]
-    idempotency_key: str
-    return_url: str | None = None
+    idempotency_key: NonEmptyString
+    return_url: NonEmptyString | None = None
 
 
 SavedPaymentChargeStatus = Literal[
@@ -227,23 +280,23 @@ SavedPaymentChargeStatus = Literal[
 class SavedPaymentChargeResult(_ProviderModel):
     """Validated provider charge result mirroring the JavaScript contract."""
 
-    provider_payment_id: str | None = None
+    provider_payment_id: NonEmptyString | None = None
     status: SavedPaymentChargeStatus
-    action_url: str | None = None
-    amount_minor: int | None = None
-    currency: str | None = None
+    action_url: NonEmptyString | None = None
+    amount_minor: NonNegativeInt | None = None
+    currency: CurrencyCode | None = None
 
 
 class SavedPaymentChargeQuote(_ProviderModel):
-    amount_minor: int
-    currency: str
-    tax_minor: int | None = None
-    expires_at: str | None = None
+    amount_minor: NonNegativeInt
+    currency: CurrencyCode
+    tax_minor: NonNegativeInt | None = None
+    expires_at: NonEmptyString | None = None
 
 
 class ChangePlanParams(_ProviderModel):
-    provider_subscription_id: str
-    product_id: str
+    provider_subscription_id: NonEmptyString
+    product_id: NonEmptyString
     proration_billing_mode: Literal[
         "prorated_immediately",
         "full_immediately",
@@ -252,9 +305,9 @@ class ChangePlanParams(_ProviderModel):
     ]
     effective_at: Literal["immediately", "next_billing_date"] | None = None
     on_payment_failure: Literal["prevent_change", "apply_change"] | None = None
-    quantity: int = 1
+    quantity: PositiveInt = 1
     metadata: dict[str, str] | None = None
-    idempotency_key: str | None = None
+    idempotency_key: StableKey
 
 
 class PlanSelection(_ProviderModel):
@@ -263,8 +316,8 @@ class PlanSelection(_ProviderModel):
 
 
 class PreviewChangePlanParams(_ProviderModel):
-    provider_subscription_id: str
-    product_id: str
+    provider_subscription_id: NonEmptyString
+    product_id: NonEmptyString
     proration_billing_mode: Literal[
         "prorated_immediately",
         "full_immediately",
@@ -272,31 +325,31 @@ class PreviewChangePlanParams(_ProviderModel):
         "do_not_bill",
     ]
     effective_at: Literal["immediately", "next_billing_date"] | None = None
-    quantity: int = 1
+    quantity: PositiveInt = 1
 
 
 class ChangePlanLineItem(_ProviderModel):
-    product_id: str
-    name: str
-    unit_price: float
-    quantity: int
-    proration_factor: float
-    currency: str
-    tax: int
-    subtotal: int
+    product_id: NonEmptyString
+    name: NonEmptyString
+    unit_price: FiniteNumber
+    quantity: PositiveInt
+    proration_factor: FiniteNumber
+    currency: CurrencyCode
+    tax: FiniteNumber
+    subtotal: FiniteNumber
 
 
 class ChangePlanPreview(_ProviderModel):
-    total_amount: int
-    settlement_amount: int
-    currency: str
+    total_amount: FiniteNumber
+    settlement_amount: FiniteNumber
+    currency: CurrencyCode
     line_items: list[ChangePlanLineItem]
-    effective_at: str
-    recurring_amount: int | None = None
-    recurring_currency: str | None = None
-    next_billing_date: str | None = None
-    tax_amount: int | None = None
-    customer_credits: int | None = None
+    effective_at: ProviderInstant
+    recurring_amount: FiniteNumber | None = None
+    recurring_currency: CurrencyCode | None = None
+    next_billing_date: ProviderInstant | None = None
+    tax_amount: FiniteNumber | None = None
+    customer_credits: FiniteNumber | None = None
 
 
 @runtime_checkable
@@ -337,12 +390,12 @@ class CustomerCreationProvider(Protocol):
 
 @runtime_checkable
 class SubscriptionCancellationProvider(Protocol):
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> None: ...
 
 
 @runtime_checkable
 class SubscriptionReactivationProvider(Protocol):
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str) -> None: ...
 
 
 @runtime_checkable
@@ -351,7 +404,8 @@ class ScheduledPlanChangeCancellationProvider(Protocol):
         self,
         subscription_id: str,
         provider_operation_id: str | None = None,
-        idempotency_key: str | None = None,
+        *,
+        idempotency_key: str,
     ) -> None: ...
 
 

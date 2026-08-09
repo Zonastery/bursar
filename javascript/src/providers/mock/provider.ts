@@ -18,6 +18,7 @@ import type {
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { assertBillingEvent } from "../../billing/types/index.js";
+import { requireStableKey } from "../../shared/idempotency.js";
 
 export interface MockPaymentProviderOptions {
   eventSink: BillingEventSink;
@@ -68,6 +69,7 @@ export class MockPaymentProvider implements PaymentProvider {
   async createCheckoutSession(
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string }> {
+    requireStableKey(params.idempotencyKey);
     return { url: params.returnUrl };
   }
 
@@ -87,15 +89,21 @@ export class MockPaymentProvider implements PaymentProvider {
     return { url: params.returnUrl };
   }
 
-  async cancelSubscription(_subscriptionId: string): Promise<void> {}
+  async cancelSubscription(_subscriptionId: string, idempotencyKey: string): Promise<void> {
+    requireStableKey(idempotencyKey);
+  }
 
-  async reactivateSubscription(_subscriptionId: string): Promise<void> {}
+  async reactivateSubscription(_subscriptionId: string, idempotencyKey: string): Promise<void> {
+    requireStableKey(idempotencyKey);
+  }
 
   async cancelScheduledPlanChange(
     _subscriptionId: string,
-    _providerOperationId?: string | null,
-    _idempotencyKey?: string,
-  ): Promise<void> {}
+    _providerOperationId: string | null | undefined,
+    idempotencyKey: string,
+  ): Promise<void> {
+    requireStableKey(idempotencyKey);
+  }
 
   async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
     return [];
@@ -118,8 +126,9 @@ export class MockPaymentProvider implements PaymentProvider {
     };
   }
 
-  async createCustomer(_params: CreateCustomerParams): Promise<{ customerId: string }> {
-    return { customerId: `mock_cus_${Date.now()}` };
+  async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
+    return { customerId: `mock_cus_${idempotencyKey}` };
   }
 
   async getInvoiceUrl(_providerPaymentId: string): Promise<{ url: string } | null> {
@@ -189,7 +198,9 @@ export class MockPaymentProvider implements PaymentProvider {
     };
   }
 
-  async changePlan(_params: ChangePlanParams): Promise<void> {}
+  async changePlan(params: ChangePlanParams): Promise<void> {
+    requireStableKey(params.idempotencyKey);
+  }
 
   async previewChangePlan(_params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
     return {

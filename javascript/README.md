@@ -62,7 +62,9 @@ const grant = await bursar.credits.addCredits(userId, 500, {
 const charge = await bursar.credits.deductCredits(userId, 20, {
   idempotencyKey: "job:42",
 });
-const refund = await bursar.credits.refundCredits(charge.entryId);
+const refund = await bursar.credits.refundCredits(charge.entryId, {
+  idempotencyKey: "refund:job:42",
+});
 
 let page = await bursar.credits.listLedgerEntries(userId, { limit: 25 });
 while (page.nextCursor) {
@@ -229,7 +231,7 @@ for the full S3 and ClickHouse setup.
 cd javascript
 bun ci                        # Bun 1.3.14; installs the committed bun.lock
 bun run typecheck
-bun run test                  # integration tests need Postgres (DATABASE_URL or testcontainer)
+bun run test                  # integration tests use a disposable testcontainer by default
 bun run lint
 bun run build
 ```
@@ -237,6 +239,8 @@ bun run build
 Bun manages development dependencies and scripts; consumers of the published
 package do not need it. See
 [CONTRIBUTING.md](https://github.com/Zonastery/bursar/blob/main/CONTRIBUTING.md).
+An externally supplied `DATABASE_URL` also requires
+`BURSAR_ALLOW_DATABASE_RESET=1`; the integration harness truncates Bursar data.
 
 ## License
 

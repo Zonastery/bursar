@@ -24,6 +24,7 @@ import type {
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { ProviderResponseError } from "../../errors.js";
+import { requireStableKey, scopedStableKey } from "../../shared/idempotency.js";
 import { handleStripeWebhook } from "./event-mapper.js";
 
 function requireStripeText(value: unknown, operation: string, field: string): string {
@@ -76,17 +77,15 @@ function savedPaymentStatus(
       return "requires_capture";
     case "canceled":
       return "cancelled";
+    default:
+      throw new ProviderResponseError("stripe", "chargeSavedPaymentMethod", {
+        details: { field: "status" },
+      });
   }
 }
 
-function scopedIdempotencyKey(key: string | undefined, scope: string): string | undefined {
-  if (!key) return undefined;
-  const suffix = `:${scope}`;
-  return `${key.slice(0, 255 - suffix.length)}${suffix}`;
-}
-
-function requestOptions(idempotencyKey: string | undefined): Stripe.RequestOptions | undefined {
-  return idempotencyKey ? { idempotencyKey } : undefined;
+function requestOptions(idempotencyKey: string): Stripe.RequestOptions {
+  return { idempotencyKey };
 }
 
 function expandableId(value: string | { id: string } | null | undefined): string | undefined {
@@ -186,6 +185,7 @@ export class StripeProvider implements PaymentProvider {
   }
 
   async createCheckoutSession(params: CheckoutParams): Promise<CheckoutSessionResult> {
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
     this.logger.info("[StripeProvider] createCheckoutSession", {
       productId: params.productId,
       type: params.type,
@@ -201,7 +201,7 @@ export class StripeProvider implements PaymentProvider {
           ...(params.email ? { email: params.email } : {}),
           metadata: { userId: params.userId },
         },
-        requestOptions(scopedIdempotencyKey(params.idempotencyKey, "customer")),
+        requestOptions(scopedStableKey(idempotencyKey, "customer")),
       );
       customerId = customer.id;
     }
@@ -221,7 +221,7 @@ export class StripeProvider implements PaymentProvider {
     };
     const session = await stripe.checkout.sessions.create(
       sessionOpts,
-      requestOptions(params.idempotencyKey),
+      requestOptions(idempotencyKey),
     );
 
     return {
@@ -334,34 +334,37 @@ export class StripeProvider implements PaymentProvider {
     };
   }
 
-  async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
+  async cancelSubscription(subscriptionId: string, idempotencyKey: string): Promise<void> {
+    const stableKey = requireStableKey(idempotencyKey);
     const stripe = this.getStripe();
     await stripe.subscriptions.update(
       subscriptionId,
       { cancel_at_period_end: true },
-      idempotencyKey ? { idempotencyKey } : undefined,
+      { idempotencyKey: stableKey },
     );
   }
 
-  async reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
+  async reactivateSubscription(subscriptionId: string, idempotencyKey: string): Promise<void> {
+    const stableKey = requireStableKey(idempotencyKey);
     const stripe = this.getStripe();
     await stripe.subscriptions.update(
       subscriptionId,
       { cancel_at_period_end: false },
-      idempotencyKey ? { idempotencyKey } : undefined,
+      { idempotencyKey: stableKey },
     );
   }
 
   async cancelScheduledPlanChange(
     _subscriptionId: string,
-    providerOperationId?: string | null,
-    idempotencyKey?: string,
+    providerOperationId: string | null | undefined,
+    idempotencyKey: string,
   ): Promise<void> {
+    const stableKey = requireStableKey(idempotencyKey);
     if (!providerOperationId) throw new TypeError("Stripe scheduled change has no schedule ID");
     await this.getStripe().subscriptionSchedules.release(
       providerOperationId,
       {},
-      idempotencyKey ? { idempotencyKey } : undefined,
+      { idempotencyKey: stableKey },
     );
   }
 
@@ -457,11 +460,15 @@ export class StripeProvider implements PaymentProvider {
 
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
     const stripe = this.getStripe();
-    const customer = await stripe.customers.create({
-      email: params.email,
-      name: params.name,
-      metadata: params.metadata,
-    });
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
+    const customer = await stripe.customers.create(
+      {
+        email: params.email,
+        name: params.name,
+        metadata: params.metadata,
+      },
+      requestOptions(idempotencyKey),
+    );
     return { customerId: requireStripeText(customer.id, "createCustomer", "id") };
   }
 
@@ -476,6 +483,7 @@ export class StripeProvider implements PaymentProvider {
   }
 
   async changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string }> {
+    const idempotencyKey = requireStableKey(params.idempotencyKey);
     const stripe = this.getStripe();
     const subscription = await stripe.subscriptions.retrieve(params.providerSubscriptionId);
     const item = subscription.items.data[0];
@@ -487,7 +495,7 @@ export class StripeProvider implements PaymentProvider {
     if (params.effectiveAt === "next_billing_date") {
       const schedule = await stripe.subscriptionSchedules.create(
         { from_subscription: params.providerSubscriptionId },
-        requestOptions(scopedIdempotencyKey(params.idempotencyKey, "schedule-create")),
+        requestOptions(scopedStableKey(idempotencyKey, "schedule-create")),
       );
       const currentPhase = schedule.phases[0];
       if (!currentPhase) {
@@ -509,7 +517,7 @@ export class StripeProvider implements PaymentProvider {
           ],
           proration_behavior: "none",
         },
-        requestOptions(scopedIdempotencyKey(params.idempotencyKey, "schedule-update")),
+        requestOptions(scopedStableKey(idempotencyKey, "schedule-update")),
       );
       return {
         providerOperationId: requireStripeText(schedule.id, "changePlan", "schedule.id"),
@@ -524,7 +532,7 @@ export class StripeProvider implements PaymentProvider {
           params.onPaymentFailure === "apply_change" ? "allow_incomplete" : "pending_if_incomplete",
         ...(params.metadata ? { metadata: params.metadata } : {}),
       },
-      requestOptions(scopedIdempotencyKey(params.idempotencyKey, "subscription-update")),
+      requestOptions(scopedStableKey(idempotencyKey, "subscription-update")),
     );
     const latestInvoiceId = expandableId(updated.latest_invoice);
     return latestInvoiceId === undefined ? {} : { providerOperationId: latestInvoiceId };

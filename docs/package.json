@@ -5,7 +5,7 @@
   "scripts": {
     "generate": "npm run generate:api && npm run generate:notebooks && npm run generate:erd",
     "generate:api": "bash scripts/gen-api-docs.sh",
-    "generate:notebooks": "python3 scripts/gen-notebook-docs.py",
+    "generate:notebooks": "bash scripts/run-python.sh scripts/gen-notebook-docs.py",
     "generate:erd": "bash scripts/generate_erd_docs.sh",
     "prebuild": "npm run generate",
     "prestart": "npm run generate",
@@ -60,6 +60,6 @@
     ]
   },
   "engines": {
-    "node": ">=20.0"
+    "node": ">=22.0"
   }
 }

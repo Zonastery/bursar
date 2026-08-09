@@ -1,27 +1,16 @@
 import { readFileSync, statSync } from "fs";
 import { extname } from "path";
-import { ConfigError, ImportError } from "./errors.js";
+import { load as parseYaml } from "js-yaml";
+import { ConfigError } from "./errors.js";
 
-/** Minimal shape of the `js-yaml` module we rely on (loaded on demand). */
-interface YamlModule {
-  load(content: string): unknown;
-}
-
-/**
- * Narrow an unknown dynamic-import result to the `js-yaml` shape we use.
- *
- * The result of `import()` is treated as `unknown` and validated (L12): the
- * module may expose `load` directly or under a CJS-interop `default` export.
- */
-function asYamlModule(mod: unknown): YamlModule {
-  const candidate = mod as { load?: unknown; default?: { load?: unknown } };
-  if (typeof candidate.load === "function") {
-    return candidate as YamlModule;
-  }
-  if (candidate.default && typeof candidate.default.load === "function") {
-    return candidate.default as YamlModule;
-  }
-  throw new ImportError("js-yaml is installed but does not export a `load` function");
+function parseJsonWithUniqueKeys(content: string): unknown {
+  const parsed: unknown = JSON.parse(content);
+  // JSON is a strict subset of YAML. js-yaml retains source-level mapping
+  // keys and rejects duplicates, including nested and escape-equivalent keys;
+  // native JSON.parse above remains the authority for strict JSON syntax and
+  // for the returned JavaScript value.
+  parseYaml(content, { json: false });
+  return parsed;
 }
 
 /**
@@ -71,9 +60,8 @@ function assertNonEmptyObject(data: unknown, filepath: string): Record<string, u
  * Returns the raw parsed dict (suitable for ``loadConfigFromDict`` or
  * ``PricingEngine.fromDict``).
  *
- * For YAML files the optional peer dep ``js-yaml`` is loaded on demand. If it
- * is not installed, an {@link ImportError} is thrown so callers get a clear,
- * typed message.
+ * JSON syntax is validated by the platform parser and mapping keys are also
+ * checked by js-yaml so duplicate config fields cannot silently overwrite.
  */
 export async function loadConfigFile(filepath: string): Promise<Record<string, unknown>> {
   const extension = extname(filepath).toLowerCase();
@@ -84,17 +72,10 @@ export async function loadConfigFile(filepath: string): Promise<Record<string, u
   }
 
   if (extension === ".yaml" || extension === ".yml") {
-    let mod: unknown;
-    try {
-      mod = await import("js-yaml");
-    } catch (cause) {
-      throw new ImportError("js-yaml required for YAML files: npm install js-yaml", { cause });
-    }
-    const yaml = asYamlModule(mod);
     const content = readFileClean(filepath);
     let parsed: unknown;
     try {
-      parsed = yaml.load(content);
+      parsed = parseYaml(content, { json: false });
     } catch (cause) {
       throw new ConfigError(`Invalid YAML in ${filepath}: ${(cause as Error).message}`, [], {
         cause,
@@ -106,7 +87,7 @@ export async function loadConfigFile(filepath: string): Promise<Record<string, u
   const content = readFileClean(filepath);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = parseJsonWithUniqueKeys(content);
   } catch (cause) {
     throw new ConfigError(`Invalid JSON in ${filepath}: ${(cause as Error).message}`, [], {
       cause,

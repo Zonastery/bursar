@@ -15,9 +15,12 @@ order and records its SHA-256 checksum in `bursar.schema_migrations`.
 
 The baseline requires PostgreSQL 16+, pg_partman 5.x, and pg_jsonschema 0.3+.
 Both server extension packages must be available before migration; the
-migration installs them in dedicated `partman` and `extensions` schemas and
-fails loudly when their contracts are unavailable. `pg_cron`, S3, and
-ClickHouse remain optional.
+migration installs them when absent in the expected `partman` and `extensions`
+schemas and fails loudly when their contracts are unavailable. Bursar does not
+rewrite ambient ACLs for either potentially shared extension schema. Runtime
+roles receive no `partman` schema access and reach pg_partman only through
+locked-search-path Bursar operator wrappers. `pg_cron`, S3, and ClickHouse
+remain optional.
 
 ## File boundaries
 
@@ -46,7 +49,7 @@ it calls a Bursar provisioning RPC.
 Shared-table multi-tenancy is defined directly by the baseline table,
 constraint, index, and storage migrations. Business tables have a mandatory
 `tenant_id` plus tenant-prefixed relationship and uniqueness constraints.
-`031_multitenancy_security.sql` installs forced RLS and assigns tenant RPCs to
+`029_multitenancy_security.sql` installs forced RLS and assigns tenant RPCs to
 the `NOLOGIN NOBYPASSRLS` `bursar_runtime` role, so a Supabase `service_role`
 caller cannot bypass isolation through a security-definer RPC.
 
@@ -113,9 +116,9 @@ gmake test-integration
 uv run --with sqlfluff sqlfluff lint python/src/bursar/sql --dialect postgres
 ```
 
-The SQL regression files in `python/tests/sql*.sql` must pass against a clean
-PostgreSQL instance with pg_partman 5 and pg_jsonschema after every baseline
-change.
+The SQL regression programs executed by `test_redesign_integration.py` and
+`test_plan_evolution_integration.py` must pass against a clean PostgreSQL
+instance with pg_partman 5 and pg_jsonschema after every baseline change.
 
 ## PostgreSQL-first storage lifecycle
 

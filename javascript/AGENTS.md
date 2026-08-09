@@ -68,14 +68,16 @@ new Bursar({ creditStore, creditsOptions?, billingStore?, billingOptions? })
 | `tests/expr.test.ts` | Expression parser/evaluator edge cases |
 | `tests/load-pricing-file.test.ts` | File loading for JSON/YAML |
 | `tests/postgres-store.test.ts` | PostgresStore unit tests against a mocked `pg.Pool` (no real DB) |
-| `tests/store-integration.test.ts` | Real Postgres tests incl. facade-owned credit capability end-to-end |
-| `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles |
+| `tests/store-integration.test.ts` | Real-Postgres public credit, quota, lease, team, and migration workflows |
+| `tests/billing-integration.test.ts` | Billing claims, lifecycle ordering, credit grants, refunds, and concurrency |
+| `tests/commerce-integration.test.ts` | Checkout, subscription change, and auto-recharge workflows |
+| `tests/storage-integration.test.ts` | Storage configuration and bounded maintenance behavior |
+| `tests/security-rls.test.ts` | Restricted-RPC catalog smoke test after the security migration |
 
-Run: `bun run test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own
-service container) or, failing that, a testcontainers-managed PostgreSQL 17 +
-pg_partman 5 + pg_jsonschema 0.3 instance (Docker permitting) started automatically in
-`tests/global-setup.ts` — so a bare `bun run test` with Docker available
-exercises them too, not just CI.
+Run: `bun run test`. Real-Postgres tests start a testcontainers-managed
+PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3 instance automatically. An
+external `DATABASE_URL` requires `BURSAR_ALLOW_DATABASE_RESET=1`; see
+`tests/global-setup.ts`.
 Typecheck: `bun run typecheck`.
 Lint: `bun run lint`.
 

@@ -1,5 +1,4 @@
 import Decimal from "decimal.js";
-import { randomUUID } from "node:crypto";
 import { StoreClosedError, StoreError } from "../../errors.js";
 import {
   canonicalBursarConfigDict,
@@ -24,7 +23,6 @@ import type {
   BalanceResult,
   CheckFeatureResult,
   CreateTeamResult,
-  CreditMetadata,
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
@@ -63,6 +61,12 @@ import type {
   UnsetUserPlanResult,
   LedgerEntry,
 } from "../types/index.js";
+import { requireStableKey } from "../../shared/idempotency.js";
+import type {
+  AddCreditsOptions,
+  DeductTeamOptions,
+  RefundCreditsOptions,
+} from "../service-types.js";
 import { CreditStore } from "../store.js";
 import type { CreateLeaseOptions, SettleLeaseOptions } from "../store.js";
 import { BalanceRepository } from "./repositories/balance.js";
@@ -250,24 +254,21 @@ export class PostgresStore extends CreditStore {
   async addCredits(
     userId: string,
     amount: Decimal,
-    type = "adjustment",
-    metadata?: CreditMetadata | null,
-    expiresAt?: Date | null,
-    bucket?: string | null,
-    idempotencyKey?: string | null,
+    options: AddCreditsOptions,
   ): Promise<AddCreditsResult> {
-    const meta: Record<string, unknown> = { ...(metadata ?? {}) };
-    if (expiresAt) {
-      meta.expires_at = expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt);
+    const stableKey = requireStableKey(options?.idempotencyKey);
+    const meta: Record<string, unknown> = { ...(options?.metadata ?? {}) };
+    if (options?.expiresAt) {
+      meta.expires_at = options.expiresAt.toISOString();
     }
     const row = await this.balanceRepo.addCredits(
       userId,
       decParam(amount),
-      type,
+      options?.type ?? "adjustment",
       JSON.stringify(meta),
-      expiresAt ? expiresAt.toISOString() : null,
-      bucket ?? null,
-      idempotencyKey ?? `credit:${randomUUID()}`,
+      options?.expiresAt?.toISOString() ?? null,
+      options?.bucket ?? null,
+      stableKey,
     );
     if (row.error !== null) {
       throw new StoreError(`post_credit: ${row.error}`);
@@ -286,9 +287,9 @@ export class PostgresStore extends CreditStore {
   async deductWithAllowance(
     userId: string,
     amount: Decimal,
-    options?: DeductWithAllowanceOptions,
+    options: DeductWithAllowanceOptions,
   ): Promise<DeductionResult> {
-    const idempotencyKey = options?.idempotencyKey ?? `usage:${randomUUID()}`;
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const operation =
       options?.operation ??
       (typeof options?.metadata?.operation === "string" ? options.metadata.operation : "usage");
@@ -344,9 +345,9 @@ export class PostgresStore extends CreditStore {
     userId: string,
     operation: string,
     amount: Decimal,
-    options?: DeductWithAllowanceOptions,
+    options: DeductWithAllowanceOptions,
   ): Promise<UsageRecordResult> {
-    const idempotencyKey = options?.idempotencyKey ?? `usage-record:${randomUUID()}`;
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const row = await this.deductionRepo.recordUsage({
       userId,
       operation,
@@ -381,13 +382,14 @@ export class PostgresStore extends CreditStore {
     userId: string,
     amount: Decimal,
     operationType: string,
-    options?: CreateLeaseOptions,
+    options: CreateLeaseOptions,
   ): Promise<LeaseResult> {
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const row = await this.leaseRepo.createLease({
       userId,
       amount: decParam(amount),
       operationType,
-      idempotencyKey: options?.idempotencyKey ?? `lease:${randomUUID()}`,
+      idempotencyKey,
       ttlSeconds: options?.ttlSeconds ?? DEFAULT_LEASE_TTL_SECONDS,
       metadata: JSON.stringify(options?.metadata ?? {}),
       feature: options?.feature ?? null,
@@ -430,11 +432,15 @@ export class PostgresStore extends CreditStore {
     amount: Decimal,
     options?: SettleLeaseOptions,
   ): Promise<DeductionResult> {
+    const idempotencyKey =
+      options?.idempotencyKey === undefined
+        ? `lease:${leaseId}:settle`
+        : requireStableKey(options.idempotencyKey);
     const row = await this.leaseRepo.settleLease({
       userId,
       leaseId,
       amount: decParam(amount),
-      idempotencyKey: options?.idempotencyKey ?? `lease:${leaseId}:settle`,
+      idempotencyKey,
       feature: options?.feature ?? null,
       model: options?.model ?? null,
       region: options?.region ?? null,
@@ -843,19 +849,14 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async refundCredits(
-    entryId: string,
-    amount?: Decimal,
-    reason?: string,
-    metadata?: CreditMetadata | null,
-    idempotencyKey?: string | null,
-  ): Promise<RefundResult> {
+  async refundCredits(entryId: string, options: RefundCreditsOptions): Promise<RefundResult> {
+    const stableKey = requireStableKey(options?.idempotencyKey);
     const row = await this.deductionRepo.refundCredits(
       entryId,
-      amount != null ? decParam(amount) : null,
-      idempotencyKey ?? `refund:${entryId}:${amount != null ? decParam(amount) : "remaining"}`,
-      reason ?? null,
-      JSON.stringify(metadata ?? {}),
+      options?.amount != null ? decParam(new Decimal(options.amount)) : null,
+      stableKey,
+      options?.reason ?? null,
+      JSON.stringify(options?.metadata ?? {}),
     );
     if (row.error !== null) {
       return {
@@ -1062,11 +1063,10 @@ export class PostgresStore extends CreditStore {
     teamId: string,
     userId: string,
     amount: Decimal,
-    metadata?: CreditMetadata | null,
-    idempotencyKey?: string | null,
+    options: DeductTeamOptions,
   ): Promise<TeamDeductionResult> {
-    const meta: Record<string, unknown> = { ...(metadata ?? {}) };
-    const effectiveIdempotencyKey = idempotencyKey ?? `team-usage:${randomUUID()}`;
+    const meta: Record<string, unknown> = { ...(options?.metadata ?? {}) };
+    const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
     meta.idempotency_key = effectiveIdempotencyKey;
     const operation =
       typeof meta.operation === "string" && meta.operation.length > 0

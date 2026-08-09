@@ -141,6 +141,15 @@ def base_config() -> dict:
     }
 
 
+@pytest.mark.parametrize("invalid_count", [True, "7"])
+def test_config_rejects_coerced_integer_values(invalid_count: object) -> None:
+    config = base_config()
+    config["credits"]["buckets"]["gifted"]["expiry"]["interval"]["count"] = invalid_count
+
+    with pytest.raises(ConfigError, match="count"):
+        load_config_from_dict(config)
+
+
 def test_removed_catalog_activation_is_rejected() -> None:
     config = base_config()
     config["catalog"] = {"activation": {"mode": "on_publish"}}

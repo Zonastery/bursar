@@ -49,26 +49,28 @@ uv run pytest -q              # quiet
 
 Store/manager/SQL **integration tests run against real PostgreSQL with
 pg_partman 5 and pg_jsonschema 0.3**. They read the connection string from
-`DATABASE_URL` (falling back to the legacy `BURSAR_TEST_PG_URL`) or start a
-disposable PostgreSQL 17 testcontainer when Docker is available. Without
-either, database tests skip with a visible reason. To run everything locally:
+`DATABASE_URL` or start a disposable PostgreSQL 17 testcontainer when Docker
+is available. Without either, local database tests skip with a visible reason;
+CI fails closed if the database cannot start. To run both SDK suites against
+the repository's provider-neutral test image:
 
 ```bash
-docker run -d --name bursar-pg -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=bursar -p 5432:5432 \
-  public.ecr.aws/supabase/postgres:17.6.1.156
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar uv run pytest
+gmake test-integration
 ```
 
-The test fixtures bootstrap the Supabase `auth` stubs/roles and apply
-`python/src/bursar/sql/*.sql` themselves; no preloaded Bursar schema is needed.
-CI runs this matrix on Python 3.12 and 3.13.
+The fixtures apply `python/src/bursar/sql/*.sql` themselves; no preloaded Bursar
+schema is needed. CI runs this matrix on Python 3.12 and 3.13.
+Supplying `DATABASE_URL` requires `BURSAR_ALLOW_DATABASE_RESET=1` because the
+harness truncates every Bursar-owned table between tests. Set it only for a
+disposable test database; `gmake test-integration` handles this automatically
+for its isolated container.
 
 ### JavaScript
 
 ```bash
 cd javascript
 bun run test                  # unit, parity, and available Postgres tests
+BURSAR_ALLOW_DATABASE_RESET=1 \
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar bun run test
                               # also runs the PostgresStore integration tests
 bun run typecheck             # typecheck
@@ -105,9 +107,10 @@ bun run typecheck
 
 `lefthook.yml` (repo root) wires both SDKs:
 
-- **pre-commit** — `ruff format`/`ruff check --fix` on staged Python files and
-  `prettier --write`/`eslint --fix` on staged JS/TS files (auto-fixes are
-  re-staged), plus trailing-whitespace and merge-conflict-marker checks.
+- **pre-commit** — check-only `ruff`, Prettier, ESLint, and SQLFluff runs on
+  staged files, plus trailing-whitespace and merge-conflict-marker checks.
+  Failed checks print the corresponding fix command so changes stay explicit
+  and reviewable before they are re-staged.
 - **pre-push** (parallel) — `pyright` + `pytest` for Python and
   `tsc --noEmit` + `vitest run` + `knip` for JavaScript.
 

@@ -86,7 +86,7 @@ export interface DeductionFailure extends DeductionResultBase {
 export type DeductionResult = DeductionSuccess | DeductionFailure;
 
 export interface DeductWithAllowanceOptions {
-  idempotencyKey?: string | null;
+  idempotencyKey: string;
   operation?: string | null;
   feature?: string | null;
   model?: string | null;

@@ -22,6 +22,8 @@ RUN architecture="$(dpkg --print-architecture)"; \
         "postgresql-${PG_MAJOR}-partman"; \
     package="pg_jsonschema-v${PG_JSONSCHEMA_VERSION}-pg${PG_MAJOR}-${architecture}-linux-gnu.deb"; \
     curl --fail --location --proto '=https' --tlsv1.2 \
+        --connect-timeout 15 --max-time 300 \
+        --retry 2 --retry-all-errors --retry-max-time 600 \
         --output "/tmp/${package}" \
         "https://github.com/supabase/pg_jsonschema/releases/download/v${PG_JSONSCHEMA_VERSION}/${package}"; \
     echo "${pg_jsonschema_sha256}  /tmp/${package}" | sha256sum --check --strict; \

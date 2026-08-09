@@ -181,7 +181,7 @@ function provider(name = "alpha"): PaymentProvider {
     previewChangePlan: vi.fn(async () => ({
       totalAmount: 100,
       settlementAmount: 100,
-      currency: "USD",
+      currency: "usd",
       lineItems: [],
       effectiveAt: "2026-08-01T00:00:00.000Z",
       nextBillingDate: "2026-09-01T00:00:00.000Z",
@@ -509,6 +509,8 @@ describe("CommerceService", () => {
       const result = await service.previewPlanChange({ accountId: "user-1", offerKey });
 
       expect(result.classification).toBe(classification);
+      if (result.unchanged) throw new Error("Expected a plan-change quote");
+      expect(result.preview.currency).toBe("USD");
       expect(alpha.previewChangePlan).toHaveBeenCalledWith(
         expect.objectContaining({ effectiveAt, prorationBillingMode }),
       );
@@ -578,6 +580,111 @@ describe("CommerceService", () => {
     ).rejects.toBeInstanceOf(QuoteChangedError);
     expect(billing.createBillingSubscriptionChange).not.toHaveBeenCalled();
     expect(alpha.changePlan).not.toHaveBeenCalled();
+  });
+
+  it("rejects confirmation when a refreshed scheduled date changes", async () => {
+    const alpha = provider("alpha");
+    vi.mocked(alpha.previewChangePlan!)
+      .mockResolvedValueOnce({
+        totalAmount: 0,
+        settlementAmount: 0,
+        currency: "USD",
+        lineItems: [],
+        effectiveAt: "2026-09-01T00:00:00.000Z",
+        nextBillingDate: "2026-09-01T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        totalAmount: 0,
+        settlementAmount: 0,
+        currency: "USD",
+        lineItems: [],
+        effectiveAt: "2026-10-01T00:00:00.000Z",
+        nextBillingDate: "2026-10-01T00:00:00.000Z",
+      });
+    const { service, billing } = harness({ alpha });
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription());
+    const preview = await service.previewPlanChange({
+      accountId: "user-1",
+      offerKey: "basic_year",
+    });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
+
+    await expect(
+      service.confirmPlanChange({
+        accountId: "user-1",
+        offerKey: "basic_year",
+        quoteFingerprint: preview.quoteFingerprint,
+        operationKey: "scheduled-change-1",
+      }),
+    ).rejects.toBeInstanceOf(QuoteChangedError);
+    expect(billing.createBillingSubscriptionChange).not.toHaveBeenCalled();
+    expect(alpha.changePlan).not.toHaveBeenCalled();
+  });
+
+  it("accepts a refreshed immediate execution timestamp", async () => {
+    const alpha = provider("alpha");
+    vi.mocked(alpha.previewChangePlan!)
+      .mockResolvedValueOnce({
+        totalAmount: 100,
+        settlementAmount: 100,
+        currency: "USD",
+        lineItems: [],
+        effectiveAt: "2026-08-01T00:00:00.000Z",
+        nextBillingDate: "2026-09-01T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        totalAmount: 100,
+        settlementAmount: 100,
+        currency: "USD",
+        lineItems: [],
+        effectiveAt: "2026-08-01T00:00:05.000Z",
+        nextBillingDate: "2026-09-01T00:00:00.000Z",
+      });
+    const { service, billing } = harness({ alpha });
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription());
+    const preview = await service.previewPlanChange({
+      accountId: "user-1",
+      offerKey: "pro_month",
+    });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
+
+    await expect(
+      service.confirmPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        quoteFingerprint: preview.quoteFingerprint,
+        operationKey: "immediate-change-1",
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      scheduled: false,
+      effectiveAt: "2026-08-01T00:00:05.000Z",
+    });
+    expect(billing.createBillingSubscriptionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ effectiveAt: "2026-08-01T00:00:05.000Z" }),
+    );
+    expect(alpha.changePlan).toHaveBeenCalledOnce();
+  });
+
+  it("rejects non-finite provider plan-change quotes", async () => {
+    const alpha = provider("alpha");
+    vi.mocked(alpha.previewChangePlan!).mockResolvedValue({
+      totalAmount: Number.NaN,
+      settlementAmount: 100,
+      currency: "USD",
+      lineItems: [],
+      effectiveAt: "2026-08-01T00:00:00.000Z",
+    });
+    const { service, billing } = harness({ alpha });
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription());
+
+    await expect(
+      service.previewPlanChange({ accountId: "user-1", offerKey: "pro_month" }),
+    ).rejects.toMatchObject({
+      name: "ProviderResponseError",
+      provider: "alpha",
+      operation: "previewChangePlan",
+    });
   });
 
   it("requires explicit cancellation before replacing a scheduled plan change", async () => {

@@ -284,6 +284,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     await service.deductCredits(USER_ID, new Decimal(5), {
       bucket: "grant",
       entryType: "adjustment",
+      idempotencyKey: "targeted-bucket-debit",
     });
     const buckets = await service.getBucketBalances(USER_ID);
     expect(
@@ -343,22 +344,16 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
 
     const team = await store.createTeam(USER_ID, "SDK integration team", new Decimal(10));
     await store.addTeamMember(team.teamId, REPLAY_USER_ID, "member", new Decimal(3));
-    const firstTeamCharge = await store.deductTeam(
-      team.teamId,
-      REPLAY_USER_ID,
-      new Decimal(2),
-      { operation: "completion" },
-      "team-charge-1",
-    );
+    const firstTeamCharge = await store.deductTeam(team.teamId, REPLAY_USER_ID, new Decimal(2), {
+      idempotencyKey: "team-charge-1",
+      metadata: { operation: "completion" },
+    });
     if (firstTeamCharge.error !== null) throw new Error(firstTeamCharge.error);
     expect(firstTeamCharge.teamBalanceAfter.toString()).toBe("8");
-    const cappedTeamCharge = await store.deductTeam(
-      team.teamId,
-      REPLAY_USER_ID,
-      new Decimal(2),
-      { operation: "completion" },
-      "team-charge-2",
-    );
+    const cappedTeamCharge = await store.deductTeam(team.teamId, REPLAY_USER_ID, new Decimal(2), {
+      idempotencyKey: "team-charge-2",
+      metadata: { operation: "completion" },
+    });
     expect(cappedTeamCharge.error).toBe("member_spend_cap_exceeded");
     expect(await store.getTeamBalance(team.teamId)).toMatchObject({
       teamId: team.teamId,

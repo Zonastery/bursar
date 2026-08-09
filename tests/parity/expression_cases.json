@@ -34,6 +34,16 @@
       "expect_error": true
     },
     {
+      "name": "and_binds_tighter_than_or",
+      "expr": "1 if input_tokens > 0 or output_tokens > 0 and tool_calls > 0 else 0",
+      "vars": {
+        "input_tokens": 1,
+        "output_tokens": 0,
+        "tool_calls": 0
+      },
+      "expected": "1.000000"
+    },
+    {
       "name": "two_term_rate",
       "expr": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
       "vars": {

@@ -23,6 +23,10 @@ export type * from "./config/types.js";
 const ajv = new Ajv2020({
   allErrors: true,
   strict: false,
+  // Configs loaded from files cannot contain these values, so reject them at
+  // the programmatic dictionary boundary as well. Decimal accepts Infinity
+  // and NaN, which would otherwise leak invalid monetary values downstream.
+  strictNumbers: true,
 });
 addFormats(ajv, { mode: "full" });
 const validateStructure = ajv.compile(schema);

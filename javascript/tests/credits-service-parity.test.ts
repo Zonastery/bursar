@@ -138,11 +138,15 @@ describe("CreditsService mirror regressions", () => {
       events.push(event.data);
     });
 
-    const result = await new CreditsService(store, engine, emitter).deduct("user-1", {
-      operation: "free_operation",
-      measures: {},
-      dimensions: {},
-    });
+    const result = await new CreditsService(store, engine, emitter).deduct(
+      "user-1",
+      {
+        operation: "free_operation",
+        measures: {},
+        dimensions: {},
+      },
+      { idempotencyKey: "free-operation-1" },
+    );
 
     expect(deductWithAllowance).toHaveBeenCalledWith(
       "user-1",

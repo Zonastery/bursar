@@ -377,7 +377,12 @@ class AutoRechargeService:
         )
         if attempt is None:
             return AutoRechargeProcessResult(outcome="limit_reached")
-        if attempt.idempotency_key != idempotency_key:
+        # The claim RPC returns an existing in-flight attempt before it considers
+        # the newly proposed key. A provider transport failure is recorded as
+        # ``unknown`` because the charge may already exist. Resume only that state
+        # with its original provider idempotency key; all other in-flight states
+        # remain webhook-owned and must not be resubmitted.
+        if attempt.idempotency_key != idempotency_key and attempt.state != "unknown":
             return AutoRechargeProcessResult(outcome="already_processing")
 
         try:

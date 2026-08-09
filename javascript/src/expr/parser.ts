@@ -142,14 +142,27 @@ export class ExpressionParser {
     } as UnaryNode;
   }
 
-  private booleanExpression(): Node {
+  private andExpression(): Node {
     let left = this.notExpression();
-    while (this.match("and", "or")) {
+    while (this.match("and")) {
       left = {
         type: "boolean",
-        op: this.previous().value,
+        op: "and",
         left,
         right: this.notExpression(),
+      } as BoolOpNode;
+    }
+    return left;
+  }
+
+  private booleanExpression(): Node {
+    let left = this.andExpression();
+    while (this.match("or")) {
+      left = {
+        type: "boolean",
+        op: "or",
+        left,
+        right: this.andExpression(),
       } as BoolOpNode;
     }
     return left;

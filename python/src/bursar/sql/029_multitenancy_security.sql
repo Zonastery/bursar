@@ -68,6 +68,24 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
+    IF EXISTS (
+        SELECT 1
+        FROM pg_auth_members AS membership
+        JOIN pg_roles AS granted_role
+          ON granted_role.oid = membership.roleid
+        JOIN pg_roles AS member_role
+          ON member_role.oid = membership.member
+        WHERE granted_role.rolname IN (
+            'bursar_runtime',
+            'bursar_client',
+            'bursar_operator'
+        )
+          AND member_role.rolname <> v_migration_role
+    ) THEN
+        RAISE EXCEPTION 'a Bursar role has an unexpected member'
+            USING ERRCODE = '55000';
+    END IF;
+
     -- Object ownership transfer requires SET permission on the destination
     -- role. The migration connection may SET the two caller roles explicitly,
     -- so one trusted deployment DSN remains a complete default setup without

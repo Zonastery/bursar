@@ -1,6 +1,6 @@
 """Tests for the safe expression sandbox and Decimal money math.
 
-Covers (REFACTOR_CONTRACT §1, §7, §8 / AUDIT C5, C7, H6, M4, M5, H1):
+The suite covers:
 - Cross-SDK parity fixture (expression_cases).
 - Sandbox-escape table (dunder/attribute/subscript/lambda/comprehension/
   f-string/walrus/starred) -> ExpressionError.
@@ -68,7 +68,7 @@ class TestDecimalPrecision:
         assert _q(result) == Decimal("0.3000")
 
     def test_sub_one_credit_not_truncated(self) -> None:
-        # A 0.4-credit op charges 0.4, not 0 (revenue-leak guard, H1).
+        # A 0.4-credit operation charges 0.4 rather than truncating to zero.
         result = evaluate_expression("input_tokens * 0.0004", {"input_tokens": 1000})
         assert _q(result) == Decimal("0.4000")
 
@@ -129,7 +129,7 @@ def test_sandbox_escapes_rejected_at_eval(name: str, expr: str) -> None:
         evaluate_expression(expr, {"input_tokens": 5})
 
 
-# ── Exponentiation rejection (C5) ───────────────────────────────────────────
+# ── Exponentiation rejection ────────────────────────────────────────────────
 
 
 class TestPowRejected:
@@ -147,7 +147,7 @@ class TestPowRejected:
             evaluate_expression("input_tokens ** 400", {"input_tokens": 1000})
 
 
-# ── Division / modulo by zero, non-finite (C7) ──────────────────────────────
+# ── Division / modulo by zero and non-finite results ────────────────────────
 
 
 class TestDivModByZero:
@@ -168,7 +168,7 @@ class TestDivModByZero:
             evaluate_expression("input_tokens // 0", {"input_tokens": 5})
 
 
-# ── Variable-name validation (M5) ───────────────────────────────────────────
+# ── Variable-name validation ────────────────────────────────────────────────
 
 
 class TestVariableValidation:
@@ -225,7 +225,7 @@ class TestHelperArity:
             evaluate_expression("if(input_tokens > 0, 5, 1, 9)", {"input_tokens": 1})
 
     def test_tier_requires_even_ge_four(self) -> None:
-        # Canonical rule (§1): even and >= 4. Odd arg counts and <4 args error.
+        # tier() requires an even argument count of at least four.
         with pytest.raises(ExpressionError, match="tier"):
             # 2 args -> too few
             evaluate_expression("tier(input_tokens, 100)", {"input_tokens": 50})
@@ -426,11 +426,11 @@ def test_not_precedence() -> None:
     assert _eval("not 5 > 10 and 3 > 1")
 
 
-# ── E1: tier() exact boundary semantics ─────────────────────────────────────
+# ── tier() exact boundary semantics ─────────────────────────────────────────
 
 
 class TestTierBoundarySemantics:
-    """E1 — tier() uses strict less-than: val < threshold returns that tier's rate."""
+    """tier() uses strict less-than: val < threshold returns that tier's rate."""
 
     def test_at_first_threshold_falls_to_next_tier(self) -> None:
         # val=100, threshold=100: 100 < 100 is False -> falls to second tier (threshold=500)
@@ -449,11 +449,11 @@ class TestTierBoundarySemantics:
         assert _q(result) == Decimal("3.0000")
 
 
-# ── E2: percentile() edge cases ──────────────────────────────────────────────
+# ── percentile() edge cases ─────────────────────────────────────────────────
 
 
 class TestPercentileEdgeCases:
-    """E2 — percentile() with single/two elements, uniform values, p=0/100."""
+    """Cover single/two elements, uniform values, and p=0/100."""
 
     def test_single_element(self) -> None:
         result = evaluate_expression("percentile(50, x)", {"x": 7})
@@ -483,11 +483,11 @@ class TestPercentileEdgeCases:
             evaluate_expression("percentile(150, x, y)", {"x": 1, "y": 2})
 
 
-# ── E3: clamp(min > max) ─────────────────────────────────────────────────────
+# ── clamp(min > max) ────────────────────────────────────────────────────────
 
 
 class TestClampMinGtMax:
-    """E3 — clamp() when lo > hi: max(lo, min(x, hi)) so lo always wins."""
+    """When lo > hi, max(lo, min(x, hi)) means lo always wins."""
 
     def test_clamp_min_greater_than_max_returns_min(self) -> None:
         # clamp(5, 10, 3): max(10, min(5, 3)) = max(10, 3) = 10
@@ -505,11 +505,11 @@ class TestClampMinGtMax:
         assert result == Decimal(10)
 
 
-# ── E4: Negative operand edge cases ─────────────────────────────────────────
+# ── Negative operand edge cases ─────────────────────────────────────────────
 
 
 class TestNegativeOperandEdgeCases:
-    """E4 — negation, double-negation, min/max with negatives."""
+    """Cover negation, double-negation, and min/max with negatives."""
 
     def test_unary_negate_then_multiply(self) -> None:
         # (-input_tokens) * 0.001 with input_tokens=1000 -> -1.0
@@ -530,11 +530,11 @@ class TestNegativeOperandEdgeCases:
         assert _q(result) == Decimal("-5.0000")
 
 
-# ── E5: Division with negative operands ─────────────────────────────────────
+# ── Division with negative operands ─────────────────────────────────────────
 
 
 class TestDivisionNegativeOperands:
-    """E5 — division and modulo sign conventions with negative operands."""
+    """Cover division and modulo sign conventions with negative operands."""
 
     def test_negative_dividend(self) -> None:
         result = evaluate_expression("(-x) / 2", {"x": 10})
@@ -556,33 +556,33 @@ class TestDivisionNegativeOperands:
         assert result == Decimal(1)
 
 
-# ── E6: Floor division by zero ───────────────────────────────────────────────
+# ── Floor division by zero ──────────────────────────────────────────────────
 
 
 class TestFloorDivByZero:
-    """E6 — floor division by zero raises ExpressionError."""
+    """Floor division by zero raises ExpressionError."""
 
     def test_floor_div_by_zero_raises(self) -> None:
         with pytest.raises(ExpressionError):
             evaluate_expression("x // 0", {"x": 10})
 
 
-# ── E7: Large numeric literals ───────────────────────────────────────────────
+# ── Large numeric literals ──────────────────────────────────────────────────
 
 
 class TestLargeNumericLiterals:
-    """E7 — large literals stay exact, no overflow."""
+    """Large literals stay exact without overflow."""
 
     def test_large_literal_exact(self) -> None:
         result = evaluate_expression("x * 999999999999.9999", {"x": 1})
         assert str(_q(result)) == "999999999999.999900"
 
 
-# ── E8: Expression with no variables ─────────────────────────────────────────
+# ── Expression with no variables ────────────────────────────────────────────
 
 
 class TestExpressionNoVariables:
-    """E8 — expression referencing no variables is rejected."""
+    """An expression referencing no variables is rejected."""
 
     def test_constant_expression_rejected(self) -> None:
         # The engine requires at least one metric variable in every expression.
@@ -590,11 +590,11 @@ class TestExpressionNoVariables:
             evaluate_expression("1 + 2", {"x": 1})
 
 
-# ── E9: Nested function calls ────────────────────────────────────────────────
+# ── Nested function calls ───────────────────────────────────────────────────
 
 
 class TestNestedFunctionCalls:
-    """E9 — functions nested inside other function arguments evaluate correctly."""
+    """Functions nested inside other function arguments evaluate correctly."""
 
     def test_max_of_ceil(self) -> None:
         # ceil(500 * 0.001) = ceil(0.5) = 1; max(1, 1) = 1
@@ -615,11 +615,11 @@ class TestNestedFunctionCalls:
         assert _q(result) == Decimal("1.0000")
 
 
-# ── E10: Decimal quantization boundary ──────────────────────────────────────
+# ── Decimal quantization boundary ───────────────────────────────────────────
 
 
 class TestDecimalQuantizationBoundary:
-    """E10 — values near the 6dp boundary quantize with ROUND_HALF_UP."""
+    """Values near the six-decimal boundary quantize with ROUND_HALF_UP."""
 
     def test_below_half_ulp_rounds_to_zero(self) -> None:
         # a * 0.00001 = 0.00001; 6dp quantize rounds down to 0.0000
@@ -637,29 +637,11 @@ class TestDecimalQuantizationBoundary:
         assert str(_q(result)) == "0.000000"
 
 
-# ── E11: Parity pricing_cases via PricingEngine ──────────────────────────────
-
-
-_PRICING_CASES_FOR_EXPR: list[dict] = []
-
-
-@pytest.mark.parametrize("case", _PRICING_CASES_FOR_EXPR, ids=[c["name"] for c in _PRICING_CASES_FOR_EXPR])
-def test_parity_pricing_cases_via_engine(case: dict) -> None:
-    """E11 — every pricing_cases entry in the parity fixture passes through
-    PricingEngine.from_dict() and produces the expected total (byte-identical string)."""
-    from bursar.engine import PricingEngine
-    from bursar.metrics import UsageMetrics
-
-    engine = PricingEngine.from_dict(case["config"])
-    breakdown = engine.calculate(UsageMetrics(**case["metrics"]))
-    assert str(breakdown.total) == case["expected_total"]
-
-
-# ── E12: Concurrent eval isolation ──────────────────────────────────────────
+# ── Concurrent evaluation isolation ────────────────────────────────────────
 
 
 class TestConcurrentEvalIsolation:
-    """E12 — concurrent evaluate_expression calls on different threads produce
+    """Concurrent evaluate_expression calls on different threads produce
     correct results and do not bleed Decimal context state."""
 
     def test_20_threads_no_state_bleed(self) -> None:

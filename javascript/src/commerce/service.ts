@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 import type { BillingCapability, BillingEventSink } from "../billing/contracts.js";
 import type { BillingPreferences, BillingSubscriptionState } from "../billing/types/index.js";
@@ -23,7 +24,7 @@ import type {
   ListUsageChargesOptions,
   UsageChargePage,
 } from "../credits/types/index.js";
-import { ConfigError } from "../errors.js";
+import { ProviderResponseError } from "../errors.js";
 import type {
   ChangePlanPreview,
   PaymentMethodInfo,
@@ -31,6 +32,7 @@ import type {
   PreviewChangePlanParams,
 } from "../providers/types.js";
 import { normalizeLogger } from "../shared/logger.js";
+import { requireStableKey, scopedStableKey } from "../shared/idempotency.js";
 import {
   ActiveSubscriptionError,
   CheckoutCompletedError,
@@ -94,7 +96,7 @@ function assertCreateCheckoutInput(input: CreateCheckoutInput): void {
   requireNonEmptyText(input.offerKey, "offerKey");
   requireNonEmptyText(input.returnUrl, "returnUrl");
   requireNonEmptyText(input.cancelUrl, "cancelUrl");
-  requireNonEmptyText(input.operationKey, "operationKey");
+  requireStableKey(input.operationKey, "operationKey");
   requireOptionalNonEmptyText(input.accountId, "accountId");
   requireOptionalNonEmptyText(input.email, "email");
   requireOptionalNonEmptyText(input.provider, "provider");
@@ -143,27 +145,83 @@ function checkoutRedirectUrl(template: string, intentId: string): string {
   return template.replaceAll("{intentId}", encodeURIComponent(intentId));
 }
 
+const currencySchema = z
+  .string()
+  .regex(/^[A-Za-z]{3}$/u, "expected a three-letter ASCII currency")
+  .transform((value) => value.toUpperCase());
+const instantSchema = z.string().datetime({ offset: true });
+const changePlanLineItemSchema = z
+  .object({
+    productId: z.string().trim().min(1),
+    name: z.string().trim().min(1),
+    unitPrice: z.number().finite(),
+    quantity: z.number().finite().int().positive(),
+    prorationFactor: z.number().finite(),
+    currency: currencySchema,
+    tax: z.number().finite(),
+    subtotal: z.number().finite(),
+  })
+  .strict();
+const changePlanPreviewSchema = z
+  .object({
+    totalAmount: z.number().finite(),
+    settlementAmount: z.number().finite(),
+    currency: currencySchema,
+    lineItems: z.array(changePlanLineItemSchema),
+    effectiveAt: instantSchema,
+    recurringAmount: z.number().finite().optional(),
+    recurringCurrency: currencySchema.optional(),
+    nextBillingDate: instantSchema.optional(),
+    taxAmount: z.number().finite().optional(),
+    customerCredits: z.number().finite().optional(),
+  })
+  .strict();
+
+function validatePlanPreview(
+  value: unknown,
+  provider: string,
+  requireNextBillingDate: boolean,
+): ChangePlanPreview {
+  const parsed = changePlanPreviewSchema.safeParse(value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new ProviderResponseError(provider, "previewChangePlan", {
+      details: {
+        field: issue?.path.length ? issue.path.join(".") : "response",
+        validation: issue?.message,
+      },
+      cause: parsed.error,
+    });
+  }
+  if (requireNextBillingDate && parsed.data.nextBillingDate === undefined) {
+    throw new ProviderResponseError(provider, "previewChangePlan", {
+      details: { field: "nextBillingDate" },
+    });
+  }
+  return parsed.data;
+}
+
 function quoteFingerprint(preview: ChangePlanPreview): string {
-  const amount = (value: unknown): number | null => {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric : null;
-  };
   const financialFields = {
-    totalAmount: amount(preview.totalAmount),
-    settlementAmount: amount(preview.settlementAmount),
+    totalAmount: preview.totalAmount,
+    settlementAmount: preview.settlementAmount,
     currency: preview.currency.toUpperCase(),
-    recurringAmount: amount(preview.recurringAmount),
+    recurringAmount: preview.recurringAmount ?? null,
     recurringCurrency: preview.recurringCurrency?.toUpperCase() ?? null,
-    taxAmount: amount(preview.taxAmount),
-    customerCredits: amount(preview.customerCredits),
+    taxAmount: preview.taxAmount ?? null,
+    customerCredits: preview.customerCredits ?? null,
+    nextBillingDate:
+      preview.nextBillingDate === undefined
+        ? null
+        : new Date(preview.nextBillingDate).toISOString(),
     lineItems: preview.lineItems.map((item) => ({
       productId: item.productId,
-      unitPrice: amount(item.unitPrice),
-      quantity: amount(item.quantity),
-      prorationFactor: amount(item.prorationFactor),
+      unitPrice: item.unitPrice,
+      quantity: item.quantity,
+      prorationFactor: item.prorationFactor,
       currency: item.currency.toUpperCase(),
-      tax: amount(item.tax),
-      subtotal: amount(item.subtotal),
+      tax: item.tax,
+      subtotal: item.subtotal,
     })),
   };
   return createHash("sha256").update(JSON.stringify(financialFields)).digest("hex");
@@ -542,6 +600,7 @@ export class CommerceService {
     accountId: string;
     operationKey: string;
   }): Promise<SubscriptionCommandResult> {
+    requireStableKey(input.operationKey, "operationKey");
     const subscription = await this.billing.getUserSubscription(input.accountId);
     if (!subscription?.providerSubscriptionId) {
       throw new CommerceResourceNotFoundError("No active subscription found");
@@ -573,6 +632,7 @@ export class CommerceService {
     accountId: string;
     operationKey: string;
   }): Promise<SubscriptionCommandResult> {
+    requireStableKey(input.operationKey, "operationKey");
     const subscription = await this.billing.getUserSubscription(input.accountId);
     if (!subscription?.providerSubscriptionId) {
       throw new CommerceResourceNotFoundError("No subscription found");
@@ -607,9 +667,7 @@ export class CommerceService {
     accountId: string;
     operationKey: string;
   }): Promise<CancelAllSubscriptionsResult> {
-    if (!input.operationKey.trim()) {
-      throw new ConfigError("operationKey must not be empty");
-    }
+    requireStableKey(input.operationKey, "operationKey");
     const subscriptions = await this.billing.listCancellableSubscriptions(input.accountId);
     const results = await Promise.all(
       subscriptions.map(async (subscription) => {
@@ -618,7 +676,10 @@ export class CommerceService {
           if (!provider.cancelSubscription) {
             throw new ProviderCapabilityNotSupportedError(provider.provider, "cancelSubscription");
           }
-          const operationKey = `${input.operationKey}:${subscription.provider}:${subscription.providerSubscriptionId}`;
+          const operationKey = scopedStableKey(input.operationKey, "cancel-all", [
+            subscription.provider,
+            subscription.providerSubscriptionId,
+          ]);
           await provider.cancelSubscription(subscription.providerSubscriptionId, operationKey);
           await this.billing.ingestBillingEvent({
             provider: subscription.provider,
@@ -793,11 +854,16 @@ export class CommerceService {
     if (!context.provider.previewChangePlan) {
       throw new ProviderCapabilityNotSupportedError(context.provider.provider, "previewChangePlan");
     }
-    return context.provider.previewChangePlan({
+    const preview: unknown = await context.provider.previewChangePlan({
       providerSubscriptionId: context.subscription.providerSubscriptionId,
       productId: context.targetProductId,
       ...providerPlanChangeParams(context.policy!),
     });
+    return validatePlanPreview(
+      preview,
+      context.provider.provider,
+      context.policy!.effective === "renewal",
+    );
   }
 
   async previewPlanChange(input: PreviewPlanChangeInput): Promise<PlanChangePreviewResult> {
@@ -824,6 +890,7 @@ export class CommerceService {
   }
 
   async confirmPlanChange(input: ConfirmPlanChangeInput): Promise<ConfirmPlanChangeResult> {
+    requireStableKey(input.operationKey, "operationKey");
     const context = await this.planChangeContext(input);
     if (context.classification === "unchanged") {
       return {
@@ -864,11 +931,7 @@ export class CommerceService {
     }
 
     const scheduled = context.policy!.effective === "renewal";
-    const effectiveAt = scheduled
-      ? preview.nextBillingDate
-      : Number.isFinite(Date.parse(preview.effectiveAt))
-        ? preview.effectiveAt
-        : new Date().toISOString();
+    const effectiveAt = scheduled ? preview.nextBillingDate : preview.effectiveAt;
     if (!effectiveAt) {
       throw new CoreBillingDataUnavailableError(
         "The provider did not return the scheduled change date",
@@ -901,7 +964,7 @@ export class CommerceService {
         }
         await context.provider.reactivateSubscription(
           context.subscription.providerSubscriptionId,
-          `${input.operationKey}:keep`,
+          scopedStableKey(input.operationKey, "keep"),
         );
         cancellationWasReactivated = true;
       }
@@ -927,7 +990,7 @@ export class CommerceService {
         try {
           await context.provider.cancelSubscription!(
             context.subscription.providerSubscriptionId,
-            `${input.operationKey}:restore-cancellation`,
+            scopedStableKey(input.operationKey, "restore-cancellation"),
           );
         } catch (compensationError) {
           failure = new AggregateError(
@@ -956,6 +1019,7 @@ export class CommerceService {
     accountId: string;
     operationKey: string;
   }): Promise<{ success: true }> {
+    requireStableKey(input.operationKey, "operationKey");
     const subscription = await this.billing.getActiveSubscription(input.accountId);
     if (!subscription) throw new CommerceResourceNotFoundError("No active subscription found");
     const change = await this.billing.getOpenBillingSubscriptionChange(

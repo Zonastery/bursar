@@ -52,11 +52,17 @@ class CommerceProviderRegistry:
 
             loading = asyncio.create_task(load())
             self._loading[name] = loading
-        try:
-            return await loading
-        finally:
-            if self._loading.get(name) is loading:
-                self._loading.pop(name, None)
+
+            def discard_completed(completed: asyncio.Task[PaymentProvider]) -> None:
+                if self._loading.get(name) is completed:
+                    self._loading.pop(name, None)
+                if not completed.cancelled():
+                    completed.exception()
+
+            loading.add_done_callback(discard_completed)
+        # One request being cancelled must not cancel the shared factory task
+        # or force concurrent callers to construct duplicate provider clients.
+        return await asyncio.shield(loading)
 
     async def select(
         self,

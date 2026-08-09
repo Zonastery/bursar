@@ -83,9 +83,9 @@ budgets, and cancellation. The default classifier retries only errors marked
 | `@zonastery/bursar/browser`     | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`)                             |
 | `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock)                                                                                  |
 
-The `node` entry point depends on Node built-ins (`crypto`, `fs`) and is not
-compatible with Edge Runtime environments; `browser` contains no database
-stores or Node-only dependencies and is safe for Client Components.
+The root and `node` entry points are server-only and depend on Node built-ins;
+`browser` contains no database stores or Node-only dependencies and is safe
+for Client Components.
 
 ## Migrations
 
