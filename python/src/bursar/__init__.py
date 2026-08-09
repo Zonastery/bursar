@@ -1,7 +1,7 @@
 """Bursar SDK for metering, credits, subscriptions, and payments."""
 
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from bursar.billing.auto_recharge_service import (
@@ -9,10 +9,7 @@ from bursar.billing.auto_recharge_service import (
     AutoRechargeService,
 )
 
-try:
-    __version__ = version("bursar")
-except PackageNotFoundError:  # pragma: no cover - source checkout without install
-    __version__ = "0.0.0+unknown"
+__version__ = version("bursar")
 
 from bursar.billing import (
     AUTO_RECHARGE_STATES,

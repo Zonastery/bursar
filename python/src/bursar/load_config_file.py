@@ -9,7 +9,42 @@ import json
 from pathlib import Path
 from typing import Any
 
-from bursar.errors import BursarImportError, ConfigError
+import yaml
+
+from bursar.errors import ConfigError
+
+
+class _StrictYamlLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate mapping keys."""
+
+
+def _construct_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.YAMLError(f"duplicate key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictYamlLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping,
+)
+
+
+class _DuplicateJsonKeyError(ValueError):
+    """Internal parse error used to preserve JSON source context."""
+
+
+def _construct_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    mapping: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in mapping:
+            raise _DuplicateJsonKeyError(f"duplicate key: {key!r}")
+        mapping[key] = value
+    return mapping
 
 
 def _read_clean(path: Path) -> str:
@@ -21,14 +56,35 @@ def _read_clean(path: Path) -> str:
         raise ConfigError(f"Could not read {path}: {exc}") from exc
 
 
-def _assert_non_empty_object(data: Any, path: Path) -> dict[str, Any]:
+def _assert_non_empty_object(data: Any, source: str | Path) -> dict[str, Any]:
     if data is None:
-        raise ConfigError(f"Bursar config is empty: {path}")
+        raise ConfigError(f"Bursar config is empty: {source}")
     if not isinstance(data, dict):
-        raise ConfigError(f"Bursar config must be a JSON/YAML object, got {type(data).__name__}: {path}")
+        raise ConfigError(f"Bursar config must be a JSON/YAML object, got {type(data).__name__}: {source}")
     if not data:
-        raise ConfigError(f"Bursar config is empty: {path}")
+        raise ConfigError(f"Bursar config is empty: {source}")
     return data
+
+
+def load_config_text(content: str, *, is_yaml: bool, source: str | Path = "<string>") -> dict[str, Any]:
+    """Parse one complete JSON or YAML config document.
+
+    Duplicate object keys are rejected in both formats. Silently taking the
+    final value is unsafe for financial configuration and makes reviews
+    misleading, especially when the duplicate is nested far from the root.
+    """
+
+    if is_yaml:
+        try:
+            parsed = yaml.load(content, Loader=_StrictYamlLoader)
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Invalid YAML in {source}: {exc}") from exc
+    else:
+        try:
+            parsed = json.loads(content, object_pairs_hook=_construct_json_object)
+        except (json.JSONDecodeError, _DuplicateJsonKeyError) as exc:
+            raise ConfigError(f"Invalid JSON in {source}: {exc}") from exc
+    return _assert_non_empty_object(parsed, source)
 
 
 def load_config_file(path: str | Path) -> dict[str, Any]:
@@ -50,42 +106,9 @@ def load_config_file(path: str | Path) -> dict[str, Any]:
 
     suffix = path.suffix.lower()
     if suffix == ".json":
-        content = _read_clean(path)
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ConfigError(f"Invalid JSON in {path}: {exc}") from exc
-        return _assert_non_empty_object(parsed, path)
+        return load_config_text(_read_clean(path), is_yaml=False, source=path)
 
     if suffix in (".yaml", ".yml"):
-        try:
-            import yaml
-        except ImportError:
-            raise BursarImportError(
-                "PyYAML is required to load YAML config files. Install with: pip install pyyaml"
-            ) from None
-        content = _read_clean(path)
-
-        class _StrictYamlLoader(yaml.SafeLoader):
-            pass
-
-        def _construct_mapping(loader: Any, node: Any, deep: bool = False) -> dict[Any, Any]:
-            mapping: dict[Any, Any] = {}
-            for key_node, value_node in node.value:
-                key = loader.construct_object(key_node, deep=deep)
-                if key in mapping:
-                    raise yaml.YAMLError(f"duplicate key: {key!r}")
-                mapping[key] = loader.construct_object(value_node, deep=deep)
-            return mapping
-
-        _StrictYamlLoader.add_constructor(
-            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-            _construct_mapping,
-        )
-        try:
-            parsed = yaml.load(content, Loader=_StrictYamlLoader)
-        except yaml.YAMLError as exc:
-            raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc
-        return _assert_non_empty_object(parsed, path)
+        return load_config_text(_read_clean(path), is_yaml=True, source=path)
 
     raise ConfigError(f"Unsupported config file format: {suffix}. Expected .json, .yaml, or .yml")

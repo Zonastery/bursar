@@ -99,22 +99,10 @@ def _retry_store_operation[T](op: Callable[[], T], *, what: str) -> T:
 
 
 def _store_from_env(
-    store_type: str | None = None,
     *,
     tenant_id: str | None = None,
 ) -> CreditStore:
-    """Create a store from env vars (``DATABASE_URL``).
-
-    Args:
-        store_type: ``"postgres"``. Falls back to the
-            ``BURSAR_STORE`` env var, then ``"postgres"``.
-    """
-    kind = store_type or os.environ.get("BURSAR_STORE", "postgres")
-
-    if kind != "postgres":
-        print(f"Unknown store: {kind}", file=sys.stderr)
-        raise SystemExit(1)
-
+    """Create the Postgres store from its required environment variables."""
     _require_extra("postgres")
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -139,74 +127,15 @@ def _load_config_file(filepath: str) -> dict[str, Any]:
     empty/non-object payload) print a clean message to stderr and exit 1 — no
     tracebacks.
     """
-    if filepath == "-":
-        raw = sys.stdin.read()
-        data = _parse_config_text(raw, is_yaml=False, source="<stdin>")
-    else:
-        path = Path(filepath)
-        suffix = path.suffix.lower()
-        if suffix not in {".json", ".yaml", ".yml"}:
-            print(
-                f"Unsupported config file format: {suffix or '<none>'}. Expected .json, .yaml, or .yml",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        if path.is_dir():
-            print(f"Not a file (is a directory): {filepath}", file=sys.stderr)
-            raise SystemExit(1)
-        try:
-            raw = path.read_text()
-        except FileNotFoundError:
-            print(f"Config file not found: {filepath}", file=sys.stderr)
-            raise SystemExit(1) from None
-        except PermissionError:
-            print(f"Permission denied: {filepath}", file=sys.stderr)
-            raise SystemExit(1) from None
-        except OSError as exc:
-            print(f"Could not read {filepath}: {exc}", file=sys.stderr)
-            raise SystemExit(1) from None
-        data = _parse_config_text(raw, is_yaml=suffix in {".yaml", ".yml"}, source=filepath)
+    from bursar.errors import ConfigError
+    from bursar.load_config_file import load_config_file, load_config_text
 
-    if not isinstance(data, dict):
-        print(f"Bursar config must be a JSON/YAML object, got {type(data).__name__}", file=sys.stderr)
-        raise SystemExit(1)
-    if not data:
-        print("Bursar config is empty.", file=sys.stderr)
-        raise SystemExit(1)
-    return data
-
-
-def _parse_config_text(raw: str, *, is_yaml: bool, source: str) -> Any:
-    """Parse *raw* as YAML or JSON, exiting 1 with a clean message on failure."""
-    if is_yaml:
-        try:
-            import yaml
-        except ImportError:
-            print("PyYAML is required to read YAML configuration files", file=sys.stderr)
-            raise SystemExit(1) from None
-
-        class _StrictYamlLoader(yaml.SafeLoader):
-            pass
-
-        def _construct_mapping(loader: Any, node: Any, deep: bool = False) -> dict[Any, Any]:
-            mapping: dict[Any, Any] = {}
-            for key_node, value_node in node.value:
-                key = loader.construct_object(key_node, deep=deep)
-                if key in mapping:
-                    raise yaml.YAMLError(f"duplicate key: {key!r}")
-                mapping[key] = loader.construct_object(value_node, deep=deep)
-            return mapping
-
-        _StrictYamlLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
-        try:
-            return yaml.load(raw, Loader=_StrictYamlLoader)
-        except yaml.YAMLError as exc:
-            print(f"Invalid YAML in {source}: {exc}", file=sys.stderr)
-            raise SystemExit(1) from None
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"Invalid JSON in {source}: {exc}", file=sys.stderr)
+        if filepath == "-":
+            return load_config_text(sys.stdin.read(), is_yaml=False, source="<stdin>")
+        return load_config_file(filepath)
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
 
 
@@ -388,12 +317,11 @@ def _validated_rollout(
 def _set_config(
     data: dict[str, Any],
     *,
-    store_type: str,
     tenant_id: str | None = None,
     label: str | None = None,
     rollout: dict[str, Any] | None = None,
 ) -> bool:
-    store = _store_from_env(store_type, tenant_id=tenant_id)
+    store = _store_from_env(tenant_id=tenant_id)
 
     # Abort if identical to the currently active version to avoid pointless
     # version churn. First-time setup always proceeds.
@@ -419,7 +347,6 @@ def _cmd_config_set(args: argparse.Namespace) -> None:
     rollout = _validated_rollout(args.rollout, data)
     if not _set_config(
         data,
-        store_type=args.store,
         label=args.label,
         rollout=rollout,
     ):
@@ -444,7 +371,6 @@ def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
     )
     changed = _set_config(
         data,
-        store_type=args.store,
         tenant_id=str(created_id),
         label=args.label,
     )
@@ -453,7 +379,7 @@ def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_get(args: argparse.Namespace) -> None:
-    store = _store_from_env(args.store)
+    store = _store_from_env()
     result = _retry_store_operation(store.get_active_catalog, what="get active catalog")
     if result is None:
         print("No active Bursar config.", file=sys.stderr)
@@ -462,7 +388,7 @@ def _cmd_config_get(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_list(args: argparse.Namespace) -> None:
-    store = _store_from_env(args.store)
+    store = _store_from_env()
     rows = _retry_store_operation(store.get_catalog_history, what="list catalog revisions")
     if not rows:
         print("No Bursar configs found.", file=sys.stderr)
@@ -474,7 +400,7 @@ def _cmd_config_list(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_activate(args: argparse.Namespace) -> None:
-    store = _store_from_env(args.store)
+    store = _store_from_env()
     rollout = _validated_rollout(args.rollout)
     _retry_store_operation(
         lambda: store.activate_catalog_revision(args.version, rollout),
@@ -484,7 +410,7 @@ def _cmd_config_activate(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_pin(args: argparse.Namespace) -> None:
-    store = _store_from_env(args.store)
+    store = _store_from_env()
     pinned = not args.unpin
     changed = _retry_store_operation(
         lambda: store.set_plan_revision_pin(args.subject_id, pinned),
@@ -498,7 +424,7 @@ def _cmd_config_pin(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_apply_due(args: argparse.Namespace) -> None:
-    store = _store_from_env(args.store)
+    store = _store_from_env()
     applied = _retry_store_operation(
         lambda: store.apply_due_plan_changes(args.limit),
         what="apply due plan changes",
@@ -509,7 +435,7 @@ def _cmd_config_apply_due(args: argparse.Namespace) -> None:
 def _cmd_config_export(args: argparse.Namespace) -> None:
     from bursar.config import BursarConfig
 
-    store = _store_from_env(args.store)
+    store = _store_from_env()
     result = _retry_store_operation(lambda: store.get_catalog_revision(args.version), what="fetch catalog revision")
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
@@ -520,7 +446,7 @@ def _cmd_config_export(args: argparse.Namespace) -> None:
 def _cmd_config_diff(args: argparse.Namespace) -> None:
     from bursar.config import BursarConfig
 
-    store = _store_from_env(args.store)
+    store = _store_from_env()
 
     def _fetch() -> tuple[CatalogRevision | None, CatalogRevision | None]:
         return store.get_catalog_revision(args.version_a), store.get_catalog_revision(args.version_b)
@@ -556,12 +482,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bursar",
         description="Bursar SDK: database migrations and catalog management.",
-    )
-    parser.add_argument(
-        "--store",
-        choices=["postgres"],
-        default=os.environ.get("BURSAR_STORE", "postgres"),
-        help="Store backend (env: BURSAR_STORE, default: postgres)",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 

@@ -4,15 +4,11 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
-# Allow running without installing the package (src layout).
+from bursar.config import BursarConfig
+
 _ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "src"))
-
-from bursar.config import BursarConfig  # noqa: E402
-
 _REPO_ROOT = _ROOT.parent
 OUTPUT = _REPO_ROOT / "docs" / "pricing-config.schema.json"
 JAVASCRIPT_OUTPUT = _REPO_ROOT / "javascript" / "src" / "generated" / "pricing-config.schema.json"

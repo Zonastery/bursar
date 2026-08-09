@@ -98,6 +98,17 @@ def test_rejects_duplicate_yaml_keys() -> None:
         os.unlink(path)
 
 
+def test_rejects_nested_duplicate_json_keys_after_escape_decoding() -> None:
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        f.write(r'{"pricing": {"operation": 1, "oper\u0061tion": 2}}')
+        path = f.name
+    try:
+        with pytest.raises(ConfigError, match=r"duplicate key: 'operation'"):
+            load_config_file(path)
+    finally:
+        os.unlink(path)
+
+
 def test_raises_on_unsupported_format() -> None:
     with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False) as f:
         f.write("hello")

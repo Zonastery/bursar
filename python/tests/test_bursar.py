@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from importlib.metadata import version
 from typing import Any, cast
 
 import pytest
@@ -15,6 +16,12 @@ from bursar.billing.types import BillingEvent
 from bursar.bursar import AccountService, Bursar, CatalogService
 from bursar.credits.service import CreditsService
 from bursar.credits.store import CreditStore
+
+
+def test_package_version_comes_from_installed_distribution_metadata() -> None:
+    from bursar import __version__
+
+    assert __version__ == version("bursar")
 
 
 @dataclass

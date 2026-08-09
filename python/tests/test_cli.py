@@ -74,6 +74,11 @@ def test_parser_requires_a_command_and_config_subcommand() -> None:
         cli.main(["config"])
 
 
+def test_parser_has_no_legacy_store_backend_switch() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--store", "postgres", "config", "schema"])
+
+
 def test_parser_exposes_tenant_bootstrap_as_one_operator_command() -> None:
     args = cli.build_parser().parse_args(
         [
@@ -222,14 +227,13 @@ def test_tenant_bootstrap_owns_provisioning_and_config_sequence(
     def set_config(
         data: dict[str, object],
         *,
-        store_type: str,
         tenant_id: str | None,
         label: str | None,
     ) -> bool:
         calls.append(
             (
                 "config",
-                (data, store_type, tenant_id, label),
+                (data, tenant_id, label),
             )
         )
         return True
@@ -244,13 +248,12 @@ def test_tenant_bootstrap_owns_provisioning_and_config_sequence(
             slug="acme",
             display_name="Acme",
             label="initial",
-            store="postgres",
         )
     )
 
     assert calls == [
         ("tenant", (tenant_id, "acme", "Acme")),
-        ("config", (config, "postgres", str(tenant_id), "initial")),
+        ("config", (config, str(tenant_id), "initial")),
     ]
     assert capsys.readouterr().out == f"Tenant {tenant_id} bootstrapped successfully (config applied).\n"
 
