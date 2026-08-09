@@ -14,6 +14,9 @@ python/build/
 *.egg-info/
 .coverage
 coverage.xml
+coverage.json
+coverage/
+*-coverage-report/
 htmlcov/
 javascript/coverage/
 .claude/

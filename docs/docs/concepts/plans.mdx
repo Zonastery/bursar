@@ -21,7 +21,7 @@ application code.
 | `rate_card`          | The rate card that prices allowed operations                                      |
 | `allowed_operations` | Operations the plan may run                                                       |
 | `features`           | Feature values for the plan (`{ voice_mode: true, max_context: 200000 }`)         |
-| `credit_allowance`   | Free credits per window; optional `priority` positions them among credit buckets  |
+| `credit_allowance`   | Free credits per window; its `priority` positions them among credit buckets       |
 | `quotas`             | Per-operation measure limits over a window                                        |
 | `credit_policy`      | Reference to a `prepaid` or `credit_line` policy                                  |
 | `admission_policy`   | Reference to a named concurrency policy                                           |
@@ -59,10 +59,9 @@ first use), or `plan_assignment` (anchored to when the plan was assigned).
 
 Allowance and bucket priorities use one ordering namespace; lower numbers spend
 first. In the example, promotional credits spend first, then the monthly
-allowance, then purchased credits. An allowance priority cannot equal a bucket
-priority. Omitting `priority` preserves the legacy allowance-first behavior.
-The allowance remains a plan entitlement with its own reset window rather than
-a synthetic bucket.
+allowance, then purchased credits. Every allowance must declare a priority, and
+that value cannot equal a bucket priority. The allowance remains a plan
+entitlement with its own reset window rather than a synthetic bucket.
 
 `DeductionResult.allowance_consumed` reports how much of a charge the allowance
 covered. `check_allowance(user_id)` returns the current window (`plan_id`,

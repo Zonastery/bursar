@@ -21,6 +21,5 @@
     "Run the Bursar database migrations before using a PostgreSQL-backed store.",
     "Use the same versioned configuration document with both SDKs; the Python and JavaScript clients share the canonical PostgreSQL schema and behavioral contracts.",
     "Treat PostgreSQL as authoritative; S3 and ClickHouse are optional analytics delivery backends."
-  ],
-  "previousVersions": [{ "tag": "v1.0.1" }, { "tag": "v1.0.0" }]
+  ]
 }

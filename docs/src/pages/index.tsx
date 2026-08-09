@@ -158,7 +158,7 @@ export default function Home(): ReactNode {
             <div className={styles.heroCode}>
               <div className={styles.codeHeader}>
                 <span>One workflow, two SDKs</span>
-                <span className={styles.status}>1.x stable</span>
+                <span className={styles.status}>Current stable</span>
               </div>
               <CodeBlock language="python" title="Python">
                 {pythonExample}
