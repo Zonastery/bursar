@@ -33,5 +33,5 @@ jobs:
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer $CONTEXT7_API_KEY" \
             --data "$request_body"; then
-            echo "::warning::Context7 refresh failed; continuing because documentation indexing is optional"
+            printf '\n::warning::Context7 refresh failed; continuing because documentation indexing is optional\n'
           fi
