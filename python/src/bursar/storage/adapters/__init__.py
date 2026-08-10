@@ -10,6 +10,7 @@ from bursar.storage.adapters.s3 import (
     S3BillingArchive,
     S3BillingArchiveOptions,
     S3Credentials,
+    S3PutObjectOptions,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "S3BillingArchive",
     "S3BillingArchiveOptions",
     "S3Credentials",
+    "S3PutObjectOptions",
 ]

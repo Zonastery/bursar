@@ -1,4 +1,4 @@
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 
 export const AUTO_RECHARGE_STATES = ["disabled", "active", "paused"] as const;
 export type BillingAutoRechargeState = (typeof AUTO_RECHARGE_STATES)[number];

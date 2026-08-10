@@ -1,7 +1,7 @@
 """Fixtures for integration tests — one canonical Postgres source.
 
 The ``pg_database_url`` fixture resolves a connection string to a **real
-PostgreSQL 17 with pg_partman 5 and pg_jsonschema 0.3** from a single,
+PostgreSQL 16 or 17 with pg_partman 5 and pg_jsonschema 0.3** from a single,
 consistent mechanism
 (resolution order):
 
@@ -12,7 +12,7 @@ consistent mechanism
        BURSAR_ALLOW_DATABASE_RESET=1 \
        DATABASE_URL=postgres://bursar:bursar@localhost:5432/bursar_test uv run pytest
 
-2. **testcontainers** — a disposable, provider-neutral PostgreSQL 17 image
+2. **testcontainers** — a disposable, provider-neutral PostgreSQL image
    with pg_partman 5 and pg_jsonschema 0.3,
    started once per test session (requires only a reachable Docker daemon; no
    manual setup, no ``ephemeralpg``/``pg_tmp`` install). This is the default

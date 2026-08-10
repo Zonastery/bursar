@@ -1,6 +1,7 @@
 """PostgreSQL integration coverage for the public v1 Bursar configuration."""
 
 import time
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -17,7 +18,7 @@ from bursar.credits.postgres.store import PostgresStore, run_migrations
 from bursar.credits.service import CreditsService
 from bursar.credits.service_types import ReserveOptions, SettleOptions
 from bursar.credits.store import CreateLeaseOptions, StoreError
-from bursar.credits.types import CreditMetadata, ExecuteGrantProgramRequest
+from bursar.credits.types import CreditMetadata, DeductionResult, ExecuteGrantProgramRequest, LeaseResult
 from bursar.metrics import UsageMetrics
 from tests.conftest import TEST_TENANT_ID
 
@@ -85,14 +86,144 @@ CONFIG = {
     "plans": {"pro": {"display_name": "Pro", "rank": 0, "rate_card": "standard"}},
 }
 
+CONCURRENCY_CONFIG = {
+    "version": 1,
+    "catalog": {"default_plan": "max_two"},
+    "pricing": deepcopy(CONFIG["pricing"]),
+    "credits": deepcopy(CONFIG["credits"]),
+    "admission": {
+        "policies": {
+            "max_two": {"max_in_flight": 2},
+            "headroom": {"max_in_flight": 10},
+        }
+    },
+    "plans": {
+        "max_two": {
+            "display_name": "Max two",
+            "rank": 0,
+            "rate_card": "standard",
+            "allowed_operations": ["completion"],
+            "admission_policy": "max_two",
+        },
+        "headroom": {
+            "display_name": "Headroom",
+            "rank": 1,
+            "rate_card": "standard",
+            "allowed_operations": ["completion"],
+            "admission_policy": "headroom",
+        },
+    },
+}
+
 
 @pytest.fixture
-def store(pg_database_url: str) -> PostgresStore:
-    return PostgresStore(
+def store(pg_database_url: str) -> Iterator[PostgresStore]:
+    owned_store = PostgresStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
         provider_environment="test",
     )
+    try:
+        yield owned_store
+    finally:
+        owned_store.close()
+
+
+def _run_with_concurrent_stores[T](
+    pg_database_url: str,
+    worker_count: int,
+    operation: Callable[[PostgresStore, int], T],
+) -> list[T]:
+    """Start one independently pooled store per worker at the same barrier."""
+    start = Barrier(worker_count)
+
+    def invoke(worker_index: int) -> T:
+        with PostgresStore(
+            pg_database_url,
+            tenant_id=TEST_TENANT_ID,
+            provider_environment="test",
+            max_pool_size=1,
+        ) as worker_store:
+            start.wait(timeout=10)
+            return operation(worker_store, worker_index)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(invoke, worker_index) for worker_index in range(worker_count)]
+        return [future.result() for future in futures]
+
+
+def _financial_snapshot(
+    pg_database_url: str,
+    user_id: str,
+) -> tuple[Decimal, Decimal, int, int, int]:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                account.balance,
+                COALESCE((
+                    SELECT sum(entry.amount)
+                    FROM bursar.credit_ledger_entries AS entry
+                    WHERE entry.account_id = account.id
+                ), 0),
+                (
+                    SELECT count(*)
+                    FROM bursar.credit_ledger_entries AS entry
+                    WHERE entry.account_id = account.id
+                      AND entry.kind = 'usage'
+                ),
+                (
+                    SELECT count(*)
+                    FROM bursar.credit_usage_charges AS charge
+                    WHERE charge.account_id = account.id
+                ),
+                (
+                    SELECT count(DISTINCT charge.idempotency_key)
+                    FROM bursar.credit_usage_charges AS charge
+                    WHERE charge.account_id = account.id
+                )
+            FROM bursar.credit_accounts AS account
+            WHERE account.tenant_id = %s
+              AND account.subject_id = %s
+              AND account.account_kind = 'personal'
+            """,
+            [TEST_TENANT_ID, user_id],
+        )
+        row = cursor.fetchone()
+    assert row is not None
+    balance, ledger_total, usage_entries, usage_charges, usage_keys = row
+    return balance, ledger_total, usage_entries, usage_charges, usage_keys
+
+
+def _active_lease_snapshot(
+    pg_database_url: str,
+    user_id: str,
+) -> tuple[Decimal, int, Decimal]:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                account.balance,
+                count(lease.id) FILTER (
+                    WHERE lease.status = 'active' AND lease.expires_at > now()
+                ),
+                COALESCE(sum(lease.reserved_amount) FILTER (
+                    WHERE lease.status = 'active' AND lease.expires_at > now()
+                ), 0)
+            FROM bursar.credit_accounts AS account
+            LEFT JOIN bursar.credit_leases AS lease
+              ON lease.account_id = account.id
+            WHERE account.tenant_id = %s
+              AND account.subject_id = %s
+              AND account.account_kind = 'personal'
+            GROUP BY account.id, account.balance
+            """,
+            [TEST_TENANT_ID, user_id],
+        )
+        row = cursor.fetchone()
+    assert row is not None
+    balance, active_count, reserved_total = row
+    return balance, active_count, reserved_total
 
 
 def test_catalog_shape_validator_rejects_removed_nested_fields(
@@ -172,6 +303,27 @@ def test_migrations_are_idempotent_and_detect_checksum_mismatch(
 
 
 @pytest.mark.concurrency
+def test_migration_lock_timeout_fails_promptly_and_recovers(pg_database_url: str) -> None:
+    holder = psycopg2.connect(pg_database_url)
+    try:
+        with holder.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ["bursar:migrations"],
+            )
+
+        started_at = time.monotonic()
+        with pytest.raises(StoreError, match="lock timeout"):
+            run_migrations(pg_database_url, lock_timeout_ms=100)
+        assert time.monotonic() - started_at < 5
+    finally:
+        holder.rollback()
+        holder.close()
+
+    run_migrations(pg_database_url, lock_timeout_ms=1_000)
+
+
+@pytest.mark.concurrency
 def test_concurrent_migrations_serialize_pristine_database(pg_database_url: str) -> None:
     database_name = f"bursar_migration_race_{uuid4().hex}"
     admin_dsn = make_dsn(pg_database_url, dbname="postgres")
@@ -213,6 +365,186 @@ def test_concurrent_migrations_serialize_pristine_database(pg_database_url: str)
                 cursor.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(database_name)))
         finally:
             admin.close()
+
+
+@pytest.mark.concurrency
+def test_concurrent_unique_deductions_prevent_double_spend(
+    pg_database_url: str,
+    store: PostgresStore,
+) -> None:
+    user_id = "00000000-0000-0000-0000-000000000921"
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(deepcopy(CONCURRENCY_CONFIG))
+    service.add_credits(
+        user_id,
+        Decimal("5"),
+        entry_type="purchase",
+        idempotency_key="concurrent-double-spend-funding",
+    )
+
+    def charge(worker_store: PostgresStore, worker_index: int) -> DeductionResult:
+        return worker_store.deduct_with_allowance(
+            user_id,
+            Decimal("1"),
+            operation="completion",
+            idempotency_key=f"concurrent-double-spend:{worker_index}",
+        )
+
+    results = _run_with_concurrent_stores(pg_database_url, 12, charge)
+    successes = [result for result in results if result.error is None]
+    failures = [result for result in results if result.error is not None]
+
+    assert len(successes) == 5
+    assert len(failures) == 7
+    assert {result.error for result in failures} == {"insufficient_credits"}
+    assert len({result.entry_id for result in successes}) == 5
+    assert {result.balance_after for result in successes} == {
+        Decimal("0"),
+        Decimal("1"),
+        Decimal("2"),
+        Decimal("3"),
+        Decimal("4"),
+    }
+
+    balance, ledger_total, usage_entries, usage_charges, usage_keys = _financial_snapshot(
+        pg_database_url,
+        user_id,
+    )
+    assert balance == Decimal("0")
+    assert ledger_total == balance
+    assert usage_entries == 5
+    assert usage_charges == 5
+    assert usage_keys == 5
+
+
+@pytest.mark.concurrency
+def test_concurrent_same_key_deduction_replays_one_logical_debit(
+    pg_database_url: str,
+    store: PostgresStore,
+) -> None:
+    user_id = "00000000-0000-0000-0000-000000000922"
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(deepcopy(CONCURRENCY_CONFIG))
+    service.add_credits(
+        user_id,
+        Decimal("10"),
+        entry_type="purchase",
+        idempotency_key="concurrent-replay-funding",
+    )
+
+    def replay(worker_store: PostgresStore, _worker_index: int) -> DeductionResult:
+        return worker_store.deduct_with_allowance(
+            user_id,
+            Decimal("2"),
+            operation="completion",
+            idempotency_key="concurrent-replay-one-debit",
+        )
+
+    results = _run_with_concurrent_stores(pg_database_url, 12, replay)
+
+    assert all(result.error is None for result in results)
+    assert len({result.entry_id for result in results}) == 1
+    assert len({result.usage_charge_id for result in results}) == 1
+    assert sum(not result.idempotent for result in results) == 1
+    assert sum(result.idempotent for result in results) == 11
+    assert {result.balance_after for result in results} == {Decimal("8")}
+
+    balance, ledger_total, usage_entries, usage_charges, usage_keys = _financial_snapshot(
+        pg_database_url,
+        user_id,
+    )
+    assert balance == Decimal("8")
+    assert ledger_total == balance
+    assert usage_entries == 1
+    assert usage_charges == 1
+    assert usage_keys == 1
+
+
+@pytest.mark.concurrency
+def test_concurrent_lease_admission_enforces_max_concurrent_and_headroom(
+    pg_database_url: str,
+    store: PostgresStore,
+) -> None:
+    max_concurrent_user = "00000000-0000-0000-0000-000000000923"
+    headroom_user = "00000000-0000-0000-0000-000000000924"
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(deepcopy(CONCURRENCY_CONFIG))
+    service.add_credits(
+        max_concurrent_user,
+        Decimal("100"),
+        entry_type="purchase",
+        idempotency_key="concurrent-lease-limit-funding",
+    )
+    service.add_credits(
+        headroom_user,
+        Decimal("5"),
+        entry_type="purchase",
+        idempotency_key="concurrent-lease-headroom-funding",
+    )
+    service.set_user_plan(headroom_user, "headroom")
+
+    def acquire_with_limit(worker_store: PostgresStore, worker_index: int) -> LeaseResult:
+        return worker_store.create_lease(
+            max_concurrent_user,
+            Decimal("1"),
+            "completion",
+            CreateLeaseOptions(
+                idempotency_key=f"concurrent-lease-limit:{worker_index}",
+                floor=Decimal("0"),
+                max_concurrent=2,
+                ttl_seconds=60,
+            ),
+        )
+
+    limited_results = _run_with_concurrent_stores(pg_database_url, 12, acquire_with_limit)
+    limited_successes = [result for result in limited_results if result.error is None]
+    limited_failures = [result for result in limited_results if result.error is not None]
+    assert len(limited_successes) == 2
+    assert len({result.lease_id for result in limited_successes}) == 2
+    assert len(limited_failures) == 10
+    assert {result.error for result in limited_failures} == {"max_concurrent_reached"}
+
+    def acquire_against_headroom(worker_store: PostgresStore, worker_index: int) -> LeaseResult:
+        return worker_store.create_lease(
+            headroom_user,
+            Decimal("2"),
+            "completion",
+            CreateLeaseOptions(
+                idempotency_key=f"concurrent-lease-headroom:{worker_index}",
+                floor=Decimal("0"),
+                max_concurrent=10,
+                ttl_seconds=60,
+            ),
+        )
+
+    headroom_results = _run_with_concurrent_stores(pg_database_url, 12, acquire_against_headroom)
+    headroom_successes = [result for result in headroom_results if result.error is None]
+    headroom_failures = [result for result in headroom_results if result.error is not None]
+    assert len(headroom_successes) == 2
+    assert len({result.lease_id for result in headroom_successes}) == 2
+    assert len(headroom_failures) == 10
+    assert {result.error for result in headroom_failures} == {"insufficient_headroom"}
+
+    assert _active_lease_snapshot(pg_database_url, max_concurrent_user) == (
+        Decimal("100"),
+        2,
+        Decimal("2"),
+    )
+    assert _active_lease_snapshot(pg_database_url, headroom_user) == (
+        Decimal("5"),
+        2,
+        Decimal("4"),
+    )
+    limited_availability = store.get_available(max_concurrent_user)
+    headroom_availability = store.get_available(headroom_user)
+    assert (limited_availability.available, limited_availability.reserved) == (
+        Decimal("98"),
+        Decimal("2"),
+    )
+    assert (headroom_availability.available, headroom_availability.reserved) == (
+        Decimal("1"),
+        Decimal("4"),
+    )
 
 
 def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStore) -> None:

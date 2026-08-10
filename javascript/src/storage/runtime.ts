@@ -29,11 +29,20 @@ import {
 import type { QueryFn } from "../shared/postgres-types.js";
 import { ClickHouseUsageStore, type ClickHouseUsageStoreOptions } from "./adapters/clickhouse.js";
 import { S3BillingArchive, type S3BillingArchiveOptions } from "./adapters/s3.js";
+import {
+  RuntimeDiagnosticsTracker,
+  type BursarRuntimeDiagnostics,
+  type BursarRuntimeState,
+  type CheckDependenciesOptions,
+  type OutboxStatusSnapshot,
+} from "./diagnostics.js";
+import { BursarMaintenance, BursarOperatorMaintenance } from "./maintenance.js";
 import { OutboxWorker, type OutboxRunResult, type OutboxWorkerOptions } from "./outbox-worker.js";
 import type {
   BillingEventPayloadExport,
   BillingPayloadArchive,
   OutboxHandler,
+  OutboxRecoveryStore,
   UsageChargeExport,
   UsageEventSink,
 } from "./ports.js";
@@ -109,9 +118,52 @@ const runtimeStartOptionsSchema = z
 
 export interface BursarRuntimeHealth {
   ready: boolean;
+  financialReady: boolean;
+  projectionReady: boolean;
+  degraded: boolean;
   started: boolean;
   closed: boolean;
   catalogLoaded: boolean;
+}
+
+interface PendingUsageWrite {
+  event: UsageChargeExport;
+  outboxEventId: string;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+/** Coalesce concurrently dispatched usage events into one optional sink write. */
+class UsageWriteBatcher {
+  private pending: PendingUsageWrite[] = [];
+  private scheduled = false;
+
+  constructor(private readonly sink: UsageEventSink) {}
+
+  write(event: UsageChargeExport, outboxEventId: string): Promise<void> {
+    if (!this.sink.writeUsageBatch) return this.sink.writeUsage(event, outboxEventId);
+    return new Promise<void>((resolve, reject) => {
+      this.pending.push({ event, outboxEventId, resolve, reject });
+      if (this.scheduled) return;
+      this.scheduled = true;
+      queueMicrotask(() => {
+        void this.flush();
+      });
+    });
+  }
+
+  private async flush(): Promise<void> {
+    const pending = this.pending.splice(0);
+    this.scheduled = false;
+    try {
+      await this.sink.writeUsageBatch!(
+        pending.map(({ event, outboxEventId }) => [event, outboxEventId] as const),
+      );
+      for (const write of pending) write.resolve();
+    } catch (error) {
+      for (const write of pending) write.reject(error);
+    }
+  }
 }
 
 /**
@@ -124,7 +176,10 @@ export class BursarRuntime {
   readonly bursar: Bursar;
   readonly creditStore: PostgresStore;
   readonly billingStore: PostgresBillingStore;
+  readonly maintenance: BursarMaintenance;
+  readonly operatorMaintenance: BursarOperatorMaintenance;
   readonly worker: OutboxWorker | null;
+  readonly outboxRecovery: OutboxRecoveryStore;
   readonly clickhouse: (UsageEventSink & UsageAnalyticsStore) | null;
   readonly s3: BillingPayloadArchive | null;
 
@@ -134,6 +189,8 @@ export class BursarRuntime {
   private readonly query: QueryFn;
   private readonly tenantId: string;
   private readonly tenantSlug: string | null;
+  private readonly diagnosticsTracker: RuntimeDiagnosticsTracker;
+  private readonly usageBatcher: UsageWriteBatcher | null;
   readonly providerEnvironment: ProviderEnvironment;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
@@ -219,6 +276,7 @@ export class BursarRuntime {
         ? options.clickhouse
         : new ClickHouseUsageStore({ ...options.clickhouse, tenantId: this.tenantId })
       : null;
+    this.usageBatcher = this.clickhouse ? new UsageWriteBatcher(this.clickhouse) : null;
     this.s3 = options.s3
       ? "archive" in options.s3
         ? options.s3
@@ -270,12 +328,61 @@ export class BursarRuntime {
       billingPayloadBackend: this.s3 ? "s3" : "postgres",
     });
     this.query = this.postgres.query;
+    this.maintenance = new BursarMaintenance({
+      expireLeases: (limit) => this.creditStore.expireLeases(limit),
+      expireCredits: async (limit) =>
+        (await this.creditStore.sweepExpiredCredits(false, undefined, limit)).expiredCount,
+      applyDuePlanChanges: (limit) => this.creditStore.applyDuePlanChanges(limit),
+      expirePastDueGracePeriods: this.bursar.billing
+        ? (now) => this.bursar.billing!.expirePastDueGracePeriods(now)
+        : undefined,
+      pastDueGracePeriodLimit: 100,
+      pastDueGracePeriodsUnavailableReason: this.bursar.billing
+        ? undefined
+        : "billing is not configured",
+    });
+    this.operatorMaintenance = new BursarOperatorMaintenance(this.query);
     const repository = new PostgresStorageRepository(this.query, this.tenantId);
+    this.outboxRecovery = repository;
     const handlers = this.createHandlers(repository);
+    const configuredOutboxOptions =
+      options.outbox === false || options.outbox === undefined ? {} : options.outbox;
+    const originalOnError = configuredOutboxOptions.onError;
+    let diagnosticsTracker: RuntimeDiagnosticsTracker | null = null;
+    const workerOptions: OutboxWorkerOptions = {
+      ...configuredOutboxOptions,
+      onError: async (error) => {
+        diagnosticsTracker?.recordWorkerError(error);
+        await originalOnError?.(error);
+      },
+    };
     this.worker =
       handlers.length > 0 && options.outbox !== false
-        ? new OutboxWorker(repository, handlers, options.outbox)
+        ? new OutboxWorker(repository, handlers, workerOptions)
         : null;
+    this.diagnosticsTracker = new RuntimeDiagnosticsTracker(
+      {
+        checkPostgres: async () => {
+          const rows = await this.query("SELECT 1 AS bursar_reachable");
+          const row = rows[0];
+          if (
+            !row ||
+            typeof row !== "object" ||
+            !("bursar_reachable" in row) ||
+            (row as { bursar_reachable?: unknown }).bursar_reachable !== 1
+          ) {
+            throw new Error("PostgreSQL reachability check returned an invalid result");
+          }
+        },
+        getCatalogRevision: async () => {
+          const revision = await this.bursar.catalog.getActive();
+          return revision ? { id: revision.id, version: revision.version } : null;
+        },
+        getOutboxStatus: outboxStatusProvider(repository),
+      },
+      this.worker !== null,
+    );
+    diagnosticsTracker = this.diagnosticsTracker;
   }
 
   start(options: BursarRuntimeStartOptions = {}): Promise<void> {
@@ -310,23 +417,48 @@ export class BursarRuntime {
       });
     }
     await this.clickhouse?.initialize?.();
+    await this.clickhouse?.checkSchemaCompatibility?.();
     await this.worker?.start();
+    if (this.worker) this.diagnosticsTracker.markWorkerStarted();
     this.started = true;
   }
 
-  health(): BursarRuntimeHealth {
-    const catalogLoaded = this.bursar.catalog.isLoaded;
-    return {
-      ready: this.started && !this.closed && catalogLoaded,
+  state(): BursarRuntimeState {
+    return this.diagnosticsTracker.state({
       started: this.started,
       closed: this.closed,
-      catalogLoaded,
+      catalogLoaded: this.bursar.catalog.isLoaded,
+    });
+  }
+
+  checkDependencies(options: CheckDependenciesOptions = {}): Promise<BursarRuntimeDiagnostics> {
+    return this.diagnosticsTracker.checkDependencies(
+      {
+        started: this.started,
+        closed: this.closed,
+        catalogLoaded: this.bursar.catalog.isLoaded,
+      },
+      options,
+    );
+  }
+
+  health(): BursarRuntimeHealth {
+    const state = this.state();
+    return {
+      ready: state.ready,
+      financialReady: state.financialReady,
+      projectionReady: state.projectionReady,
+      degraded: state.degraded,
+      started: state.started,
+      closed: state.closed,
+      catalogLoaded: state.catalogLoaded,
     };
   }
 
   async flush(): Promise<OutboxRunResult> {
     if (this.closed) throw new StoreClosedError("BursarRuntime has been closed");
-    return this.worker?.runOnce() ?? { claimed: 0, delivered: 0, failed: 0 };
+    if (!this.worker) return { claimed: 0, delivered: 0, failed: 0, claimLost: 0 };
+    return this.diagnosticsTracker.observeManualRun(() => this.worker!.runOnce());
   }
 
   close(): Promise<void> {
@@ -351,6 +483,8 @@ export class BursarRuntime {
       await this.worker?.stop();
     } catch (error) {
       failures.push(error);
+    } finally {
+      if (this.worker) this.diagnosticsTracker.markWorkerStopped();
     }
 
     const resources = await Promise.allSettled([
@@ -399,7 +533,8 @@ export class BursarRuntime {
           if (usage.chargeId !== outboxEvent.aggregateId) {
             throw new Error("Usage export charge does not match its outbox event");
           }
-          await this.clickhouse?.writeUsage(usage, outboxEvent.eventId);
+          if (!this.usageBatcher) throw new Error("ClickHouse usage sink is not configured");
+          await this.usageBatcher.write(usage, outboxEvent.eventId);
         },
       });
     }
@@ -464,6 +599,57 @@ export class BursarRuntime {
 
 export async function createBursarRuntime(options: BursarRuntimeOptions): Promise<BursarRuntime> {
   return BursarRuntime.create(options);
+}
+
+function outboxStatusProvider(
+  repository: PostgresStorageRepository,
+): (limit: number) => Promise<OutboxStatusSnapshot> {
+  const stats = (
+    repository as unknown as {
+      stats: (...args: unknown[]) => unknown;
+    }
+  ).stats;
+  return async (limit) => {
+    let raw: unknown;
+    try {
+      raw = await stats.call(repository, { limit });
+    } catch (error) {
+      if (!isInputShapeError(error)) throw error;
+      raw = await stats.call(repository, limit);
+    }
+    if (!isJsonObject(raw)) throw new TypeError("outbox stats returned a malformed result");
+    return {
+      pendingCount: statsCount(raw, "pendingCount", "pending_count", "pending"),
+      processingCount: statsCount(raw, "processingCount", "processing_count", "processing"),
+      deliveredCount: statsCount(raw, "deliveredCount", "delivered_count", "delivered"),
+      deadLetterCount: statsCount(raw, "deadLetterCount", "dead_letter_count", "dead_letter"),
+      oldestPendingAt: statsTimestamp(raw, "oldestPendingAt", "oldest_pending_at"),
+    };
+  };
+}
+
+function statsCount(raw: Record<string, unknown>, ...keys: string[]): number {
+  const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new TypeError(`outbox stats field ${keys[0]} must be a non-negative integer`);
+  }
+  return value as number;
+}
+
+function statsTimestamp(raw: Record<string, unknown>, ...keys: string[]): string | null {
+  const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+  if (typeof value === "string") return value;
+  throw new TypeError(`outbox stats field ${keys[0]} must be a timestamp string or null`);
+}
+
+function isInputShapeError(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    error instanceof RangeError ||
+    (error instanceof Error && error.name === "ZodError")
+  );
 }
 
 function normalizeTenantSlug(value: string): string {

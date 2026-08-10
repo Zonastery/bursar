@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import psycopg2
 import pytest
 
-from bursar.billing.contracts import AutoRechargeProviderPaymentUpdate
+from bursar.billing.contracts import AutoRechargeProviderPaymentUpdate, CheckoutIntentUpdate
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.types import (
     BillingCustomerInfo,
@@ -21,10 +22,12 @@ from bursar.billing.types import (
     ProviderRef,
 )
 from bursar.bursar import Bursar
-from bursar.commerce import AutoRechargeInput, CommerceOptions, CreateCheckoutInput
+from bursar.commerce import AutoRechargeInput, CheckoutConflictError, CommerceOptions, CreateCheckoutInput
 from bursar.providers.mock.provider import MockPaymentProvider
 from bursar.providers.types import (
     ChangePlanPreview,
+    CheckoutParams,
+    CheckoutSessionResult,
     PaymentMethodInfo,
     PreviewChangePlanParams,
     SavedPaymentChargeParams,
@@ -48,6 +51,8 @@ class IntegrationMockProvider(MockPaymentProvider):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.checkout_params: list[CheckoutParams] = []
+        self.checkout_gate: asyncio.Event | None = None
         self.charges: list[SavedPaymentChargeResult] = [
             SavedPaymentChargeResult(
                 provider_payment_id="auto_pay_processing",
@@ -69,6 +74,18 @@ class IntegrationMockProvider(MockPaymentProvider):
                 currency="USD",
             ),
         ]
+
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
+        self.checkout_params.append(params)
+        if self.checkout_gate is not None:
+            if len(self.checkout_params) == 2:
+                self.checkout_gate.set()
+            await self.checkout_gate.wait()
+        return CheckoutSessionResult(
+            url=params.return_url,
+            provider_session_id=f"session_{params.idempotency_key}",
+            customer_id=CUSTOMER_ID,
+        )
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
         del params
@@ -281,6 +298,239 @@ async def test_commerce_checkout_persists_intent_and_topup_payment_grants_credit
         overview = await bursar.commerce.get_account_overview(USER_ID)
         assert overview.credits.ledger_balance == Decimal("100")
         assert overview.transactions[0].entry_type == "purchase"
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+async def test_checkout_operation_key_replays_once_and_conflicts_before_provider(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, provider = _bursar(pg_database_url, pg_store)
+    try:
+        commerce = bursar.commerce
+        assert commerce is not None
+        base = {
+            "subject_id": USER_ID,
+            "account_id": USER_ID,
+            "offer_key": "standard_topup",
+            "quantity": 1,
+            "return_url": "https://app.example/return?intent={intentId}",
+            "cancel_url": "https://app.example/cancel?intent={intentId}",
+            "operation_key": "checkout-operation-replay",
+        }
+
+        async def checkout(**overrides: object):
+            return await commerce.create_checkout(CreateCheckoutInput.model_validate({**base, **overrides}))
+
+        first = await checkout()
+        assert await checkout() == first
+        assert len(provider.checkout_params) == 1
+
+        for changed in (
+            {"account_id": USER_ID2},
+            {"quantity": 2},
+            {"offer_key": "pro_month", "quantity": 1},
+        ):
+            with pytest.raises(CheckoutConflictError):
+                await checkout(**changed)
+        assert len(provider.checkout_params) == 1
+
+        independent = await checkout(operation_key="checkout-operation-independent")
+        assert independent.intent_id != first.intent_id
+        assert len(provider.checkout_params) == 2
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT operation_key,
+                       encode(request_digest, 'hex'),
+                       count(*)
+                FROM bursar.billing_checkout_intents
+                WHERE subject_id = %s::uuid
+                GROUP BY operation_key, request_digest
+                ORDER BY operation_key
+                """,
+                (USER_ID,),
+            )
+            assert cursor.fetchall() == [
+                (
+                    "checkout-operation-independent",
+                    "685d7d08850ce95a0ce0a59dacba601f7b1dcaea192d215aa147319a74c628f3",
+                    1,
+                ),
+                (
+                    "checkout-operation-replay",
+                    "685d7d08850ce95a0ce0a59dacba601f7b1dcaea192d215aa147319a74c628f3",
+                    1,
+                ),
+            ]
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_point", "operation_key", "failure_message"),
+    [
+        ("intent", "checkout-intent-persistence-recovery", "injected checkout persistence failure"),
+        ("customer", "checkout-customer-persistence-recovery", "injected customer persistence failure"),
+    ],
+)
+async def test_checkout_recovers_open_intent_after_transient_persistence_failure(
+    pg_database_url: str,
+    pg_store: object,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+    operation_key: str,
+    failure_message: str,
+) -> None:
+    bursar, billing_store, provider = _bursar(pg_database_url, pg_store)
+    original_update = billing_store.update_checkout_intent
+    original_upsert = billing_store.upsert_billing_customer
+    fail_once = True
+
+    def flaky_update(intent_id: str, update: CheckoutIntentUpdate) -> None:
+        nonlocal fail_once
+        if failure_point == "intent" and fail_once:
+            fail_once = False
+            raise RuntimeError(failure_message)
+        original_update(intent_id, update)
+
+    def flaky_upsert(provider_name: str, customer_id: str, user_id: str, email: str | None = None) -> None:
+        nonlocal fail_once
+        if failure_point == "customer" and fail_once:
+            fail_once = False
+            raise RuntimeError(failure_message)
+        original_upsert(provider_name, customer_id, user_id, email)
+
+    monkeypatch.setattr(billing_store, "update_checkout_intent", flaky_update)
+    monkeypatch.setattr(billing_store, "upsert_billing_customer", flaky_upsert)
+    try:
+        assert bursar.commerce is not None
+        input = CreateCheckoutInput(
+            subject_id=USER_ID,
+            account_id=USER_ID,
+            offer_key="standard_topup",
+            return_url="https://app.example/return?intent={intentId}",
+            cancel_url="https://app.example/cancel?intent={intentId}",
+            operation_key=operation_key,
+        )
+
+        with pytest.raises(RuntimeError, match=failure_message):
+            await bursar.commerce.create_checkout(input)
+        assert len(provider.checkout_params) == 1
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id::text, status, provider_session_id, checkout_url
+                FROM bursar.billing_checkout_intents
+                WHERE subject_id = %s::uuid
+                  AND operation_key = %s
+                """,
+                (USER_ID, input.operation_key),
+            )
+            after_failure = cursor.fetchall()
+            cursor.execute(
+                "SELECT count(*) FROM bursar.billing_customers WHERE subject_id = %s::uuid",
+                (USER_ID,),
+            )
+            customer_count_row = cursor.fetchone()
+            assert customer_count_row is not None
+            customer_count_after_failure = customer_count_row[0]
+        assert len(after_failure) == 1
+        intent_id, status, provider_session_id, checkout_url = after_failure[0]
+        assert (status, provider_session_id, checkout_url) == ("open", None, None)
+        assert customer_count_after_failure == (1 if failure_point == "intent" else 0)
+
+        recovered = await bursar.commerce.create_checkout(input)
+        assert recovered.intent_id == intent_id
+        assert len(provider.checkout_params) == 2
+        assert [params.idempotency_key for params in provider.checkout_params] == [
+            input.operation_key,
+            input.operation_key,
+        ]
+        assert {params.return_url for params in provider.checkout_params} == {recovered.url}
+
+        original_update(recovered.intent_id, CheckoutIntentUpdate(status="completed"))
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT status, provider_session_id, checkout_url
+                FROM bursar.billing_checkout_intents
+                WHERE id = %s::uuid
+                """,
+                (recovered.intent_id,),
+            )
+            assert cursor.fetchone() == (
+                "completed",
+                f"session_{input.operation_key}",
+                recovered.url,
+            )
+            cursor.execute(
+                """
+                SELECT min(provider_customer_id), count(*)
+                FROM bursar.billing_customers
+                WHERE subject_id = %s::uuid
+                """,
+                (USER_ID,),
+            )
+            assert cursor.fetchone() == (CUSTOMER_ID, 1)
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_key_checkouts_converge_on_one_provider_session(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, provider = _bursar(pg_database_url, pg_store)
+    provider.checkout_gate = asyncio.Event()
+    try:
+        commerce = bursar.commerce
+        assert commerce is not None
+        input = CreateCheckoutInput(
+            subject_id=USER_ID,
+            account_id=USER_ID,
+            offer_key="standard_topup",
+            return_url="https://app.example/return?intent={intentId}",
+            cancel_url="https://app.example/cancel?intent={intentId}",
+            operation_key="checkout-concurrent-replay",
+        )
+
+        first, second = await asyncio.gather(
+            commerce.create_checkout(input),
+            commerce.create_checkout(input),
+        )
+
+        assert second == first
+        assert len(provider.checkout_params) == 2
+        assert {params.idempotency_key for params in provider.checkout_params} == {input.operation_key}
+        assert {params.return_url for params in provider.checkout_params} == {first.url}
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT min(id::text),
+                       min(status),
+                       min(provider_session_id),
+                       min(checkout_url),
+                       count(*)
+                FROM bursar.billing_checkout_intents
+                WHERE subject_id = %s::uuid
+                  AND operation_key = %s
+                """,
+                (USER_ID, input.operation_key),
+            )
+            assert cursor.fetchone() == (
+                first.intent_id,
+                "open",
+                f"session_{input.operation_key}",
+                first.url,
+                1,
+            )
     finally:
         billing_store.close()
 

@@ -5,6 +5,7 @@ import {
 } from "../providers/environment.js";
 import { normalizePostgresError, type PostgresOperationPhase } from "./postgres-errors.js";
 import type { QueryFn } from "./postgres-types.js";
+import { getDefaultInstrumentation, type Instrumentation } from "../telemetry/index.js";
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
@@ -71,6 +72,8 @@ export interface PostgresConnectionOptions {
   applicationName?: string;
   /** Receives typed errors emitted by idle pool clients. Must not throw. */
   onPoolError?: (error: BursarError) => void;
+  /** Optional vendor-neutral instrumentation. Defaults to Bursar's no-op registry. */
+  instrumentation?: Instrumentation;
 }
 
 export interface PostgresClientOptions extends PostgresConnectionOptions {
@@ -93,6 +96,7 @@ interface NormalizedPostgresConnectionOptions {
   maxConnections?: number;
   applicationName: string;
   onPoolError?: (error: BursarError) => void;
+  instrumentation: Instrumentation;
 }
 
 function integerOption(
@@ -118,6 +122,14 @@ function normalizeConnectionOptions(
   }
   if (options.onPoolError !== undefined && typeof options.onPoolError !== "function") {
     throw new TypeError("onPoolError must be a function");
+  }
+  const instrumentation = options.instrumentation ?? getDefaultInstrumentation();
+  if (
+    typeof instrumentation !== "object" ||
+    instrumentation === null ||
+    typeof instrumentation.run !== "function"
+  ) {
+    throw new TypeError("instrumentation must provide run()");
   }
   const applicationName = options.applicationName?.trim() || "bursar-js";
   if (applicationName.includes("\0")) {
@@ -147,7 +159,14 @@ function normalizeConnectionOptions(
     maxConnections: integerOption(options.maxConnections, undefined, "maxConnections", 1),
     applicationName,
     onPoolError: options.onPoolError,
+    instrumentation,
   };
+}
+
+function postgresTelemetryOperation(text: string): "postgres.query" | "postgres.rpc" {
+  return /^\s*select\s+\*\s+from\s+bursar\.[a-z_][a-z0-9_]*\s*\(/i.test(text)
+    ? "postgres.rpc"
+    : "postgres.query";
 }
 
 /** Build a pg Pool config with finite connection and statement deadlines. */
@@ -293,106 +312,111 @@ export class PostgresClient {
     }
   }
 
-  readonly query: QueryFn = async (text: string, params?: unknown[]) => {
-    let pool: PostgresPool;
-    try {
-      pool = await this.getPool();
-    } catch (error) {
-      if (this.closed) throw error;
-      throw normalizePostgresError(error, { operation: "query", phase: "connect" });
-    }
-
-    if (!this.tenantId && !this.accessRole) {
-      try {
-        return (await pool.query(text, params)).rows;
-      } catch (error) {
-        throw normalizePostgresError(error, {
-          operation: "query",
-          phase: "query",
-          indeterminate: true,
-        });
-      }
-    }
-
-    let client: PostgresPoolClient;
-    try {
-      client = await pool.connect();
-    } catch (error) {
-      throw normalizePostgresError(error, { operation: "query", phase: "connect" });
-    }
-
-    let phase: PostgresOperationPhase = "begin";
-    let transactionStarted = false;
-    let discardConnection: Error | undefined;
-    try {
-      await client.query("BEGIN");
-      transactionStarted = true;
-      phase = "configure";
-      if (this.accessRole) await client.query(`SET LOCAL ROLE ${this.accessRole}`);
-      const settings = [
-        `set_config('statement_timeout', $1, true)`,
-        `set_config('idle_in_transaction_session_timeout', $2, true)`,
-      ];
-      const values: unknown[] = [
-        String(this.connectionOptions.statementTimeoutMs),
-        String(this.connectionOptions.idleTransactionTimeoutMs),
-      ];
-      if (this.tenantId) {
-        settings.push(
-          `set_config('bursar.tenant_id', $3, true)`,
-          `set_config('bursar.usage_backend', $4, true)`,
-          `set_config('bursar.billing_payload_backend', $5, true)`,
-          `set_config('bursar.provider_environment', $6, true)`,
-        );
-        values.push(
-          this.tenantId,
-          this.usageBackend,
-          this.billingPayloadBackend,
-          this.providerEnvironment,
-        );
-      }
-      await client.query(`SELECT ${settings.join(", ")}`, values);
-      phase = "query";
-      const result = await client.query(text, params);
-      phase = "commit";
-      await client.query("COMMIT");
-      transactionStarted = false;
-      return result.rows;
-    } catch (error) {
-      const failedPhase = phase;
-      let rollbackFailed = false;
-      if (transactionStarted) {
+  readonly query: QueryFn = (text: string, params?: unknown[]) =>
+    this.connectionOptions.instrumentation.run(
+      postgresTelemetryOperation(text),
+      { "bursar.backend": "postgres" },
+      async () => {
+        let pool: PostgresPool;
         try {
-          phase = "rollback";
-          await client.query("ROLLBACK");
-          transactionStarted = false;
-        } catch (rollbackError) {
-          rollbackFailed = true;
-          discardConnection =
-            rollbackError instanceof Error
-              ? rollbackError
-              : new Error("PostgreSQL rollback failed", { cause: rollbackError });
+          pool = await this.getPool();
+        } catch (error) {
+          if (this.closed) throw error;
+          throw normalizePostgresError(error, { operation: "query", phase: "connect" });
         }
-      }
-      const normalized = normalizePostgresError(error, {
-        operation: "query",
-        phase: failedPhase,
-        indeterminate: failedPhase === "query" || failedPhase === "commit",
-        rollbackFailed,
-      });
-      throw normalized;
-    } finally {
-      try {
-        client.release(discardConnection);
-      } catch (releaseError) {
-        const normalized = normalizePostgresError(releaseError, {
-          operation: "release connection",
-          phase: "pool",
-        });
-        notifyPoolError(this.connectionOptions.onPoolError, normalized);
-      }
-    }
-  };
+
+        if (!this.tenantId && !this.accessRole) {
+          try {
+            return (await pool.query(text, params)).rows;
+          } catch (error) {
+            throw normalizePostgresError(error, {
+              operation: "query",
+              phase: "query",
+              indeterminate: true,
+            });
+          }
+        }
+
+        let client: PostgresPoolClient;
+        try {
+          client = await pool.connect();
+        } catch (error) {
+          throw normalizePostgresError(error, { operation: "query", phase: "connect" });
+        }
+
+        let phase: PostgresOperationPhase = "begin";
+        let transactionStarted = false;
+        let discardConnection: Error | undefined;
+        try {
+          await client.query("BEGIN");
+          transactionStarted = true;
+          phase = "configure";
+          if (this.accessRole) await client.query(`SET LOCAL ROLE ${this.accessRole}`);
+          const settings = [
+            `set_config('statement_timeout', $1, true)`,
+            `set_config('idle_in_transaction_session_timeout', $2, true)`,
+          ];
+          const values: unknown[] = [
+            String(this.connectionOptions.statementTimeoutMs),
+            String(this.connectionOptions.idleTransactionTimeoutMs),
+          ];
+          if (this.tenantId) {
+            settings.push(
+              `set_config('bursar.tenant_id', $3, true)`,
+              `set_config('bursar.usage_backend', $4, true)`,
+              `set_config('bursar.billing_payload_backend', $5, true)`,
+              `set_config('bursar.provider_environment', $6, true)`,
+            );
+            values.push(
+              this.tenantId,
+              this.usageBackend,
+              this.billingPayloadBackend,
+              this.providerEnvironment,
+            );
+          }
+          await client.query(`SELECT ${settings.join(", ")}`, values);
+          phase = "query";
+          const result = await client.query(text, params);
+          phase = "commit";
+          await client.query("COMMIT");
+          transactionStarted = false;
+          return result.rows;
+        } catch (error) {
+          const failedPhase = phase;
+          let rollbackFailed = false;
+          if (transactionStarted) {
+            try {
+              phase = "rollback";
+              await client.query("ROLLBACK");
+              transactionStarted = false;
+            } catch (rollbackError) {
+              rollbackFailed = true;
+              discardConnection =
+                rollbackError instanceof Error
+                  ? rollbackError
+                  : new Error("PostgreSQL rollback failed", { cause: rollbackError });
+            }
+          }
+          const normalized = normalizePostgresError(error, {
+            operation: "query",
+            phase: failedPhase,
+            indeterminate: failedPhase === "query" || failedPhase === "commit",
+            rollbackFailed,
+          });
+          throw normalized;
+        } finally {
+          try {
+            client.release(discardConnection);
+          } catch (releaseError) {
+            const normalized = normalizePostgresError(releaseError, {
+              operation: "release connection",
+              phase: "pool",
+            });
+            notifyPoolError(this.connectionOptions.onPoolError, normalized);
+          }
+        }
+      },
+    );
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;

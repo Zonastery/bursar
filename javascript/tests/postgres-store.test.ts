@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import type { PgPool, PgPoolConstructor } from "../src/credits/postgres/store.js";
 import { PostgresStore as BasePostgresStore } from "../src/credits/postgres/store.js";
 import { PostgresBillingStore as BasePostgresBillingStore } from "../src/billing/postgres/store.js";

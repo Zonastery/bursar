@@ -75,12 +75,13 @@ budgets, and cancellation. The default classifier retries only errors marked
 
 ## Entry points
 
-| Subpath                         | Contents                                                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `@zonastery/bursar`             | The application API: facade, stores, `PricingEngine`, config, errors                                                            |
-| `@zonastery/bursar/node`        | Node-only: `loadPricingFile`, `BursarRuntime`/`createBursarRuntime`, `OutboxWorker`, `ClickHouseUsageStore`, `S3BillingArchive` |
-| `@zonastery/bursar/browser`     | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`)                             |
-| `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock)                                                                                  |
+| Subpath                           | Contents                                                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `@zonastery/bursar`               | The application API: facade, stores, `PricingEngine`, config, errors                                         |
+| `@zonastery/bursar/node`          | Node-only: `loadConfigFile`, runtime, maintenance, diagnostics, outbox recovery, ClickHouse, and S3 adapters |
+| `@zonastery/bursar/browser`       | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`)          |
+| `@zonastery/bursar/opentelemetry` | Optional API-only OpenTelemetry adapter; the embedding application owns providers and exporters              |
+| `@zonastery/bursar/providers/*`   | Payment-provider adapters (Stripe, Dodo, mock)                                                               |
 
 The root and `node` entry points are server-only and depend on Node built-ins;
 `browser` contains no database stores or Node-only dependencies and is safe

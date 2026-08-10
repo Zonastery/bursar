@@ -2,10 +2,12 @@
  * DB-backed commerce integration tests for the JavaScript SDK.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
 import pg from "pg";
 import { Bursar } from "../src/bursar.js";
 import { PostgresBillingStore } from "../src/billing/index.js";
+import { CheckoutConflictError } from "../src/commerce/index.js";
+import type { CreateCheckoutInput } from "../src/commerce/index.js";
 import type { BursarConfigData } from "../src/config.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import type {
@@ -23,7 +25,7 @@ import type {
 } from "../src/providers/types.js";
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
+const DATABASE_URL = inject("DATABASE_URL");
 
 const USER_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID2 = "00000000-0000-0000-0000-000000000002";
@@ -153,6 +155,7 @@ const CONFIG = {
 
 class IntegrationProvider implements PaymentProvider {
   readonly provider = "stripe";
+  readonly checkoutParams: CheckoutParams[] = [];
   readonly charges: SavedPaymentChargeResult[] = [
     {
       providerPaymentId: "auto_pay_processing",
@@ -171,6 +174,7 @@ class IntegrationProvider implements PaymentProvider {
   ];
 
   async createCheckoutSession(params: CheckoutParams): Promise<CheckoutSessionResult> {
+    this.checkoutParams.push(params);
     return {
       url: params.returnUrl,
       providerSessionId: `session_${params.idempotencyKey ?? "checkout"}`,
@@ -238,6 +242,26 @@ class IntegrationProvider implements PaymentProvider {
       provider: this.provider,
       eventId: "evt_webhook_1",
       eventType: "payment.succeeded",
+    };
+  }
+}
+
+class ConcurrentCheckoutProvider extends IntegrationProvider {
+  private arrivals = 0;
+  private release!: () => void;
+  private readonly gate = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  override async createCheckoutSession(params: CheckoutParams): Promise<CheckoutSessionResult> {
+    this.checkoutParams.push(params);
+    this.arrivals += 1;
+    if (this.arrivals === 2) this.release();
+    await this.gate;
+    return {
+      url: params.returnUrl,
+      providerSessionId: `session_${params.idempotencyKey ?? "checkout"}`,
+      customerId: CUSTOMER_ID,
     };
   }
 }
@@ -329,6 +353,226 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
     const overview = await bursar.commerce!.getAccountOverview(USER_ID);
     expect(overview.credits.ledgerBalance.toString()).toBe("100");
     expect(overview.transactions[0]?.entryType).toBe("purchase");
+  });
+
+  it("binds checkout replays to one operation key before another provider call", async () => {
+    const { bursar, provider } = await makeBursar(pool);
+    expect(bursar.commerce).not.toBeNull();
+    const checkout = (overrides: Partial<CreateCheckoutInput> = {}) =>
+      bursar.commerce!.createCheckout({
+        subjectId: USER_ID,
+        accountId: USER_ID,
+        offerKey: "standard_topup",
+        quantity: 1,
+        returnUrl: "https://app.example/return?intent={intentId}",
+        cancelUrl: "https://app.example/cancel?intent={intentId}",
+        operationKey: "checkout-operation-replay",
+        ...overrides,
+      });
+
+    const first = await checkout();
+    await expect(checkout()).resolves.toEqual(first);
+    expect(provider.checkoutParams).toHaveLength(1);
+
+    await expect(checkout({ accountId: USER_ID2 })).rejects.toBeInstanceOf(CheckoutConflictError);
+    await expect(checkout({ quantity: 2 })).rejects.toBeInstanceOf(CheckoutConflictError);
+    await expect(checkout({ offerKey: "pro_month", quantity: 1 })).rejects.toBeInstanceOf(
+      CheckoutConflictError,
+    );
+    expect(provider.checkoutParams).toHaveLength(1);
+
+    const independent = await checkout({ operationKey: "checkout-operation-independent" });
+    expect(independent.intentId).not.toBe(first.intentId);
+    expect(provider.checkoutParams).toHaveLength(2);
+
+    const persisted = await pool.query<{
+      operation_key: string;
+      request_digest: string;
+      count: string;
+    }>(
+      `SELECT operation_key,
+              encode(request_digest, 'hex') AS request_digest,
+              count(*)::text AS count
+       FROM bursar.billing_checkout_intents
+       WHERE subject_id = $1::uuid
+       GROUP BY operation_key, request_digest
+       ORDER BY operation_key`,
+      [USER_ID],
+    );
+    expect(persisted.rows).toEqual([
+      {
+        operation_key: "checkout-operation-independent",
+        request_digest: "685d7d08850ce95a0ce0a59dacba601f7b1dcaea192d215aa147319a74c628f3",
+        count: "1",
+      },
+      {
+        operation_key: "checkout-operation-replay",
+        request_digest: "685d7d08850ce95a0ce0a59dacba601f7b1dcaea192d215aa147319a74c628f3",
+        count: "1",
+      },
+    ]);
+  });
+
+  it.each([
+    {
+      failurePoint: "intent" as const,
+      operationKey: "checkout-intent-persistence-recovery",
+      failureMessage: "injected checkout persistence failure",
+    },
+    {
+      failurePoint: "customer" as const,
+      operationKey: "checkout-customer-persistence-recovery",
+      failureMessage: "injected customer persistence failure",
+    },
+  ])(
+    "recovers the same open intent after provider success and a transient $failurePoint persistence failure",
+    async ({ failurePoint, operationKey, failureMessage }) => {
+      const { bursar, billingStore, provider } = await makeBursar(pool);
+      expect(bursar.commerce).not.toBeNull();
+      const failingWrite =
+        failurePoint === "intent"
+          ? vi.spyOn(billingStore, "updateCheckoutIntent")
+          : vi.spyOn(billingStore, "upsertBillingCustomer");
+      failingWrite.mockRejectedValueOnce(new Error(failureMessage));
+      const input = {
+        subjectId: USER_ID,
+        accountId: USER_ID,
+        offerKey: "standard_topup",
+        returnUrl: "https://app.example/return?intent={intentId}",
+        cancelUrl: "https://app.example/cancel?intent={intentId}",
+        operationKey,
+      } satisfies CreateCheckoutInput;
+
+      await expect(bursar.commerce!.createCheckout(input)).rejects.toThrow(failureMessage);
+      expect(provider.checkoutParams).toHaveLength(1);
+
+      const afterFailure = await pool.query<{
+        id: string;
+        status: string;
+        provider_session_id: string | null;
+        checkout_url: string | null;
+      }>(
+        `SELECT id, status, provider_session_id, checkout_url
+       FROM bursar.billing_checkout_intents
+       WHERE subject_id = $1::uuid
+         AND operation_key = $2`,
+        [USER_ID, input.operationKey],
+      );
+      expect(afterFailure.rows).toEqual([
+        {
+          id: expect.any(String),
+          status: "open",
+          provider_session_id: null,
+          checkout_url: null,
+        },
+      ]);
+      const customerAfterFailure = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+       FROM bursar.billing_customers
+       WHERE subject_id = $1::uuid`,
+        [USER_ID],
+      );
+      expect(customerAfterFailure.rows).toEqual([{ count: failurePoint === "intent" ? "1" : "0" }]);
+
+      const recovered = await bursar.commerce!.createCheckout(input);
+      expect(recovered.intentId).toBe(afterFailure.rows[0]!.id);
+      expect(provider.checkoutParams).toHaveLength(2);
+      expect(provider.checkoutParams.map((params) => params.idempotencyKey)).toEqual([
+        input.operationKey,
+        input.operationKey,
+      ]);
+      expect(new Set(provider.checkoutParams.map((params) => params.returnUrl))).toEqual(
+        new Set([recovered.url]),
+      );
+
+      await expect(
+        billingStore.updateCheckoutIntent(recovered.intentId, { status: "completed" }),
+      ).resolves.toBeUndefined();
+      const afterRecovery = await pool.query<{
+        status: string;
+        provider_session_id: string | null;
+        checkout_url: string | null;
+      }>(
+        `SELECT status, provider_session_id, checkout_url
+       FROM bursar.billing_checkout_intents
+       WHERE id = $1::uuid`,
+        [recovered.intentId],
+      );
+      expect(afterRecovery.rows).toEqual([
+        {
+          status: "completed",
+          provider_session_id: `session_${input.operationKey}`,
+          checkout_url: recovered.url,
+        },
+      ]);
+      const customerAfterRecovery = await pool.query<{
+        provider_customer_id: string;
+        count: string;
+      }>(
+        `SELECT min(provider_customer_id) AS provider_customer_id,
+              count(*)::text AS count
+       FROM bursar.billing_customers
+       WHERE subject_id = $1::uuid`,
+        [USER_ID],
+      );
+      expect(customerAfterRecovery.rows).toEqual([
+        { provider_customer_id: CUSTOMER_ID, count: "1" },
+      ]);
+    },
+  );
+
+  it("converges concurrent same-key checkouts on one persisted provider session", async () => {
+    const provider = new ConcurrentCheckoutProvider();
+    const { bursar } = await makeBursar(pool, provider);
+    expect(bursar.commerce).not.toBeNull();
+    const input = {
+      subjectId: USER_ID,
+      accountId: USER_ID,
+      offerKey: "standard_topup",
+      returnUrl: "https://app.example/return?intent={intentId}",
+      cancelUrl: "https://app.example/cancel?intent={intentId}",
+      operationKey: "checkout-concurrent-replay",
+    } satisfies CreateCheckoutInput;
+
+    const [first, second] = await Promise.all([
+      bursar.commerce!.createCheckout(input),
+      bursar.commerce!.createCheckout(input),
+    ]);
+
+    expect(second).toEqual(first);
+    expect(provider.checkoutParams).toHaveLength(2);
+    expect(new Set(provider.checkoutParams.map((params) => params.idempotencyKey))).toEqual(
+      new Set([input.operationKey]),
+    );
+    expect(new Set(provider.checkoutParams.map((params) => params.returnUrl))).toEqual(
+      new Set([first.url]),
+    );
+    const persisted = await pool.query<{
+      id: string;
+      status: string;
+      provider_session_id: string;
+      checkout_url: string;
+      count: string;
+    }>(
+      `SELECT min(id::text) AS id,
+              min(status) AS status,
+              min(provider_session_id) AS provider_session_id,
+              min(checkout_url) AS checkout_url,
+              count(*)::text AS count
+       FROM bursar.billing_checkout_intents
+       WHERE subject_id = $1::uuid
+         AND operation_key = $2`,
+      [USER_ID, input.operationKey],
+    );
+    expect(persisted.rows).toEqual([
+      {
+        id: first.intentId,
+        status: "open",
+        provider_session_id: `session_${input.operationKey}`,
+        checkout_url: first.url,
+        count: "1",
+      },
+    ]);
   });
 
   it("manages active subscription portal, scheduled plan change, and cancellation", async () => {

@@ -294,16 +294,32 @@ class SubscriptionGrant(BaseModel):
 
 
 class BillingEventClaim(BaseModel):
-    status: Literal["claimed", "duplicate", "busy", "retry"]
+    status: Literal[
+        "claimed",
+        "duplicate",
+        "busy",
+        "invalid_request",
+        "idempotency_conflict",
+        "max_retries_exceeded",
+        "retry",
+    ]
     claim_token: str | None = None
     billing_event_id: str | None = None
 
     @model_validator(mode="after")
     def validate_claim(self) -> "BillingEventClaim":
-        if self.status == "claimed" and (self.claim_token is None or self.billing_event_id is None):
-            raise ValueError("claimed billing event requires claim_token and billing_event_id")
-        if self.status != "claimed" and (self.claim_token is not None or self.billing_event_id is not None):
-            raise ValueError("non-claimed billing event cannot include claim identifiers")
+        if self.status == "claimed":
+            if self.claim_token is None or self.billing_event_id is None:
+                raise ValueError("claimed billing event requires claim_token and billing_event_id")
+            return self
+        if self.claim_token is not None:
+            raise ValueError("non-claimed billing event cannot include a claim_token")
+        if self.status in {"idempotency_conflict", "max_retries_exceeded"}:
+            if self.billing_event_id is None:
+                raise ValueError("stored billing event outcome requires billing_event_id")
+            return self
+        if self.billing_event_id is not None:
+            raise ValueError("unstored billing event outcome cannot include billing_event_id")
         return self
 
 

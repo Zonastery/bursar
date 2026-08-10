@@ -2,12 +2,14 @@ import Stripe from "stripe";
 import type { BillingEventSink } from "../../bursar.js";
 import type {
   BillingCustomerInfo,
+  BillingDisputeInfo,
   BillingPaymentInfo,
   ProviderRef,
   BillingSubscriptionInfo,
   BillingSubscriptionStatus,
 } from "../../billing/types/index.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
+import { persistedDiagnosticSummary } from "../../shared/diagnostics.js";
 import {
   callBillingEventSink,
   requireCurrency,
@@ -16,6 +18,13 @@ import {
 } from "../_shared.js";
 
 const STRIPE_CHECKOUT_EXPAND = ["line_items"] as const;
+
+const STRIPE_SUBSCRIPTION_LIFECYCLE_EVENTS = {
+  "customer.subscription.created": "subscription.created",
+  "customer.subscription.paused": "subscription.paused",
+  "customer.subscription.resumed": "subscription.resumed",
+  "customer.subscription.trial_will_end": "subscription.trial_will_end",
+} as const;
 
 function timestamp(value: number | null | undefined): string | null {
   return value == null ? null : new Date(value * 1000).toISOString();
@@ -159,6 +168,26 @@ function invoiceTaxMinor(invoice: Stripe.Invoice): number {
   );
 }
 
+function stripeDisputeStatus(status: Stripe.Dispute.Status): BillingDisputeInfo["status"] {
+  switch (status) {
+    case "needs_response":
+    case "warning_needs_response":
+      return "needs_response";
+    case "under_review":
+    case "warning_under_review":
+      return "under_review";
+    case "won":
+    case "prevented":
+      return "won";
+    case "lost":
+      return "lost";
+    case "warning_closed":
+      return "closed";
+    default:
+      throw new TypeError(`Unsupported Stripe dispute status: ${status}`);
+  }
+}
+
 export async function handleStripeWebhook(
   event: Stripe.Event,
   sink: BillingEventSink,
@@ -259,6 +288,26 @@ export async function handleStripeWebhook(
         break;
       }
 
+      case "customer.subscription.created":
+      case "customer.subscription.paused":
+      case "customer.subscription.resumed":
+      case "customer.subscription.trial_will_end": {
+        const subscription = event.data.object as Stripe.Subscription;
+        await callBillingEventSink(sink, {
+          provider: "stripe",
+          eventId: event.id,
+          eventType: STRIPE_SUBSCRIPTION_LIFECYCLE_EVENTS[event.type],
+          occurredAt,
+          accountId: subscription.metadata?.bursar_account_id,
+          customer: {
+            providerCustomerId: customerId(subscription.customer),
+          },
+          subscription: subscriptionInfo(subscription),
+          metadata: subscription.metadata,
+        });
+        break;
+      }
+
       case "customer.subscription.updated": {
         const subscription = event.data.object as Stripe.Subscription;
         const eventType =
@@ -305,18 +354,20 @@ export async function handleStripeWebhook(
       }
 
       case "payment_intent.succeeded":
-      case "payment_intent.payment_failed": {
+      case "payment_intent.payment_failed":
+      case "payment_intent.canceled": {
         const intent = event.data.object as Stripe.PaymentIntent;
         const metadata = intent.metadata ?? {};
         if (!metadata.auto_recharge_attempt_id) break;
         const succeeded = event.type === "payment_intent.succeeded";
+        const canceled = event.type === "payment_intent.canceled";
         const payment: BillingPaymentInfo = {
           providerPaymentId: intent.id,
           amountMinor: requireMinorUnits(intent.amount, "Stripe payment intent.amount"),
           taxMinor: 0,
           currency: requireCurrency(intent.currency, "Stripe payment intent.currency"),
           purpose: "credit_topup",
-          status: succeeded ? "succeeded" : "failed",
+          status: succeeded ? "succeeded" : canceled ? "canceled" : "failed",
           refs: {
             productId: metadata.product_id,
             priceId: metadata.price_id,
@@ -330,6 +381,32 @@ export async function handleStripeWebhook(
           accountId: metadata.bursar_account_id,
           payment,
           metadata,
+        });
+        break;
+      }
+
+      case "charge.dispute.created":
+      case "charge.dispute.updated":
+      case "charge.dispute.closed": {
+        const dispute = event.data.object as Stripe.Dispute;
+        const providerPaymentId =
+          expandableId(dispute.payment_intent) ?? expandableId(dispute.charge);
+        await callBillingEventSink(sink, {
+          provider: "stripe",
+          eventId: event.id,
+          eventType: event.type === "charge.dispute.closed" ? "dispute.closed" : "dispute.created",
+          occurredAt,
+          accountId: dispute.metadata?.bursar_account_id,
+          dispute: {
+            providerDisputeId: dispute.id,
+            providerPaymentId: requireProviderString(
+              providerPaymentId,
+              "Stripe dispute payment identifier",
+            ),
+            status: stripeDisputeStatus(dispute.status),
+            reason: dispute.reason,
+          },
+          metadata: dispute.metadata,
         });
         break;
       }
@@ -456,7 +533,7 @@ export async function handleStripeWebhook(
     log.error("Stripe webhook processing failed", {
       eventId: event.id,
       eventType: event.type,
-      err,
+      err: persistedDiagnosticSummary(err, "webhook_processing_failed"),
     });
     throw err;
   }

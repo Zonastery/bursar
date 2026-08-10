@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { loadConfigFromDict } from "../config.js";
 import {
   AutoRechargeDisabledError,
@@ -15,6 +15,7 @@ import type {
 } from "../providers/types.js";
 import type { AutoRechargeBillingPort } from "./auto-recharge-port.js";
 import { resolveAutoRechargeWindow } from "./policy-window.js";
+import { persistedDiagnosticSummary } from "../shared/diagnostics.js";
 
 export type AutoRechargeOutcome =
   | "not_configured"
@@ -289,7 +290,7 @@ export class AutoRechargeService {
         id: attempt.id,
         state: "unknown",
         failureCode: "provider_request_failed",
-        failureMessage: error instanceof Error ? error.message : String(error),
+        failureMessage: persistedDiagnosticSummary(error, "auto_recharge_provider_failed"),
       });
       throw error;
     }

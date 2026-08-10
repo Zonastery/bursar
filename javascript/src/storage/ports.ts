@@ -11,7 +11,11 @@ export interface OutboxEvent {
   createdAt: string;
 }
 
-export interface OutboxStore {
+export interface OutboxClaimRenewalStore {
+  renew(event: OutboxEvent, leaseSeconds: number): Promise<boolean>;
+}
+
+export interface OutboxStore extends OutboxClaimRenewalStore {
   claim(topics: readonly string[], limit: number, leaseSeconds: number): Promise<OutboxEvent[]>;
   complete(event: OutboxEvent): Promise<boolean>;
   fail(
@@ -20,6 +24,48 @@ export interface OutboxStore {
     retryDelaySeconds: number,
     attemptLimit: number,
   ): Promise<boolean>;
+}
+
+export interface OutboxStats {
+  pendingCount: number;
+  processingCount: number;
+  deliveredCount: number;
+  deadLetterCount: number;
+  oldestPendingAt: string | null;
+}
+
+export interface OutboxDeadLetterCursor {
+  createdAt: string;
+  eventId: string;
+}
+
+export interface OutboxDeadLetter {
+  eventId: string;
+  tenantId: string;
+  topic: string;
+  aggregateType: string;
+  aggregateId: string;
+  payloadVersion: number;
+  attemptCount: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OutboxDeadLetterListOptions {
+  limit?: number;
+  cursor?: OutboxDeadLetterCursor | null;
+}
+
+export interface OutboxDeadLetterPage {
+  items: OutboxDeadLetter[];
+  nextCursor: OutboxDeadLetterCursor | null;
+}
+
+export interface OutboxRecoveryStore extends OutboxStore {
+  stats(): Promise<OutboxStats>;
+  listDeadLetters(options?: OutboxDeadLetterListOptions): Promise<OutboxDeadLetterPage>;
+  requeue(eventId: string): Promise<boolean>;
 }
 
 export interface OutboxHandler {
@@ -74,7 +120,10 @@ export interface BillingEventPayloadExport {
 
 export interface UsageEventSink {
   initialize?(): Promise<void>;
+  /** Non-mutating compatibility check for a caller-managed projection schema. */
+  checkSchemaCompatibility?(): Promise<void>;
   writeUsage(event: UsageChargeExport, outboxEventId: string): Promise<void>;
+  writeUsageBatch?(entries: readonly (readonly [UsageChargeExport, string])[]): Promise<void>;
 }
 
 export interface BillingPayloadArchiveResult {

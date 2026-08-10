@@ -13,6 +13,7 @@ from bursar.billing.types import BillingEventResult, BillingEventType, BillingSu
 from bursar.providers.dodo.event_mapper import _normalize_date
 from tests.dodo_fixtures import (
     DODO_DISPUTE_OPENED,
+    DODO_DISPUTE_WON_CLOSED,
     DODO_ISO_DATE,
     DODO_JS_DATE,
     DODO_PAYMENT_FAILED,
@@ -228,6 +229,20 @@ async def test_subscription_on_hold_to_updated_with_past_due(sink):
 
 
 @pytest.mark.asyncio
+async def test_subscription_paused_to_subscription_paused(sink):
+    payload = {
+        **DODO_SUBSCRIPTION_ON_HOLD,
+        "subscription_id": "sub_dodo_paused_001",
+        "status": "paused",
+    }
+    await map_dodo_event("subscription.paused", payload, "user_1", {}, sink)
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == BillingEventType.subscription_paused
+    assert event.subscription.provider_subscription_id == "sub_dodo_paused_001"
+    assert event.subscription.status == BillingSubscriptionStatus.paused
+
+
+@pytest.mark.asyncio
 async def test_subscription_plan_changed_with_product_id(sink):
     await map_dodo_event(
         "subscription.plan_changed",
@@ -262,6 +277,14 @@ async def test_payment_failed(sink):
 
 
 @pytest.mark.asyncio
+async def test_payment_cancelled_to_terminal_canceled_payment(sink):
+    await map_dodo_event("payment.cancelled", DODO_PAYMENT_FAILED, "user_1", {}, sink)
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == BillingEventType.payment_failed
+    assert event.payment.status == "canceled"
+
+
+@pytest.mark.asyncio
 async def test_refund_succeeded_to_refund_created(sink):
     await map_dodo_event("refund.succeeded", DODO_REFUND_SUCCEEDED, None, {}, sink)
     call = sink.ingest_billing_event.call_args
@@ -279,7 +302,18 @@ async def test_dispute_opened(sink):
     assert call[0][0].event_type == BillingEventType.dispute_created
 
 
-# dispute.won/lost/etc → dispute.closed routing is in the JS mapper only (Python mapper doesn't have it yet).
+@pytest.mark.asyncio
+async def test_dispute_won_to_dispute_closed(sink):
+    await map_dodo_event("dispute.won", DODO_DISPUTE_WON_CLOSED, None, {}, sink)
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == BillingEventType.dispute_closed
+    assert event.dispute.status == "won"
+
+
+@pytest.mark.asyncio
+async def test_legacy_dispute_closed_is_not_accepted(sink):
+    await map_dodo_event("dispute.closed", DODO_DISPUTE_WON_CLOSED, None, {}, sink)
+    sink.ingest_billing_event.assert_not_called()
 
 
 @pytest.mark.asyncio

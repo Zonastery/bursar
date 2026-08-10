@@ -133,6 +133,7 @@ from bursar.metrics import UsageMetrics
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
 from bursar.shared.idempotency import require_stable_key, scope_stable_key
 from bursar.shared.logger import NormalizedLogger, normalize_logger
+from bursar.telemetry import Instrumentation, get_default_instrumentation
 
 #: Default lease TTL (seconds) for ``reserve`` and ``run_billed``.
 #: Long batch/agentic jobs call :meth:`CreditsService.renew` before this elapses.
@@ -223,6 +224,7 @@ class CreditsService:
         if policy not in POLICY_PRESETS:
             raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
         self._store = store
+        self._instrumentation: Instrumentation = options.instrumentation or get_default_instrumentation()
         self._analytics = analytics or store
         self._usage_store = usage_store or store
         self._engine = engine
@@ -547,6 +549,32 @@ class CreditsService:
         expires_at: datetime | None = None,
         bucket: str | None = None,
     ) -> AddCreditsResult:
+        """Add credits and instrument the complete grant boundary."""
+        return self._instrumentation.run(
+            "credits.grant",
+            None,
+            lambda: self._add_credits_uninstrumented(
+                user_id,
+                amount,
+                idempotency_key=idempotency_key,
+                entry_type=entry_type,
+                metadata=metadata,
+                expires_at=expires_at,
+                bucket=bucket,
+            ),
+        )
+
+    def _add_credits_uninstrumented(
+        self,
+        user_id: str,
+        amount: ExactAmount,
+        *,
+        idempotency_key: str,
+        entry_type: str = "adjustment",
+        metadata: CreditMetadata | None = None,
+        expires_at: datetime | None = None,
+        bucket: str | None = None,
+    ) -> AddCreditsResult:
         """Add credits to a user's account (``amount`` is a ``Decimal``).
 
         ``bucket`` is an optional bucket key to grant into (see
@@ -646,6 +674,19 @@ class CreditsService:
         return result
 
     def grant_subscription_cycle(
+        self,
+        user_id: str,
+        amount: ExactAmount,
+        options: GrantSubscriptionCycleOptions,
+    ) -> AddCreditsResult:
+        """Grant a subscription cycle and instrument the complete boundary."""
+        return self._instrumentation.run(
+            "credits.grant_subscription_cycle",
+            None,
+            lambda: self._grant_subscription_cycle_uninstrumented(user_id, amount, options),
+        )
+
+    def _grant_subscription_cycle_uninstrumented(
         self,
         user_id: str,
         amount: ExactAmount,
@@ -865,7 +906,11 @@ class CreditsService:
         request: ExecuteGrantProgramRequest,
     ) -> list[GrantProgramAwardResult]:
         """Execute an application-driven catalog grant program."""
-        return self._store.execute_grant_program(request)
+        return self._instrumentation.run(
+            "credits.grant_program",
+            None,
+            lambda: self._store.execute_grant_program(request),
+        )
 
     # ── Lease lifecycle: atomic admission ───────────────────────────────
 
@@ -1001,6 +1046,19 @@ class CreditsService:
         metrics_or_amount: MetricsOrAmount,
         options: ReserveOptions,
     ) -> LeaseResult:
+        """Reserve credits and instrument the complete admission boundary."""
+        return self._instrumentation.run(
+            "credits.reserve",
+            None,
+            lambda: self._reserve_uninstrumented(user_id, metrics_or_amount, options),
+        )
+
+    def _reserve_uninstrumented(
+        self,
+        user_id: str,
+        metrics_or_amount: MetricsOrAmount,
+        options: ReserveOptions,
+    ) -> LeaseResult:
         """Atomically acquire a lease — the only authoritative admission control.
 
         Resolves the effective policy, enforces ``feature``, sizes the hold
@@ -1106,6 +1164,20 @@ class CreditsService:
         metrics_or_amount: MetricsOrAmount,
         options: SettleOptions | None = None,
     ) -> DeductionResult:
+        """Settle a reservation and instrument the complete charge boundary."""
+        return self._instrumentation.run(
+            "credits.settle",
+            None,
+            lambda: self._settle_uninstrumented(user_id, lease_id, metrics_or_amount, options),
+        )
+
+    def _settle_uninstrumented(
+        self,
+        user_id: str,
+        lease_id: str,
+        metrics_or_amount: MetricsOrAmount,
+        options: SettleOptions | None = None,
+    ) -> DeductionResult:
         """Charge the actual cost against a lease and finalize it.
 
         De-clamped: bills the full actual cost even if it exceeds the lease hold
@@ -1188,6 +1260,13 @@ class CreditsService:
 
     def release(self, user_id: str, lease_id: str) -> ReleaseResult:
         """Release a lease without charging; safe to repeat after failed or aborted work."""
+        return self._instrumentation.run(
+            "credits.release",
+            None,
+            lambda: self._release_uninstrumented(user_id, lease_id),
+        )
+
+    def _release_uninstrumented(self, user_id: str, lease_id: str) -> ReleaseResult:
         result = self._store.release_lease(user_id, lease_id)
         if result.released:
             self._emit(
@@ -1554,6 +1633,28 @@ class CreditsService:
         metadata: CreditMetadata | None = None,
         feature: str | None = None,
     ) -> DeductionResult:
+        """Deduct priced usage and instrument the complete charge boundary."""
+        return self._instrumentation.run(
+            "credits.deduct",
+            None,
+            lambda: self._deduct_uninstrumented(
+                user_id,
+                metrics,
+                idempotency_key=idempotency_key,
+                metadata=metadata,
+                feature=feature,
+            ),
+        )
+
+    def _deduct_uninstrumented(
+        self,
+        user_id: str,
+        metrics: UsageMetrics,
+        *,
+        idempotency_key: str,
+        metadata: CreditMetadata | None = None,
+        feature: str | None = None,
+    ) -> DeductionResult:
         """Calculate the cost and charge it in one atomic store transaction.
 
         The flow is thin: ``breakdown = engine.calculate(metrics)`` →
@@ -1707,6 +1808,28 @@ class CreditsService:
         )
 
     def refund_credits(
+        self,
+        entry_id: str,
+        *,
+        idempotency_key: str,
+        amount: ExactAmount | None = None,
+        reason: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> RefundResult:
+        """Refund a credit charge and instrument the complete boundary."""
+        return self._instrumentation.run(
+            "credits.refund",
+            None,
+            lambda: self._refund_credits_uninstrumented(
+                entry_id,
+                idempotency_key=idempotency_key,
+                amount=amount,
+                reason=reason,
+                metadata=metadata,
+            ),
+        )
+
+    def _refund_credits_uninstrumented(
         self,
         entry_id: str,
         *,

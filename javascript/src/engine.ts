@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 
 import { makeCostBreakdown } from "./breakdown.js";
 import type { CostBreakdown } from "./breakdown.js";

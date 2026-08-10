@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { BillingCapability, BillingEventSink } from "../billing/contracts.js";
 import type { BillingPreferences, BillingSubscriptionState } from "../billing/types/index.js";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { loadConfigFromDict } from "../config.js";
 import type {
   CommerceOffer,
@@ -34,6 +34,7 @@ import type {
 import { normalizeLogger } from "../shared/logger.js";
 import { requireStableKey, scopedStableKey } from "../shared/idempotency.js";
 import { normalizeProviderEnvironment } from "../providers/environment.js";
+import { persistedDiagnosticSummary } from "../shared/diagnostics.js";
 import {
   ActiveSubscriptionError,
   CheckoutCompletedError,
@@ -465,16 +466,15 @@ export class CommerceService {
       metadata.quantity = String(quantity);
     }
 
+    const digestValue = {
+      accountId: input.accountId,
+      checkoutKind: resolved.offer.type,
+      offerKey: resolved.offerKey,
+      provider: provider.provider,
+      quantity,
+    };
     const requestDigest = createHash("sha256")
-      .update(
-        JSON.stringify({
-          checkoutKind: resolved.offer.type,
-          offerKey: resolved.offerKey,
-          provider: provider.provider,
-          quantity,
-          accountId: input.accountId,
-        }),
-      )
+      .update(JSON.stringify(digestValue, Object.keys(digestValue).sort()))
       .digest("hex");
     const expiresAt = () =>
       new Date(
@@ -484,80 +484,90 @@ export class CommerceService {
       this.billing.createOrGetCheckoutIntent({
         subjectId: input.subjectId,
         provider: provider.provider,
+        operationKey: input.operationKey,
         checkoutKind: resolved.offer.type === "subscription" ? "subscription" : "credit_topup",
         productKey: resolved.offerKey,
         requestDigest,
         expiresAt: expiresAt(),
       });
 
-    let intent = await createIntent();
+    const intent = await createIntent();
     if (intent.requestDigest !== requestDigest) {
-      throw new CheckoutConflictError("A checkout is already in progress for a different offer");
+      throw new CheckoutConflictError(
+        "This operation key is already bound to a different checkout request",
+      );
+    }
+    if (intent.status === "completed") throw new CheckoutCompletedError();
+    if (intent.status !== "open") {
+      throw new CheckoutConflictError(
+        "This checkout operation is terminal; start a new checkout with a new operation key",
+      );
     }
     if (intent.checkoutUrl) {
       const locallyExpired = new Date(intent.expiresAt).getTime() <= Date.now();
-      if (!locallyExpired && (!intent.providerSessionId || !provider.getCheckoutSessionStatus)) {
+      if (locallyExpired) {
+        await this.billing.updateCheckoutIntent(intent.id, { status: "expired" });
         throw new CheckoutConflictError(
-          "A checkout is already in progress; continue it in the existing checkout window",
+          "This checkout operation expired; start a new checkout with a new operation key",
         );
       }
-      const providerState = locallyExpired
-        ? null
-        : await provider.getCheckoutSessionStatus!(intent.providerSessionId!);
-      if (providerState?.paymentStatus === "succeeded") {
-        await this.billing.updateCheckoutIntent(intent.id, { status: "completed" });
-        throw new CheckoutCompletedError();
-      }
-      if (
-        !locallyExpired &&
-        providerState !== null &&
-        !TERMINAL_CHECKOUT_STATUSES.has(providerState.paymentStatus ?? "")
-      ) {
-        throw new CheckoutConflictError(
-          "A checkout is already in progress; continue it in the existing checkout window",
-        );
-      }
-      await this.billing.updateCheckoutIntent(intent.id, {
-        status: providerState === null ? "expired" : "failed",
-      });
-      intent = await createIntent();
-    }
-
-    try {
-      const session = await provider.createCheckoutSession({
-        accountId: input.accountId,
-        ...(customer?.providerCustomerId ? { customerId: customer.providerCustomerId } : {}),
-        ...(input.email ? { email: input.email } : {}),
-        productId,
-        type: resolved.offer.type === "subscription" ? "subscription" : "credit_pack",
-        quantity,
-        returnUrl: checkoutRedirectUrl(input.returnUrl, intent.id),
-        cancelUrl: checkoutRedirectUrl(input.cancelUrl, intent.id),
-        metadata: { ...metadata, checkout_intent_id: intent.id },
-        idempotencyKey: input.operationKey,
-      });
-      await this.billing.updateCheckoutIntent(intent.id, {
-        providerSessionId: session.providerSessionId,
-        checkoutUrl: session.url,
-      });
-      if (session.customerId && session.customerId !== customer?.providerCustomerId) {
-        await this.billing.upsertCustomer(
-          provider.provider,
-          session.customerId,
-          input.accountId,
-          input.email ?? null,
-        );
+      if (intent.providerSessionId && provider.getCheckoutSessionStatus) {
+        const providerState = await provider.getCheckoutSessionStatus(intent.providerSessionId);
+        if (providerState?.paymentStatus === "succeeded") {
+          await this.billing.updateCheckoutIntent(intent.id, { status: "completed" });
+          throw new CheckoutCompletedError();
+        }
+        if (
+          providerState !== null &&
+          TERMINAL_CHECKOUT_STATUSES.has(providerState.paymentStatus ?? "")
+        ) {
+          await this.billing.updateCheckoutIntent(intent.id, { status: "failed" });
+          throw new CheckoutConflictError(
+            "This checkout operation is no longer active; start a new checkout with a new operation key",
+          );
+        }
       }
       return {
         intentId: intent.id,
-        url: session.url,
+        url: intent.checkoutUrl,
         provider: provider.provider,
         offerKey: resolved.offerKey,
       };
-    } catch (error) {
-      await this.billing.updateCheckoutIntent(intent.id, { status: "failed" });
-      throw error;
     }
+
+    const session = await provider.createCheckoutSession({
+      accountId: input.accountId,
+      ...(customer?.providerCustomerId ? { customerId: customer.providerCustomerId } : {}),
+      ...(input.email ? { email: input.email } : {}),
+      productId,
+      type: resolved.offer.type === "subscription" ? "subscription" : "credit_pack",
+      quantity,
+      returnUrl: checkoutRedirectUrl(input.returnUrl, intent.id),
+      cancelUrl: checkoutRedirectUrl(input.cancelUrl, intent.id),
+      metadata: { ...metadata, checkout_intent_id: intent.id },
+      idempotencyKey: input.operationKey,
+    });
+    // Complete every fallible local write before publishing the session on the
+    // intent. If either write fails, an exact replay reaches the provider with
+    // the same idempotency key and can repair the open intent.
+    if (session.customerId && session.customerId !== customer?.providerCustomerId) {
+      await this.billing.upsertCustomer(
+        provider.provider,
+        session.customerId,
+        input.accountId,
+        input.email ?? null,
+      );
+    }
+    await this.billing.updateCheckoutIntent(intent.id, {
+      providerSessionId: session.providerSessionId,
+      checkoutUrl: session.url,
+    });
+    return {
+      intentId: intent.id,
+      url: session.url,
+      provider: provider.provider,
+      offerKey: resolved.offerKey,
+    };
   }
 
   async getCheckoutStatus(input: { intentId: string; subjectId: string }) {
@@ -981,7 +991,7 @@ export class CommerceService {
       }
       await this.billing.updateBillingSubscriptionChange(change.id, {
         state: "failed",
-        errorMessage: failure instanceof Error ? failure.message : String(failure),
+        errorMessage: persistedDiagnosticSummary(failure, "subscription_change_failed"),
       });
       throw failure;
     }

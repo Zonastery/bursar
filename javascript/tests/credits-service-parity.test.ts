@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { makeCostBreakdown } from "../src/breakdown.js";

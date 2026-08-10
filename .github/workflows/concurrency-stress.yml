@@ -47,10 +47,10 @@ jobs:
         run: bun ci --ignore-scripts
       - name: Python race subset
         working-directory: python
-        run: pytest -m concurrency -q
+        run: pytest -m concurrency -q --count "$BURSAR_RACE_ITERATIONS"
       - name: JavaScript race subset
         working-directory: javascript
         run: |
-          for iteration in $(seq 1 20); do
+          for iteration in $(seq 1 "$BURSAR_RACE_ITERATIONS"); do
             bunx --no-install vitest run tests/store-integration.test.ts tests/billing-integration.test.ts -t concurrent
           done

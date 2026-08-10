@@ -369,4 +369,7 @@ export type BillingEventClaim =
   | { status: "claimed"; claimToken: string; billingEventId: string }
   | { status: "duplicate" }
   | { status: "busy" }
+  | { status: "invalid_request" }
+  | { status: "idempotency_conflict"; billingEventId: string }
+  | { status: "max_retries_exceeded"; billingEventId: string }
   | { status: "retry" };

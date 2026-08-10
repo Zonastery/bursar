@@ -20,6 +20,38 @@ BursarErrorCategory = Literal[
     "internal",
 ]
 
+BURSAR_ERROR_CODES = frozenset(
+    {
+        "AUTO_RECHARGE_DISABLED",
+        "AUTO_RECHARGE_NOT_CONFIGURED",
+        "BILLING_ERROR",
+        "BURSAR_ERROR",
+        "BURSAR_IMPORT_ERROR",
+        "CAPABILITY_NOT_CONFIGURED",
+        "CAPABILITY_NOT_SUPPORTED",
+        "CAP_REACHED",
+        "CATALOG_NOT_LOADED",
+        "CONCURRENCY_LIMIT_REACHED",
+        "CONFIG_ERROR",
+        "CREDIT_ERROR",
+        "EXPRESSION_ERROR",
+        "FEATURE_NOT_ENTITLED",
+        "INSUFFICIENT_CREDITS",
+        "LEASE_EXPIRED",
+        "LEASE_NOT_FOUND",
+        "OPERATION_NOT_ALLOWED",
+        "PAYMENT_METHOD_REQUIRED",
+        "PROVIDER_CAPABILITY_NOT_SUPPORTED",
+        "PROVIDER_RESPONSE_INVALID",
+        "QUOTA_EXCEEDED",
+        "REFUND_REJECTED",
+        "STORE_CLOSED",
+        "STORE_ERROR",
+        "STORE_TIMEOUT",
+        "STORE_UNAVAILABLE",
+    }
+)
+
 
 class BursarError(Exception):
     """Base exception for all Bursar errors."""

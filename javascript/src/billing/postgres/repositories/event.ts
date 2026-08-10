@@ -21,7 +21,39 @@ const BillingEventRowSchema = z
     event_id: postgresUuid.nullable(),
     claim_token: postgresUuid.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((row, ctx) => {
+    if (row.status === "claimed") {
+      if (row.event_id === null || row.claim_token === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "claimed billing event requires event_id and claim_token",
+        });
+      }
+      return;
+    }
+    if (row.claim_token !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "unclaimed billing event cannot expose a claim_token",
+      });
+    }
+    if (row.status === "invalid_request") {
+      if (row.event_id !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "invalid billing event request cannot identify a stored event",
+        });
+      }
+      return;
+    }
+    if (row.event_id === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "stored billing event outcome requires event_id",
+      });
+    }
+  });
 
 export type BillingEventRow = z.infer<typeof BillingEventRowSchema>;
 

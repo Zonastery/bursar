@@ -14,7 +14,8 @@ import difflib
 import json
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
@@ -83,11 +84,12 @@ def _retry_store_operation[T](op: Callable[[], T], *, what: str) -> T:
         raise SystemExit(1) from exc
 
 
+@contextmanager
 def _store_from_env(
     *,
     tenant_id: str | None = None,
-) -> CreditStore:
-    """Create the Postgres store from its required environment variables."""
+) -> Iterator[CreditStore]:
+    """Yield and deterministically close a tenant-scoped CLI store."""
     _require_extra("postgres")
     database_url = _database_url_from_env("DATABASE_URL")
     provider_environment = _provider_environment_from_env()
@@ -97,11 +99,15 @@ def _store_from_env(
         raise SystemExit(1)
     from bursar.credits.postgres.store import PostgresStore
 
-    return PostgresStore(
+    store = PostgresStore(
         database_url=database_url,
         tenant_id=resolved_tenant_id,
         provider_environment=provider_environment,
     )
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 # ── File loading ─────────────────────────────────────────────────────────────
@@ -183,7 +189,11 @@ def _provision_tenant(
     import psycopg2
 
     try:
-        with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+        with (
+            closing(psycopg2.connect(database_url)) as connection,
+            connection,
+            connection.cursor() as cursor,
+        ):
             cursor.execute("SET LOCAL ROLE bursar_operator")
             cursor.execute(
                 "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
@@ -235,7 +245,11 @@ def _cmd_tenant_status(args: argparse.Namespace) -> None:
     import psycopg2
 
     try:
-        with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+        with (
+            closing(psycopg2.connect(database_url)) as connection,
+            connection,
+            connection.cursor() as cursor,
+        ):
             cursor.execute("SET LOCAL ROLE bursar_operator")
             cursor.execute(
                 "SELECT bursar.set_tenant_status(%s::uuid, %s::text)",
@@ -314,25 +328,24 @@ def _set_config(
     label: str | None = None,
     rollout: dict[str, Any] | None = None,
 ) -> bool:
-    store = _store_from_env(tenant_id=tenant_id)
+    with _store_from_env(tenant_id=tenant_id) as store:
+        # Abort if identical to the currently active version to avoid pointless
+        # version churn. First-time setup always proceeds.
+        active = store.get_active_catalog()
+        if active is not None and data == active.config:
+            if rollout is not None and rollout.get("plans"):
+                _retry_store_operation(
+                    lambda: store.activate_catalog_revision(active.version, rollout),
+                    what="apply catalog rollout",
+                )
+                return True
+            return False
 
-    # Abort if identical to the currently active version to avoid pointless
-    # version churn. First-time setup always proceeds.
-    active = store.get_active_catalog()
-    if active is not None and data == active.config:
-        if rollout is not None and rollout.get("plans"):
-            _retry_store_operation(
-                lambda: store.activate_catalog_revision(active.version, rollout),
-                what="apply catalog rollout",
-            )
-            return True
-        return False
-
-    _retry_store_operation(
-        lambda: store.publish_and_activate_catalog(data, label=label, rollout=rollout),
-        what="publish catalog",
-    )
-    return True
+        _retry_store_operation(
+            lambda: store.publish_and_activate_catalog(data, label=label, rollout=rollout),
+            what="publish catalog",
+        )
+        return True
 
 
 def _cmd_config_set(args: argparse.Namespace) -> None:
@@ -375,8 +388,8 @@ def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_get(args: argparse.Namespace) -> None:
-    store = _store_from_env()
-    result = _retry_store_operation(store.get_active_catalog, what="get active catalog")
+    with _store_from_env() as store:
+        result = _retry_store_operation(store.get_active_catalog, what="get active catalog")
     if result is None:
         print("No active Bursar config.", file=sys.stderr)
         raise SystemExit(1)
@@ -384,8 +397,8 @@ def _cmd_config_get(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_list(args: argparse.Namespace) -> None:
-    store = _store_from_env()
-    rows = _retry_store_operation(store.get_catalog_history, what="list catalog revisions")
+    with _store_from_env() as store:
+        rows = _retry_store_operation(store.get_catalog_history, what="list catalog revisions")
     if not rows:
         print("No Bursar configs found.", file=sys.stderr)
         raise SystemExit(1)
@@ -396,22 +409,22 @@ def _cmd_config_list(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_activate(args: argparse.Namespace) -> None:
-    store = _store_from_env()
     rollout = _validated_rollout(args.rollout)
-    _retry_store_operation(
-        lambda: store.activate_catalog_revision(args.version, rollout),
-        what="activate catalog revision",
-    )
+    with _store_from_env() as store:
+        _retry_store_operation(
+            lambda: store.activate_catalog_revision(args.version, rollout),
+            what="activate catalog revision",
+        )
     print(f"Catalog revision {args.version} activated.")
 
 
 def _cmd_config_pin(args: argparse.Namespace) -> None:
-    store = _store_from_env()
     pinned = not args.unpin
-    changed = _retry_store_operation(
-        lambda: store.set_plan_revision_pin(args.subject_id, pinned),
-        what="update plan revision pin",
-    )
+    with _store_from_env() as store:
+        changed = _retry_store_operation(
+            lambda: store.set_plan_revision_pin(args.subject_id, pinned),
+            what="update plan revision pin",
+        )
     if not changed:
         print("No current plan assignment found.", file=sys.stderr)
         raise SystemExit(1)
@@ -420,19 +433,22 @@ def _cmd_config_pin(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_apply_due(args: argparse.Namespace) -> None:
-    store = _store_from_env()
-    applied = _retry_store_operation(
-        lambda: store.apply_due_plan_changes(args.limit),
-        what="apply due plan changes",
-    )
+    with _store_from_env() as store:
+        applied = _retry_store_operation(
+            lambda: store.apply_due_plan_changes(args.limit),
+            what="apply due plan changes",
+        )
     print(f"Applied {applied} due plan change(s).")
 
 
 def _cmd_config_export(args: argparse.Namespace) -> None:
     from bursar.config import BursarConfig
 
-    store = _store_from_env()
-    result = _retry_store_operation(lambda: store.get_catalog_revision(args.version), what="fetch catalog revision")
+    with _store_from_env() as store:
+        result = _retry_store_operation(
+            lambda: store.get_catalog_revision(args.version),
+            what="fetch catalog revision",
+        )
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
         raise SystemExit(1)
@@ -442,12 +458,12 @@ def _cmd_config_export(args: argparse.Namespace) -> None:
 def _cmd_config_diff(args: argparse.Namespace) -> None:
     from bursar.config import BursarConfig
 
-    store = _store_from_env()
+    with _store_from_env() as store:
 
-    def _fetch() -> tuple[CatalogRevision | None, CatalogRevision | None]:
-        return store.get_catalog_revision(args.version_a), store.get_catalog_revision(args.version_b)
+        def _fetch() -> tuple[CatalogRevision | None, CatalogRevision | None]:
+            return store.get_catalog_revision(args.version_a), store.get_catalog_revision(args.version_b)
 
-    a, b = _retry_store_operation(_fetch, what="fetch catalog revisions")
+        a, b = _retry_store_operation(_fetch, what="fetch catalog revisions")
     if a is None:
         print(f"Version {args.version_a} not found.", file=sys.stderr)
         raise SystemExit(1)

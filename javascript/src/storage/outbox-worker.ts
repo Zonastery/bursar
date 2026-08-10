@@ -1,7 +1,22 @@
 import { z } from "zod";
 
-import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
+import { persistedDiagnosticSummary } from "../shared/diagnostics.js";
 import type { OutboxEvent, OutboxHandler, OutboxStore } from "./ports.js";
+
+export type OutboxEventOutcomeStatus = "delivered" | "delivery_failed" | "claim_lost";
+export type OutboxClaimLossPhase = "heartbeat" | "complete" | "fail";
+
+export interface OutboxEventOutcome {
+  topic: string;
+  attemptCount: number;
+  status: OutboxEventOutcomeStatus;
+  /** Persistence-safe diagnostic summary; never a raw exception message. */
+  summary: string | null;
+  durationMs: number;
+  retryDelaySeconds: number | null;
+  deadLettered: boolean;
+  claimLossPhase: OutboxClaimLossPhase | null;
+}
 
 export interface OutboxWorkerOptions {
   batchSize?: number;
@@ -12,12 +27,15 @@ export interface OutboxWorkerOptions {
   maxRetryDelaySeconds?: number;
   attemptLimit?: number;
   onError?: (error: unknown) => void | Promise<void>;
+  onEventOutcome?: (outcome: OutboxEventOutcome) => void | Promise<void>;
 }
 
 export interface OutboxRunResult {
   claimed: number;
   delivered: number;
   failed: number;
+  /** Events that lost or could not prove ownership. */
+  claimLost: number;
 }
 
 const outboxWorkerOptionsSchema = z
@@ -28,11 +46,17 @@ const outboxWorkerOptionsSchema = z
     pollIntervalMs: z.number().finite().int().min(10).max(3_600_000).default(1_000),
     retryDelaySeconds: z.number().finite().int().min(1).max(86_400).default(30),
     maxRetryDelaySeconds: z.number().finite().int().min(1).max(86_400).default(3_600),
-    attemptLimit: z.number().finite().int().min(1).max(1_000).default(10),
+    attemptLimit: z.number().finite().int().min(1).max(100).default(10),
     onError: z
       .custom<(error: unknown) => void | Promise<void>>(
         (value) => typeof value === "function",
         "onError must be a function",
+      )
+      .optional(),
+    onEventOutcome: z
+      .custom<(outcome: OutboxEventOutcome) => void | Promise<void>>(
+        (value) => typeof value === "function",
+        "onEventOutcome must be a function",
       )
       .optional(),
   })
@@ -42,9 +66,22 @@ const outboxWorkerOptionsSchema = z
     message: "must be at least retryDelaySeconds",
   });
 
-type NormalizedWorkerOptions = Omit<z.infer<typeof outboxWorkerOptionsSchema>, "onError"> & {
+type NormalizedWorkerOptions = Omit<
+  z.infer<typeof outboxWorkerOptionsSchema>,
+  "onError" | "onEventOutcome"
+> & {
   onError: ((error: unknown) => void | Promise<void>) | null;
+  onEventOutcome: ((outcome: OutboxEventOutcome) => void | Promise<void>) | null;
 };
+
+interface ClaimHeartbeatResult {
+  claimLost: boolean;
+  summary: string | null;
+}
+
+interface ClaimHeartbeat {
+  stop(): Promise<ClaimHeartbeatResult>;
+}
 
 /**
  * Generic leased-outbox dispatcher.
@@ -68,6 +105,9 @@ export class OutboxWorker {
     options: OutboxWorkerOptions = {},
   ) {
     if (handlers.length === 0) throw new TypeError("OutboxWorker requires at least one handler");
+    if (typeof store.renew !== "function") {
+      throw new TypeError("OutboxWorker store must support claim renewal");
+    }
     const parsedOptions = outboxWorkerOptionsSchema.parse(options);
     this.store = store;
     for (const handler of handlers) {
@@ -85,6 +125,7 @@ export class OutboxWorker {
     this.options = {
       ...parsedOptions,
       onError: parsedOptions.onError ?? null,
+      onEventOutcome: parsedOptions.onEventOutcome ?? null,
     };
   }
 
@@ -132,47 +173,194 @@ export class OutboxWorker {
     }
   }
 
+  private reportOutcome(outcome: OutboxEventOutcome): void {
+    try {
+      const result = this.options.onEventOutcome?.(outcome);
+      if (result) void Promise.resolve(result).catch(() => {});
+    } catch {
+      // Per-event observers must never stop this or a later delivery.
+    }
+  }
+
   private async dispatchOnce(): Promise<OutboxRunResult> {
-    const events = await this.store.claim(
-      this.topics,
-      this.options.batchSize,
-      this.options.leaseSeconds,
-    );
-    const result: OutboxRunResult = { claimed: events.length, delivered: 0, failed: 0 };
-    let cursor = 0;
-    const consume = async (): Promise<void> => {
-      while (cursor < events.length) {
-        const event = events[cursor++];
-        if (!event) return;
-        const delivered = await this.dispatchEvent(event);
-        if (delivered) result.delivered += 1;
-        else result.failed += 1;
+    const result: OutboxRunResult = { claimed: 0, delivered: 0, failed: 0, claimLost: 0 };
+    let remainingBudget = this.options.batchSize;
+
+    while (remainingBudget > 0) {
+      const availableSlots = Math.min(this.options.concurrency, remainingBudget);
+      const events = await this.store.claim(this.topics, availableSlots, this.options.leaseSeconds);
+      if (events.length === 0) break;
+      if (events.length > availableSlots) {
+        throw new Error(
+          `Outbox store returned ${events.length} events for ${availableSlots} available slots`,
+        );
       }
-    };
-    const consumers = Math.min(this.options.concurrency, events.length);
-    await Promise.all(Array.from({ length: consumers }, () => consume()));
+
+      result.claimed += events.length;
+      remainingBudget -= events.length;
+      const outcomes = await Promise.all(events.map((event) => this.dispatchEvent(event)));
+      for (const outcome of outcomes) {
+        if (outcome === "delivered") result.delivered += 1;
+        else {
+          result.failed += 1;
+          if (outcome === "claim_lost") result.claimLost += 1;
+        }
+      }
+      if (events.length < availableSlots) break;
+    }
+
     return result;
   }
 
-  private async dispatchEvent(event: OutboxEvent): Promise<boolean> {
+  private async dispatchEvent(event: OutboxEvent): Promise<OutboxEventOutcomeStatus> {
+    const startedAt = Date.now();
+    const heartbeat = this.startHeartbeat(event);
+    let deliveryFailure: { error: unknown } | null = null;
     try {
       const handlers = this.handlers.get(event.topic);
       if (!handlers?.length) throw new Error(`No handler for outbox topic ${event.topic}`);
       await Promise.all(handlers.map((handler) => handler.handle(event)));
-      if (!(await this.store.complete(event))) {
-        throw new Error(`Lost outbox claim for event ${event.eventId}`);
-      }
-      return true;
     } catch (error) {
-      const message = boundedDiagnosticMessage(
-        error instanceof Error ? `${error.name}: ${error.message}` : error,
-        "outbox_delivery_failed",
-      );
-      const exponentialDelay =
-        this.options.retryDelaySeconds * 2 ** Math.max(event.attemptCount - 1, 0);
-      const retryDelay = Math.min(exponentialDelay, this.options.maxRetryDelaySeconds);
-      await this.store.fail(event, message, retryDelay, this.options.attemptLimit);
-      return false;
+      deliveryFailure = { error };
     }
+
+    const heartbeatResult = await heartbeat.stop();
+    if (heartbeatResult.claimLost) {
+      return this.claimLost(event, "heartbeat", heartbeatResult.summary, startedAt);
+    }
+    if (deliveryFailure) {
+      return this.failDelivery(event, deliveryFailure.error, startedAt);
+    }
+
+    try {
+      if (!(await this.store.complete(event))) {
+        return this.claimLost(
+          event,
+          "complete",
+          persistedDiagnosticSummary(null, "outbox_claim_lost"),
+          startedAt,
+        );
+      }
+    } catch (error) {
+      return this.claimLost(
+        event,
+        "complete",
+        persistedDiagnosticSummary(error, "outbox_claim_lost"),
+        startedAt,
+      );
+    }
+
+    this.reportOutcome({
+      topic: event.topic,
+      attemptCount: event.attemptCount,
+      status: "delivered",
+      summary: null,
+      durationMs: Math.max(Date.now() - startedAt, 0),
+      retryDelaySeconds: null,
+      deadLettered: false,
+      claimLossPhase: null,
+    });
+    return "delivered";
+  }
+
+  private async failDelivery(
+    event: OutboxEvent,
+    error: unknown,
+    startedAt: number,
+  ): Promise<OutboxEventOutcomeStatus> {
+    const summary = persistedDiagnosticSummary(error, "outbox_delivery_failed");
+    const exponentialDelay =
+      this.options.retryDelaySeconds * 2 ** Math.max(event.attemptCount - 1, 0);
+    const retryDelay = Math.min(exponentialDelay, this.options.maxRetryDelaySeconds);
+
+    try {
+      if (!(await this.store.fail(event, summary, retryDelay, this.options.attemptLimit))) {
+        return this.claimLost(event, "fail", summary, startedAt);
+      }
+    } catch (failureError) {
+      return this.claimLost(
+        event,
+        "fail",
+        persistedDiagnosticSummary(failureError, "outbox_claim_lost"),
+        startedAt,
+      );
+    }
+
+    this.reportOutcome({
+      topic: event.topic,
+      attemptCount: event.attemptCount,
+      status: "delivery_failed",
+      summary,
+      durationMs: Math.max(Date.now() - startedAt, 0),
+      retryDelaySeconds: retryDelay,
+      deadLettered: event.attemptCount >= this.options.attemptLimit,
+      claimLossPhase: null,
+    });
+    return "delivery_failed";
+  }
+
+  private claimLost(
+    event: OutboxEvent,
+    phase: OutboxClaimLossPhase,
+    summary: string | null,
+    startedAt: number,
+  ): OutboxEventOutcomeStatus {
+    this.reportOutcome({
+      topic: event.topic,
+      attemptCount: event.attemptCount,
+      status: "claim_lost",
+      summary: summary ?? persistedDiagnosticSummary(null, "outbox_claim_lost"),
+      durationMs: Math.max(Date.now() - startedAt, 0),
+      retryDelaySeconds: null,
+      deadLettered: false,
+      claimLossPhase: phase,
+    });
+    return "claim_lost";
+  }
+
+  private startHeartbeat(event: OutboxEvent): ClaimHeartbeat {
+    const intervalMs = Math.max(100, Math.floor((this.options.leaseSeconds * 1_000) / 3));
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let pending: Promise<void> | null = null;
+    let stopped = false;
+    let claimLost = false;
+    let heartbeatSummary: string | null = null;
+
+    const loseClaim = (error: unknown): void => {
+      claimLost = true;
+      heartbeatSummary = persistedDiagnosticSummary(error, "outbox_claim_lost");
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+
+    const schedule = (): void => {
+      if (stopped || claimLost) return;
+      timer = setTimeout(() => {
+        timer = null;
+        pending = Promise.resolve()
+          .then(async () => {
+            if (!(await this.store.renew(event, this.options.leaseSeconds))) {
+              loseClaim("outbox_claim_lost");
+            }
+          })
+          .catch((error: unknown) => loseClaim(error))
+          .finally(() => {
+            pending = null;
+            schedule();
+          });
+      }, intervalMs);
+      timer.unref?.();
+    };
+
+    schedule();
+    return {
+      stop: async () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (pending) await pending;
+        return { claimLost, summary: heartbeatSummary };
+      },
+    };
   }
 }

@@ -84,7 +84,7 @@ override them if your backend supports them. Billing is a separate hierarchy
 
 The package never applies SQL on construction — neither `PostgresStore` nor
 `Bursar` runs migrations. Apply the bundled migrations with the `bursar`
-CLI during deployment, before constructing any store:
+CLI during application setup, before constructing any store:
 
 ```bash title="Terminal"
 BURSAR_MIGRATION_DATABASE_URL=postgres://... bursar migrate

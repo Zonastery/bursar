@@ -9,7 +9,7 @@ import {
   safeParse,
 } from "../../../shared/postgres-validation.js";
 import { StoreError } from "../../../errors.js";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 
 const decimal = z.union([z.string().min(1), z.number().finite()] as const);
 const timestamp = z.union([z.string().min(1), z.date()] as const).transform((value, context) => {

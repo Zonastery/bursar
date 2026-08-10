@@ -38,6 +38,7 @@ from bursar.providers.types import (
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
+from bursar.shared.diagnostics import persisted_diagnostic_summary
 from bursar.shared.idempotency import require_stable_key, scope_stable_key
 from bursar.shared.numbers import MAX_SAFE_INTEGER
 
@@ -333,7 +334,10 @@ class StripeProvider:
                 event_type=None,
             )
         except stripe_mod.APIError as e:
-            self._logger.error("Stripe webhook temporarily unavailable", {"error": str(e)})
+            self._logger.error(
+                "Stripe webhook temporarily unavailable",
+                {"error": persisted_diagnostic_summary(e, "webhook_verification_unavailable")},
+            )
             return WebhookResult(
                 received=False,
                 retryable=True,
@@ -342,7 +346,10 @@ class StripeProvider:
                 event_type=None,
             )
         except Exception as e:
-            self._logger.warning("Stripe webhook verification failed", {"error": str(e)})
+            self._logger.warning(
+                "Stripe webhook verification failed",
+                {"error": persisted_diagnostic_summary(e, "webhook_verification_failed")},
+            )
             return WebhookResult(
                 received=False,
                 retryable=False,

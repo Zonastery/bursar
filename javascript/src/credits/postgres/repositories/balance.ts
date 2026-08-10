@@ -1,5 +1,5 @@
 import { z } from "zod";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
 import {
   pgBoolean,

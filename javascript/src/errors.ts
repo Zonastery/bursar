@@ -28,6 +28,44 @@ export interface StoreErrorOptions extends BursarErrorOptions {
   retryable?: boolean;
 }
 
+/** Bounded SDK-owned codes safe for diagnostics and low-cardinality telemetry. */
+export const BURSAR_ERROR_CODES = [
+  "AUTO_RECHARGE_DISABLED",
+  "AUTO_RECHARGE_NOT_CONFIGURED",
+  "BILLING_ERROR",
+  "BURSAR_ERROR",
+  "BURSAR_IMPORT_ERROR",
+  "CAPABILITY_NOT_CONFIGURED",
+  "CAPABILITY_NOT_SUPPORTED",
+  "CAP_REACHED",
+  "CATALOG_NOT_LOADED",
+  "CONCURRENCY_LIMIT_REACHED",
+  "CONFIG_ERROR",
+  "CREDIT_ERROR",
+  "EXPRESSION_ERROR",
+  "FEATURE_NOT_ENTITLED",
+  "INSUFFICIENT_CREDITS",
+  "LEASE_EXPIRED",
+  "LEASE_NOT_FOUND",
+  "OPERATION_NOT_ALLOWED",
+  "PAYMENT_METHOD_REQUIRED",
+  "PROVIDER_CAPABILITY_NOT_SUPPORTED",
+  "PROVIDER_RESPONSE_INVALID",
+  "QUOTA_EXCEEDED",
+  "REFUND_REJECTED",
+  "STORE_CLOSED",
+  "STORE_ERROR",
+  "STORE_TIMEOUT",
+  "STORE_UNAVAILABLE",
+] as const;
+
+export type BursarErrorCode = (typeof BURSAR_ERROR_CODES)[number];
+const BURSAR_ERROR_CODE_SET = new Set<string>(BURSAR_ERROR_CODES);
+
+export function isBursarErrorCode(value: unknown): value is BursarErrorCode {
+  return typeof value === "string" && BURSAR_ERROR_CODE_SET.has(value);
+}
+
 export interface SerializedBursarError {
   name: string;
   message: string;

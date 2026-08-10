@@ -1,6 +1,6 @@
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 
 import schema from "./generated/pricing-config.schema.json" with { type: "json" };
 import { ConfigError } from "./errors.js";

@@ -49,7 +49,7 @@ from bursar.billing.types import (
     CheckoutIntent,
 )
 from bursar.errors import StoreError
-from bursar.shared.diagnostics import bounded_diagnostic_message
+from bursar.shared.diagnostics import bounded_diagnostic_message, persisted_diagnostic_summary
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 
@@ -509,6 +509,22 @@ class BillingService:
             )
             return BillingEventResult(handled=False, error="claim_busy")
 
+        if claim.status in {
+            "invalid_request",
+            "idempotency_conflict",
+            "max_retries_exceeded",
+        }:
+            self._logger.warn(
+                "permanent billing event claim rejection",
+                {
+                    "provider": event.provider,
+                    "event_id": event.event_id,
+                    "billing_event_id": claim.billing_event_id,
+                    "status": claim.status,
+                },
+            )
+            return BillingEventResult(handled=False, error=claim.status)
+
         if claim.status == "retry":
             self._logger.warn(
                 "billing event retry — skipping",
@@ -534,6 +550,7 @@ class BillingService:
                 claim.claim_token,
                 message,
                 log_as_error=False,
+                trusted_code=True,
             )
             return result.model_copy(update={"error": message})
 
@@ -551,6 +568,7 @@ class BillingService:
                 event,
                 claim.claim_token,
                 "billing_event_completion_rejected",
+                trusted_code=True,
             )
         return result
 
@@ -561,8 +579,13 @@ class BillingService:
         error: object | None,
         *,
         log_as_error: bool = True,
+        trusted_code: bool = False,
     ) -> BillingEventResult:
-        message = bounded_diagnostic_message(error, "billing_event_processing_failed")
+        message = (
+            bounded_diagnostic_message(error, "billing_event_processing_failed")
+            if trusted_code
+            else persisted_diagnostic_summary(error, "billing_event_processing_failed")
+        )
         log = self._logger.error if log_as_error else self._logger.warn
         log(
             "failed to handle billing event",
@@ -636,7 +659,7 @@ class BillingService:
                 {
                     "provider": event.provider,
                     "event_id": event.event_id,
-                    "error": str(exc),
+                    "error": persisted_diagnostic_summary(exc, "billing_event_callback_failed"),
                 },
             )
 

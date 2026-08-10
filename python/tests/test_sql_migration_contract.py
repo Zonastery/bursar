@@ -27,6 +27,20 @@ def test_migration_files_are_contiguous_and_self_contained() -> None:
         assert content.endswith("\n"), path
 
 
+def test_checkout_rpc_owner_transfer_uses_a_transaction_scoped_schema_grant() -> None:
+    migration_sql = (SQL_DIR / "030_checkout_operation_idempotency.sql").read_text(encoding="utf-8")
+
+    grant_offset = migration_sql.index("GRANT CREATE ON SCHEMA bursar TO bursar_runtime;")
+    owner_offset = migration_sql.index(
+        "OWNER TO bursar_runtime;",
+        migration_sql.index("ALTER FUNCTION bursar.create_checkout_intent("),
+    )
+    revoke_offset = migration_sql.index("REVOKE CREATE ON SCHEMA bursar FROM bursar_runtime;")
+
+    assert grant_offset < owner_offset < revoke_offset
+    assert migration_sql.count("GRANT CREATE ON SCHEMA bursar TO bursar_runtime;") == 1
+
+
 def test_migration_ledger_exactly_matches_the_greenfield_baseline(
     pg_database_url: str,
 ) -> None:
@@ -48,6 +62,14 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
     )
     assert client_block is not None
     client_signatures = sorted(set(re.findall(r"'(bursar\.[^']+\([^']*\))'", client_block.group(1))))
+    # Migration 030 replaces the checkout RPC after the baseline security
+    # migration has transferred function ownership. Verify the current
+    # signature rather than requiring the intentionally dropped predecessor.
+    checkout_signature_v1 = "bursar.create_checkout_intent(uuid,text,text,text,bytea,timestamptz,text,text,text)"
+    checkout_signature_v2 = "bursar.create_checkout_intent(uuid,text,text,text,text,bytea,timestamptz,text,text,text)"
+    client_signatures = sorted(
+        checkout_signature_v2 if signature == checkout_signature_v1 else signature for signature in client_signatures
+    )
     assert client_signatures
 
     operator_signatures = (

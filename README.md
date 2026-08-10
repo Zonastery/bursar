@@ -65,7 +65,7 @@ export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
 Provision `bursar_ops` and `bursar_app` as separate SET-only members of
 `bursar_operator` and `bursar_client`, respectively. The
 [CLI guide](https://zonastery.github.io/bursar/docs/cli) has the exact SQL and
-deployment sequence; never use migration-owner or `BYPASSRLS` credentials in
+caller-role contract; never use migration-owner or `BYPASSRLS` credentials in
 the application.
 
 ```python

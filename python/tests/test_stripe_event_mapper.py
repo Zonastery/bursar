@@ -99,6 +99,28 @@ async def emit(
 
 
 @pytest.mark.asyncio
+async def test_official_subscription_lifecycle_event_set(sink: MagicMock) -> None:
+    stripe = stripe_client()
+    lifecycle = [
+        ("customer.subscription.created", "subscription.created", "active"),
+        ("customer.subscription.paused", "subscription.paused", "paused"),
+        ("customer.subscription.resumed", "subscription.resumed", "active"),
+        ("customer.subscription.trial_will_end", "subscription.trial_will_end", "trialing"),
+    ]
+
+    for provider_event, billing_event, status in lifecycle:
+        await emit(provider_event, {**subscription_fixture(), "status": status}, sink, stripe)
+        event = sink.ingest_billing_event.call_args.args[0]
+        assert event.event_type == billing_event
+        assert event.account_id == "u1"
+        assert event.customer.provider_customer_id == "cus_1"
+        assert event.subscription.provider_subscription_id == "sub_1"
+        assert event.subscription.status == status
+        assert event.subscription.refs.price_id == "price_pro"
+        assert event.subscription.refs.product_id == "prod_pro"
+
+
+@pytest.mark.asyncio
 async def test_current_subscription_periods_and_invoice_parent_references(sink: MagicMock) -> None:
     subscription = subscription_fixture()
     stripe = stripe_client()
@@ -331,6 +353,7 @@ async def test_stripe_retrieval_failure_propagates_for_webhook_retry(sink: Magic
             "payment.failed",
             "failed",
         ),
+        ("payment_intent.canceled", "canceled", "payment.failed", "canceled"),
     ],
 )
 @pytest.mark.asyncio
@@ -361,6 +384,31 @@ async def test_payment_intent_event_uses_webhook_type_for_outcome(
     assert event.event_type == expected_event
     assert event.payment.status == expected_status
     assert event.payment.refs.price_id == "price_topup"
+
+
+@pytest.mark.asyncio
+async def test_stripe_dispute_creation_and_closure(sink: MagicMock) -> None:
+    dispute = {
+        "id": "dp_1",
+        "payment_intent": "pi_1",
+        "charge": "ch_1",
+        "status": "needs_response",
+        "reason": "fraudulent",
+        "metadata": {"bursar_account_id": "u1"},
+    }
+    await emit("charge.dispute.created", dispute, sink, SimpleNamespace())
+    await emit("charge.dispute.closed", {**dispute, "status": "won"}, sink, SimpleNamespace())
+
+    created, closed = [call.args[0] for call in sink.ingest_billing_event.call_args_list]
+    assert created.event_type == "dispute.created"
+    assert created.account_id == "u1"
+    assert created.dispute.provider_dispute_id == "dp_1"
+    assert created.dispute.provider_payment_id == "pi_1"
+    assert created.dispute.status == "needs_response"
+    assert created.dispute.reason == "fraudulent"
+    assert closed.event_type == "dispute.closed"
+    assert closed.dispute.provider_dispute_id == "dp_1"
+    assert closed.dispute.status == "won"
 
 
 @pytest.mark.parametrize(

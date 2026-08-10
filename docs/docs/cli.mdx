@@ -1,7 +1,7 @@
 ---
 title: Bursar CLI reference
 sidebar_label: CLI
-description: Look up migration, tenant, and configuration commands, environment requirements, and operational behavior.
+description: Look up migration, tenant, and configuration commands and their required inputs.
 ---
 
 # Bursar CLI reference
@@ -72,7 +72,7 @@ bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
 ```
 
-For a deployment bootstrap, provision a tenant and publish its initial config
+To initialize an embedded Bursar tenant, provision it and publish its initial config
 through one idempotent command:
 
 ```bash title="Terminal"
@@ -132,7 +132,7 @@ the version number and dumps that one immutable version as JSON.
 ### Per-release rollout
 
 Each plan's `evolution.default_rollout` controls normal revision adoption. To
-override selected plans for one deployment, save a rollout manifest:
+override selected plans for one catalog publication, save a rollout manifest:
 
 ```yaml title="rollout.yaml"
 plans:
@@ -154,26 +154,7 @@ Pinned assignments are excluded unless `include_pinned` is `true`. Run
 `config apply-due` from a bounded background job to advance changes whose
 renewal time has arrived.
 
-## A deployment workflow
-
-Deploy in this order:
-
-1. Run `bursar migrate` with the dedicated migration owner in
-   `BURSAR_MIGRATION_DATABASE_URL`.
-2. Provision the two least-privilege caller logins, then put the operator login
-   in `BURSAR_OPERATOR_DATABASE_URL` and the application login in
-   `DATABASE_URL`.
-3. Provision the tenant: `bursar tenant create <slug>` or the combined
-   `bursar tenant bootstrap <slug> ./pricing.yaml`.
-4. Set `BURSAR_PROVIDER_ENVIRONMENT` to `live`, `test`, or `sandbox`, matching
-   the provider credentials and the SDK runtime. Publish and activate the
-   canonical configuration — `bootstrap` covers this; otherwise run
-   `bursar config set ./pricing.yaml`, followed by
-   `bursar config activate <version>` when activating an older revision.
-5. Verify what is live: `bursar config get` and `bursar config list`.
-6. Start or roll the application with the least-privilege application
-   `DATABASE_URL`; the store binds `BURSAR_TENANT_ID` and the same provider
-   environment at construction time.
-7. To roll back a bad config, re-point with
-   `bursar config activate <previous-version>` — versions are immutable, so
-   the prior document is still exactly as published.
+The CLI deliberately stops at Bursar-owned schema, tenant, and catalog
+operations. The embedding application owns process supervision, scheduling,
+database availability and recovery, secret delivery, and every provider or
+cloud deployment decision.

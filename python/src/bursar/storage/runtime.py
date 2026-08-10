@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
+from inspect import Parameter, signature
 from typing import Literal, Protocol, TypeGuard
 from uuid import UUID
 
@@ -30,6 +32,21 @@ from bursar.storage.adapters.clickhouse import (
     ClickHouseUsageStoreOptions,
 )
 from bursar.storage.adapters.s3 import S3BillingArchive, S3BillingArchiveOptions
+from bursar.storage.diagnostics import (
+    BursarRuntimeDiagnostics,
+    BursarRuntimeState,
+    CatalogRevisionSnapshot,
+    CheckDependenciesOptions,
+    OutboxStatusSnapshot,
+    RuntimeDiagnosticsOperations,
+    RuntimeDiagnosticsTracker,
+    RuntimeStateInput,
+)
+from bursar.storage.maintenance import (
+    BursarMaintenance,
+    BursarOperatorMaintenance,
+    MaintenanceOperations,
+)
 from bursar.storage.outbox_worker import (
     OutboxRunResult,
     OutboxWorker,
@@ -39,6 +56,7 @@ from bursar.storage.ports import (
     BillingEventPayloadExport,
     BillingPayloadArchive,
     OutboxEvent,
+    OutboxRecoveryStore,
     UsageChargeExport,
     UsageEventSink,
 )
@@ -87,7 +105,7 @@ class BursarRuntimeOptions(_RuntimeModel):
     tenant_id: UUID
     provider_environment: ProviderEnvironment
     tenant_slug: str | None = None
-    postgres_options: PostgresConnectionOptions = Field(default_factory=PostgresConnectionOptions)
+    postgres_options: SkipValidation[PostgresConnectionOptions] = Field(default_factory=PostgresConnectionOptions)
     s3: SkipValidation[BillingPayloadArchive] | S3BillingArchiveOptions | None = None
     clickhouse: SkipValidation[UsageAnalyticsSink] | ClickHouseUsageStoreOptions | None = None
     outbox: OutboxWorkerOptions | Literal[False] | None = None
@@ -126,6 +144,9 @@ class BursarRuntimeStartOptions(_RuntimeModel):
 
 class BursarRuntimeHealth(_RuntimeModel):
     ready: bool
+    financial_ready: bool
+    projection_ready: bool
+    degraded: bool
     started: bool
     closed: bool
     catalog_loaded: bool
@@ -140,13 +161,71 @@ class _CallableOutboxHandler:
         self.callback(event)
 
 
+@dataclass(slots=True)
+class _PendingUsageWrite:
+    event: UsageChargeExport
+    outbox_event_id: str
+    completed: threading.Event
+    error: BaseException | None = None
+
+
+class _UsageWriteBatcher:
+    """Coalesce concurrently dispatched usage events into one optional sink write."""
+
+    def __init__(self, sink: UsageAnalyticsSink) -> None:
+        self._sink = sink
+        write_batch = getattr(sink, "write_usage_batch", None)
+        self._write_batch: Callable[[Sequence[tuple[UsageChargeExport, str]]], object] | None = (
+            write_batch if callable(write_batch) else None
+        )
+        self._lock = threading.Lock()
+        self._pending: list[_PendingUsageWrite] = []
+        self._timer: threading.Timer | None = None
+
+    def write(self, event: UsageChargeExport, outbox_event_id: str) -> None:
+        if not callable(self._write_batch):
+            self._sink.write_usage(event, outbox_event_id)
+            return
+
+        pending = _PendingUsageWrite(event, outbox_event_id, threading.Event())
+        with self._lock:
+            self._pending.append(pending)
+            if self._timer is None:
+                self._timer = threading.Timer(0.001, self._flush)
+                self._timer.daemon = True
+                self._timer.start()
+        pending.completed.wait()
+        if pending.error is not None:
+            raise pending.error
+
+    def _flush(self) -> None:
+        with self._lock:
+            pending = self._pending
+            self._pending = []
+            self._timer = None
+        write_batch = self._write_batch
+        try:
+            if write_batch is None:  # pragma: no cover - only scheduled when batching is supported
+                raise RuntimeError("usage batch writer is unavailable")
+            write_batch([(item.event, item.outbox_event_id) for item in pending])
+        except BaseException as error:
+            for item in pending:
+                item.error = error
+        finally:
+            for item in pending:
+                item.completed.set()
+
+
 class BursarRuntime:
     """Composition root for Postgres and optional external projections."""
 
     bursar: Bursar
     credit_store: PostgresStore
     billing_store: PostgresBillingStore
+    maintenance: BursarMaintenance
+    operator_maintenance: BursarOperatorMaintenance
     worker: OutboxWorker | None
+    outbox_recovery: OutboxRecoveryStore
     clickhouse: UsageAnalyticsSink | None
     s3: BillingPayloadArchive | None
 
@@ -202,6 +281,7 @@ class BursarRuntime:
         else:
             msg = "clickhouse must implement both usage sink and analytics ports"
             raise TypeError(msg)
+        self._usage_batcher = _UsageWriteBatcher(self.clickhouse) if self.clickhouse is not None else None
         self.s3: BillingPayloadArchive | None
         if options.s3 is None:
             self.s3 = None
@@ -268,14 +348,58 @@ class BursarRuntime:
         self._query = self._postgres.query
         self._tenant_id = str(options.tenant_id)
         self._tenant_slug = options.tenant_slug
+        self.maintenance = BursarMaintenance(
+            MaintenanceOperations(
+                expire_leases=self.credit_store.expire_leases,
+                expire_credits=lambda limit: (
+                    self.credit_store.sweep_expired_credits(
+                        dry_run=False,
+                        user_id=None,
+                        limit=limit,
+                    ).expired_count
+                ),
+                apply_due_plan_changes=self.credit_store.apply_due_plan_changes,
+                expire_past_due_grace_periods=(
+                    self.bursar.billing.expire_past_due_grace_periods if self.bursar.billing is not None else None
+                ),
+                past_due_grace_period_limit=100,
+                past_due_grace_periods_unavailable_reason=(
+                    None if self.bursar.billing is not None else "billing is not configured"
+                ),
+            )
+        )
+        self.operator_maintenance = BursarOperatorMaintenance(self._query)
         repository = PostgresStorageRepository(
             self._query,
             options.tenant_id,
         )
+        self.outbox_recovery = repository
         handlers = self._create_handlers(repository)
         worker_options = options.outbox if isinstance(options.outbox, OutboxWorkerOptions) else None
+        original_on_error = worker_options.on_error if worker_options is not None else None
+
+        def on_worker_error(error: BaseException) -> None:
+            diagnostics = getattr(self, "_diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.record_worker_error(error)
+            if original_on_error is not None:
+                original_on_error(error)
+
+        effective_worker_options = (worker_options or OutboxWorkerOptions()).model_copy(
+            update={"on_error": on_worker_error}
+        )
         self.worker = (
-            OutboxWorker(repository, handlers, worker_options) if handlers and options.outbox is not False else None
+            OutboxWorker(repository, handlers, effective_worker_options)
+            if handlers and options.outbox is not False
+            else None
+        )
+        self._diagnostics = RuntimeDiagnosticsTracker(
+            RuntimeDiagnosticsOperations(
+                check_postgres=self._check_postgres,
+                get_catalog_revision=self._get_catalog_revision,
+                get_outbox_status=_outbox_status_provider(repository),
+            ),
+            worker_configured=self.worker is not None,
         )
         self._lifecycle_lock = threading.RLock()
         self._started = False
@@ -307,19 +431,47 @@ class BursarRuntime:
                 initialize = getattr(self.clickhouse, "initialize", None)
                 if callable(initialize):
                     initialize()
+                check_schema_compatibility = getattr(self.clickhouse, "check_schema_compatibility", None)
+                if callable(check_schema_compatibility):
+                    check_schema_compatibility()
             if self.worker is not None:
                 self.worker.start()
+                self._diagnostics.mark_worker_started()
             self._started = True
 
-    def health(self) -> BursarRuntimeHealth:
+    def state(self) -> BursarRuntimeState:
         with self._lifecycle_lock:
-            catalog_loaded = self.bursar.catalog.is_loaded
-            return BursarRuntimeHealth(
-                ready=self._started and not self._closed and catalog_loaded,
+            return self._diagnostics.state(
+                RuntimeStateInput(
+                    started=self._started,
+                    closed=self._closed,
+                    catalog_loaded=self.bursar.catalog.is_loaded,
+                )
+            )
+
+    def check_dependencies(
+        self,
+        options: CheckDependenciesOptions | None = None,
+    ) -> BursarRuntimeDiagnostics:
+        with self._lifecycle_lock:
+            state_input = RuntimeStateInput(
                 started=self._started,
                 closed=self._closed,
-                catalog_loaded=catalog_loaded,
+                catalog_loaded=self.bursar.catalog.is_loaded,
             )
+        return self._diagnostics.check_dependencies(state_input, options)
+
+    def health(self) -> BursarRuntimeHealth:
+        state = self.state()
+        return BursarRuntimeHealth(
+            ready=state.ready,
+            financial_ready=state.financial_ready,
+            projection_ready=state.projection_ready,
+            degraded=state.degraded,
+            started=state.started,
+            closed=state.closed,
+            catalog_loaded=state.catalog_loaded,
+        )
 
     def flush(self) -> OutboxRunResult:
         with self._lifecycle_lock:
@@ -327,8 +479,8 @@ class BursarRuntime:
                 msg = "BursarRuntime has been closed"
                 raise StoreClosedError(msg)
             if self.worker is None:
-                return OutboxRunResult(claimed=0, delivered=0, failed=0)
-            return self.worker.run_once()
+                return OutboxRunResult(claimed=0, delivered=0, failed=0, claim_lost=0)
+            return self._diagnostics.observe_manual_run(self.worker.run_once)
 
     def close(self) -> None:
         with self._lifecycle_lock:
@@ -341,7 +493,7 @@ class BursarRuntime:
 
             resources: list[Callable[[], object]] = []
             if self.worker is not None:
-                resources.append(self.worker.stop)
+                resources.append(self._stop_worker)
             if self.s3 is not None:
                 close = getattr(self.s3, "close", None)
                 if callable(close):
@@ -365,6 +517,13 @@ class BursarRuntime:
             )
             raise self._close_failure
 
+    def _stop_worker(self) -> None:
+        try:
+            if self.worker is not None:
+                self.worker.stop()
+        finally:
+            self._diagnostics.mark_worker_stopped()
+
     def __enter__(self) -> BursarRuntime:
         self.start()
         return self
@@ -382,6 +541,17 @@ class BursarRuntime:
         resolved = rows[0].get("tenant_id") if rows else None
         if resolved != self._tenant_id:
             raise ConfigError(f"Bursar tenant slug '{self._tenant_slug}' resolves to a different tenant ID")
+
+    def _check_postgres(self) -> None:
+        rows = self._query("SELECT 1 AS bursar_reachable")
+        if len(rows) != 1 or rows[0].get("bursar_reachable") != 1:
+            raise RuntimeError("PostgreSQL reachability check returned an invalid result")
+
+    def _get_catalog_revision(self) -> CatalogRevisionSnapshot | None:
+        revision = self.bursar.catalog.get_active()
+        if revision is None:
+            return None
+        return CatalogRevisionSnapshot(id=revision.id, version=revision.version)
 
     def _create_handlers(
         self,
@@ -425,8 +595,9 @@ class BursarRuntime:
             raise RuntimeError("Usage export tenant does not match its outbox event")
         if usage.charge_id != outbox_event.aggregate_id:
             raise RuntimeError("Usage export charge does not match its outbox event")
-        if self.clickhouse is not None:
-            self.clickhouse.write_usage(usage, outbox_event.event_id)
+        if self._usage_batcher is None:
+            raise RuntimeError("ClickHouse usage sink is not configured")
+        self._usage_batcher.write(usage, outbox_event.event_id)
 
     def _handle_billing(self, repository: PostgresStorageRepository, outbox_event: OutboxEvent) -> None:
         if outbox_event.payload_version != 1:
@@ -459,6 +630,94 @@ class BursarRuntime:
         if not recorded:
             msg = f"Could not record archive pointer for billing event {event.event_id}"
             raise RuntimeError(msg)
+
+
+def _outbox_status_provider(
+    repository: PostgresStorageRepository,
+) -> Callable[[int], OutboxStatusSnapshot] | None:
+    stats = getattr(repository, "stats", None)
+    if not callable(stats):
+        return None
+
+    def get_status(limit: int) -> OutboxStatusSnapshot:
+        raw = _invoke_outbox_stats(stats, limit)
+        values = _stats_mapping(raw)
+        return OutboxStatusSnapshot(
+            pending_count=_stats_count(values, "pending_count", "pendingCount", "pending"),
+            processing_count=_stats_count(values, "processing_count", "processingCount", "processing"),
+            delivered_count=_stats_count(values, "delivered_count", "deliveredCount", "delivered"),
+            dead_letter_count=_stats_count(values, "dead_letter_count", "deadLetterCount", "dead_letter"),
+            oldest_pending_at=_stats_timestamp(values, "oldest_pending_at", "oldestPendingAt"),
+        )
+
+    return get_status
+
+
+def _invoke_outbox_stats(stats: Callable[..., object], limit: int) -> object:
+    try:
+        parameters = list(signature(stats).parameters.values())
+    except (TypeError, ValueError):
+        parameters = []
+    if not parameters:
+        return stats()
+    if any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters):
+        return stats(outbox_limit=limit)
+    first = parameters[0]
+    if first.kind == Parameter.POSITIONAL_ONLY:
+        return stats(limit)
+    if first.name in {"limit", "outbox_limit"}:
+        return stats(**{first.name: limit})
+    return stats({"limit": limit, "outbox_limit": limit})
+
+
+def _stats_mapping(raw: object) -> Mapping[str, object]:
+    if isinstance(raw, BaseModel):
+        return raw.model_dump()
+    if isinstance(raw, Mapping):
+        return raw
+    values = {
+        name: getattr(raw, name)
+        for name in (
+            "pending_count",
+            "pendingCount",
+            "pending",
+            "processing_count",
+            "processingCount",
+            "processing",
+            "delivered_count",
+            "deliveredCount",
+            "delivered",
+            "dead_letter_count",
+            "deadLetterCount",
+            "dead_letter",
+            "oldest_pending_at",
+            "oldestPendingAt",
+        )
+        if hasattr(raw, name)
+    }
+    if not values:
+        raise TypeError("outbox stats returned a malformed result")
+    return values
+
+
+def _stats_count(values: Mapping[str, object], *keys: str) -> int:
+    value = next((values[key] for key in keys if key in values), None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TypeError(f"outbox stats field {keys[0]} must be a non-negative integer")
+    return value
+
+
+def _stats_timestamp(values: Mapping[str, object], *keys: str) -> str | None:
+    value = next((values[key] for key in keys if key in values), None)
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise TypeError(f"outbox stats field {keys[0]} must include a timezone")
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"outbox stats field {keys[0]} must be a timestamp string or null")
 
 
 def create_bursar_runtime(options: BursarRuntimeOptions) -> BursarRuntime:

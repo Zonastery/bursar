@@ -15,6 +15,15 @@ class _BillingClaimBusyError(Exception):
     pass
 
 
+_ACKNOWLEDGED_BILLING_EVENT_ERRORS = {
+    "unhandled_event_type",
+    "account_not_found",
+    "invalid_request",
+    "idempotency_conflict",
+    "max_retries_exceeded",
+}
+
+
 def require_provider_string(value: object, field: str) -> str:
     """Return a non-empty provider value without manufacturing an identifier."""
 
@@ -98,7 +107,7 @@ def call_billing_event_sink(sink: BillingEventSink, event: BillingEvent) -> Bill
             "Billing event claim could not be acquired",
             details={"reason": result.error},
         )
-    if not result.handled and result.error not in ("unhandled_event_type", "account_not_found"):
+    if not result.handled and result.error not in _ACKNOWLEDGED_BILLING_EVENT_ERRORS:
         raise BursarError(
             "Bursar failed to ingest the billing event",
             details={"reason": result.error or "unknown"},

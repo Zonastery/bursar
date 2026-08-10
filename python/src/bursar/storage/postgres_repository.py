@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from bursar.shared.diagnostics import bounded_diagnostic_message
 from bursar.shared.postgres_types import QueryFn
 from bursar.storage.ports import (
     BillingEventPayloadExport,
+    OutboxDeadLetter,
+    OutboxDeadLetterCursor,
+    OutboxDeadLetterListOptions,
+    OutboxDeadLetterPage,
     OutboxEvent,
+    OutboxStats,
     UsageChargeExport,
 )
 
@@ -46,15 +50,74 @@ def _optional_string(row: dict[str, Any], key: str) -> str | None:
     return str(value)
 
 
-def _json_object(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+def _json_object(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        msg = f"{context} must be a JSON object"
+        raise RuntimeError(msg)
+    return value
+
+
+def _billing_disposition(row: dict[str, Any], context: str) -> Literal["billable", "record_only"]:
+    value = _required_string(row, "billing_disposition", context)
+    if value == "billable" or value == "record_only":
+        return value
+    msg = f"{context}.billing_disposition must be billable or record_only"
+    raise RuntimeError(msg)
+
+
+def _nonnegative_integer(row: dict[str, Any], key: str, context: str) -> int:
+    value = row.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, str, bytes, bytearray)):
+        msg = f"{context}.{key} must be a non-negative integer"
+        raise RuntimeError(msg)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        msg = f"{context}.{key} must be a non-negative integer"
+        raise RuntimeError(msg) from error
+    if parsed < 0:
+        msg = f"{context}.{key} must be a non-negative integer"
+        raise RuntimeError(msg)
+    return parsed
+
+
+def _positive_event_id(value: str) -> str:
+    if not isinstance(value, str) or not value.isascii() or not value.isdigit() or value.startswith("0"):
+        raise ValueError("outbox event_id must be a positive integer string")
+    return value
+
+
+def _persisted_diagnostic_summary(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("outbox failure summary must be a string")
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise ValueError("outbox failure summary must contain operation and error codes")
+    for part in parts:
+        if (
+            not part
+            or len(part) > 128
+            or not part.isascii()
+            or not part[0].isalpha()
+            or any(not (character.isalnum() or character in "_.-") for character in part)
+        ):
+            raise ValueError("outbox failure summary contains an invalid diagnostic code")
+    return value
 
 
 def _scalar_boolean(rows: list[Any]) -> bool:
     if len(rows) != 1:
-        return False
+        msg = f"PostgreSQL boolean RPC returned {len(rows)} rows; expected one"
+        raise RuntimeError(msg)
     row = _as_row(rows[0], "PostgreSQL boolean RPC")
-    return len(row) == 1 and next(iter(row.values())) is True
+    if len(row) != 1:
+        msg = "PostgreSQL boolean RPC returned an invalid result envelope"
+        raise RuntimeError(msg)
+    value = next(iter(row.values()))
+    if not isinstance(value, bool):
+        msg = "PostgreSQL boolean RPC result must be a boolean"
+        raise RuntimeError(msg)
+    return value
 
 
 class PostgresStorageRepository:
@@ -90,7 +153,7 @@ class PostgresStorageRepository:
                     aggregate_type=_required_string(row, "aggregate_type", "outbox event"),
                     aggregate_id=_required_string(row, "aggregate_id", "outbox event"),
                     payload_version=int(row["payload_version"]),
-                    payload=_json_object(row.get("payload")),
+                    payload=_json_object(row.get("payload"), "outbox event.payload"),
                     claim_token=_required_string(row, "claim_token", "outbox event"),
                     attempt_count=int(row["attempt_count"]),
                     created_at=_required_string(row, "created_at", "outbox event"),
@@ -98,11 +161,39 @@ class PostgresStorageRepository:
             )
         return events
 
-    def complete(self, event: OutboxEvent) -> bool:
+    def _assert_event_tenant(self, event: OutboxEvent) -> None:
+        if event.tenant_id != self._tenant_id:
+            msg = "Outbox event tenant does not match repository tenant"
+            raise RuntimeError(msg)
+
+    def renew(self, event: OutboxEvent, lease_seconds: int) -> bool:
+        self._assert_event_tenant(event)
         return _scalar_boolean(
             self._query(
-                "SELECT bursar.complete_outbox_event(%s::bigint, %s::uuid)",
-                [event.event_id, event.claim_token],
+                """
+                SELECT bursar.renew_tenant_outbox_claim(
+                    %s::uuid,
+                    %s::bigint,
+                    %s::uuid,
+                    %s::integer
+                )
+                """,
+                [self._tenant_id, event.event_id, event.claim_token, lease_seconds],
+            )
+        )
+
+    def complete(self, event: OutboxEvent) -> bool:
+        self._assert_event_tenant(event)
+        return _scalar_boolean(
+            self._query(
+                """
+                SELECT bursar.complete_tenant_outbox_event(
+                    %s::uuid,
+                    %s::bigint,
+                    %s::uuid
+                )
+                """,
+                [self._tenant_id, event.event_id, event.claim_token],
             )
         )
 
@@ -113,10 +204,12 @@ class PostgresStorageRepository:
         retry_delay_seconds: int,
         attempt_limit: int,
     ) -> bool:
+        self._assert_event_tenant(event)
         return _scalar_boolean(
             self._query(
                 """
-                SELECT bursar.fail_outbox_event(
+                SELECT bursar.fail_tenant_outbox_event(
+                    %s::uuid,
                     %s::bigint,
                     %s::uuid,
                     %s::text,
@@ -125,12 +218,89 @@ class PostgresStorageRepository:
                 )
                 """,
                 [
+                    self._tenant_id,
                     event.event_id,
                     event.claim_token,
-                    bounded_diagnostic_message(error, "outbox_delivery_failed"),
+                    _persisted_diagnostic_summary(error),
                     retry_delay_seconds,
                     attempt_limit,
                 ],
+            )
+        )
+
+    def stats(self) -> OutboxStats:
+        rows = self._query(
+            "SELECT * FROM bursar.get_outbox_stats(%s::uuid)",
+            [self._tenant_id],
+        )
+        if len(rows) != 1:
+            msg = f"get_outbox_stats returned {len(rows)} rows; expected one"
+            raise RuntimeError(msg)
+        row = _as_row(rows[0], "get_outbox_stats")
+        return OutboxStats(
+            pending_count=_nonnegative_integer(row, "pending_count", "outbox stats"),
+            processing_count=_nonnegative_integer(row, "processing_count", "outbox stats"),
+            delivered_count=_nonnegative_integer(row, "delivered_count", "outbox stats"),
+            dead_letter_count=_nonnegative_integer(row, "dead_letter_count", "outbox stats"),
+            oldest_pending_at=_optional_string(row, "oldest_pending_at"),
+        )
+
+    def list_dead_letters(
+        self,
+        options: OutboxDeadLetterListOptions | None = None,
+    ) -> OutboxDeadLetterPage:
+        effective = options or OutboxDeadLetterListOptions()
+        rows = self._query(
+            """
+            SELECT * FROM bursar.list_outbox_dead_letters(
+                %s::uuid,
+                %s::timestamptz,
+                %s::bigint,
+                %s::integer
+            )
+            """,
+            [
+                self._tenant_id,
+                effective.cursor.created_at if effective.cursor is not None else None,
+                effective.cursor.event_id if effective.cursor is not None else None,
+                effective.limit,
+            ],
+        )
+        dead_letters: list[OutboxDeadLetter] = []
+        for raw in rows:
+            row = _as_row(raw, "list_outbox_dead_letters")
+            dead_letters.append(
+                OutboxDeadLetter(
+                    event_id=_positive_event_id(_required_string(row, "event_id", "outbox dead letter")),
+                    tenant_id=_required_string(row, "tenant_id", "outbox dead letter"),
+                    topic=_required_string(row, "topic", "outbox dead letter"),
+                    aggregate_type=_required_string(row, "aggregate_type", "outbox dead letter"),
+                    aggregate_id=_required_string(row, "aggregate_id", "outbox dead letter"),
+                    payload_version=_nonnegative_integer(row, "payload_version", "outbox dead letter"),
+                    attempt_count=_nonnegative_integer(row, "attempt_count", "outbox dead letter"),
+                    last_error=_optional_string(row, "last_error"),
+                    created_at=_required_string(row, "created_at", "outbox dead letter"),
+                    updated_at=_required_string(row, "updated_at", "outbox dead letter"),
+                )
+            )
+        has_more = len(dead_letters) > effective.limit
+        items = dead_letters[: effective.limit] if has_more else dead_letters
+        last = items[-1] if items else None
+        return OutboxDeadLetterPage(
+            items=items,
+            next_cursor=(
+                OutboxDeadLetterCursor(created_at=last.created_at, event_id=last.event_id)
+                if has_more and last is not None
+                else None
+            ),
+        )
+
+    def requeue(self, event_id: str) -> bool:
+        normalized_event_id = _positive_event_id(event_id)
+        return _scalar_boolean(
+            self._query(
+                "SELECT bursar.requeue_outbox_dead_letter(%s::uuid, %s::bigint)",
+                [self._tenant_id, normalized_event_id],
             )
         )
 
@@ -155,9 +325,9 @@ class PostgresStorageRepository:
             feature=_optional_string(row, "feature"),
             model=_optional_string(row, "model"),
             region=_optional_string(row, "region"),
-            measures=_json_object(row.get("measures")),
-            dimensions=_json_object(row.get("dimensions")),
-            metadata=_json_object(row.get("metadata")),
+            measures=_json_object(row.get("measures"), "usage charge export.measures"),
+            dimensions=_json_object(row.get("dimensions"), "usage charge export.dimensions"),
+            metadata=_json_object(row.get("metadata"), "usage charge export.metadata"),
             requested=_required_string(row, "requested", "usage charge export"),
             charged=_required_string(row, "charged", "usage charge export"),
             allowance_requested=_required_string(
@@ -170,20 +340,14 @@ class PostgresStorageRepository:
                 "allowance_covered",
                 "usage charge export",
             ),
-            billing_disposition=(
-                "record_only"
-                if _required_string(
-                    row,
-                    "billing_disposition",
-                    "usage charge export",
-                )
-                == "record_only"
-                else "billable"
-            ),
+            billing_disposition=_billing_disposition(row, "usage charge export"),
             catalog_revision_id=_optional_string(row, "catalog_revision_id"),
             plan_id=_optional_string(row, "plan_id"),
             rate_card_key=_optional_string(row, "rate_card_key"),
-            pricing_snapshot=_json_object(row.get("pricing_snapshot")),
+            pricing_snapshot=_json_object(
+                row.get("pricing_snapshot"),
+                "usage charge export.pricing_snapshot",
+            ),
             ledger_entry_id=_optional_string(row, "ledger_entry_id"),
             correction_of_charge_id=_optional_string(row, "correction_of_charge_id"),
             idempotency_key=_required_string(row, "idempotency_key", "usage charge export"),
@@ -220,7 +384,7 @@ class PostgresStorageRepository:
             status=_required_string(row, "status", "billing payload export"),
             received_at=_required_string(row, "received_at", "billing payload export"),
             completed_at=_optional_string(row, "completed_at"),
-            envelope=_json_object(envelope) if envelope is not None else None,
+            envelope=(_json_object(envelope, "billing payload export.envelope") if envelope is not None else None),
             object_key=_optional_string(row, "object_key"),
             object_version=_optional_string(row, "object_version"),
             archived_at=_optional_string(row, "archived_at"),

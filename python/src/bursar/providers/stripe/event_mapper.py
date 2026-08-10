@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from bursar.billing.types import (
     BillingCustomerInfo,
+    BillingDisputeInfo,
     BillingEvent,
     BillingEventType,
     BillingInvoiceInfo,
@@ -25,6 +26,7 @@ from bursar.providers._shared import (
     require_provider_string,
 )
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
+from bursar.shared.diagnostics import persisted_diagnostic_summary
 
 if TYPE_CHECKING:
     from stripe import StripeClient
@@ -193,6 +195,24 @@ def _invoice_tax_minor(invoice: Any) -> int:
     )
 
 
+def _stripe_dispute_status(value: object) -> Literal["needs_response", "under_review", "won", "lost", "closed"]:
+    status = require_provider_string(value, "Stripe dispute.status")
+    statuses: dict[str, Literal["needs_response", "under_review", "won", "lost", "closed"]] = {
+        "needs_response": "needs_response",
+        "warning_needs_response": "needs_response",
+        "under_review": "under_review",
+        "warning_under_review": "under_review",
+        "won": "won",
+        "prevented": "won",
+        "lost": "lost",
+        "warning_closed": "closed",
+    }
+    normalized = statuses.get(status)
+    if normalized is None:
+        raise ValueError(f"Unsupported Stripe dispute status: {status}")
+    return normalized
+
+
 async def _handle_checkout_event(
     event_id: str,
     data: Any,
@@ -329,6 +349,36 @@ async def _handle_subscription_updated(
             provider="stripe",
             event_id=event_id,
             event_type=event_type,
+            occurred_at=occurred_at,
+            account_id=account_id or metadata.get("bursar_account_id"),
+            customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
+            subscription=_subscription_info(data),
+            metadata=metadata,
+        ),
+    )
+
+
+async def _handle_subscription_lifecycle(
+    event_id: str,
+    data: Any,
+    account_id: str | None,
+    event_metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: StripeClient,
+    logger: ProviderLogger,
+    occurred_at: str,
+    *,
+    billing_event_type: BillingEventType,
+) -> None:
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    customer_id = _expandable_id(_value(data, "customer"))
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=billing_event_type,
             occurred_at=occurred_at,
             account_id=account_id or metadata.get("bursar_account_id"),
             customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
@@ -509,6 +559,43 @@ async def _handle_payment_intent_event(
     )
 
 
+async def _handle_dispute_event(
+    event_id: str,
+    data: Any,
+    account_id: str | None,
+    event_metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: StripeClient,
+    logger: ProviderLogger,
+    occurred_at: str,
+    *,
+    closed: bool,
+) -> None:
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    provider_payment_id = _expandable_id(_value(data, "payment_intent")) or _expandable_id(_value(data, "charge"))
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=BillingEventType.dispute_closed if closed else BillingEventType.dispute_created,
+            occurred_at=occurred_at,
+            account_id=account_id or metadata.get("bursar_account_id"),
+            dispute=BillingDisputeInfo(
+                provider_dispute_id=require_provider_string(_value(data, "id"), "Stripe dispute.id"),
+                provider_payment_id=require_provider_string(
+                    provider_payment_id,
+                    "Stripe dispute payment identifier",
+                ),
+                status=_stripe_dispute_status(_value(data, "status")),
+                reason=_value(data, "reason"),
+            ),
+            metadata=metadata,
+        ),
+    )
+
+
 async def _handle_refund_event(
     event_id: str,
     data: Any,
@@ -562,6 +649,22 @@ _EVENT_HANDLERS: dict[str, Any] = {
     "checkout.session.async_payment_succeeded": partial(_handle_checkout_event, outcome="succeeded"),
     "checkout.session.async_payment_failed": partial(_handle_checkout_event, outcome="failed"),
     "checkout.session.expired": _handle_checkout_expired,
+    "customer.subscription.created": partial(
+        _handle_subscription_lifecycle,
+        billing_event_type=BillingEventType.subscription_created,
+    ),
+    "customer.subscription.paused": partial(
+        _handle_subscription_lifecycle,
+        billing_event_type=BillingEventType.subscription_paused,
+    ),
+    "customer.subscription.resumed": partial(
+        _handle_subscription_lifecycle,
+        billing_event_type=BillingEventType.subscription_resumed,
+    ),
+    "customer.subscription.trial_will_end": partial(
+        _handle_subscription_lifecycle,
+        billing_event_type=BillingEventType.subscription_trial_will_end,
+    ),
     "customer.subscription.updated": _handle_subscription_updated,
     "customer.subscription.deleted": _handle_subscription_deleted,
     "invoice.paid": _handle_invoice_paid,
@@ -576,6 +679,14 @@ _EVENT_HANDLERS: dict[str, Any] = {
         billing_event_type=BillingEventType.payment_failed,
         payment_status="failed",
     ),
+    "payment_intent.canceled": partial(
+        _handle_payment_intent_event,
+        billing_event_type=BillingEventType.payment_failed,
+        payment_status="canceled",
+    ),
+    "charge.dispute.created": partial(_handle_dispute_event, closed=False),
+    "charge.dispute.updated": partial(_handle_dispute_event, closed=False),
+    "charge.dispute.closed": partial(_handle_dispute_event, closed=True),
     "refund.created": partial(
         _handle_refund_event,
         billing_event_type=BillingEventType.refund_created,
@@ -619,6 +730,6 @@ async def handle_stripe_billing_event(
     except Exception as exc:
         logger.error(
             "Stripe webhook processing failed",
-            {"eventType": event_type, "err": str(exc)},
+            {"eventType": event_type, "err": persisted_diagnostic_summary(exc, "webhook_processing_failed")},
         )
         raise

@@ -304,7 +304,7 @@ class PostgresStore(CreditStore):
     # ── Schema management ──────────────────────────────────────────────
 
     @staticmethod
-    def _migrate(database_url: str) -> None:
+    def _migrate(database_url: str, *, lock_timeout_ms: int) -> None:
         """Apply bundled migrations exactly once, transactionally.
 
         A migration ledger records each filename and SHA-256 checksum. An
@@ -322,6 +322,10 @@ class PostgresStore(CreditStore):
         try:
             conn.autocommit = False
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('lock_timeout', %s, true)",
+                    (f"{lock_timeout_ms}ms",),
+                )
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
                 cur.execute("CREATE SCHEMA IF NOT EXISTS bursar")
                 cur.execute("""
@@ -1685,8 +1689,14 @@ class PostgresStore(CreditStore):
         ]
 
 
-def run_migrations(database_url: str) -> None:
+def run_migrations(database_url: str, *, lock_timeout_ms: int = 30_000) -> None:
     """Run bundled, checksummed SQL migrations against *database_url*."""
     if not isinstance(database_url, str) or not database_url.strip():
         raise ValueError("database_url must not be empty")
-    PostgresStore._migrate(database_url)
+    if (
+        isinstance(lock_timeout_ms, bool)
+        or not isinstance(lock_timeout_ms, int)
+        or not 1 <= lock_timeout_ms <= 3_600_000
+    ):
+        raise ValueError("lock_timeout_ms must be an integer from 1 to 3600000")
+    PostgresStore._migrate(database_url, lock_timeout_ms=lock_timeout_ms)

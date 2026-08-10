@@ -23,6 +23,11 @@
       "import": "./dist/browser.js",
       "default": "./dist/browser.js"
     },
+    "./opentelemetry": {
+      "types": "./dist/telemetry/opentelemetry.d.ts",
+      "import": "./dist/telemetry/opentelemetry.js",
+      "default": "./dist/telemetry/opentelemetry.js"
+    },
     "./providers": {
       "types": "./dist/providers/index.d.ts",
       "import": "./dist/providers/index.js",
@@ -132,6 +137,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
+    "@opentelemetry/api": "^1.9.0",
     "@dodopayments/better-auth": "^1.6.4",
     "@dodopayments/nextjs": "^0.3.7",
     "@dodopayments/react-native-checkout": "^1.1.2",
@@ -143,6 +149,9 @@
     "stripe": "^22.2.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
     "@dodopayments/better-auth": {
       "optional": true
     },
@@ -172,6 +181,7 @@
     }
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
     "@aws-sdk/client-s3": "^3.1106.0",
     "@dodopayments/better-auth": "^1.6.4",
     "@dodopayments/nextjs": "^0.3.7",

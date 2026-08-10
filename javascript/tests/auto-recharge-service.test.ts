@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { expect, it, vi } from "vitest";
 
 import type { AutoRechargeBillingPort } from "../src/billing/auto-recharge-port.js";

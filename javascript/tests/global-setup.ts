@@ -1,6 +1,6 @@
 /**
  * Vitest global setup — builds and starts Bursar's provider-neutral
- * PostgreSQL 17 image with pg_partman 5 and pg_jsonschema 0.3
+ * PostgreSQL 16/17 image with pg_partman 5 and pg_jsonschema 0.3
  * testcontainer when `DATABASE_URL` isn't already set, so `bun run test`
  * exercises the real PostgresStore integration/concurrency suite by default
  * (Docker permitting) instead of silently skipping it. CI requires this path

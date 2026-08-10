@@ -1,0 +1,149 @@
+---
+title: Instrument Bursar with OpenTelemetry
+sidebar_label: OpenTelemetry
+description: Add API-only Bursar traces and metrics while keeping SDK and exporter ownership in the host application.
+---
+
+# Instrument Bursar with OpenTelemetry
+
+Bursar provides an optional OpenTelemetry API adapter. The adapter creates
+spans and records metrics through the providers already selected by the
+embedding application. It does not install or configure an OpenTelemetry SDK,
+processor, reader, collector, or exporter.
+
+Without the optional adapter, Bursar uses its vendor-neutral no-op
+instrumentation. Installing only the OpenTelemetry API is also safe: when the
+host has not registered an SDK provider, the API implementations remain no-op.
+
+## JavaScript
+
+Install the optional peer alongside Bursar:
+
+```bash
+npm install @zonastery/bursar @opentelemetry/api
+```
+
+Create one instrumentation instance and inject it into both the credit service
+and the PostgreSQL store:
+
+```ts
+import { Bursar, PostgresStore } from "@zonastery/bursar";
+import { createOpenTelemetryInstrumentation } from "@zonastery/bursar/opentelemetry";
+
+const instrumentation = createOpenTelemetryInstrumentation();
+
+const creditStore = new PostgresStore({
+  postgres: process.env.DATABASE_URL!,
+  tenantId,
+  providerEnvironment: "live",
+  instrumentation,
+});
+
+const bursar = new Bursar({
+  creditStore,
+  creditsOptions: { instrumentation },
+});
+```
+
+`enableOpenTelemetry()` is a convenience alternative when every subsequently
+constructed Bursar service should use the adapter:
+
+```ts
+import { enableOpenTelemetry } from "@zonastery/bursar/opentelemetry";
+
+const restoreInstrumentation = enableOpenTelemetry();
+```
+
+Call the restore function only after the Bursar instances using that default
+have stopped. Passing `creditsOptions.instrumentation` is preferred when an
+application needs explicit per-service isolation. Passing `instrumentation`
+directly to each PostgreSQL store is likewise preferred over relying on the
+process-wide default.
+
+## Python
+
+Install Bursar's API-only extra:
+
+```bash
+pip install "bursar[opentelemetry]"
+```
+
+Inject the same instrumentation into the credit service and PostgreSQL client
+options:
+
+```python
+from bursar import (
+    Bursar,
+    CreditsServiceOptions,
+    PostgresConnectionOptions,
+    PostgresStore,
+)
+from bursar.telemetry.opentelemetry import (
+    create_opentelemetry_instrumentation,
+)
+
+instrumentation = create_opentelemetry_instrumentation()
+
+credit_store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="live",
+    postgres_options=PostgresConnectionOptions(
+        instrumentation=instrumentation,
+    ),
+)
+
+bursar = Bursar(
+    credit_store=credit_store,
+    credits_options=CreditsServiceOptions(
+        instrumentation=instrumentation,
+    ),
+)
+```
+
+`enable_opentelemetry()` selects the adapter as Bursar's fallback for services
+constructed afterward and returns a restore callback. Explicit options remain
+the clearer choice when several independently configured Bursar instances
+share a process.
+
+## Emitted operations
+
+Bursar instruments the following bounded operation names:
+
+- Credit grants, grant programs, reserve, settle, release, deduct, and refund.
+- PostgreSQL query and RPC boundaries.
+
+The adapter emits:
+
+- `bursar.operation.count`, a completed-operation counter.
+- `bursar.operation.duration`, a duration histogram in seconds.
+- One active span named `bursar.<operation>` around each boundary.
+
+The instrumentation scope is the Bursar package name and package version.
+Spans preserve the host's currently active context.
+
+## Attribute and data-safety contract
+
+Only these bounded attributes can reach the adapter:
+
+- `bursar.operation`
+- `bursar.outcome`
+- `bursar.backend`
+- `bursar.provider`
+- `error.type`
+- `error.code`
+
+Unknown attributes and non-scalar values are discarded. Error messages and
+exception events are deliberately not recorded. Bursar never adds tenant,
+user, account, lease, or event identifiers; idempotency keys; SQL text or
+parameters; database URLs; prompts; webhook envelopes; or arbitrary metadata.
+
+The host application owns any additional span enrichment and is responsible
+for ensuring that its own attributes remain bounded and non-sensitive.
+
+## Ownership boundary
+
+Bursar owns only the vendor-neutral instrumentation contract, safe operation
+boundaries, and the optional OpenTelemetry API adapter. The embedding
+application owns provider registration, sampling, processing, export, and all
+global OpenTelemetry configuration.

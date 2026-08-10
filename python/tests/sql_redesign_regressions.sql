@@ -956,6 +956,7 @@ BEGIN
             PERFORM bursar.create_checkout_intent(
                 v_subject,
                 'test-provider',
+                'checkout-required-fields',
                 CASE WHEN v_case = 1 THEN NULL ELSE 'credit_topup' END,
                 'test-product',
                 CASE

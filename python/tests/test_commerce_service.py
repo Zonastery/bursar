@@ -319,6 +319,8 @@ class FakeBilling:
         self.created_changes: list[Any] = []
         self.change_updates: list[tuple[str, dict[str, Any]]] = []
         self.auto_recharge_profile: BillingAutoRechargeProfile | None = None
+        self.checkout_update_error: Exception | None = None
+        self.customer_upsert_error: Exception | None = None
 
     def get_active_catalog_document(self) -> dict[str, Any]:
         return self.catalog
@@ -355,6 +357,8 @@ class FakeBilling:
         intent_id: str,
         update: CheckoutIntentUpdate,
     ) -> None:
+        if self.checkout_update_error is not None:
+            raise self.checkout_update_error
         self.updates.append((intent_id, update.model_dump(exclude_none=True)))
 
     def get_checkout_intent(self, intent_id: str, subject_id: str) -> CheckoutIntent | None:
@@ -364,6 +368,8 @@ class FakeBilling:
         return None
 
     def upsert_customer(self, provider: str, customer_id: str, user_id: str, email: str | None = None) -> None:
+        if self.customer_upsert_error is not None:
+            raise self.customer_upsert_error
         self.upserted_customers.append((provider, customer_id, user_id, email))
 
     def get_user_subscription(self, account_id: str) -> BillingSubscriptionState | None:
@@ -722,8 +728,114 @@ async def test_checkout_replay_is_bound_to_the_financial_account() -> None:
     }
     await commerce.create_checkout(CreateCheckoutInput.model_validate({**common, "account_id": "account-1"}))
 
-    with pytest.raises(CheckoutConflictError, match="different offer"):
+    with pytest.raises(CheckoutConflictError, match="different checkout request"):
         await commerce.create_checkout(CreateCheckoutInput.model_validate({**common, "account_id": "account-2"}))
+
+
+@pytest.mark.asyncio
+async def test_checkout_replay_returns_the_persisted_provider_session() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+
+    def persisted_intent(input: CheckoutIntentCreate) -> CheckoutIntent:
+        return CheckoutIntent(
+            id="intent-replay",
+            subject_id=input.subject_id,
+            provider=input.provider,
+            checkout_kind=input.checkout_kind,
+            product_key=input.product_key,
+            request_digest=input.request_digest,
+            status=CheckoutIntentStatus.open,
+            provider_session_id="session-replay",
+            checkout_url="https://checkout.example/replay",
+            expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+
+    billing.intent_factory = persisted_intent
+    result = await commerce.create_checkout(
+        CreateCheckoutInput(
+            subject_id="subject-1",
+            account_id="account-1",
+            offer_key="pack",
+            return_url="https://app.example/return",
+            cancel_url="https://app.example/cancel",
+            operation_key="checkout-replay",
+        )
+    )
+
+    assert result.intent_id == "intent-replay"
+    assert result.url == "https://checkout.example/replay"
+    assert provider.checkout_params == []
+
+
+@pytest.mark.asyncio
+async def test_checkout_persistence_failure_remains_replayable_not_terminal() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.checkout_update_error = RuntimeError("database unavailable")
+    checkout = CreateCheckoutInput(
+        subject_id="subject-1",
+        account_id="account-1",
+        offer_key="pack",
+        return_url="https://app.example/return",
+        cancel_url="https://app.example/cancel",
+        operation_key="checkout-persistence-retry",
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await commerce.create_checkout(checkout)
+    assert billing.updates == []
+    assert len(provider.checkout_params) == 1
+
+    billing.checkout_update_error = None
+    recovered = await commerce.create_checkout(checkout)
+    assert recovered.intent_id == "intent-1"
+    assert len(provider.checkout_params) == 2
+    assert all(params.idempotency_key == "checkout-persistence-retry" for params in provider.checkout_params)
+    assert billing.updates == [
+        (
+            "intent-1",
+            {
+                "provider_session_id": "session-1",
+                "checkout_url": "https://checkout.example/alpha-pack",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_checkout_customer_persistence_failure_remains_replayable_not_terminal() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.customer_upsert_error = RuntimeError("customer database unavailable")
+    checkout = CreateCheckoutInput(
+        subject_id="subject-1",
+        account_id="account-1",
+        offer_key="pack",
+        return_url="https://app.example/return",
+        cancel_url="https://app.example/cancel",
+        operation_key="checkout-customer-retry",
+    )
+
+    with pytest.raises(RuntimeError, match="customer database unavailable"):
+        await commerce.create_checkout(checkout)
+    assert billing.updates == []
+    assert len(provider.checkout_params) == 1
+
+    billing.customer_upsert_error = None
+    recovered = await commerce.create_checkout(checkout)
+    assert recovered.intent_id == "intent-1"
+    assert len(provider.checkout_params) == 2
+    assert all(params.idempotency_key == "checkout-customer-retry" for params in provider.checkout_params)
+    assert billing.updates == [
+        (
+            "intent-1",
+            {
+                "provider_session_id": "session-1",
+                "checkout_url": "https://checkout.example/alpha-pack",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -803,6 +915,7 @@ async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> Non
 
     provider.fail_checkout = True
     billing.intent_factory = None
+    updates_before_failure = list(billing.updates)
     with pytest.raises(RuntimeError, match="checkout failed"):
         await commerce.create_checkout(
             CreateCheckoutInput(
@@ -814,7 +927,7 @@ async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> Non
                 operation_key="provider-fails",
             )
         )
-    assert billing.updates[-1] == ("intent-1", {"status": "failed"})
+    assert billing.updates == updates_before_failure
 
 
 def test_checkout_status_maps_terminal_pending_expired_and_missing() -> None:
@@ -922,7 +1035,10 @@ async def test_plan_change_confirmation_requires_explicit_replacement_cancellati
             offer_key="pro_month",
             quote_fingerprint=preview.quote_fingerprint or "",
         )
-    assert billing.change_updates[-1] == ("change-row", {"state": "failed", "error_message": "change failed"})
+    assert billing.change_updates[-1] == (
+        "change-row",
+        {"state": "failed", "error_message": "subscription_change_failed:RuntimeError"},
+    )
     assert provider.cancelled[-1] == ("subscription-1", "change-fails:restore-cancellation")
 
 

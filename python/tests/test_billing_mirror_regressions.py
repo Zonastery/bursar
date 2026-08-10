@@ -230,9 +230,7 @@ def test_unknown_cancellation_without_offer_refs_is_failed_for_retry() -> None:
     result = service.ingest_billing_event(_cancellation_event(event_id="evt_cancel_unresolved", refs=None))
 
     assert result.handled is False
-    assert result.error == (
-        "cannot persist cancellation for unknown subscription stripe/sub_unknown: offer could not be resolved"
-    )
+    assert result.error == "billing_event_processing_failed:STORE_ERROR"
     store.upsert_billing_subscription.assert_not_called()
     store.complete_billing_event.assert_not_called()
     store.fail_billing_event.assert_called_once()

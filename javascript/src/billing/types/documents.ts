@@ -1,4 +1,4 @@
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 import type { ProviderRef } from "./common.js";
 
 export interface BillingCustomerInfo {

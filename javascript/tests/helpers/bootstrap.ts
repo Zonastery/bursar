@@ -33,6 +33,7 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT set_config('lock_timeout', '30000ms', true)");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
       "bursar:migrations",
     ]);

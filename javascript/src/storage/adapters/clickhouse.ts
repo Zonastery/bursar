@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import type {
   AggregateStats,
   DailySpendRow,
@@ -40,11 +40,49 @@ export interface ClickHouseUsageStoreOptions {
   client: ClickHouseClient;
   tenantId: string;
   table?: string;
-  /** Create the usage projection table on first use. Defaults to true. */
+  /** Create the usage projection table on first use. Defaults to false. */
   createTable?: boolean;
-  /** Optional ClickHouse-side TTL. Omit to retain the full projection. */
+  /** TTL used only by SDK-generated DDL when createTable/initializeSchema is used. */
   retentionDays?: number | null;
 }
+
+interface ClickHouseSchemaRow {
+  name: string;
+  type: string;
+  engine: string;
+  engine_full: string;
+  sorting_key: string;
+}
+
+const EXPECTED_SCHEMA_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  tenant_id: ["UUID"],
+  outbox_event_id: ["UInt64"],
+  charge_id: ["UUID"],
+  account_id: ["UUID"],
+  subject_id: ["UUID"],
+  operation: ["String", "LowCardinality(String)"],
+  feature: ["Nullable(String)", "LowCardinality(Nullable(String))"],
+  model: ["Nullable(String)", "LowCardinality(Nullable(String))"],
+  region: ["Nullable(String)", "LowCardinality(Nullable(String))"],
+  measures: ["String"],
+  dimensions: ["String"],
+  metadata: ["String"],
+  requested: ["Decimal(20,6)"],
+  charged: ["Decimal(20,6)"],
+  allowance_requested: ["Decimal(20,6)"],
+  allowance_covered: ["Decimal(20,6)"],
+  billing_disposition: ["String", "LowCardinality(String)"],
+  catalog_revision_id: ["Nullable(UUID)"],
+  plan_id: ["Nullable(UUID)"],
+  rate_card_key: ["Nullable(String)"],
+  pricing_snapshot: ["String"],
+  ledger_entry_id: ["Nullable(UUID)"],
+  correction_of_charge_id: ["Nullable(UUID)"],
+  idempotency_key: ["String"],
+  request_digest: ["String"],
+  event_at: ["DateTime64(6,'UTC')"],
+  created_at: ["DateTime64(6,'UTC')"],
+};
 
 interface SpendRow {
   key: string;
@@ -105,6 +143,21 @@ function readClickHouseDate(value: string): string {
   return `${normalized}Z`;
 }
 
+function normalizeClickHouseType(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+function normalizeOutboxEventId(value: string): string {
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw new TypeError("ClickHouse outboxEventId must be an unsigned integer string");
+  }
+  const parsed = BigInt(value);
+  if (parsed > 18_446_744_073_709_551_615n) {
+    throw new RangeError("ClickHouse outboxEventId exceeds UInt64");
+  }
+  return parsed.toString();
+}
+
 /**
  * Idempotent ClickHouse usage projection plus the analytics read port.
  *
@@ -124,7 +177,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     this.tenantId = normalizeTenantId(options.tenantId);
     this.table = validateTableName(options.table ?? "bursar_usage_events");
     this.quotedTable = quoteTable(this.table);
-    this.createTable = options.createTable ?? true;
+    this.createTable = options.createTable ?? false;
     this.retentionDays = options.retentionDays ?? null;
     if (
       this.retentionDays !== null &&
@@ -138,6 +191,11 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
 
   initialize(): Promise<void> {
     if (!this.createTable) return Promise.resolve();
+    return this.initializeSchema();
+  }
+
+  /** Explicitly create Bursar's standalone projection schema. */
+  initializeSchema(): Promise<void> {
     if (!this.initializePromise) {
       this.initializePromise = this.createProjectionTable().catch((error: unknown) => {
         this.initializePromise = null;
@@ -148,45 +206,72 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
   }
 
   async writeUsage(event: UsageChargeExport, outboxEventId: string): Promise<void> {
+    await this.writeUsageBatch([[event, outboxEventId]]);
+  }
+
+  /** Insert a batch in one ClickHouse request while retaining each outbox identity. */
+  async writeUsageBatch(entries: readonly (readonly [UsageChargeExport, string])[]): Promise<void> {
+    if (entries.length === 0) return;
+    const values = entries.map(([event, outboxEventId]) => this.projectUsage(event, outboxEventId));
     await this.initialize();
-    if (event.tenantId !== this.tenantId) {
-      throw new Error("Usage event tenantId does not match ClickHouse store tenantId");
-    }
     await this.client.insert({
       table: this.table,
       format: "JSONEachRow",
-      values: [
-        {
-          tenant_id: event.tenantId,
-          outbox_event_id: outboxEventId,
-          charge_id: event.chargeId,
-          account_id: event.accountId,
-          subject_id: event.subjectId,
-          operation: event.operation,
-          feature: event.feature,
-          model: event.model,
-          region: event.region,
-          measures: JSON.stringify(event.measures),
-          dimensions: JSON.stringify(event.dimensions),
-          metadata: JSON.stringify(event.metadata),
-          requested: event.requested,
-          charged: event.charged,
-          allowance_requested: event.allowanceRequested,
-          allowance_covered: event.allowanceCovered,
-          billing_disposition: event.billingDisposition,
-          catalog_revision_id: event.catalogRevisionId,
-          plan_id: event.planId,
-          rate_card_key: event.rateCardKey,
-          pricing_snapshot: JSON.stringify(event.pricingSnapshot),
-          ledger_entry_id: event.ledgerEntryId,
-          correction_of_charge_id: event.correctionOfChargeId,
-          idempotency_key: event.idempotencyKey,
-          request_digest: event.requestDigest,
-          event_at: clickHouseDate(event.eventAt),
-          created_at: clickHouseDate(event.createdAt),
-        },
-      ],
+      values,
     });
+  }
+
+  /** Validate the existing schema without creating or modifying it. */
+  async checkSchemaCompatibility(): Promise<void> {
+    const [database = "", tableName] = this.table.includes(".")
+      ? this.table.split(".")
+      : ["", this.table];
+    const result = await this.client.query({
+      query: `SELECT
+         c.name,
+         c.type,
+         t.engine,
+         t.engine_full,
+         t.sorting_key
+       FROM system.columns AS c
+       INNER JOIN system.tables AS t
+         ON t.database = c.database AND t.name = c.table
+       WHERE c.database = if(empty({database:String}), currentDatabase(), {database:String})
+         AND c.table = {tableName:String}
+       ORDER BY c.position`,
+      query_params: { database, tableName },
+      format: "JSONEachRow",
+    });
+    const rows = await result.json<ClickHouseSchemaRow[]>();
+    if (rows.length === 0) {
+      throw new Error(`ClickHouse table ${this.table} does not exist`);
+    }
+
+    const actual = new Map(rows.map((row) => [row.name, normalizeClickHouseType(row.type)]));
+    const mismatches: string[] = [];
+    for (const [name, expectedTypes] of Object.entries(EXPECTED_SCHEMA_COLUMNS)) {
+      const actualType = actual.get(name);
+      const accepted = expectedTypes.map(normalizeClickHouseType);
+      if (actualType === undefined) mismatches.push(`missing ${name}`);
+      else if (!accepted.includes(actualType)) {
+        mismatches.push(`${name} is ${actualType}, expected ${accepted.join(" or ")}`);
+      }
+    }
+
+    const schema = rows[0];
+    if (!schema?.engine.endsWith("ReplacingMergeTree")) {
+      mismatches.push(`engine ${schema?.engine ?? "unknown"} is not a ReplacingMergeTree`);
+    } else if (!/\boutbox_event_id\b/.test(schema.engine_full)) {
+      mismatches.push("ReplacingMergeTree does not use outbox_event_id as its version column");
+    }
+    for (const keyColumn of ["tenant_id", "event_at", "charge_id"]) {
+      if (!new RegExp(`\\b${keyColumn}\\b`).test(schema?.sorting_key ?? "")) {
+        mismatches.push(`sorting key does not include ${keyColumn}`);
+      }
+    }
+    if (mismatches.length > 0) {
+      throw new Error(`ClickHouse table ${this.table} is incompatible: ${mismatches.join("; ")}`);
+    }
   }
 
   async spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]> {
@@ -388,6 +473,41 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       PARTITION BY toYYYYMM(event_at)
       ORDER BY (tenant_id, event_at, charge_id)${ttl}`,
     });
+  }
+
+  private projectUsage(event: UsageChargeExport, outboxEventId: string): Record<string, unknown> {
+    if (event.tenantId !== this.tenantId) {
+      throw new Error("Usage event tenantId does not match ClickHouse store tenantId");
+    }
+    return {
+      tenant_id: event.tenantId,
+      outbox_event_id: normalizeOutboxEventId(outboxEventId),
+      charge_id: event.chargeId,
+      account_id: event.accountId,
+      subject_id: event.subjectId,
+      operation: event.operation,
+      feature: event.feature,
+      model: event.model,
+      region: event.region,
+      measures: JSON.stringify(event.measures),
+      dimensions: JSON.stringify(event.dimensions),
+      metadata: JSON.stringify(event.metadata),
+      requested: event.requested,
+      charged: event.charged,
+      allowance_requested: event.allowanceRequested,
+      allowance_covered: event.allowanceCovered,
+      billing_disposition: event.billingDisposition,
+      catalog_revision_id: event.catalogRevisionId,
+      plan_id: event.planId,
+      rate_card_key: event.rateCardKey,
+      pricing_snapshot: JSON.stringify(event.pricingSnapshot),
+      ledger_entry_id: event.ledgerEntryId,
+      correction_of_charge_id: event.correctionOfChargeId,
+      idempotency_key: event.idempotencyKey,
+      request_digest: event.requestDigest,
+      event_at: clickHouseDate(event.eventAt),
+      created_at: clickHouseDate(event.createdAt),
+    };
   }
 
   private async spendRows(

@@ -28,7 +28,7 @@ test: lint typecheck  ## Lint, typecheck, then run the test suite
 	uv run python -m pytest tests/ -q
 
 test-concurrency:  ## Run the real-Postgres concurrency subset (set DATABASE_URL)
-	BURSAR_RACE_ITERATIONS=$${BURSAR_RACE_ITERATIONS:-1} uv run python -m pytest tests/ -m concurrency -q
+	uv run python -m pytest tests/ -m concurrency -q --count $${BURSAR_RACE_ITERATIONS:-1}
 
 release-ci:  ## Print the git tag commands for a CI-driven release
 	@echo "Release via CI: git tag v$(VERSION) && git push origin v$(VERSION)"

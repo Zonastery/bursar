@@ -1,17 +1,18 @@
 ---
 title: How-to guides
 sidebar_label: How-to guides
-description: Complete focused production tasks for deployment, credit operations, billing, and agent integrations.
+description: Complete focused tasks for embedding Bursar, configuring credits and billing, and integrating agent tooling.
 keywords:
-  - Bursar deployment
+  - embed Bursar
   - credit integration
   - subscription billing
+  - OpenTelemetry
   - Google ADK metering
 ---
 
 import DocCardList from "@theme/DocCardList";
 
-# Complete a production integration
+# Complete an embedded integration
 
 These guides assume you understand the Bursar boundary and have completed the quickstart. Each page addresses one production task and links to reference material for exact software development kit (SDK) signatures.
 
@@ -19,7 +20,7 @@ If you are choosing the architecture, begin with
 [Build a prepaid credit system for AI SaaS](./ai-saas-credits.mdx) to separate
 application ownership from the transactional metering and ledger boundary.
 
-## Follow the production sequence
+## Follow the integration sequence
 
 For a new integration, complete these tasks in order:
 
@@ -28,6 +29,7 @@ For a new integration, complete these tasks in order:
 3. [Protect monetary operations](./financial-safety.mdx) with stable idempotency keys and atomic admission.
 4. [Manage credits](./credit-lifecycle.mdx) through grants, purchases, charges, refunds, expiry, and revocation.
 5. [Integrate subscriptions and payments](./subscription-integration.mdx) after the credit boundary is stable.
+6. [Instrument Bursar with OpenTelemetry](./opentelemetry.mdx) when the host has selected its telemetry providers and exporters.
 
 Add [Google ADK metering](./google-adk.mdx) or the [Bursar coding-agent skill](../agent-skills.mdx) only when the host application uses those surfaces.
 

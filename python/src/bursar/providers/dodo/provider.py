@@ -35,6 +35,7 @@ from bursar.providers.types import (
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
+from bursar.shared.diagnostics import persisted_diagnostic_summary
 from bursar.shared.idempotency import require_stable_key
 from bursar.shared.numbers import MAX_SAFE_INTEGER
 
@@ -183,7 +184,10 @@ class DodoProvider:
                 key=self._webhook_key,
             )
         except Exception as exc:
-            self._logger.warning("Dodo webhook verification failed", {"error": str(exc)})
+            self._logger.warning(
+                "Dodo webhook verification failed",
+                {"error": persisted_diagnostic_summary(exc, "webhook_verification_failed")},
+            )
             return WebhookResult(
                 received=False,
                 retryable=False,
@@ -260,21 +264,16 @@ class DodoProvider:
         return CheckoutSessionStatus(payment_status=session.payment_status)
 
     async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
-        product_id = params.product_id or self._setup_product_id
-        if not product_id:
-            raise ValueError("productId is required for payment method update")
         client = self._get_client()
-        response = await client.checkout_sessions.create(
-            product_cart=[{"product_id": product_id, "quantity": 1}],
-            customer={"customer_id": params.customer_id},
-            return_url=params.return_url,
-            metadata={"purpose": "update_payment_method", "subscription_id": params.subscription_id},
+        response = await client.subscriptions.update_payment_method(
+            params.subscription_id,
+            payment_method={"type": "new", "return_url": params.return_url},
         )
         return ProviderUrlResult(
             url=_require_provider_text(
-                response.checkout_url,
+                response.payment_link,
                 "create_update_payment_method_session",
-                "checkout_url",
+                "payment_link",
             )
         )
 
@@ -288,6 +287,7 @@ class DodoProvider:
             customer={"customer_id": params.customer_id},
             return_url=params.return_url,
             metadata={"purpose": "setup_payment_method"},
+            subscription_data={"on_demand": {"mandate_only": True}},
         )
         return ProviderUrlResult(
             url=_require_provider_text(
@@ -445,8 +445,8 @@ class DodoProvider:
     async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         client = self._get_client()
         payment = await client.payments.retrieve(provider_payment_id)
-        if payment.payment_link:
-            return ProviderUrlResult(url=payment.payment_link)
+        if payment.invoice_url:
+            return ProviderUrlResult(url=_require_provider_text(payment.invoice_url, "get_invoice_url", "invoice_url"))
         return None
 
     async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult:

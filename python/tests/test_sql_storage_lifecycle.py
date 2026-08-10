@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import psycopg2
 import pytest
+from psycopg2 import sql
 from psycopg2.extras import Json
 
 from tests.conftest import TEST_TENANT_ID
 
 pytestmark = [pytest.mark.integration]
+type ManagedPartition = tuple[str, str]
+type ManagedPartitionFactory = Callable[
+    [psycopg2.extensions.cursor, str, datetime],
+    ManagedPartition,
+]
 
 
 def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
@@ -36,7 +43,7 @@ def _create_managed_partition(
     cursor: psycopg2.extensions.cursor,
     parent_table: str,
     partition_at: datetime,
-) -> None:
+) -> ManagedPartition:
     """Create a test partition and apply Bursar's production hardening hook."""
     cursor.execute(
         """
@@ -49,13 +56,16 @@ def _create_managed_partition(
     )
     cursor.execute(
         """
-        SELECT bursar.secure_tenant_partition(
-            format(
-                '%%I.%%I',
-                partition_schema,
-                partition_table
-            )::regclass
-        )
+        SELECT
+            partition_schema,
+            partition_table,
+            bursar.secure_tenant_partition(
+                format(
+                    '%%I.%%I',
+                    partition_schema,
+                    partition_table
+                )::regclass
+            )
         FROM partman.show_partition_name(
             %s,
             %s::timestamptz::text
@@ -64,7 +74,45 @@ def _create_managed_partition(
         """,
         (parent_table, partition_at),
     )
-    assert cursor.fetchone() is not None
+    row = cursor.fetchone()
+    assert row is not None
+    return str(row[0]), str(row[1])
+
+
+@pytest.fixture
+def committed_partition_factory(
+    pg_database_url: str,
+) -> Iterator[ManagedPartitionFactory]:
+    """Create partitions whose setup transaction commits, then always drop them."""
+    committed_partitions: list[ManagedPartition] = []
+
+    def create(
+        cursor: psycopg2.extensions.cursor,
+        parent_table: str,
+        partition_at: datetime,
+    ) -> ManagedPartition:
+        partition = _create_managed_partition(cursor, parent_table, partition_at)
+        committed_partitions.append(partition)
+        return partition
+
+    yield create
+
+    if not committed_partitions:
+        return
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL lock_timeout = '5s'")
+        for partition_schema, partition_table in reversed(committed_partitions):
+            cursor.execute(
+                sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                    sql.Identifier(partition_schema),
+                    sql.Identifier(partition_table),
+                )
+            )
+            cursor.execute(
+                "SELECT to_regclass(%s)",
+                (f"{partition_schema}.{partition_table}",),
+            )
+            assert cursor.fetchone() == (None,)
 
 
 def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
@@ -185,7 +233,7 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         subject_id, _ = _create_account(cursor)
-        _create_managed_partition(
+        partition_schema, partition_table = _create_managed_partition(
             cursor,
             "bursar.usage_charge_payloads",
             expired_at,
@@ -204,18 +252,6 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
             (subject_id, expired_at),
         )
         charge_id = str(cursor.fetchone()[0])  # type: ignore[reportOptionalSubscript]
-
-        cursor.execute(
-            """
-            SELECT partition_schema, partition_table
-            FROM partman.show_partition_name(
-                'bursar.usage_charge_payloads',
-                %s::timestamptz::text
-            )
-            """,
-            (expired_at,),
-        )
-        partition_schema, partition_table = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
 
         cursor.execute(
             """
@@ -434,13 +470,14 @@ def test_default_partition_preserves_out_of_horizon_ingestion(
 
 def test_partition_maintenance_does_not_wait_behind_ingestion(
     pg_database_url: str,
+    committed_partition_factory: ManagedPartitionFactory,
 ) -> None:
     maintenance_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
     expired_at = datetime(2025, 1, 15, 12, tzinfo=UTC)
 
     with psycopg2.connect(pg_database_url) as setup, setup.cursor() as cursor:
         subject_id, _ = _create_account(cursor)
-        _create_managed_partition(
+        committed_partition_factory(
             cursor,
             "bursar.usage_charge_payloads",
             expired_at,

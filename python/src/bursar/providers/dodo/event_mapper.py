@@ -32,6 +32,7 @@ _DODO_SUBSCRIPTION_STATUS: dict[str, BillingSubscriptionStatus] = {
     "pending": BillingSubscriptionStatus.incomplete,
     "trialing": BillingSubscriptionStatus.trialing,
     "active": BillingSubscriptionStatus.active,
+    "paused": BillingSubscriptionStatus.paused,
     "on_hold": BillingSubscriptionStatus.past_due,
     "cancelled": BillingSubscriptionStatus.canceled,
     "failed": BillingSubscriptionStatus.past_due,
@@ -425,6 +426,30 @@ async def _handle_subscription_on_hold(
     call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
+async def _handle_subscription_paused(
+    event_type: str,
+    data: dict[str, Any],
+    account_id: str | None,
+    metadata: dict[str, str],
+    event_timestamp: object,
+    sink: BillingEventSink,
+    logger: ProviderLogger,
+) -> None:
+    sub_id = _subscription_id(data)
+    customer_info = _make_customer_info(data)
+    kw = {
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
+        "event_type": BillingEventType.subscription_paused,
+        "subscription": BillingSubscriptionInfo(
+            provider_subscription_id=sub_id,
+            status=BillingSubscriptionStatus.paused,
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
+        ),
+    }
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
+
+
 async def _handle_subscription_updated_event(
     event_type: str,
     data: dict[str, Any],
@@ -579,7 +604,7 @@ async def _handle_payment_failed(
             "Dodo payment.currency",
         ),
         purpose="subscription" if subscription_id else "credit_topup",
-        status="failed",
+        status="canceled" if event_type == "payment.cancelled" else "failed",
         refs=ProviderRef(product_id=product_id) if product_id else None,
     )
     call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
@@ -696,14 +721,15 @@ _EVENT_HANDLERS: dict[str, Any] = {
     "subscription.expired": _handle_subscription_expired,
     "subscription.failed": _handle_subscription_failed,
     "subscription.on_hold": _handle_subscription_on_hold,
+    "subscription.paused": _handle_subscription_paused,
     "subscription.updated": _handle_subscription_updated_event,
     "subscription.plan_changed": _handle_subscription_plan_changed,
     "payment.succeeded": _handle_payment_succeeded,
     "payment.failed": _handle_payment_failed,
+    "payment.cancelled": _handle_payment_failed,
     "refund.succeeded": _handle_refund,
     "refund.failed": _handle_refund,
     "dispute.opened": _handle_dispute_created,
-    "dispute.closed": _handle_dispute_closed,
     "dispute.won": _handle_dispute_closed,
     "dispute.lost": _handle_dispute_closed,
     "dispute.accepted": _handle_dispute_closed,

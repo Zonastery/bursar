@@ -1,12 +1,16 @@
 import { z } from "zod";
 
-import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
+import { normalizeTenantId } from "../shared/postgres-client.js";
 import { safeParse } from "../shared/postgres-validation.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import type {
   BillingEventPayloadExport,
+  OutboxDeadLetter,
+  OutboxDeadLetterListOptions,
+  OutboxDeadLetterPage,
   OutboxEvent,
-  OutboxStore,
+  OutboxRecoveryStore,
+  OutboxStats,
   UsageChargeExport,
 } from "./ports.js";
 
@@ -24,6 +28,23 @@ const nonnegativeIntegerSchema = z
   .union([z.number(), z.string().regex(/^\d+$/u)])
   .transform(Number)
   .pipe(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER));
+const positiveBigintTextSchema = z.string().regex(/^[1-9]\d*$/u);
+const persistedDiagnosticSummarySchema = z
+  .string()
+  .regex(/^[A-Za-z][A-Za-z0-9_.-]{0,127}:[A-Za-z][A-Za-z0-9_.-]{0,127}$/u);
+const outboxDeadLetterListOptionsSchema = z
+  .object({
+    limit: z.number().finite().int().min(1).max(100).default(100),
+    cursor: z
+      .object({
+        createdAt: timestampSchema,
+        eventId: positiveBigintTextSchema,
+      })
+      .strict()
+      .nullable()
+      .default(null),
+  })
+  .strict();
 
 function asRow(value: unknown, context: string): Row {
   return safeParse(rowSchema, value, context);
@@ -70,11 +91,21 @@ function scalarBoolean(rows: unknown[]): boolean {
   return safeParse(z.boolean(), values[0], "PostgreSQL boolean RPC result");
 }
 
-export class PostgresStorageRepository implements OutboxStore {
+export class PostgresStorageRepository implements OutboxRecoveryStore {
+  private readonly tenantId: string;
+
   constructor(
     private readonly query: QueryFn,
-    private readonly tenantId: string,
-  ) {}
+    tenantId: string,
+  ) {
+    this.tenantId = normalizeTenantId(tenantId);
+  }
+
+  private assertEventTenant(event: OutboxEvent): void {
+    if (event.tenantId !== this.tenantId) {
+      throw new Error("Outbox event tenant does not match repository tenant");
+    }
+  }
 
   async claim(
     topics: readonly string[],
@@ -102,12 +133,23 @@ export class PostgresStorageRepository implements OutboxStore {
     });
   }
 
-  async complete(event: OutboxEvent): Promise<boolean> {
+  async renew(event: OutboxEvent, leaseSeconds: number): Promise<boolean> {
+    this.assertEventTenant(event);
     return scalarBoolean(
-      await this.query("SELECT bursar.complete_outbox_event($1::bigint, $2::uuid)", [
-        event.eventId,
-        event.claimToken,
-      ]),
+      await this.query(
+        "SELECT bursar.renew_tenant_outbox_claim($1::uuid, $2::bigint, $3::uuid, $4::integer)",
+        [this.tenantId, event.eventId, event.claimToken, leaseSeconds],
+      ),
+    );
+  }
+
+  async complete(event: OutboxEvent): Promise<boolean> {
+    this.assertEventTenant(event);
+    return scalarBoolean(
+      await this.query(
+        "SELECT bursar.complete_tenant_outbox_event($1::uuid, $2::bigint, $3::uuid)",
+        [this.tenantId, event.eventId, event.claimToken],
+      ),
     );
   }
 
@@ -117,17 +159,85 @@ export class PostgresStorageRepository implements OutboxStore {
     retryDelaySeconds: number,
     attemptLimit: number,
   ): Promise<boolean> {
+    this.assertEventTenant(event);
     return scalarBoolean(
       await this.query(
-        "SELECT bursar.fail_outbox_event($1::bigint, $2::uuid, $3::text, $4::integer, $5::integer)",
+        "SELECT bursar.fail_tenant_outbox_event($1::uuid, $2::bigint, $3::uuid, $4::text, $5::integer, $6::integer)",
         [
+          this.tenantId,
           event.eventId,
           event.claimToken,
-          boundedDiagnosticMessage(error, "outbox_delivery_failed"),
+          safeParse(persistedDiagnosticSummarySchema, error, "outbox failure summary"),
           retryDelaySeconds,
           attemptLimit,
         ],
       ),
+    );
+  }
+
+  async stats(): Promise<OutboxStats> {
+    const rows = await this.query("SELECT * FROM bursar.get_outbox_stats($1::uuid)", [
+      this.tenantId,
+    ]);
+    if (rows.length !== 1) {
+      throw new Error(`get_outbox_stats returned ${rows.length} rows; expected one`);
+    }
+    const row = asRow(rows[0], "get_outbox_stats");
+    return {
+      pendingCount: nonnegativeInteger(row, "pending_count", "outbox stats"),
+      processingCount: nonnegativeInteger(row, "processing_count", "outbox stats"),
+      deliveredCount: nonnegativeInteger(row, "delivered_count", "outbox stats"),
+      deadLetterCount: nonnegativeInteger(row, "dead_letter_count", "outbox stats"),
+      oldestPendingAt: optionalTimestamp(row, "oldest_pending_at", "outbox stats"),
+    };
+  }
+
+  async listDeadLetters(options: OutboxDeadLetterListOptions = {}): Promise<OutboxDeadLetterPage> {
+    const parsed = outboxDeadLetterListOptionsSchema.parse(options);
+    const rows = await this.query(
+      "SELECT * FROM bursar.list_outbox_dead_letters($1::uuid, $2::timestamptz, $3::bigint, $4::integer)",
+      [
+        this.tenantId,
+        parsed.cursor?.createdAt ?? null,
+        parsed.cursor?.eventId ?? null,
+        parsed.limit,
+      ],
+    );
+    const deadLetters: OutboxDeadLetter[] = rows.map((raw) => {
+      const row = asRow(raw, "list_outbox_dead_letters");
+      return {
+        eventId: safeParse(positiveBigintTextSchema, row.event_id, "outbox dead letter.event_id"),
+        tenantId: requiredString(row, "tenant_id", "outbox dead letter"),
+        topic: requiredString(row, "topic", "outbox dead letter"),
+        aggregateType: requiredString(row, "aggregate_type", "outbox dead letter"),
+        aggregateId: requiredString(row, "aggregate_id", "outbox dead letter"),
+        payloadVersion: nonnegativeInteger(row, "payload_version", "outbox dead letter"),
+        attemptCount: nonnegativeInteger(row, "attempt_count", "outbox dead letter"),
+        lastError: optionalString(row, "last_error", "outbox dead letter"),
+        createdAt: requiredTimestamp(row, "created_at", "outbox dead letter"),
+        updatedAt: requiredTimestamp(row, "updated_at", "outbox dead letter"),
+      };
+    });
+    const hasMore = deadLetters.length > parsed.limit;
+    const items = hasMore ? deadLetters.slice(0, parsed.limit) : deadLetters;
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, eventId: last.eventId } : null,
+    };
+  }
+
+  async requeue(eventId: string): Promise<boolean> {
+    const normalizedEventId = safeParse(
+      positiveBigintTextSchema,
+      eventId,
+      "outbox dead letter eventId",
+    );
+    return scalarBoolean(
+      await this.query("SELECT bursar.requeue_outbox_dead_letter($1::uuid, $2::bigint)", [
+        this.tenantId,
+        normalizedEventId,
+      ]),
     );
   }
 

@@ -74,6 +74,22 @@ export type {
 export { retryBursarOperation } from "./retry.js";
 export type { BursarRetryOptions } from "./retry.js";
 export { validateExpression, evaluateExpression } from "./expr.js";
+export {
+  BURSAR_INSTRUMENTATION_SCOPE,
+  BURSAR_INSTRUMENTATION_VERSION,
+  NOOP_INSTRUMENTATION,
+  NoopInstrumentation,
+  getDefaultInstrumentation,
+  sanitizeTelemetryAttributes,
+  setDefaultInstrumentation,
+  telemetryErrorAttributes,
+  telemetryOperationAttributes,
+} from "./telemetry/index.js";
+export type {
+  Instrumentation,
+  TelemetryAttributes,
+  TelemetryAttributeValue,
+} from "./telemetry/index.js";
 
 // Application facade. Credit/billing orchestration is internal to Bursar.
 export { AccountService, Bursar, CatalogService } from "./bursar.js";

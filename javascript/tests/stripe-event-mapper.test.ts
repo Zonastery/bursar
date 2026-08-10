@@ -69,6 +69,35 @@ const event = (type: string, object: unknown) =>
   }) as unknown as Stripe.Event;
 
 describe("Stripe webhook mapper", () => {
+  it("maps the official subscription lifecycle event set", async () => {
+    const target = sink();
+    const stripe = fakeStripe();
+    const lifecycle = [
+      ["customer.subscription.created", "subscription.created", "active"],
+      ["customer.subscription.paused", "subscription.paused", "paused"],
+      ["customer.subscription.resumed", "subscription.resumed", "active"],
+      ["customer.subscription.trial_will_end", "subscription.trial_will_end", "trialing"],
+    ] as const;
+
+    for (const [providerEvent, billingEvent, status] of lifecycle) {
+      await handleStripeWebhook(
+        event(providerEvent, { ...subscriptionFixture(), status }),
+        target,
+        stripe,
+      );
+      expect(target.events.at(-1)).toMatchObject({
+        eventType: billingEvent,
+        accountId: "u1",
+        customer: { providerCustomerId: "cus_1" },
+        subscription: {
+          providerSubscriptionId: "sub_1",
+          status,
+          refs: { priceId: "price_pro", productId: "prod_pro" },
+        },
+      });
+    }
+  });
+
   it("maps current subscription periods and invoice parent references", async () => {
     const target = sink();
     const subscription = subscriptionFixture();
@@ -275,6 +304,79 @@ describe("Stripe webhook mapper", () => {
         refs: { priceId: "price_pro", productId: "prod_pro" },
       },
     });
+  });
+
+  it("maps terminal auto-recharge PaymentIntent outcomes", async () => {
+    const target = sink();
+    const stripe = fakeStripe();
+    const outcomes = [
+      ["payment_intent.succeeded", "payment.succeeded", "succeeded"],
+      ["payment_intent.payment_failed", "payment.failed", "failed"],
+      ["payment_intent.canceled", "payment.failed", "canceled"],
+    ] as const;
+
+    for (const [providerEvent, billingEvent, status] of outcomes) {
+      await handleStripeWebhook(
+        event(providerEvent, {
+          id: `pi_${status}`,
+          amount: 500,
+          currency: "usd",
+          metadata: {
+            auto_recharge_attempt_id: "attempt_1",
+            bursar_account_id: "u1",
+            price_id: "price_topup",
+          },
+        }),
+        target,
+        stripe,
+      );
+      expect(target.events.at(-1)).toMatchObject({
+        eventType: billingEvent,
+        accountId: "u1",
+        payment: {
+          providerPaymentId: `pi_${status}`,
+          status,
+          refs: { priceId: "price_topup" },
+        },
+      });
+    }
+  });
+
+  it("maps Stripe dispute creation and closure", async () => {
+    const target = sink();
+    const stripe = fakeStripe();
+    const dispute = {
+      id: "dp_1",
+      payment_intent: "pi_1",
+      charge: "ch_1",
+      status: "needs_response",
+      reason: "fraudulent",
+      metadata: { bursar_account_id: "u1" },
+    };
+
+    await handleStripeWebhook(event("charge.dispute.created", dispute), target, stripe);
+    await handleStripeWebhook(
+      event("charge.dispute.closed", { ...dispute, status: "won" }),
+      target,
+      stripe,
+    );
+
+    expect(target.events).toMatchObject([
+      {
+        eventType: "dispute.created",
+        accountId: "u1",
+        dispute: {
+          providerDisputeId: "dp_1",
+          providerPaymentId: "pi_1",
+          status: "needs_response",
+          reason: "fraudulent",
+        },
+      },
+      {
+        eventType: "dispute.closed",
+        dispute: { providerDisputeId: "dp_1", status: "won" },
+      },
+    ]);
   });
 
   it("propagates transient Stripe retrieval failures for webhook retries", async () => {

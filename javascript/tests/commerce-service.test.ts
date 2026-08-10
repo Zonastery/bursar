@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { describe, expect, it, vi, type Mocked } from "vitest";
 
 import type { BillingCapability, BillingEventSink } from "../src/billing/contracts.js";
@@ -427,6 +427,92 @@ describe("CommerceService", () => {
     expect(first).not.toBe(second);
   });
 
+  it("returns the persisted provider session for an exact checkout replay", async () => {
+    const beta = provider("beta");
+    const { service, billing } = harness({ beta });
+    billing.createOrGetCheckoutIntent.mockImplementation(async (value) =>
+      intent({
+        requestDigest: value.requestDigest,
+        provider: value.provider,
+        providerSessionId: "session-replay",
+        checkoutUrl: "https://checkout.example/replay",
+      }),
+    );
+
+    await expect(
+      service.createCheckout({
+        subjectId: "subject-1",
+        accountId: "account-1",
+        offerKey: "pack",
+        returnUrl: "https://app.example/return",
+        cancelUrl: "https://app.example/cancel",
+        operationKey: "checkout-replay",
+      }),
+    ).resolves.toMatchObject({
+      intentId: "intent-1",
+      url: "https://checkout.example/replay",
+    });
+    expect(beta.createCheckoutSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps a checkout replayable when provider-session persistence fails", async () => {
+    const beta = provider("beta");
+    const { service, billing } = harness({ beta });
+    billing.updateCheckoutIntent.mockRejectedValueOnce(new Error("database unavailable"));
+    const checkout = {
+      subjectId: "subject-1",
+      accountId: "account-1",
+      offerKey: "pack",
+      returnUrl: "https://app.example/return",
+      cancelUrl: "https://app.example/cancel",
+      operationKey: "checkout-persistence-retry",
+    };
+
+    await expect(service.createCheckout(checkout)).rejects.toThrow("database unavailable");
+    await expect(service.createCheckout(checkout)).resolves.toMatchObject({ intentId: "intent-1" });
+    expect(beta.createCheckoutSession).toHaveBeenCalledTimes(2);
+    expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ idempotencyKey: "checkout-persistence-retry" }),
+    );
+    expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ idempotencyKey: "checkout-persistence-retry" }),
+    );
+    expect(billing.updateCheckoutIntent).not.toHaveBeenCalledWith("intent-1", {
+      status: "failed",
+    });
+  });
+
+  it("keeps a checkout replayable when customer persistence fails", async () => {
+    const beta = provider("beta");
+    const { service, billing } = harness({ beta });
+    billing.upsertCustomer.mockRejectedValueOnce(new Error("customer database unavailable"));
+    const checkout = {
+      subjectId: "subject-1",
+      accountId: "account-1",
+      offerKey: "pack",
+      returnUrl: "https://app.example/return",
+      cancelUrl: "https://app.example/cancel",
+      operationKey: "checkout-customer-retry",
+    };
+
+    await expect(service.createCheckout(checkout)).rejects.toThrow("customer database unavailable");
+    expect(billing.updateCheckoutIntent).not.toHaveBeenCalled();
+
+    await expect(service.createCheckout(checkout)).resolves.toMatchObject({ intentId: "intent-1" });
+    expect(beta.createCheckoutSession).toHaveBeenCalledTimes(2);
+    expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ idempotencyKey: "checkout-customer-retry" }),
+    );
+    expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ idempotencyKey: "checkout-customer-retry" }),
+    );
+    expect(billing.updateCheckoutIntent).toHaveBeenCalledOnce();
+  });
+
   it("resolves only catalog offer keys while enforcing offer type and quantity", async () => {
     const { service } = harness();
     await expect(
@@ -805,7 +891,7 @@ describe("CommerceService", () => {
     );
     expect(billing.updateBillingSubscriptionChange).toHaveBeenLastCalledWith(expect.any(String), {
       state: "failed",
-      errorMessage: "change failed",
+      errorMessage: "subscription_change_failed:Error",
     });
   });
 

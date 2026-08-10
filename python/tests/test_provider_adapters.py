@@ -12,6 +12,7 @@ from dodopayments import AsyncDodoPayments
 from stripe import StripeClient
 
 from bursar.billing.types import BillingEvent, BillingEventResult, BillingEventType, BillingInvoiceInfo
+from bursar.errors import StoreUnavailableError
 from bursar.providers._shared import call_billing_event_sink
 from bursar.providers.dodo.provider import DodoProvider
 from bursar.providers.mock.provider import MockPaymentProvider
@@ -96,6 +97,61 @@ def test_billing_sink_retries_a_busy_claim() -> None:
     assert result.action == "duplicate"
 
 
+@pytest.mark.parametrize(
+    "error",
+    ["invalid_request", "idempotency_conflict", "max_retries_exceeded"],
+)
+def test_billing_sink_acknowledges_permanent_claim_outcomes(error: str) -> None:
+    class PermanentSink:
+        def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+            del event
+            return BillingEventResult(handled=False, error=error)
+
+    result = call_billing_event_sink(
+        PermanentSink(),
+        BillingEvent(
+            provider="stripe",
+            event_id=f"evt_{error}",
+            event_type=BillingEventType.invoice_paid,
+            occurred_at="2026-07-29T12:00:00+00:00",
+            invoice=BillingInvoiceInfo(
+                provider_invoice_id=f"in_{error}",
+                status="paid",
+                amount_paid_minor=0,
+                amount_due_minor=0,
+                currency="USD",
+            ),
+        ),
+    )
+
+    assert result.error == error
+
+
+def test_billing_sink_keeps_legacy_retry_claim_retryable() -> None:
+    class RetrySink:
+        def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+            del event
+            return BillingEventResult(handled=False, error="claim_failed_retry")
+
+    with pytest.raises(StoreUnavailableError):
+        call_billing_event_sink(
+            RetrySink(),
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_claim_retry",
+                event_type=BillingEventType.invoice_paid,
+                occurred_at="2026-07-29T12:00:00+00:00",
+                invoice=BillingInvoiceInfo(
+                    provider_invoice_id="in_claim_retry",
+                    status="paid",
+                    amount_paid_minor=0,
+                    amount_due_minor=0,
+                    currency="USD",
+                ),
+            ),
+        )
+
+
 class DodoClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -119,6 +175,10 @@ class DodoClient:
 
     async def update(self, subscription_id: str, **kwargs: Any) -> None:
         self.calls.append((subscription_id, kwargs))
+
+    async def update_payment_method(self, subscription_id: str, **kwargs: Any) -> SimpleNamespace:
+        self.calls.append((subscription_id, kwargs))
+        return SimpleNamespace(payment_link="https://update-payment-method.test")
 
     async def retrieve_payment_methods(self, _customer_id: str) -> SimpleNamespace:
         return SimpleNamespace(
@@ -170,7 +230,8 @@ class DodoClient:
     async def retrieve(self, payment_id: str) -> SimpleNamespace:
         return SimpleNamespace(
             payment_id=payment_id,
-            payment_link="https://invoice.test",
+            payment_link="https://checkout.test/not-an-invoice",
+            invoice_url="https://invoice.test/document.pdf",
             status="succeeded",
             total_amount=12,
             currency="USD",
@@ -339,7 +400,27 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
             UpdatePaymentMethodParams(customer_id="cus_1", subscription_id="sub_1", return_url="https://return")
         )
     )
-    assert updated.url == "https://checkout.test"
+    assert updated.url == "https://update-payment-method.test"
+    assert client.calls[1] == (
+        "sub_1",
+        {"payment_method": {"type": "new", "return_url": "https://return"}},
+    )
+    setup = run(
+        provider.create_payment_method_setup_session(
+            PaymentMethodSetupParams(customer_id="cus_1", return_url="https://return/setup")
+        )
+    )
+    assert setup.url == "https://checkout.test"
+    assert client.calls[2] == (
+        "create",
+        {
+            "product_cart": [{"product_id": "prod_setup", "quantity": 1}],
+            "customer": {"customer_id": "cus_1"},
+            "return_url": "https://return/setup",
+            "metadata": {"purpose": "setup_payment_method"},
+            "subscription_data": {"on_demand": {"mandate_only": True}},
+        },
+    )
     run(
         provider.change_plan(
             ChangePlanParams(
@@ -374,7 +455,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
     assert client.calls[-1][1]["extra_headers"] == {"Idempotency-Key": "dodo-customer-1"}
     invoice = run(provider.get_invoice_url("pay_1"))
     assert invoice is not None
-    assert invoice.url == "https://invoice.test"
+    assert invoice.url == "https://invoice.test/document.pdf"
     assert [p.id for p in run(provider.list_payment_methods("cus_1"))] == ["pm_1"]
 
 

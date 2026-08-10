@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, inject } from "vitest";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import { CreditsService } from "../src/credits/service.js";
@@ -19,7 +19,7 @@ import type {
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 import { mapDodoEvent } from "./helpers/dodo-fixtures.js";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
+const DATABASE_URL = inject("DATABASE_URL");
 
 const USER_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID2 = "00000000-0000-0000-0000-000000000002";
@@ -35,6 +35,7 @@ const PRODUCT_ID = "prod_monthly";
 const PRICE_ID = "price_monthly_1000";
 const PRICE_ID_TOPUP = "price_topup_credits";
 const EVENT_ID = "evt_test_001";
+const DODO_PRODUCT_ID = "prod_dodo_monthly";
 const TEST_INSTANT = "2025-01-01T00:00:00.000Z";
 
 const PRICING_DICT = {
@@ -240,11 +241,12 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(offer!.plan).toBe("pro");
   });
 
-  it("sync billing config resolves by canonical lookup", async () => {
+  it("sync billing config resolves the same offer by product id", async () => {
     const { bs } = await makePgComponents(pool);
-    const offer = await bs.resolveBillingOffer(PROVIDER, null, PRICE_ID);
+    const offer = await bs.resolveBillingOffer("dodo", DODO_PRODUCT_ID, null);
     expect(offer).not.toBeNull();
     expect(offer!.offerKey).toBe("pro_monthly");
+    expect(offer!.plan).toBe("pro");
   });
 
   it("sync topup config round-trip", async () => {
@@ -427,6 +429,122 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     await bs.failBillingEvent(PROVIDER, "evt_fail_retry", c1.claimToken, "retryable test failure");
     const c2 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
     expect(c2.status).toBe("claimed");
+  });
+
+  it("rejects an invalid event claim without storing an event", async () => {
+    const { bs } = await makePgComponents(pool);
+
+    await expect(bs.claimBillingEvent(PROVIDER, "evt_invalid_claim", "")).resolves.toEqual({
+      status: "invalid_request",
+    });
+
+    const result = await pool.query<{ event_count: number }>(
+      `SELECT count(*)::integer AS event_count
+       FROM bursar.billing_events
+       WHERE tenant_id = $1::uuid
+         AND provider = $2
+         AND provider_environment = 'test'
+         AND provider_event_id = $3`,
+      [TEST_TENANT_ID, PROVIDER, "evt_invalid_claim"],
+    );
+    expect(result.rows[0]?.event_count).toBe(0);
+  });
+
+  it("preserves an idempotency conflict without creating another event or payload", async () => {
+    const { bs } = await makePgComponents(pool);
+    const eventId = "evt_claim_conflict";
+    const first = await bs.claimBillingEvent(PROVIDER, eventId, "test.event", { amount: 100 });
+    expect(first.status).toBe("claimed");
+    if (first.status !== "claimed") throw new Error("expected initial event claim");
+    await expect(bs.completeBillingEvent(PROVIDER, eventId, first.claimToken)).resolves.toBe(true);
+
+    const conflict = await bs.claimBillingEvent(PROVIDER, eventId, "test.event", { amount: 200 });
+    expect(conflict).toEqual({
+      status: "idempotency_conflict",
+      billingEventId: first.billingEventId,
+    });
+
+    const result = await pool.query<{
+      id: string;
+      status: string;
+      attempt_count: number;
+      payload_count: number;
+    }>(
+      `SELECT event.id,
+              event.status,
+              event.attempt_count,
+              (SELECT count(*)::integer
+               FROM bursar.billing_event_payloads AS payload
+               WHERE payload.event_id = event.id) AS payload_count
+       FROM bursar.billing_events AS event
+       WHERE event.tenant_id = $1::uuid
+         AND event.provider = $2
+         AND event.provider_environment = 'test'
+         AND event.provider_event_id = $3`,
+      [TEST_TENANT_ID, PROVIDER, eventId],
+    );
+    expect(result.rows).toEqual([
+      {
+        id: first.billingEventId,
+        status: "completed",
+        attempt_count: 1,
+        payload_count: 1,
+      },
+    ]);
+  });
+
+  it("preserves a terminal event claim after the retry budget is exhausted", async () => {
+    const { bs } = await makePgComponents(pool);
+    const eventId = "evt_claim_exhausted";
+    const first = await bs.claimBillingEvent(PROVIDER, eventId, "test.event");
+    expect(first.status).toBe("claimed");
+    if (first.status !== "claimed") throw new Error("expected initial event claim");
+    await expect(
+      bs.failBillingEvent(PROVIDER, eventId, first.claimToken, "attempt 1"),
+    ).resolves.toBe(true);
+
+    for (let attempt = 2; attempt <= 3; attempt += 1) {
+      const retry = await bs.claimBillingEvent(PROVIDER, eventId, "test.event");
+      expect(retry.status).toBe("claimed");
+      if (retry.status !== "claimed") throw new Error(`expected event retry ${attempt}`);
+      expect(retry.billingEventId).toBe(first.billingEventId);
+      await expect(
+        bs.failBillingEvent(PROVIDER, eventId, retry.claimToken, `attempt ${attempt}`),
+      ).resolves.toBe(true);
+    }
+
+    await expect(bs.claimBillingEvent(PROVIDER, eventId, "test.event")).resolves.toEqual({
+      status: "max_retries_exceeded",
+      billingEventId: first.billingEventId,
+    });
+
+    const result = await pool.query<{
+      id: string;
+      status: string;
+      attempt_count: number;
+      payload_count: number;
+    }>(
+      `SELECT event.id,
+              event.status,
+              event.attempt_count,
+              (SELECT count(*)::integer
+               FROM bursar.billing_event_payloads AS payload
+               WHERE payload.event_id = event.id) AS payload_count
+       FROM bursar.billing_events AS event
+       WHERE event.tenant_id = $1::uuid
+         AND event.provider = $2
+         AND event.provider_environment = 'test'
+         AND event.provider_event_id = $3`,
+      [TEST_TENANT_ID, PROVIDER, eventId],
+    );
+    expect(result.rows).toEqual([
+      {
+        id: first.billingEventId,
+        status: "failed",
+        attempt_count: 3,
+        payload_count: 1,
+      },
+    ]);
   });
 
   // ── Topup credits ────────────────────────────────────────────────────
@@ -656,6 +774,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     const failedIntent = await bs.createOrGetCheckoutIntent({
       subjectId: USER_ID,
       provider: PROVIDER,
+      operationKey: "checkout-payment-failed",
       checkoutKind: "subscription",
       productKey: "pro_monthly",
       requestDigest: "11".repeat(32),
@@ -688,6 +807,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     const expiredIntent = await bs.createOrGetCheckoutIntent({
       subjectId: USER_ID2,
       provider: PROVIDER,
+      operationKey: "checkout-expired",
       checkoutKind: "subscription",
       productKey: "pro_monthly",
       requestDigest: "22".repeat(32),
@@ -1501,7 +1621,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     });
 
     expect(result.handled).toBe(false);
-    expect(result.error).toContain("offer could not be resolved");
+    expect(result.error).toBe("billing_event_processing_failed:STORE_ERROR");
     await expect(
       bs.getBillingSubscription(PROVIDER, "sub_cancel_unknown_without_refs"),
     ).resolves.toBeNull();

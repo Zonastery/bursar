@@ -8,6 +8,14 @@ class BillingClaimBusyError extends Error {
   override readonly name = "BillingClaimBusyError";
 }
 
+const ACKNOWLEDGED_BILLING_EVENT_ERRORS = new Set([
+  "unhandled_event_type",
+  "account_not_found",
+  "invalid_request",
+  "idempotency_conflict",
+  "max_retries_exceeded",
+]);
+
 export function requireProviderString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new TypeError(`${field} must be a non-empty string`);
@@ -51,9 +59,9 @@ export function requireCurrency(value: unknown, field: string): string {
 }
 
 /**
- * Wrapper around the facade event sink that throws on unhandled results (except
- * "unhandled_event_type" which is a permanent no-op). Ensures the provider
- * receives a retryable signal when the event could not be processed.
+ * Wrapper around the facade event sink that throws on retryable or unexpected
+ * failures. Permanent claim outcomes are returned so the provider can
+ * acknowledge them without scheduling another delivery.
  */
 export async function callBillingEventSink(
   sink: BillingEventSink,
@@ -92,11 +100,7 @@ export async function callBillingEventSink(
       details: { reason: result.error },
     });
   }
-  if (
-    !result.handled &&
-    result.error !== "unhandled_event_type" &&
-    result.error !== "account_not_found"
-  ) {
+  if (!result.handled && !ACKNOWLEDGED_BILLING_EVENT_ERRORS.has(result.error ?? "")) {
     throw new BursarError("Bursar failed to ingest the billing event", {
       details: { reason: result.error ?? "unknown" },
     });

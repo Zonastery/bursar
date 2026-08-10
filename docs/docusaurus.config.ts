@@ -81,7 +81,11 @@ const config: Config = {
     [
       "docusaurus-plugin-typedoc",
       {
-        entryPoints: ["../javascript/src/index.ts"],
+        entryPoints: [
+          "../javascript/src/index.ts",
+          "../javascript/src/node.ts",
+          "../javascript/src/telemetry/opentelemetry.ts",
+        ],
         tsconfig: "../javascript/tsconfig.json",
         out: "docs/javascript-api/reference",
         sidebar: { autoConfiguration: false },
@@ -113,6 +117,7 @@ const config: Config = {
           "guides/financial-safety.mdx",
           "guides/credit-lifecycle.mdx",
           "guides/subscription-integration.mdx",
+          "guides/opentelemetry.mdx",
           "guides/google-adk.mdx",
           "agent-skills.mdx",
           "concepts/index.mdx",

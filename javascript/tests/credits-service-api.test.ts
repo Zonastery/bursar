@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { CreditsService } from "../src/credits/service.js";

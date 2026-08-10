@@ -340,18 +340,17 @@ class PostgresBillingStore(BillingStore):
         self,
         input: CheckoutIntentCreate,
     ) -> CheckoutIntent:
-        """Create or retrieve an open checkout intent for an actor key.
-
-        Atomically expires any old open intents for the same actor,
-        then inserts a new one (or returns the existing one via ON CONFLICT).
-        """
+        """Create or retrieve the checkout intent bound to an operation key."""
         if re.fullmatch(r"[0-9a-fA-F]{64}", input.request_digest) is None:
             raise ValueError("request_digest must be a 32-byte hex string")
         rows = self._execute(
-            "SELECT bursar.create_checkout_intent(%s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz) AS id",
+            """SELECT bursar.create_checkout_intent(
+                   %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+               ) AS id""",
             [
                 input.subject_id,
                 input.provider,
+                input.operation_key,
                 input.checkout_kind,
                 input.product_key,
                 input.request_digest,
@@ -432,7 +431,7 @@ class PostgresBillingStore(BillingStore):
             event_type: The event type string.
 
         Returns:
-            BillingEventClaim with status ("ok", "retry", etc.).
+            BillingEventClaim with the explicit database lifecycle status.
         """
         result = self._event_repo.claim(
             provider,
@@ -458,8 +457,18 @@ class PostgresBillingStore(BillingStore):
             return BillingEventClaim(status="duplicate")
         if raw_status == "busy":
             return BillingEventClaim(status="busy")
-        if raw_status in {"invalid_request", "idempotency_conflict", "max_retries_exceeded"}:
-            return BillingEventClaim(status="retry")
+        if raw_status == "invalid_request":
+            return BillingEventClaim(status="invalid_request")
+        if raw_status in {"idempotency_conflict", "max_retries_exceeded"}:
+            if billing_event_id is None:
+                raise StoreError(
+                    "billing event terminal claim returned no event identifier",
+                    details={"provider": provider, "event_id": event_id, "status": raw_status},
+                )
+            return BillingEventClaim(
+                status=raw_status,
+                billing_event_id=str(billing_event_id),
+            )
         raise StoreError(
             "billing event claim returned an unsupported status",
             details={"provider": provider, "event_id": event_id, "status": raw_status},

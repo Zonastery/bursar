@@ -3,7 +3,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import pg from "pg";
 import { PostgresClient } from "../src/shared/postgres-client.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
@@ -11,7 +11,8 @@ import { PostgresStorageRepository } from "../src/storage/postgres-repository.js
 import type { BillingEventPayloadExport, UsageChargeExport } from "../src/storage/ports.js";
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
+const DATABASE_URL = inject("DATABASE_URL");
+const OTHER_TENANT_ID = "00000000-0000-0000-0000-000000000002";
 
 async function seedStorageRows(pool: pg.Pool): Promise<{
   chargeId: string;
@@ -82,6 +83,48 @@ async function seedStorageRows(pool: pg.Pool): Promise<{
   } finally {
     client.release();
   }
+}
+
+async function seedDeadLetters(pool: pg.Pool): Promise<string[]> {
+  await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+    OTHER_TENANT_ID,
+    "outbox-other",
+    "Outbox other tenant",
+  ]);
+  const eventIds: string[] = [];
+  for (let index = 0; index < 2; index += 1) {
+    const inserted = await pool.query<{ id: string }>(
+      `INSERT INTO bursar.event_outbox(
+         tenant_id, topic, aggregate_type, aggregate_id, idempotency_key,
+         status, attempt_count, last_error, created_at
+       )
+       VALUES (
+         $1::uuid, 'usage.charge_recorded', 'credit_usage_charge',
+         gen_random_uuid(), $2::text, 'dead_letter', 10,
+         'outbox_delivery_failed:Error', $3::timestamptz
+       )
+       RETURNING id::text`,
+      [
+        TEST_TENANT_ID,
+        `outbox-recovery-${index}`,
+        new Date(Date.UTC(2026, 7, 10, 0, 0, index)).toISOString(),
+      ],
+    );
+    eventIds.push(inserted.rows[0]!.id);
+  }
+  await pool.query(
+    `INSERT INTO bursar.event_outbox(
+       tenant_id, topic, aggregate_type, aggregate_id, idempotency_key,
+       status, attempt_count, last_error
+     )
+     VALUES (
+       $1::uuid, 'usage.charge_recorded', 'credit_usage_charge',
+       gen_random_uuid(), 'outbox-other-tenant', 'dead_letter', 10,
+       'outbox_delivery_failed:Error'
+     )`,
+    [OTHER_TENANT_ID],
+  );
+  return eventIds;
 }
 
 describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
@@ -176,7 +219,56 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     const usageEvent = claimed.find((event) => event.topic === "usage.charge_recorded")!;
     const billingEvent = claimed.find((event) => event.topic === "billing.webhook_completed")!;
     await expect(repository.complete(usageEvent)).resolves.toBe(true);
-    await expect(repository.fail(billingEvent, "archive unavailable", 0, 3)).resolves.toBe(true);
+    await expect(repository.fail(billingEvent, "outbox_delivery_failed:Error", 0, 3)).resolves.toBe(
+      true,
+    );
+  });
+
+  it("recovers dead letters with bounded cursors, claim renewal, and tenant isolation", async () => {
+    const eventIds = await seedDeadLetters(pool);
+
+    await expect(repository.stats()).resolves.toMatchObject({
+      pendingCount: 0,
+      deadLetterCount: 2,
+    });
+    const firstPage = await repository.listDeadLetters({ limit: 1 });
+    expect(firstPage.items.map(({ eventId }) => eventId)).toEqual([eventIds[0]]);
+    expect(firstPage.nextCursor).not.toBeNull();
+    const secondPage = await repository.listDeadLetters({
+      limit: 1,
+      cursor: firstPage.nextCursor,
+    });
+    expect(secondPage.items.map(({ eventId }) => eventId)).toEqual([eventIds[1]]);
+    expect(secondPage.nextCursor).toBeNull();
+
+    await expect(repository.requeue(eventIds[0]!)).resolves.toBe(true);
+    await expect(repository.requeue(eventIds[0]!)).resolves.toBe(false);
+    await expect(repository.stats()).resolves.toMatchObject({
+      pendingCount: 1,
+      deadLetterCount: 1,
+    });
+
+    const [claimed] = await repository.claim(["usage.charge_recorded"], 1, 1);
+    expect(claimed?.eventId).toBe(eventIds[0]);
+    await expect(repository.renew(claimed!, 60)).resolves.toBe(true);
+    await expect(repository.complete(claimed!)).resolves.toBe(true);
+    await expect(repository.complete(claimed!)).resolves.toBe(false);
+
+    await expect(repository.requeue(eventIds[1]!)).resolves.toBe(true);
+    const [retry] = await repository.claim(["usage.charge_recorded"], 1, 60);
+    expect(retry?.eventId).toBe(eventIds[1]);
+    await expect(repository.fail(retry!, "outbox_delivery_failed:Error", 0, 1)).resolves.toBe(true);
+    await expect(repository.stats()).resolves.toMatchObject({ deadLetterCount: 1 });
+
+    const crossTenant = new PostgresStorageRepository(postgres.query, OTHER_TENANT_ID);
+    await expect(crossTenant.stats()).rejects.toMatchObject({
+      name: "StoreError",
+      code: "STORE_ERROR",
+      message: "PostgreSQL query failed",
+      retryable: false,
+      indeterminate: false,
+      details: expect.objectContaining({ sqlState: "42501" }),
+    });
   });
 
   it("flushes usage and billing outbox events through runtime handlers", async () => {
@@ -229,7 +321,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
       await runtime.start({ loadCatalog: false });
       expect(initialized).toBe(true);
       const result = await runtime.flush();
-      expect(result).toEqual({ claimed: 2, delivered: 2, failed: 0 });
+      expect(result).toEqual({ claimed: 2, delivered: 2, failed: 0, claimLost: 0 });
       expect(usageWrites[0]?.event.operation).toBe("completion");
       expect(archivedBillingEvents[0]?.eventId).toBe(billingEventId);
       await expect(repository.getBillingEventPayload(billingEventId)).resolves.toMatchObject({

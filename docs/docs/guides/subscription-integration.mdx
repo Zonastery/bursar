@@ -41,7 +41,7 @@ npm install @zonastery/bursar pg stripe
 :::important Provider catalog ownership
 
 Bursar does not create or synchronize products and prices in Stripe, Dodo, or
-another provider. Your deployment process owns that catalog. Every provider
+another provider. Your embedding application owns that catalog. Every provider
 identifier in the active Bursar config must already exist in the same provider
 environment as the API key.
 
@@ -182,6 +182,7 @@ def dodo_factory(context):
     return DodoProvider(
         get_client=lambda: dodo,
         webhook_key=os.environ["DODO_PAYMENTS_WEBHOOK_KEY"],
+        setup_product_id=os.environ["DODO_SETUP_PRODUCT_ID"],
         event_sink=context.event_sink,
     )
 ```
@@ -206,6 +207,7 @@ const dodoFactory: CommerceProviderFactory = (context) =>
   new DodoProvider({
     getClient: () => dodo,
     webhookKey: process.env.DODO_PAYMENTS_WEBHOOK_KEY!,
+    setupProductId: process.env.DODO_SETUP_PRODUCT_ID!,
     eventSink: context.eventSink,
   });
 ```
@@ -215,6 +217,9 @@ const dodoFactory: CommerceProviderFactory = (context) =>
 
 Register that factory under `dodo`, set `default_provider="dodo"` or
 `defaultProvider: "dodo"`, and install `dodopayments` instead of `stripe`.
+`DODO_SETUP_PRODUCT_ID` is the Dodo subscription product your application
+chooses for mandate-only payment-method setup when an account has no active
+subscription. Product creation and synchronization remain application-owned.
 
 ## 2. Create checkout from authenticated server code
 
@@ -316,6 +321,14 @@ export async function POST(request: Request) {
 Never call `ingest_billing_event` or `ingestBillingEvent` directly from a
 public webhook route. Those methods accept an already trusted normalized
 event and exist for verified custom adapters.
+
+For Dodo on Next.js, use `createDodoNextWebhookHandler` from
+`@zonastery/bursar/providers/dodo/nextjs`; it composes Bursar with Dodo's
+official `@dodopayments/nextjs` webhook adapter. For Stripe, the provider calls
+the official SDK's `constructEvent`/`construct_event` API. Stripe does not ship
+a separate first-party Next.js webhook adapter, so preserving the raw request
+body is the framework integration boundary—do not reimplement signature
+verification in application code.
 
 The normalized constants use each language's public naming convention:
 Python uses `BillingEventType.subscription_created` and

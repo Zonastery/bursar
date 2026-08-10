@@ -45,6 +45,7 @@ from bursar.providers.types import (
     SavedPaymentChargeResult,
     SavedPaymentPreviewProvider,
 )
+from bursar.shared.diagnostics import persisted_diagnostic_summary
 
 AutoRechargeOutcome = Literal[
     "not_configured",
@@ -407,7 +408,7 @@ class AutoRechargeService:
                     id=attempt.id,
                     state="unknown",
                     failure_code="provider_request_failed",
-                    failure_message=str(error),
+                    failure_message=persisted_diagnostic_summary(error, "auto_recharge_provider_failed"),
                 )
             )
             raise

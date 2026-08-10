@@ -1,0 +1,12 @@
+[
+  "credits.deduct",
+  "credits.grant",
+  "credits.grant_program",
+  "credits.grant_subscription_cycle",
+  "credits.refund",
+  "credits.release",
+  "credits.reserve",
+  "credits.settle",
+  "postgres.query",
+  "postgres.rpc"
+]

@@ -9,6 +9,7 @@ compatible PostgreSQL database.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -237,6 +238,18 @@ def _bind_tenant(cursor: psycopg2.extensions.cursor) -> None:
     cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
 
 
+_COMPONENT_STORES: list[PostgresBillingStore] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_component_stores() -> Iterator[None]:
+    try:
+        yield
+    finally:
+        while _COMPONENT_STORES:
+            _COMPONENT_STORES.pop().close()
+
+
 def _make_components(
     pg_database_url: str,
     pg_store: object,
@@ -246,6 +259,7 @@ def _make_components(
         tenant_id=TEST_TENANT_ID,
         provider_environment="test",
     )
+    _COMPONENT_STORES.append(bs)
     cm = CreditsService(store=pg_store)  # type: ignore[arg-type]
     cm.publish_and_activate_catalog(PRICING_DICT)
     sink = BillingService(bs, provisioning=cm)
@@ -263,11 +277,12 @@ class TestBillingSync:
         assert offer.offer_key == "pro_monthly"
         assert offer.plan == "pro"
 
-    def test_config_resolve_by_canonical_lookup(self, pg_database_url: str, pg_store: object) -> None:
+    def test_config_resolves_same_offer_by_product_id(self, pg_database_url: str, pg_store: object) -> None:
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
-        offer = bs.resolve_billing_offer(PROVIDER, price_id=PRICE_ID)
+        offer = bs.resolve_billing_offer("dodo", product_id=DODO_PRODUCT_ID, price_id=None)
         assert offer is not None
         assert offer.offer_key == "pro_monthly"
+        assert offer.plan == "pro"
 
     def test_topup_config_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
@@ -304,13 +319,14 @@ class TestCheckoutIntentIdempotency:
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
-                    %s::uuid, %s, %s, %s, decode(%s, 'hex'),
+                    %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'),
                     %s::timestamptz, %s, %s
                 )
                 """,
                 (
                     USER_ID,
                     PROVIDER,
+                    "checkout-terminal-replay",
                     "subscription",
                     "pro_monthly",
                     digest,
@@ -329,13 +345,14 @@ class TestCheckoutIntentIdempotency:
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
-                    %s::uuid, %s, %s, %s, decode(%s, 'hex'),
+                    %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'),
                     %s::timestamptz, %s, %s
                 )
                 """,
                 (
                     USER_ID,
                     PROVIDER,
+                    "checkout-terminal-replay",
                     "subscription",
                     "pro_monthly",
                     digest,
@@ -345,6 +362,16 @@ class TestCheckoutIntentIdempotency:
                 ),
             )
             assert cursor.fetchone() == (intent_id,)
+
+            cursor.execute(
+                """
+                SELECT bursar.advance_checkout_intent(
+                    %s::uuid, NULL, %s, %s
+                )
+                """,
+                (intent_id, "session-terminal-attach", "https://example.test/terminal-attach"),
+            )
+            assert cursor.fetchone() == (False,)
 
             cursor.execute(
                 """
@@ -361,7 +388,7 @@ class TestCheckoutIntentIdempotency:
                 first_expiry,
             )
 
-    def test_checkout_replay_reopens_stale_intent_without_reusing_provider_session(
+    def test_checkout_replay_preserves_a_stale_operation_and_a_new_key_creates_a_fresh_intent(
         self,
         pg_database_url: str,
         pg_store: object,
@@ -375,13 +402,14 @@ class TestCheckoutIntentIdempotency:
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
-                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz,
+                    %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz,
                     %s, %s
                 )
                 """,
                 (
                     USER_ID2,
                     PROVIDER,
+                    "checkout-stale-replay",
                     "subscription",
                     "pro_monthly",
                     digest,
@@ -397,18 +425,28 @@ class TestCheckoutIntentIdempotency:
                 SET created_at = now() - interval '2 hours',
                     expires_at = now() - interval '1 hour'
                 WHERE id = %s
+                RETURNING status, provider_session_id, checkout_url, expires_at
                 """,
                 (intent_id,),
             )
+            stale_row = cursor.fetchone()
+            assert stale_row is not None
+            assert stale_row[:3] == (
+                "open",
+                "session-stale",
+                "https://example.test/stale",
+            )
+            assert stale_row[3] < datetime.now(UTC)
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
-                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                    %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
                 )
                 """,
                 (
                     USER_ID2,
                     PROVIDER,
+                    "checkout-stale-replay",
                     "subscription",
                     "pro_monthly",
                     digest,
@@ -423,6 +461,39 @@ class TestCheckoutIntentIdempotency:
                 WHERE id = %s
                 """,
                 (intent_id,),
+            )
+            assert cursor.fetchone() == stale_row
+
+            cursor.execute(
+                "SELECT bursar.advance_checkout_intent(%s::uuid, 'expired', NULL, NULL)",
+                (intent_id,),
+            )
+            assert cursor.fetchone() == (True,)
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                )
+                """,
+                (
+                    USER_ID2,
+                    PROVIDER,
+                    "checkout-stale-replacement",
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    retry_expiry,
+                ),
+            )
+            fresh_intent_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+            assert fresh_intent_id != intent_id
+            cursor.execute(
+                """
+                SELECT status, provider_session_id, checkout_url, expires_at
+                FROM bursar.billing_checkout_intents
+                WHERE id = %s
+                """,
+                (fresh_intent_id,),
             )
             assert cursor.fetchone() == ("open", None, None, retry_expiry)
 
@@ -789,6 +860,112 @@ class TestEventIdempotency:
         c2 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c2.status == "claimed"
 
+    def test_invalid_event_claim_does_not_store_an_event(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+
+        result = bs.claim_billing_event(PROVIDER, "evt_invalid_claim", "")
+
+        assert result.status == "invalid_request"
+        assert result.billing_event_id is None
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*)::integer
+                FROM bursar.billing_events
+                WHERE tenant_id = %s::uuid
+                  AND provider = %s
+                  AND provider_environment = 'test'
+                  AND provider_event_id = %s
+                """,
+                (TEST_TENANT_ID, PROVIDER, "evt_invalid_claim"),
+            )
+            assert cursor.fetchone() == (0,)
+
+    def test_idempotency_conflict_preserves_the_original_event_and_payload(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        event_id = "evt_claim_conflict"
+        first = bs.claim_billing_event(PROVIDER, event_id, "test.event", {"amount": 100})
+        assert first.status == "claimed"
+        assert first.claim_token is not None
+        assert first.billing_event_id is not None
+        assert bs.complete_billing_event(PROVIDER, event_id, first.claim_token) is True
+
+        conflict = bs.claim_billing_event(PROVIDER, event_id, "test.event", {"amount": 200})
+
+        assert conflict.status == "idempotency_conflict"
+        assert conflict.billing_event_id == first.billing_event_id
+        assert conflict.claim_token is None
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT event.id,
+                       event.status,
+                       event.attempt_count,
+                       (SELECT count(*)::integer
+                        FROM bursar.billing_event_payloads AS payload
+                        WHERE payload.event_id = event.id) AS payload_count
+                FROM bursar.billing_events AS event
+                WHERE event.tenant_id = %s::uuid
+                  AND event.provider = %s
+                  AND event.provider_environment = 'test'
+                  AND event.provider_event_id = %s
+                """,
+                (TEST_TENANT_ID, PROVIDER, event_id),
+            )
+            assert cursor.fetchall() == [(first.billing_event_id, "completed", 1, 1)]
+
+    def test_retry_exhaustion_preserves_the_terminal_event_claim(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        event_id = "evt_claim_exhausted"
+        first = bs.claim_billing_event(PROVIDER, event_id, "test.event")
+        assert first.status == "claimed"
+        assert first.claim_token is not None
+        assert first.billing_event_id is not None
+        assert bs.fail_billing_event(PROVIDER, event_id, first.claim_token, "attempt 1") is True
+
+        for attempt in range(2, 4):
+            retry = bs.claim_billing_event(PROVIDER, event_id, "test.event")
+            assert retry.status == "claimed"
+            assert retry.claim_token is not None
+            assert retry.billing_event_id == first.billing_event_id
+            assert bs.fail_billing_event(PROVIDER, event_id, retry.claim_token, f"attempt {attempt}") is True
+
+        exhausted = bs.claim_billing_event(PROVIDER, event_id, "test.event")
+
+        assert exhausted.status == "max_retries_exceeded"
+        assert exhausted.billing_event_id == first.billing_event_id
+        assert exhausted.claim_token is None
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT event.id,
+                       event.status,
+                       event.attempt_count,
+                       (SELECT count(*)::integer
+                        FROM bursar.billing_event_payloads AS payload
+                        WHERE payload.event_id = event.id) AS payload_count
+                FROM bursar.billing_events AS event
+                WHERE event.tenant_id = %s::uuid
+                  AND event.provider = %s
+                  AND event.provider_environment = 'test'
+                  AND event.provider_event_id = %s
+                """,
+                (TEST_TENANT_ID, PROVIDER, event_id),
+            )
+            assert cursor.fetchall() == [(first.billing_event_id, "failed", 3, 1)]
+
     @pytest.mark.concurrency
     def test_concurrent_event_claims_admit_one_worker(self, pg_database_url: str, pg_store: object) -> None:
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
@@ -811,7 +988,7 @@ class TestEventIdempotency:
         with ThreadPoolExecutor(max_workers=12) as executor:
             claims = list(executor.map(claim, range(12)))
         assert sum(c.status == "claimed" for c in claims) == 1
-        assert sum(c.status in ("duplicate", "busy", "retry") for c in claims) == 11
+        assert sum(c.status == "busy" for c in claims) == 11
         winner = next(c for c in claims if c.status == "claimed")
         assert winner.claim_token is not None
         bs.complete_billing_event(PROVIDER, "evt_concurrent_claim", winner.claim_token)

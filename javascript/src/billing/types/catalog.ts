@@ -1,4 +1,4 @@
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 
 export interface BillingGrantResult {
   mode: "cycle_grant";

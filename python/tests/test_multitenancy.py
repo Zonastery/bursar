@@ -15,7 +15,7 @@ from bursar.credits.store import StoreError
 from tests.conftest import TEST_TENANT_ID, TEST_TENANT_SLUG
 from tests.test_store_integration import CONFIG
 
-pytestmark = [pytest.mark.integration]
+pytestmark = [pytest.mark.integration, pytest.mark.security]
 
 SECOND_TENANT_ID = "00000000-0000-0000-0000-000000000002"
 SHARED_SUBJECT_ID = "00000000-0000-0000-0000-000000000099"
@@ -523,6 +523,10 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
 
         cursor.execute("SET ROLE bursar_operator")
         cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (TEST_TENANT_ID,),
+        )
+        cursor.execute(
             """
             SELECT event_id, tenant_id, claim_token
             FROM bursar.claim_outbox_events(
@@ -545,6 +549,26 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
         )
         assert cursor.fetchone() == (True,)
 
+        cursor.execute("SAVEPOINT cross_tenant_claim")
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege) as error_info:
+            cursor.execute(
+                """
+                SELECT event_id
+                FROM bursar.claim_outbox_events(
+                    %s,
+                    10,
+                    60,
+                    ARRAY['tenant-test']
+                )
+                """,
+                (SECOND_TENANT_ID,),
+            )
+        assert error_info.value.pgcode == "42501"
+        cursor.execute("ROLLBACK TO SAVEPOINT cross_tenant_claim")
+        cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (SECOND_TENANT_ID,),
+        )
         cursor.execute(
             """
             SELECT event_id, tenant_id, claim_token
@@ -563,10 +587,18 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
         assert str(second_tenant_id) == SECOND_TENANT_ID
         cursor.execute(
             "SELECT bursar.fail_outbox_event(%s, %s, %s, 0, 10)",
-            (second_outbox_id, second_claim_token, "retry"),
+            (
+                second_outbox_id,
+                second_claim_token,
+                "outbox_delivery_failed:RuntimeError",
+            ),
         )
         assert cursor.fetchone() == (True,)
 
+        cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (TEST_TENANT_ID,),
+        )
         cursor.execute(
             "SELECT bursar.export_billing_event_payload(%s)",
             (first_event.billing_event_id,),
@@ -836,6 +868,12 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
     pg_database_url: str,
 ) -> None:
     _ensure_second_tenant(pg_database_url)
+    migration_config = deepcopy(CONFIG)
+    migration_config["plans"]["legacy"] = {
+        "display_name": "Legacy",
+        "rank": 1,
+        "rate_card": "standard",
+    }
     first = PostgresStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
@@ -847,8 +885,15 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
         provider_environment="test",
     )
     try:
-        first.publish_and_activate_catalog(CONFIG, "lock-first")
-        second.publish_and_activate_catalog(CONFIG, "lock-second")
+        first.publish_and_activate_catalog(migration_config, "lock-first")
+        second.publish_and_activate_catalog(migration_config, "lock-second")
+        first_assignment = first.set_user_plan(SHARED_SUBJECT_ID, "legacy")
+        second_assignment = second.set_user_plan(SHARED_SUBJECT_ID, "legacy")
+        assert first_assignment.user_id == SHARED_SUBJECT_ID
+        assert second_assignment.user_id == SHARED_SUBJECT_ID
+        assert first_assignment.plan_key == "legacy"
+        assert second_assignment.plan_key == "legacy"
+        assert first_assignment.plan_id != second_assignment.plan_id
     finally:
         first.close()
         second.close()
@@ -871,8 +916,30 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
         second_cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
         second_cursor.execute("SET LOCAL statement_timeout = '2s'")
 
-        first_cursor.execute("SELECT bursar.activate_catalog_revision(1)")
-        second_cursor.execute("SELECT bursar.activate_catalog_revision(1)")
+        first_cursor.execute(
+            """
+            SELECT
+                (revision).tenant_id::text,
+                (revision).revision_no,
+                (revision).status::text
+            FROM (
+                SELECT bursar.activate_catalog_revision(1) AS revision
+            ) AS activated
+            """
+        )
+        assert first_cursor.fetchone() == (TEST_TENANT_ID, 1, "active")
+        second_cursor.execute(
+            """
+            SELECT
+                (revision).tenant_id::text,
+                (revision).revision_no,
+                (revision).status::text
+            FROM (
+                SELECT bursar.activate_catalog_revision(1) AS revision
+            ) AS activated
+            """
+        )
+        assert second_cursor.fetchone() == (SECOND_TENANT_ID, 1, "active")
 
         first_cursor.execute(
             """
@@ -886,7 +953,9 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
             """,
             (TEST_TENANT_ID,),
         )
-        first_target = first_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        first_target_row = first_cursor.fetchone()
+        assert first_target_row is not None
+        first_target = first_target_row[0]
         second_cursor.execute(
             """
             SELECT plan.id
@@ -899,24 +968,138 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
             """,
             (SECOND_TENANT_ID,),
         )
-        second_target = second_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        second_target_row = second_cursor.fetchone()
+        assert second_target_row is not None
+        second_target = second_target_row[0]
+        assert first_target != second_target
+        assert first_target != first_assignment.plan_id
+        assert second_target != second_assignment.plan_id
 
         first_cursor.execute(
-            "SELECT bursar.start_plan_migration(NULL, %s::uuid)",
-            (first_target,),
+            "SELECT bursar.start_plan_migration(%s::uuid, %s::uuid)",
+            (first_assignment.plan_id, first_target),
         )
-        first_migration = first_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        first_migration_row = first_cursor.fetchone()
+        assert first_migration_row is not None
+        first_migration = first_migration_row[0]
         second_cursor.execute(
-            "SELECT bursar.start_plan_migration(NULL, %s::uuid)",
-            (second_target,),
+            "SELECT bursar.start_plan_migration(%s::uuid, %s::uuid)",
+            (second_assignment.plan_id, second_target),
         )
-        second_migration = second_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        second_migration_row = second_cursor.fetchone()
+        assert second_migration_row is not None
+        second_migration = second_migration_row[0]
+        assert first_migration != second_migration
 
         first_cursor.execute(
-            "SELECT * FROM bursar.migrate_plan_batch(%s::uuid, 100)",
+            """
+            SELECT migrated, done, next_cursor::text
+            FROM bursar.migrate_plan_batch(%s::uuid, 100)
+            """,
             (first_migration,),
         )
+        first_batch = first_cursor.fetchone()
+        assert first_batch is not None
+        assert first_batch[:2] == (1, True)
+        assert first_batch[2] is not None
         second_cursor.execute(
-            "SELECT * FROM bursar.migrate_plan_batch(%s::uuid, 100)",
+            """
+            SELECT migrated, done, next_cursor::text
+            FROM bursar.migrate_plan_batch(%s::uuid, 100)
+            """,
             (second_migration,),
         )
+        second_batch = second_cursor.fetchone()
+        assert second_batch is not None
+        assert second_batch[:2] == (1, True)
+        assert second_batch[2] is not None
+        assert first_batch[2] != second_batch[2]
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                account.tenant_id::text,
+                account.subject_id::text,
+                account.id::text,
+                assignment.plan_id::text,
+                assignment.source_type
+            FROM bursar.account_plan_assignments AS assignment
+            JOIN bursar.credit_accounts AS account
+              ON account.id = assignment.account_id
+            WHERE account.subject_id = %s::uuid
+            ORDER BY account.tenant_id
+            """,
+            (SHARED_SUBJECT_ID,),
+        )
+        assert cursor.fetchall() == [
+            (
+                TEST_TENANT_ID,
+                SHARED_SUBJECT_ID,
+                first_batch[2],
+                str(first_target),
+                "migration",
+            ),
+            (
+                SECOND_TENANT_ID,
+                SHARED_SUBJECT_ID,
+                second_batch[2],
+                str(second_target),
+                "migration",
+            ),
+        ]
+
+        cursor.execute(
+            """
+            SELECT
+                tenant_id::text,
+                id::text,
+                from_plan_id::text,
+                to_plan_id::text,
+                cursor_account_id::text,
+                migrated_count,
+                status
+            FROM bursar.credit_plan_migrations
+            WHERE id IN (%s::uuid, %s::uuid)
+            ORDER BY tenant_id
+            """,
+            (first_migration, second_migration),
+        )
+        assert cursor.fetchall() == [
+            (
+                TEST_TENANT_ID,
+                str(first_migration),
+                first_assignment.plan_id,
+                str(first_target),
+                first_batch[2],
+                1,
+                "completed",
+            ),
+            (
+                SECOND_TENANT_ID,
+                str(second_migration),
+                second_assignment.plan_id,
+                str(second_target),
+                second_batch[2],
+                1,
+                "completed",
+            ),
+        ]
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL ROLE bursar_client")
+        cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (TEST_TENANT_ID,),
+        )
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
+        with pytest.raises(
+            psycopg2.errors.InvalidParameterValue,
+            match="unknown plan migration",
+        ) as exc_info:
+            cursor.execute(
+                "SELECT * FROM bursar.migrate_plan_batch(%s::uuid, 100)",
+                (second_migration,),
+            )
+        assert exc_info.value.pgcode == "22023"
+        connection.rollback()

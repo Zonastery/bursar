@@ -74,6 +74,9 @@ s3 = [
 google-adk = [
     "google-adk>=2.6.3,<2.7.0",
 ]
+opentelemetry = [
+    "opentelemetry-api>=1.42.1,<2",
+]
 test = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
@@ -91,6 +94,7 @@ test = [
     "dodopayments[webhooks]>=1.111.0,<2",
     "boto3>=1.43.66,<2",
     "google-adk>=2.6.3,<2.7.0",
+    "opentelemetry-api>=1.42.1,<2",
 ]
 
 [tool.setuptools.package-data]
@@ -176,4 +180,5 @@ test-deps = [
     "dodopayments[webhooks]>=1.111.0,<2",
     "boto3>=1.43.66,<2",
     "google-adk>=2.6.3,<2.7.0",
+    "opentelemetry-api>=1.42.1,<2",
 ]

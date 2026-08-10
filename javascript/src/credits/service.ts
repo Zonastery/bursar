@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import {
   CapReachedError,
   ConfigError,
@@ -59,6 +59,7 @@ import { CatalogRuntime } from "./catalog-runtime.js";
 import { toDecimal } from "./amount.js";
 import { CreditLeaseWorkflow } from "./lease-workflow.js";
 import { requireStableKey } from "../shared/idempotency.js";
+import { getDefaultInstrumentation, type Instrumentation } from "../telemetry/index.js";
 import type {
   AddCreditsOptions,
   BeginBilledOperationOptions,
@@ -144,6 +145,7 @@ export class CreditsService {
   // behaviour; explicit `sweepExpiredCredits`/cron remains required.
   private lazyExpiry: boolean;
   private logger: NormalizedLogger;
+  private readonly instrumentation: Instrumentation;
   private readonly postDeductionHooks = new Set<
     (context: PostDeductionContext) => void | Promise<void>
   >();
@@ -154,6 +156,7 @@ export class CreditsService {
     options?: CreditsServiceOptions | null,
   ) {
     this.store = store;
+    this.instrumentation = options?.instrumentation ?? getDefaultInstrumentation();
     this.queries = new CreditQueries(
       store,
       options?.analytics ?? store,
@@ -274,7 +277,9 @@ export class CreditsService {
   async executeGrantProgram(
     request: ExecuteGrantProgramRequest,
   ): Promise<GrantProgramAwardResult[]> {
-    return this.store.executeGrantProgram(request);
+    return this.instrumentation.run("credits.grant_program", undefined, () =>
+      this.store.executeGrantProgram(request),
+    );
   }
 
   async getLedgerEntry(userId: string, entryId: string): Promise<LedgerEntry | null> {
@@ -466,6 +471,16 @@ export class CreditsService {
     amount: ExactAmount,
     options: AddCreditsOptions,
   ): Promise<AddCreditsResult> {
+    return this.instrumentation.run("credits.grant", undefined, () =>
+      this.addCreditsUninstrumented(userId, amount, options),
+    );
+  }
+
+  private async addCreditsUninstrumented(
+    userId: string,
+    amount: ExactAmount,
+    options: AddCreditsOptions,
+  ): Promise<AddCreditsResult> {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const type = options.type ?? "adjustment";
     this.logger.info("[CreditsService] addCredits", { amount, type, bucket: options.bucket });
@@ -560,6 +575,16 @@ export class CreditsService {
     amount: ExactAmount,
     options: GrantSubscriptionCycleOptions,
   ): Promise<AddCreditsResult> {
+    return this.instrumentation.run("credits.grant_subscription_cycle", undefined, () =>
+      this.grantSubscriptionCycleUninstrumented(userId, amount, options),
+    );
+  }
+
+  private async grantSubscriptionCycleUninstrumented(
+    userId: string,
+    amount: ExactAmount,
+    options: GrantSubscriptionCycleOptions,
+  ): Promise<AddCreditsResult> {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);
     this.logger.info("[CreditsService] grantSubscriptionCycle", {
       amount,
@@ -618,7 +643,9 @@ export class CreditsService {
     metricsOrAmount: MetricsOrAmount,
     options: ReserveOptions,
   ): Promise<LeaseSuccess> {
-    return this.leases.reserve(userId, metricsOrAmount, options);
+    return this.instrumentation.run("credits.reserve", undefined, () =>
+      this.leases.reserve(userId, metricsOrAmount, options),
+    );
   }
 
   async settle(
@@ -627,11 +654,15 @@ export class CreditsService {
     metricsOrAmount: MetricsOrAmount,
     options?: SettleOptions,
   ): Promise<DeductionResult> {
-    return this.leases.settle(userId, leaseId, metricsOrAmount, options);
+    return this.instrumentation.run("credits.settle", undefined, () =>
+      this.leases.settle(userId, leaseId, metricsOrAmount, options),
+    );
   }
 
   async release(userId: string, leaseId: string): Promise<ReleaseResult> {
-    return this.leases.release(userId, leaseId);
+    return this.instrumentation.run("credits.release", undefined, () =>
+      this.leases.release(userId, leaseId),
+    );
   }
 
   async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseSuccess> {
@@ -680,6 +711,16 @@ export class CreditsService {
    * typed exception is thrown. No success event is emitted on error.
    */
   async deduct(
+    userId: string,
+    metrics: UsageMetrics,
+    options: DeductOptions,
+  ): Promise<DeductionResult> {
+    return this.instrumentation.run("credits.deduct", undefined, () =>
+      this.deductUninstrumented(userId, metrics, options),
+    );
+  }
+
+  private async deductUninstrumented(
     userId: string,
     metrics: UsageMetrics,
     options: DeductOptions,
@@ -827,6 +868,15 @@ export class CreditsService {
   }
 
   async refundCredits(entryId: string, options: RefundCreditsOptions): Promise<RefundSuccess> {
+    return this.instrumentation.run("credits.refund", undefined, () =>
+      this.refundCreditsUninstrumented(entryId, options),
+    );
+  }
+
+  private async refundCreditsUninstrumented(
+    entryId: string,
+    options: RefundCreditsOptions,
+  ): Promise<RefundSuccess> {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const refundAmount =
       options.amount != null ? positiveAmount(options.amount, "refundCredits") : undefined;

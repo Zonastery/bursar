@@ -1,5 +1,5 @@
 import { z } from "zod";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { StoreError } from "../../../errors.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
 import type {

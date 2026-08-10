@@ -13,6 +13,7 @@ from bursar.billing.types import (
     BillingEventResult,
     BillingSubscriptionChangeState,
 )
+from bursar.shared.idempotency import StableKey
 from bursar.shared.numbers import NonNegativeSafeInteger, PositiveSafeInteger
 
 
@@ -23,6 +24,7 @@ class _BillingContract(BaseModel):
 class CheckoutIntentCreate(_BillingContract):
     subject_id: str
     provider: str
+    operation_key: StableKey
     checkout_kind: Literal["subscription", "credit_topup"]
     product_key: str
     request_digest: str

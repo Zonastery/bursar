@@ -28,14 +28,14 @@ const sidebars: SidebarsConfig = {
       items: [
         {
           type: "category",
-          label: "Deployment and operations",
+          label: "Storage and tenancy",
           collapsed: false,
           link: {
             type: "generated-index",
-            slug: "guides/deployment-and-operations",
-            title: "Deploy and operate Bursar",
+            slug: "guides/storage-and-tenancy",
+            title: "Configure Bursar's data boundary",
             description:
-              "Provision isolated tenants and configure the production storage boundary.",
+              "Bind isolated tenants and choose PostgreSQL-only or optional external storage adapters.",
           },
           items: ["guides/multitenancy", "guides/storage-backends"],
         },
@@ -64,11 +64,11 @@ const sidebars: SidebarsConfig = {
           link: {
             type: "generated-index",
             slug: "guides/integrations-and-tooling",
-            title: "Integrate Bursar with agent tooling",
+            title: "Integrate and observe Bursar",
             description:
-              "Meter Google ADK calls and install the Bursar skill in supported coding agents.",
+              "Add host-owned OpenTelemetry, meter Google ADK calls, and install the Bursar skill in supported coding agents.",
           },
-          items: ["guides/google-adk", "agent-skills"],
+          items: ["guides/opentelemetry", "guides/google-adk", "agent-skills"],
         },
       ],
     },

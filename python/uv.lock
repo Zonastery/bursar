@@ -238,6 +238,9 @@ dodo = [
 google-adk = [
     { name = "google-adk" },
 ]
+opentelemetry = [
+    { name = "opentelemetry-api" },
+]
 postgres = [
     { name = "psycopg2-binary" },
 ]
@@ -253,6 +256,7 @@ test = [
     { name = "google-adk" },
     { name = "httpx" },
     { name = "hypothesis" },
+    { name = "opentelemetry-api" },
     { name = "psycopg2-binary" },
     { name = "pyright" },
     { name = "pytest" },
@@ -277,6 +281,7 @@ dev = [
     { name = "lefthook" },
     { name = "nbconvert" },
     { name = "nbformat" },
+    { name = "opentelemetry-api" },
     { name = "pglite" },
     { name = "psycopg2-binary" },
     { name = "pyright" },
@@ -296,6 +301,7 @@ test-deps = [
     { name = "google-adk" },
     { name = "httpx" },
     { name = "hypothesis" },
+    { name = "opentelemetry-api" },
     { name = "psycopg2-binary" },
     { name = "pyright" },
     { name = "pytest" },
@@ -319,6 +325,8 @@ requires-dist = [
     { name = "google-adk", marker = "extra == 'test'", specifier = ">=2.6.3,<2.7.0" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.28.1" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.165.2" },
+    { name = "opentelemetry-api", marker = "extra == 'opentelemetry'", specifier = ">=1.42.1,<2" },
+    { name = "opentelemetry-api", marker = "extra == 'test'", specifier = ">=1.42.1,<2" },
     { name = "psycopg2-binary", marker = "extra == 'postgres'", specifier = ">=2.9.12" },
     { name = "psycopg2-binary", marker = "extra == 'test'", specifier = ">=2.9.12" },
     { name = "pydantic", specifier = ">=2.13.4,<3" },
@@ -336,7 +344,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=9.1.4,<10" },
     { name = "testcontainers", extras = ["postgres"], marker = "extra == 'test'", specifier = ">=4.15.0" },
 ]
-provides-extras = ["stripe", "dodo", "postgres", "s3", "google-adk", "test"]
+provides-extras = ["stripe", "dodo", "postgres", "s3", "google-adk", "opentelemetry", "test"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -349,6 +357,7 @@ dev = [
     { name = "lefthook", specifier = ">=2.1.10" },
     { name = "nbconvert", specifier = ">=7.17.1" },
     { name = "nbformat", specifier = ">=5.11.0" },
+    { name = "opentelemetry-api", specifier = ">=1.42.1,<2" },
     { name = "pglite", specifier = ">=1.0.14" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "pyright", specifier = ">=1.1.411" },
@@ -368,6 +377,7 @@ test-deps = [
     { name = "google-adk", specifier = ">=2.6.3,<2.7.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypothesis", specifier = ">=6.165.2" },
+    { name = "opentelemetry-api", specifier = ">=1.42.1,<2" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "pyright", specifier = ">=1.1.411" },
     { name = "pytest", specifier = ">=9.1.1" },

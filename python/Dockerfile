@@ -1,34 +1,35 @@
 # syntax=docker/dockerfile:1
-# ── Build stage ──────────────────────────────────────────────────────────────
-# Pin the patch release and manifest digest for reproducible multi-platform
-# builds. Build tooling stays in this disposable stage.
-FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS build
+
+FROM python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2 AS python-base
+
+# Pin uv by version and multi-platform manifest digest. It is build-only.
+FROM python-base AS build
 
 WORKDIR /app
+COPY --from=ghcr.io/astral-sh/uv:0.11.16@sha256:440fd6477af86a2f1b38080c539f1672cd22acb1b1a47e321dba5158ab08864d /uv /usr/local/bin/uv
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
 
-# Only the files needed to build the wheel. A .dockerignore keeps .env, .venv,
-# tests, dist and .git out of the build context entirely, so no secret or build
-# artifact is ever baked into a layer.
-COPY pyproject.toml README.md ./
+# Install exactly the hashed production dependency set from uv.lock. Installing
+# the project non-editably builds a wheel without retaining build tooling.
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+RUN --mount=type=cache,id=zonastery-bursar-uv,target=/root/.cache/uv,sharing=locked \
+    uv sync --frozen --no-dev --extra postgres --no-editable
 
-# Build a wheel and install it (plus the Postgres extra) into an isolated prefix
-# that the runtime stage copies in. Keeps build tooling out of the final image.
-RUN --mount=type=cache,id=zonastery-bursar-pip,target=/root/.cache/pip,sharing=locked \
-    python -m pip install --disable-pip-version-check build \
-    && python -m build --wheel --outdir /tmp/dist \
-    && WHEEL="$(ls /tmp/dist/*.whl)" \
-    && python -m pip install --disable-pip-version-check --prefix=/install "${WHEEL}[postgres]"
+FROM python-base AS runtime
 
-# ── Runtime stage ────────────────────────────────────────────────────────────
-FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS runtime
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Run as a non-root user (H8).
+LABEL org.opencontainers.image.title="Bursar CLI" \
+    org.opencontainers.image.description="Bursar database migration and catalog management CLI" \
+    org.opencontainers.image.source="https://github.com/Zonastery/bursar" \
+    org.opencontainers.image.licenses="AGPL-3.0-only"
+
 RUN useradd --create-home --uid 10001 bursar
-COPY --from=build /install /usr/local
+COPY --from=build /app/.venv /app/.venv
 
 USER bursar
 WORKDIR /home/bursar

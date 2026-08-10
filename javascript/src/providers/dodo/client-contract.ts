@@ -13,11 +13,18 @@ type DodoPayment = Awaited<ReturnType<DodoPayments["payments"]["retrieve"]>>;
 type DodoPlanChangePreview = Awaited<
   ReturnType<DodoPayments["subscriptions"]["previewChangePlan"]>
 >;
+type DodoPaymentMethodUpdate = Awaited<
+  ReturnType<DodoPayments["subscriptions"]["updatePaymentMethod"]>
+>;
 type DodoCustomer = Awaited<ReturnType<DodoPayments["customers"]["create"]>>;
 type DodoCustomerPortalSession = Awaited<
   ReturnType<DodoPayments["customers"]["customerPortal"]["create"]>
 >;
 type DodoPaymentMethods = Awaited<ReturnType<DodoPayments["customers"]["retrievePaymentMethods"]>>;
+type DodoMutationRequestOptions = Pick<
+  NonNullable<Parameters<DodoPayments["checkoutSessions"]["create"]>[1]>,
+  "headers"
+>;
 
 type DodoSdkWebhookPayload = ReturnType<DodoPayments["webhooks"]["unwrap"]>;
 
@@ -47,7 +54,7 @@ export interface DodoClient {
   checkoutSessions: {
     create(
       body: Parameters<DodoPayments["checkoutSessions"]["create"]>[0],
-      options?: { idempotencyKey?: string },
+      options?: DodoMutationRequestOptions,
     ): Promise<DodoCheckoutSession>;
     preview(
       body: Parameters<DodoPayments["checkoutSessions"]["preview"]>[0],
@@ -59,7 +66,7 @@ export interface DodoClient {
   customers: {
     create(
       body: Parameters<DodoPayments["customers"]["create"]>[0],
-      options?: { idempotencyKey?: string },
+      options?: DodoMutationRequestOptions,
     ): Promise<DodoCustomer>;
     customerPortal: {
       create(
@@ -77,12 +84,12 @@ export interface DodoClient {
   subscriptions: {
     cancelChangePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["cancelChangePlan"]>[0],
-      options?: { idempotencyKey?: string },
+      options?: DodoMutationRequestOptions,
     ): Promise<unknown>;
     changePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["changePlan"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["changePlan"]>[1],
-      options?: { idempotencyKey?: string },
+      options?: DodoMutationRequestOptions,
     ): Promise<unknown>;
     previewChangePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["previewChangePlan"]>[0],
@@ -91,7 +98,11 @@ export interface DodoClient {
     update(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["update"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["update"]>[1],
-      options?: { idempotencyKey?: string },
+      options?: DodoMutationRequestOptions,
     ): Promise<unknown>;
+    updatePaymentMethod(
+      subscriptionId: Parameters<DodoPayments["subscriptions"]["updatePaymentMethod"]>[0],
+      body: Parameters<DodoPayments["subscriptions"]["updatePaymentMethod"]>[1],
+    ): Promise<DodoPaymentMethodUpdate>;
   };
 }

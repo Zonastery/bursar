@@ -2,6 +2,7 @@
 # environments, tests, coverage output, and secrets out of the build context.
 **
 !pyproject.toml
+!uv.lock
 !README.md
 !src/
 !src/**

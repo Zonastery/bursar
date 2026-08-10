@@ -28,7 +28,7 @@ import type {
   CheckoutIntentCreate,
   CheckoutIntentUpdate,
 } from "./contracts.js";
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 import type { ProviderEnvironment } from "../providers/environment.js";
 
 /**

@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 
 import { ExpressionError } from "../errors.js";
 import type { Node } from "./ast.js";

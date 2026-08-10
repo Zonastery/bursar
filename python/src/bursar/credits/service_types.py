@@ -24,6 +24,7 @@ from bursar.credits.types import (
 from bursar.metrics import UsageMetrics
 from bursar.shared.idempotency import StableKey
 from bursar.shared.logger import Logger
+from bursar.telemetry import Instrumentation
 
 PolicyPreset = Literal["strict_prepaid", "overdraft"]
 PostDeductionSource = Literal["deduct", "settle", "raw"]
@@ -73,6 +74,7 @@ class LowBalanceConfig(_CreditsServiceModel):
 
 class CreditsServiceOptions(_CreditsServiceModel):
     logger: SkipValidation[Logger] | None = None
+    instrumentation: SkipValidation[Instrumentation] | None = None
     analytics: UsageAnalyticsStore | None = None
     usage_store: UsageChargeStore | None = None
     policy: PolicyPreset = "strict_prepaid"

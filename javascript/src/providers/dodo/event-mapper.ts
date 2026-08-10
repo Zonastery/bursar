@@ -31,6 +31,7 @@ const DODO_SUBSCRIPTION_STATUS: Readonly<Record<string, BillingSubscriptionStatu
   pending: "incomplete",
   trialing: "trialing",
   active: "active",
+  paused: "paused",
   on_hold: "past_due",
   cancelled: "canceled",
   failed: "past_due",
@@ -346,6 +347,21 @@ export async function handleDodoBillingEvent(
       return;
     }
 
+    case "subscription.paused": {
+      const subId = subscriptionId(data);
+      await callBillingEventSink(sink, {
+        ...baseEvent(),
+        eventType: "subscription.paused",
+        subscription: {
+          providerSubscriptionId: subId,
+          status: "paused",
+          ...subscriptionFields(data, metadata),
+          refs: subscriptionRefs(data, metadata),
+        },
+      });
+      return;
+    }
+
     case "subscription.updated": {
       const subId = subscriptionId(data);
       const periodEnd = optionalDate(data.next_billing_date, "Dodo subscription.next_billing_date");
@@ -420,7 +436,8 @@ export async function handleDodoBillingEvent(
       return;
     }
 
-    case "payment.failed": {
+    case "payment.failed":
+    case "payment.cancelled": {
       const subId = optionalProviderString(data.subscription_id, "Dodo payment.subscription_id");
       const paymentId = requireProviderString(data.payment_id, "Dodo payment.payment_id");
       const providerProductId = productId(data);
@@ -435,7 +452,7 @@ export async function handleDodoBillingEvent(
           taxMinor: requireMinorUnits(data.tax ?? 0, "Dodo payment.tax"),
           currency: requireCurrency(data.currency, "Dodo payment.currency"),
           purpose: subId ? ("subscription" as const) : ("credit_topup" as const),
-          status: "failed" as const,
+          status: type === "payment.cancelled" ? ("canceled" as const) : ("failed" as const),
           refs: providerProductId ? { productId: providerProductId } : undefined,
         },
       });

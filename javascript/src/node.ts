@@ -21,8 +21,43 @@ export type {
   BursarRuntimeOptions,
   BursarRuntimeStartOptions,
 } from "./storage/runtime.js";
+export type {
+  BursarRuntimeDiagnostics,
+  BursarRuntimeState,
+  CatalogDependencyCheck,
+  CheckDependenciesOptions,
+  DependencyCheck,
+  DependencyStatus,
+  OutboxDependencyCheck,
+  OutboxStatusSnapshot,
+  WorkerErrorSnapshot,
+  WorkerLifecycle,
+  WorkerRunSnapshot,
+  WorkerState,
+} from "./storage/diagnostics.js";
+export { BursarMaintenance, BursarOperatorMaintenance } from "./storage/maintenance.js";
+export type {
+  MaintenanceRunOptions,
+  MaintenanceRunResult,
+  MaintenanceRunStatus,
+  MaintenanceOperations,
+  MaintenanceTaskResult,
+  MaintenanceTaskStatus,
+  OperatorMaintenanceRunOptions,
+  PartitionMaintenanceResult,
+  StorageMaintenanceCounts,
+  StorageMaintenanceResult,
+  StorageMaintenanceStatus,
+  StoragePartition,
+} from "./storage/maintenance.js";
 export { OutboxWorker } from "./storage/outbox-worker.js";
-export type { OutboxRunResult, OutboxWorkerOptions } from "./storage/outbox-worker.js";
+export type {
+  OutboxClaimLossPhase,
+  OutboxEventOutcome,
+  OutboxEventOutcomeStatus,
+  OutboxRunResult,
+  OutboxWorkerOptions,
+} from "./storage/outbox-worker.js";
 export { ClickHouseUsageStore } from "./storage/adapters/clickhouse.js";
 export type {
   ClickHouseClient,
@@ -30,13 +65,26 @@ export type {
   ClickHouseUsageStoreOptions,
 } from "./storage/adapters/clickhouse.js";
 export { S3BillingArchive } from "./storage/adapters/s3.js";
-export type { S3BillingArchiveOptions, S3Credentials } from "./storage/adapters/s3.js";
+export type {
+  S3ArchiveClient,
+  S3ArchiveClientFactory,
+  S3BillingArchiveOptions,
+  S3Credentials,
+  S3PutObjectOptions,
+} from "./storage/adapters/s3.js";
 export type {
   BillingEventPayloadExport,
   BillingPayloadArchive,
   BillingPayloadArchiveResult,
+  OutboxClaimRenewalStore,
+  OutboxDeadLetter,
+  OutboxDeadLetterCursor,
+  OutboxDeadLetterListOptions,
+  OutboxDeadLetterPage,
   OutboxEvent,
   OutboxHandler,
+  OutboxRecoveryStore,
+  OutboxStats,
   OutboxStore,
   UsageChargeExport,
   UsageEventSink,

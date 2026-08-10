@@ -197,7 +197,6 @@ class UpdatePaymentMethodParams(_ProviderModel):
     customer_id: NonEmptyString
     subscription_id: NonEmptyString
     return_url: NonEmptyString
-    product_id: NonEmptyString | None = None
 
 
 class PaymentMethodSetupParams(_ProviderModel):

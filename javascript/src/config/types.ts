@@ -1,4 +1,4 @@
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 import type { BursarConfig as GeneratedBursarConfigData } from "../generated/pricing-config.types.js";
 
 /** Raw, snake_case configuration accepted by the canonical JSON Schema. */

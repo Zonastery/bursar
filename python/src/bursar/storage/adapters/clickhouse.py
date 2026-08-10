@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any, Protocol, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, SkipValidation
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
 from bursar.credits.types import (
     AggregateStats,
@@ -61,8 +61,11 @@ class ClickHouseUsageStoreOptions(BaseModel):
     client: SkipValidation[ClickHouseClient]
     tenant_id: UUID
     table: str = "bursar_usage_events"
-    create_table: bool = True
-    retention_days: int | None = None
+    create_table: bool = False
+    retention_days: int | None = Field(
+        default=None,
+        description="TTL used only by SDK-generated DDL when create_table/initialize_schema is used.",
+    )
 
 
 def _validate_range(start: datetime, end: datetime) -> None:
@@ -134,6 +137,35 @@ class ClickHouseUsageStore:
         "event_at",
         "created_at",
     )
+    _EXPECTED_SCHEMA_COLUMNS: dict[str, tuple[str, ...]] = {
+        "tenant_id": ("UUID",),
+        "outbox_event_id": ("UInt64",),
+        "charge_id": ("UUID",),
+        "account_id": ("UUID",),
+        "subject_id": ("UUID",),
+        "operation": ("String", "LowCardinality(String)"),
+        "feature": ("Nullable(String)", "LowCardinality(Nullable(String))"),
+        "model": ("Nullable(String)", "LowCardinality(Nullable(String))"),
+        "region": ("Nullable(String)", "LowCardinality(Nullable(String))"),
+        "measures": ("String",),
+        "dimensions": ("String",),
+        "metadata": ("String",),
+        "requested": ("Decimal(20,6)",),
+        "charged": ("Decimal(20,6)",),
+        "allowance_requested": ("Decimal(20,6)",),
+        "allowance_covered": ("Decimal(20,6)",),
+        "billing_disposition": ("String", "LowCardinality(String)"),
+        "catalog_revision_id": ("Nullable(UUID)",),
+        "plan_id": ("Nullable(UUID)",),
+        "rate_card_key": ("Nullable(String)",),
+        "pricing_snapshot": ("String",),
+        "ledger_entry_id": ("Nullable(UUID)",),
+        "correction_of_charge_id": ("Nullable(UUID)",),
+        "idempotency_key": ("String",),
+        "request_digest": ("String",),
+        "event_at": ("DateTime64(6,'UTC')",),
+        "created_at": ("DateTime64(6,'UTC')",),
+    }
 
     def __init__(self, options: ClickHouseUsageStoreOptions) -> None:
         self._client = options.client
@@ -150,9 +182,16 @@ class ClickHouseUsageStore:
             msg = "ClickHouse retention_days must be between 1 and 36500"
             raise ValueError(msg)
         self._initialize_lock = threading.Lock()
-        self._initialized = not self._create_table
+        self._initialized = False
 
     def initialize(self) -> None:
+        if not self._create_table:
+            return
+        self.initialize_schema()
+
+    def initialize_schema(self) -> None:
+        """Explicitly create Bursar's standalone projection schema."""
+
         if self._initialized:
             return
         with self._initialize_lock:
@@ -162,13 +201,82 @@ class ClickHouseUsageStore:
             self._initialized = True
 
     def write_usage(self, event: UsageChargeExport, outbox_event_id: str) -> None:
+        self.write_usage_batch(((event, outbox_event_id),))
+
+    def write_usage_batch(self, entries: Sequence[tuple[UsageChargeExport, str]]) -> None:
+        """Insert a batch in one request while retaining each outbox identity."""
+
+        if not entries:
+            return
+        rows = [self._project_usage(event, outbox_event_id) for event, outbox_event_id in entries]
         self.initialize()
+        self._client.insert(
+            self._table,
+            rows,
+            column_names=self._INSERT_COLUMNS,
+        )
+
+    def check_schema_compatibility(self) -> None:
+        """Validate the existing schema without creating or modifying it."""
+
+        if "." in self._table:
+            database, table_name = self._table.split(".", maxsplit=1)
+        else:
+            database, table_name = "", self._table
+        result = self._client.query(
+            """
+            SELECT
+                c.name,
+                c.type,
+                t.engine,
+                t.engine_full,
+                t.sorting_key
+            FROM system.columns AS c
+            INNER JOIN system.tables AS t
+              ON t.database = c.database AND t.name = c.table
+            WHERE c.database = if(empty({database:String}), currentDatabase(), {database:String})
+              AND c.table = {table_name:String}
+            ORDER BY c.position
+            """,
+            parameters={"database": database, "table_name": table_name},
+        )
+        rows = self._result_rows(result)
+        if not rows:
+            msg = f"ClickHouse table {self._table} does not exist"
+            raise RuntimeError(msg)
+
+        actual = {str(row["name"]): self._normalize_type(str(row["type"])) for row in rows}
+        mismatches: list[str] = []
+        for name, expected_types in self._EXPECTED_SCHEMA_COLUMNS.items():
+            actual_type = actual.get(name)
+            accepted = tuple(self._normalize_type(expected) for expected in expected_types)
+            if actual_type is None:
+                mismatches.append(f"missing {name}")
+            elif actual_type not in accepted:
+                mismatches.append(f"{name} is {actual_type}, expected {' or '.join(accepted)}")
+
+        schema = rows[0]
+        engine = str(schema.get("engine", ""))
+        engine_full = str(schema.get("engine_full", ""))
+        sorting_key = str(schema.get("sorting_key", ""))
+        if not engine.endswith("ReplacingMergeTree"):
+            mismatches.append(f"engine {engine or 'unknown'} is not a ReplacingMergeTree")
+        elif not re.search(r"\boutbox_event_id\b", engine_full):
+            mismatches.append("ReplacingMergeTree does not use outbox_event_id as its version column")
+        for key_column in ("tenant_id", "event_at", "charge_id"):
+            if not re.search(rf"\b{key_column}\b", sorting_key):
+                mismatches.append(f"sorting key does not include {key_column}")
+        if mismatches:
+            msg = f"ClickHouse table {self._table} is incompatible: {'; '.join(mismatches)}"
+            raise RuntimeError(msg)
+
+    def _project_usage(self, event: UsageChargeExport, outbox_event_id: str) -> tuple[Any, ...]:
         if UUID(event.tenant_id) != self._tenant_id:
             msg = "Usage event tenant_id does not match ClickHouse store tenant_id"
             raise ValueError(msg)
-        row = (
+        return (
             UUID(event.tenant_id),
-            int(outbox_event_id),
+            self._outbox_event_id(outbox_event_id),
             UUID(event.charge_id),
             UUID(event.account_id),
             UUID(event.subject_id),
@@ -194,11 +302,6 @@ class ClickHouseUsageStore:
             event.request_digest,
             _timestamp(event.event_at),
             _timestamp(event.created_at),
-        )
-        self._client.insert(
-            self._table,
-            [row],
-            column_names=self._INSERT_COLUMNS,
         )
 
     def spend_by_user(self, start: datetime, end: datetime) -> list[SpendByUserRow]:
@@ -495,12 +598,31 @@ class ClickHouseUsageStore:
             query,
             parameters=parameters,
         )
+        return self._result_rows(result)
+
+    @staticmethod
+    def _result_rows(result: ClickHouseQueryResult) -> list[dict[str, Any]]:
         named_results = getattr(result, "named_results", None)
         if callable(named_results):
             rows = cast(Iterable[Mapping[str, Any]], named_results())
             return [dict(row) for row in rows]
         columns = list(result.column_names)
         return [dict(zip(columns, row, strict=True)) for row in result.result_rows]
+
+    @staticmethod
+    def _normalize_type(value: str) -> str:
+        return re.sub(r"\s+", "", value)
+
+    @staticmethod
+    def _outbox_event_id(value: str) -> int:
+        if not re.fullmatch(r"(?:0|[1-9]\d*)", value):
+            msg = "ClickHouse outbox_event_id must be an unsigned integer string"
+            raise ValueError(msg)
+        parsed = int(value)
+        if parsed > 18_446_744_073_709_551_615:
+            msg = "ClickHouse outbox_event_id exceeds UInt64"
+            raise ValueError(msg)
+        return parsed
 
     @staticmethod
     def _json_object(value: Any) -> dict[str, Any]:

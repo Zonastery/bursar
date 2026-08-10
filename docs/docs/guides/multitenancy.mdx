@@ -11,7 +11,7 @@ import TabItem from "@theme/TabItem";
 
 ## Prerequisites
 
-- Install the Bursar CLI and prepare separate migration, operator, and application runtime PostgreSQL credentials — see [CLI and deployment](../cli.mdx).
+- Install the Bursar CLI and prepare separate migration, operator, and application runtime PostgreSQL credentials — see the [CLI reference](../cli.mdx).
 - Read [credit accounting](../concepts/data-model.mdx) for the tenant-scoped accounting entities.
 - Have a [validated configuration](../concepts/configuration.mdx) if you want to bootstrap pricing with the tenant.
 
@@ -30,7 +30,7 @@ from referencing another tenant's rows even if privileged code has a bug.
 
 1. Run migrations with the dedicated migration owner in
    `BURSAR_MIGRATION_DATABASE_URL`
-   (see [CLI and deployment](../cli.mdx)).
+   (see the [CLI reference](../cli.mdx)).
 2. Provision the separate operator and application logins described in the
    CLI guide, then create the tenant with the operator connection:
 
@@ -41,7 +41,7 @@ bursar tenant create acme \
   --display-name "Acme"
 ```
 
-3. Deployments that also need to publish initial pricing can use the
+3. Applications that also need to publish initial pricing can use the
    idempotent bootstrap boundary, which validates the config before
    provisioning:
 

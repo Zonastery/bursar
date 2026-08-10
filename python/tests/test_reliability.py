@@ -263,3 +263,4 @@ def test_runtime_close_attempts_every_resource_and_replays_failure() -> None:
 def test_postgres_options_json_schema_handles_observer_callback() -> None:
     schema = TypeAdapter(PostgresConnectionOptions).json_schema()
     assert "on_pool_error" not in schema["properties"]
+    assert "instrumentation" not in schema["properties"]

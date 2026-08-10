@@ -94,15 +94,45 @@ def test_unhandled_event_is_failed_instead_of_completed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("raw_message", "expected"),
+    ("claim", "expected_error"),
     [
-        ("   ", "RuntimeError"),
-        (f"  {'x' * 9_000}  ", "x" * 8_192),
+        (BillingEventClaim(status="invalid_request"), "invalid_request"),
+        (
+            BillingEventClaim(status="idempotency_conflict", billing_event_id=EVENT_ROW_ID),
+            "idempotency_conflict",
+        ),
+        (
+            BillingEventClaim(status="max_retries_exceeded", billing_event_id=EVENT_ROW_ID),
+            "max_retries_exceeded",
+        ),
+        (BillingEventClaim(status="retry"), "claim_failed_retry"),
     ],
 )
+def test_unclaimed_event_outcomes_are_not_routed(
+    claim: BillingEventClaim,
+    expected_error: str,
+) -> None:
+    store = _claimed_store()
+    store.claim_billing_event.return_value = claim
+    service = BillingService(store)
+
+    result = service.ingest_billing_event(_event(f"evt_{expected_error}", BillingEventType.invoice_created))
+
+    assert result.handled is False
+    assert result.error == expected_error
+    store.complete_billing_event.assert_not_called()
+    store.fail_billing_event.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["idempotency_conflict", "max_retries_exceeded"])
+def test_stored_terminal_claim_requires_a_billing_event_id(status: str) -> None:
+    with pytest.raises(ValueError, match="requires billing_event_id"):
+        BillingEventClaim(status=status)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("raw_message", ["   ", f"  {'x' * 9_000}  "])
 def test_processing_errors_are_normalized_before_persistence(
     raw_message: str,
-    expected: str,
 ) -> None:
     store = _claimed_store()
     store.upsert_billing_customer.side_effect = RuntimeError(raw_message)
@@ -117,8 +147,8 @@ def test_processing_errors_are_normalized_before_persistence(
     result = service.ingest_billing_event(event)
 
     assert result.handled is False
-    assert result.error == expected
-    assert store.fail_billing_event.call_args.args[3] == expected
+    assert result.error == "billing_event_processing_failed:RuntimeError"
+    assert store.fail_billing_event.call_args.args[3] == "billing_event_processing_failed:RuntimeError"
 
 
 def test_diagnostic_normalization_preserves_none_and_removes_nul() -> None:

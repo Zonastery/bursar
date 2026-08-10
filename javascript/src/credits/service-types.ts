@@ -1,7 +1,8 @@
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 
 import type { UsageMetrics } from "../metrics.js";
 import type { Logger } from "../shared/logger.js";
+import type { Instrumentation } from "../telemetry/index.js";
 import type { CreditEvent } from "./events.js";
 import type {
   BillingMode,
@@ -35,6 +36,8 @@ export interface LowBalanceConfig {
 
 export interface CreditsServiceOptions {
   logger?: Logger | null;
+  /** Explicit telemetry implementation; falls back to Bursar's no-op registry. */
+  instrumentation?: Instrumentation | null;
   /**
    * Optional read-only analytics backend. Defaults to the credit store, which
    * keeps PostgreSQL as the zero-infrastructure behavior.

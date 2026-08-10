@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _StorageModel(BaseModel):
@@ -25,7 +25,11 @@ class OutboxEvent(_StorageModel):
     created_at: str
 
 
-class OutboxStore(Protocol):
+class OutboxClaimRenewalStore(Protocol):
+    def renew(self, event: OutboxEvent, lease_seconds: int) -> bool: ...
+
+
+class OutboxStore(OutboxClaimRenewalStore, Protocol):
     def claim(self, topics: Sequence[str], limit: int, lease_seconds: int) -> list[OutboxEvent]: ...
 
     def complete(self, event: OutboxEvent) -> bool: ...
@@ -37,6 +41,53 @@ class OutboxStore(Protocol):
         retry_delay_seconds: int,
         attempt_limit: int,
     ) -> bool: ...
+
+
+class OutboxStats(_StorageModel):
+    pending_count: int = Field(ge=0)
+    processing_count: int = Field(ge=0)
+    delivered_count: int = Field(ge=0)
+    dead_letter_count: int = Field(ge=0)
+    oldest_pending_at: str | None
+
+
+class OutboxDeadLetterCursor(_StorageModel):
+    created_at: str = Field(min_length=1)
+    event_id: str = Field(pattern=r"^[1-9]\d*$")
+
+
+class OutboxDeadLetter(_StorageModel):
+    event_id: str
+    tenant_id: str
+    topic: str
+    aggregate_type: str
+    aggregate_id: str
+    payload_version: int = Field(ge=0)
+    attempt_count: int = Field(ge=0)
+    last_error: str | None
+    created_at: str
+    updated_at: str
+
+
+class OutboxDeadLetterListOptions(_StorageModel):
+    limit: int = Field(default=100, strict=True, ge=1, le=100)
+    cursor: OutboxDeadLetterCursor | None = None
+
+
+class OutboxDeadLetterPage(_StorageModel):
+    items: list[OutboxDeadLetter]
+    next_cursor: OutboxDeadLetterCursor | None
+
+
+class OutboxRecoveryStore(OutboxStore, Protocol):
+    def stats(self) -> OutboxStats: ...
+
+    def list_dead_letters(
+        self,
+        options: OutboxDeadLetterListOptions | None = None,
+    ) -> OutboxDeadLetterPage: ...
+
+    def requeue(self, event_id: str) -> bool: ...
 
 
 class OutboxHandler(Protocol):
@@ -93,6 +144,16 @@ class BillingEventPayloadExport(_StorageModel):
 
 class UsageEventSink(Protocol):
     def write_usage(self, event: UsageChargeExport, outbox_event_id: str) -> None: ...
+
+
+class BatchUsageEventSink(UsageEventSink, Protocol):
+    def write_usage_batch(self, entries: Sequence[tuple[UsageChargeExport, str]]) -> None: ...
+
+
+class UsageProjectionSchema(Protocol):
+    """Optional non-mutating compatibility check for caller-managed schemas."""
+
+    def check_schema_compatibility(self) -> None: ...
 
 
 class BillingPayloadArchiveResult(_StorageModel):

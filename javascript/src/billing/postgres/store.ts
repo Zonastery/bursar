@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { z } from "zod";
 import type {
   BillingAutoRechargeAttempt,
@@ -43,6 +43,7 @@ import {
 } from "../../providers/environment.js";
 import { StoreClosedError, StoreError } from "../../errors.js";
 import { optionalBoundedDiagnosticMessage } from "../../shared/diagnostics.js";
+import { requireStableKey } from "../../shared/idempotency.js";
 import {
   optionalRecordRow,
   pgBoolean,
@@ -259,14 +260,18 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async createOrGetCheckoutIntent(input: CheckoutIntentCreate): Promise<CheckoutIntent> {
+    const operationKey = requireStableKey(input.operationKey, "operationKey");
     if (!/^[0-9a-fA-F]{64}$/.test(input.requestDigest)) {
       throw new TypeError("requestDigest must be a 32-byte hex string");
     }
     const rows = await this.queryFn(
-      `SELECT bursar.create_checkout_intent($1::uuid, $2, $3, $4, decode($5, 'hex'), $6::timestamptz) AS id`,
+      `SELECT bursar.create_checkout_intent(
+         $1::uuid, $2, $3, $4, $5, decode($6, 'hex'), $7::timestamptz
+       ) AS id`,
       [
         input.subjectId,
         input.provider,
+        operationKey,
         input.checkoutKind,
         input.productKey,
         input.requestDigest,
@@ -414,12 +419,14 @@ export class PostgresBillingStore extends BillingStore {
     }
     if (result.status === "duplicate") return { status: "duplicate" as const };
     if (result.status === "busy") return { status: "busy" as const };
-    if (
-      result.status === "invalid_request" ||
-      result.status === "idempotency_conflict" ||
-      result.status === "max_retries_exceeded"
-    ) {
-      return { status: "retry" as const };
+    if (result.status === "invalid_request") return { status: "invalid_request" as const };
+    if (result.status === "idempotency_conflict" || result.status === "max_retries_exceeded") {
+      if (result.event_id === null) {
+        throw new StoreError("Billing event terminal claim returned no event identifier", {
+          details: { provider, eventId, status: result.status },
+        });
+      }
+      return { status: result.status, billingEventId: result.event_id };
     }
     throw new StoreError("Billing event claim returned an unsupported status", {
       details: { provider, eventId, status: result.status },

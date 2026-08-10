@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import type { PostgresPool } from "../src/shared/postgres-client.js";
 import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adapters/clickhouse.js";
 import { S3BillingArchive } from "../src/storage/adapters/s3.js";
@@ -53,6 +53,7 @@ function outboxStore(events: OutboxEvent[]): OutboxStore & {
 } {
   return {
     claim: vi.fn().mockResolvedValue(events),
+    renew: vi.fn().mockResolvedValue(true),
     complete: vi.fn().mockResolvedValue(true),
     fail: vi.fn().mockResolvedValue(true),
   };
@@ -78,8 +79,13 @@ describe("OutboxWorker", () => {
     const handle = vi.fn().mockResolvedValue(undefined);
     const worker = new OutboxWorker(store, [{ topics: ["usage.charge_recorded"], handle }]);
 
-    await expect(worker.runOnce()).resolves.toEqual({ claimed: 1, delivered: 1, failed: 0 });
-    expect(store.claim).toHaveBeenCalledWith(["usage.charge_recorded"], 100, 60);
+    await expect(worker.runOnce()).resolves.toEqual({
+      claimed: 1,
+      delivered: 1,
+      failed: 0,
+      claimLost: 0,
+    });
+    expect(store.claim).toHaveBeenCalledWith(["usage.charge_recorded"], 4, 60);
     expect(handle).toHaveBeenCalledWith(outboxEvent);
     expect(store.complete).toHaveBeenCalledWith(outboxEvent);
     expect(store.fail).not.toHaveBeenCalled();
@@ -98,9 +104,14 @@ describe("OutboxWorker", () => {
       { retryDelaySeconds: 5, maxRetryDelaySeconds: 20, attemptLimit: 7 },
     );
 
-    await expect(worker.runOnce()).resolves.toEqual({ claimed: 1, delivered: 0, failed: 1 });
+    await expect(worker.runOnce()).resolves.toEqual({
+      claimed: 1,
+      delivered: 0,
+      failed: 1,
+      claimLost: 0,
+    });
     expect(store.complete).not.toHaveBeenCalled();
-    expect(store.fail).toHaveBeenCalledWith(outboxEvent, "Error: ClickHouse unavailable", 10, 7);
+    expect(store.fail).toHaveBeenCalledWith(outboxEvent, "outbox_delivery_failed:Error", 10, 7);
   });
 
   it("normalizes failure diagnostics before persistence", async () => {
@@ -112,8 +123,13 @@ describe("OutboxWorker", () => {
       },
     ]);
 
-    await expect(worker.runOnce()).resolves.toEqual({ claimed: 1, delivered: 0, failed: 1 });
-    expect(store.fail).toHaveBeenCalledWith(outboxEvent, "Error:   failed\uFFFDdelivery", 60, 10);
+    await expect(worker.runOnce()).resolves.toEqual({
+      claimed: 1,
+      delivered: 0,
+      failed: 1,
+      claimLost: 0,
+    });
+    expect(store.fail).toHaveBeenCalledWith(outboxEvent, "outbox_delivery_failed:Error", 60, 10);
   });
 
   it("isolates scheduler error observers and keeps polling", async () => {
@@ -246,6 +262,7 @@ describe("ClickHouseUsageStore", () => {
         query: vi.fn(),
       },
       tenantId: TEST_TENANT_ID,
+      createTable: true,
     });
 
     const first = store.initialize();
@@ -548,10 +565,16 @@ describe("BursarRuntime", () => {
     });
 
     expect(runtime.worker).toBeNull();
+    expect(runtime.outboxRecovery).toBeDefined();
     expect(runtime.clickhouse).toBeNull();
     expect(runtime.s3).toBeNull();
     await runtime.start({ loadCatalog: false });
-    await expect(runtime.flush()).resolves.toEqual({ claimed: 0, delivered: 0, failed: 0 });
+    await expect(runtime.flush()).resolves.toEqual({
+      claimed: 0,
+      delivered: 0,
+      failed: 0,
+      claimLost: 0,
+    });
     await runtime.close();
     expect(pool.end).not.toHaveBeenCalled();
   });

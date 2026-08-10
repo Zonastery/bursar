@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import pg from "pg";
 import { CreditsService } from "../src/credits/service.js";
 import {
@@ -11,7 +11,10 @@ import { PostgresStore } from "../src/credits/postgres/store.js";
 import type { BursarConfigData } from "../src/config.js";
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
+// Global setup owns normalization and the Testcontainers fallback. Reading the
+// raw environment here would let DATABASE_URL="" shadow the provided URL and
+// silently skip this required suite.
+const DATABASE_URL = inject("DATABASE_URL");
 const USER_ID = "00000000-0000-0000-0000-000000000902";
 const REPLAY_USER_ID = "00000000-0000-0000-0000-000000000912";
 
@@ -117,6 +120,35 @@ const CONFIG = {
   },
 } satisfies BursarConfigData;
 
+const CONCURRENCY_CONFIG = {
+  version: 1,
+  catalog: { default_plan: "max_two" },
+  pricing: CONFIG.pricing,
+  credits: CONFIG.credits,
+  admission: {
+    policies: {
+      max_two: { max_in_flight: 2 },
+      headroom: { max_in_flight: 10 },
+    },
+  },
+  plans: {
+    max_two: {
+      display_name: "Max two",
+      rank: 0,
+      rate_card: "standard",
+      allowed_operations: ["completion"],
+      admission_policy: "max_two",
+    },
+    headroom: {
+      display_name: "Headroom",
+      rank: 1,
+      rate_card: "standard",
+      allowed_operations: ["completion"],
+      admission_policy: "headroom",
+    },
+  },
+} satisfies BursarConfigData;
+
 describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration", () => {
   const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 2 });
   const store = new PostgresStore({
@@ -124,6 +156,100 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     tenantId: TEST_TENANT_ID,
     providerEnvironment: "test",
   });
+
+  async function runWithConcurrentStores<T>(
+    workerCount: number,
+    operation: (workerStore: PostgresStore, workerIndex: number) => Promise<T>,
+  ): Promise<T[]> {
+    const workerStores = Array.from(
+      { length: workerCount },
+      () =>
+        new PostgresStore({
+          postgres: DATABASE_URL!,
+          tenantId: TEST_TENANT_ID,
+          providerEnvironment: "test",
+          maxConnections: 1,
+          applicationName: "bursar-js-concurrency-test",
+        }),
+    );
+    try {
+      return await Promise.all(
+        workerStores.map((workerStore, workerIndex) => operation(workerStore, workerIndex)),
+      );
+    } finally {
+      await Promise.all(workerStores.map((workerStore) => workerStore.close()));
+    }
+  }
+
+  async function financialSnapshot(userId: string) {
+    const result = await pool.query<{
+      balance: string;
+      ledger_total: string;
+      usage_entries: number;
+      usage_charges: number;
+      usage_keys: number;
+    }>(
+      `SELECT
+         account.balance,
+         COALESCE((
+           SELECT sum(entry.amount)
+           FROM bursar.credit_ledger_entries AS entry
+           WHERE entry.account_id = account.id
+         ), 0) AS ledger_total,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_ledger_entries AS entry
+           WHERE entry.account_id = account.id
+             AND entry.kind = 'usage'
+         ) AS usage_entries,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_usage_charges AS charge
+           WHERE charge.account_id = account.id
+         ) AS usage_charges,
+         (
+           SELECT count(DISTINCT charge.idempotency_key)::int
+           FROM bursar.credit_usage_charges AS charge
+           WHERE charge.account_id = account.id
+         ) AS usage_keys
+       FROM bursar.credit_accounts AS account
+       WHERE account.tenant_id = $1::uuid
+         AND account.subject_id = $2::uuid
+         AND account.account_kind = 'personal'`,
+      [TEST_TENANT_ID, userId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`missing credit account for ${userId}`);
+    return row;
+  }
+
+  async function activeLeaseSnapshot(userId: string) {
+    const result = await pool.query<{
+      balance: string;
+      active_count: number;
+      reserved_total: string;
+    }>(
+      `SELECT
+         account.balance,
+         count(lease.id) FILTER (
+           WHERE lease.status = 'active' AND lease.expires_at > now()
+         )::int AS active_count,
+         COALESCE(sum(lease.reserved_amount) FILTER (
+           WHERE lease.status = 'active' AND lease.expires_at > now()
+         ), 0) AS reserved_total
+       FROM bursar.credit_accounts AS account
+       LEFT JOIN bursar.credit_leases AS lease
+         ON lease.account_id = account.id
+       WHERE account.tenant_id = $1::uuid
+         AND account.subject_id = $2::uuid
+         AND account.account_kind = 'personal'
+       GROUP BY account.id, account.balance`,
+      [TEST_TENANT_ID, userId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`missing credit account for ${userId}`);
+    return row;
+  }
 
   beforeAll(async () => {
     await applyMigrations(pool);
@@ -344,7 +470,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect(futureUsage.items).toHaveLength(0);
 
     const aggregate = await service.aggregateStats(startedAt, new Date(Date.now() + 1_000));
-    expect(aggregate.totalCreditsConsumed.greaterThanOrEqualTo(17)).toBe(true);
+    expect(aggregate.totalCreditsConsumed.toString()).toBe("17");
     expect(aggregate.activeUsers).toBe(2);
 
     const team = await store.createTeam(USER_ID, "SDK integration team", new Decimal(10));
@@ -433,4 +559,139 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect(batch.done).toBe(true);
     expect((await store.getUserPlan(USER_ID)).planId).toBe(targetPlanId);
   });
+
+  it("prevents concurrent unique-key deductions from double-spending", async () => {
+    const userId = "00000000-0000-0000-0000-000000000925";
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(structuredClone(CONCURRENCY_CONFIG));
+    await service.addCredits(userId, new Decimal(5), {
+      type: "purchase",
+      idempotencyKey: "concurrent-double-spend-funding",
+    });
+
+    const results = await runWithConcurrentStores(12, (workerStore, workerIndex) =>
+      workerStore.deductWithAllowance(userId, new Decimal(1), {
+        operation: "completion",
+        idempotencyKey: `concurrent-double-spend:${workerIndex}`,
+      }),
+    );
+    const successes = results.filter((result) => result.error === null);
+    const failures = results.filter((result) => result.error !== null);
+
+    expect(successes).toHaveLength(5);
+    expect(failures).toHaveLength(7);
+    expect(new Set(failures.map((result) => result.error))).toEqual(
+      new Set(["insufficient_credits"]),
+    );
+    expect(new Set(successes.map((result) => result.entryId)).size).toBe(5);
+    expect(new Set(successes.map((result) => result.balanceAfter?.toString()))).toEqual(
+      new Set(["0", "1", "2", "3", "4"]),
+    );
+
+    const snapshot = await financialSnapshot(userId);
+    expect(new Decimal(snapshot.balance).toString()).toBe("0");
+    expect(new Decimal(snapshot.ledger_total).equals(snapshot.balance)).toBe(true);
+    expect(snapshot.usage_entries).toBe(5);
+    expect(snapshot.usage_charges).toBe(5);
+    expect(snapshot.usage_keys).toBe(5);
+  }, 60_000);
+
+  it("replays one logical debit under concurrent same-key deductions", async () => {
+    const userId = "00000000-0000-0000-0000-000000000926";
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(structuredClone(CONCURRENCY_CONFIG));
+    await service.addCredits(userId, new Decimal(10), {
+      type: "purchase",
+      idempotencyKey: "concurrent-replay-funding",
+    });
+
+    const results = await runWithConcurrentStores(12, (workerStore) =>
+      workerStore.deductWithAllowance(userId, new Decimal(2), {
+        operation: "completion",
+        idempotencyKey: "concurrent-replay-one-debit",
+      }),
+    );
+
+    expect(results.every((result) => result.error === null)).toBe(true);
+    expect(new Set(results.map((result) => result.entryId)).size).toBe(1);
+    expect(new Set(results.map((result) => result.usageChargeId)).size).toBe(1);
+    expect(results.filter((result) => !result.idempotent)).toHaveLength(1);
+    expect(results.filter((result) => result.idempotent)).toHaveLength(11);
+    expect(new Set(results.map((result) => result.balanceAfter?.toString()))).toEqual(
+      new Set(["8"]),
+    );
+
+    const snapshot = await financialSnapshot(userId);
+    expect(new Decimal(snapshot.balance).toString()).toBe("8");
+    expect(new Decimal(snapshot.ledger_total).equals(snapshot.balance)).toBe(true);
+    expect(snapshot.usage_entries).toBe(1);
+    expect(snapshot.usage_charges).toBe(1);
+    expect(snapshot.usage_keys).toBe(1);
+  }, 60_000);
+
+  it("enforces maxConcurrent and headroom under concurrent lease admission", async () => {
+    const maxConcurrentUser = "00000000-0000-0000-0000-000000000927";
+    const headroomUser = "00000000-0000-0000-0000-000000000928";
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(structuredClone(CONCURRENCY_CONFIG));
+    await service.addCredits(maxConcurrentUser, new Decimal(100), {
+      type: "purchase",
+      idempotencyKey: "concurrent-lease-limit-funding",
+    });
+    await service.addCredits(headroomUser, new Decimal(5), {
+      type: "purchase",
+      idempotencyKey: "concurrent-lease-headroom-funding",
+    });
+    await service.setUserPlan(headroomUser, "headroom");
+
+    const limitedResults = await runWithConcurrentStores(12, (workerStore, workerIndex) =>
+      workerStore.createLease(maxConcurrentUser, new Decimal(1), "completion", {
+        idempotencyKey: `concurrent-lease-limit:${workerIndex}`,
+        floor: new Decimal(0),
+        maxConcurrent: 2,
+        ttlSeconds: 60,
+      }),
+    );
+    const limitedSuccesses = limitedResults.filter((result) => result.error === null);
+    const limitedFailures = limitedResults.filter((result) => result.error !== null);
+    expect(limitedSuccesses).toHaveLength(2);
+    expect(new Set(limitedSuccesses.map((result) => result.leaseId)).size).toBe(2);
+    expect(limitedFailures).toHaveLength(10);
+    expect(new Set(limitedFailures.map((result) => result.error))).toEqual(
+      new Set(["max_concurrent_reached"]),
+    );
+
+    const headroomResults = await runWithConcurrentStores(12, (workerStore, workerIndex) =>
+      workerStore.createLease(headroomUser, new Decimal(2), "completion", {
+        idempotencyKey: `concurrent-lease-headroom:${workerIndex}`,
+        floor: new Decimal(0),
+        maxConcurrent: 10,
+        ttlSeconds: 60,
+      }),
+    );
+    const headroomSuccesses = headroomResults.filter((result) => result.error === null);
+    const headroomFailures = headroomResults.filter((result) => result.error !== null);
+    expect(headroomSuccesses).toHaveLength(2);
+    expect(new Set(headroomSuccesses.map((result) => result.leaseId)).size).toBe(2);
+    expect(headroomFailures).toHaveLength(10);
+    expect(new Set(headroomFailures.map((result) => result.error))).toEqual(
+      new Set(["insufficient_headroom"]),
+    );
+
+    const limitedSnapshot = await activeLeaseSnapshot(maxConcurrentUser);
+    expect(new Decimal(limitedSnapshot.balance).toString()).toBe("100");
+    expect(limitedSnapshot.active_count).toBe(2);
+    expect(new Decimal(limitedSnapshot.reserved_total).toString()).toBe("2");
+    const headroomSnapshot = await activeLeaseSnapshot(headroomUser);
+    expect(new Decimal(headroomSnapshot.balance).toString()).toBe("5");
+    expect(headroomSnapshot.active_count).toBe(2);
+    expect(new Decimal(headroomSnapshot.reserved_total).toString()).toBe("4");
+
+    const limitedAvailability = await store.getAvailable(maxConcurrentUser);
+    expect(limitedAvailability.available.toString()).toBe("98");
+    expect(limitedAvailability.reserved.toString()).toBe("2");
+    const headroomAvailability = await store.getAvailable(headroomUser);
+    expect(headroomAvailability.available.toString()).toBe("1");
+    expect(headroomAvailability.reserved.toString()).toBe("4");
+  }, 60_000);
 });

@@ -13,11 +13,13 @@ import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
 import psycopg2.pool
+from pydantic import ConfigDict
 from pydantic.json_schema import SkipJsonSchema
 
 from bursar.errors import BursarError, StoreClosedError
 from bursar.providers.types import ProviderEnvironment
 from bursar.shared.postgres_errors import normalize_postgres_error
+from bursar.telemetry import Instrumentation, get_default_instrumentation
 
 PostgresAccessRole = Literal["bursar_client", "bursar_operator"]
 
@@ -77,12 +79,15 @@ class _LazyPostgresPool:
 class PostgresConnectionOptions:
     """Connection, transaction-deadline, and observability controls."""
 
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)
+
     connection_timeout_seconds: float = 10.0
     statement_timeout_ms: int = 30_000
     idle_transaction_timeout_ms: int = 30_000
     max_connections: int = 10
     application_name: str = "bursar-python"
-    on_pool_error: SkipJsonSchema[Callable[[BursarError], None]] | None = None
+    on_pool_error: SkipJsonSchema[Callable[[BursarError], None] | None] = None
+    instrumentation: SkipJsonSchema[Instrumentation | None] = None
 
     def __post_init__(self) -> None:
         _validate_timeout(self.connection_timeout_seconds, "connection_timeout_seconds", allow_float=True)
@@ -100,6 +105,8 @@ class PostgresConnectionOptions:
             raise ValueError("application_name must not contain null bytes")
         if self.on_pool_error is not None and not callable(self.on_pool_error):
             raise TypeError("on_pool_error must be callable")
+        if self.instrumentation is not None and not callable(getattr(self.instrumentation, "run", None)):
+            raise TypeError("instrumentation must provide run()")
 
 
 def _validate_timeout(value: float, name: str, *, allow_float: bool = False) -> None:
@@ -134,6 +141,7 @@ class PostgresClient:
         idle_transaction_timeout_ms: int = 30_000,
         application_name: str = "bursar-python",
         on_pool_error: Callable[[BursarError], None] | None = None,
+        instrumentation: Instrumentation | None = None,
         postgres_options: PostgresConnectionOptions | None = None,
     ) -> None:
         if not isinstance(dsn, str) or not dsn.strip():
@@ -152,7 +160,9 @@ class PostgresClient:
             idle_transaction_timeout_ms=idle_transaction_timeout_ms,
             application_name=application_name,
             on_pool_error=on_pool_error,
+            instrumentation=instrumentation,
         )
+        self._instrumentation = self._options.instrumentation or get_default_instrumentation()
         self._tenant_id = _normalize_tenant_id(tenant_id) if tenant_id is not None else None
         self._access_role = _normalize_access_role(access_role, self._tenant_id)
         self._usage_backend = _normalize_backend(usage_backend, ("postgres", "clickhouse"), "usage_backend")
@@ -189,6 +199,7 @@ class PostgresClient:
         idle_transaction_timeout_ms: int = 30_000,
         application_name: str = "bursar-python",
         on_pool_error: Callable[[BursarError], None] | None = None,
+        instrumentation: Instrumentation | None = None,
         postgres_options: PostgresConnectionOptions | None = None,
     ) -> PostgresClient:
         """Create a client around a borrowed pool; ``close`` never ends it."""
@@ -203,7 +214,9 @@ class PostgresClient:
             idle_transaction_timeout_ms=idle_transaction_timeout_ms,
             application_name=application_name,
             on_pool_error=on_pool_error,
+            instrumentation=instrumentation,
         )
+        instance._instrumentation = instance._options.instrumentation or get_default_instrumentation()
         instance._tenant_id = _normalize_tenant_id(tenant_id) if tenant_id is not None else None
         instance._access_role = _normalize_access_role(access_role, instance._tenant_id)
         instance._usage_backend = _normalize_backend(usage_backend, ("postgres", "clickhouse"), "usage_backend")
@@ -218,9 +231,13 @@ class PostgresClient:
     def query(self, text: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
         """Execute parameterized SQL in a bounded, tenant-scoped transaction."""
 
-        return self._run(
-            lambda cursor: self._fetch_query(cursor, text, params),
-            operation_name="query",
+        return self._instrumentation.run(
+            "postgres.query",
+            {"bursar.backend": "postgres"},
+            lambda: self._run(
+                lambda cursor: self._fetch_query(cursor, text, params),
+                operation_name="query",
+            ),
         )
 
     def callproc(self, name: str, params: Sequence[Any] | None = None) -> list[Any]:
@@ -234,7 +251,11 @@ class PostgresClient:
             rows = cursor.fetchall() if cursor.description else []
             return [next(iter(row.values())) if len(row) == 1 else dict(row) for row in (rows or [])]
 
-        return self._run(execute, operation_name=f"database RPC {name!r}")
+        return self._instrumentation.run(
+            "postgres.rpc",
+            {"bursar.backend": "postgres"},
+            lambda: self._run(execute, operation_name=f"database RPC {name!r}"),
+        )
 
     def close(self) -> None:
         """Close this client exactly once; borrowed pools remain caller-owned."""

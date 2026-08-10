@@ -7,7 +7,7 @@ import {
 import { BillingEventHandlers } from "../src/billing/event-handlers.js";
 import { BillingEventProcessor } from "../src/billing/event-processor.js";
 import { BillingEventRepository } from "../src/billing/postgres/repositories/event.js";
-import type { BillingEvent } from "../src/billing/types/index.js";
+import type { BillingEvent, BillingEventClaim } from "../src/billing/types/index.js";
 import { BillingEventType } from "../src/billing/types/index.js";
 import { StoreError } from "../src/errors.js";
 
@@ -15,12 +15,13 @@ const CLAIM_TOKEN = "00000000-0000-0000-0000-000000000003";
 const BILLING_EVENT_ID = "00000000-0000-0000-0000-000000000004";
 
 function claimedStore() {
+  const claimBillingEvent = vi.fn<BillingStore["claimBillingEvent"]>().mockResolvedValue({
+    status: "claimed",
+    claimToken: CLAIM_TOKEN,
+    billingEventId: BILLING_EVENT_ID,
+  });
   return {
-    claimBillingEvent: vi.fn().mockResolvedValue({
-      status: "claimed",
-      claimToken: CLAIM_TOKEN,
-      billingEventId: BILLING_EVENT_ID,
-    }),
+    claimBillingEvent,
     completeBillingEvent: vi.fn().mockResolvedValue(true),
     failBillingEvent: vi.fn().mockResolvedValue(true),
     upsertBillingCustomer: vi.fn().mockResolvedValue(undefined),
@@ -69,6 +70,35 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
     ).rejects.toThrow(TypeError);
     expect(store.claimBillingEvent).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [{ status: "invalid_request" }, "invalid_request"],
+    [{ status: "idempotency_conflict", billingEventId: BILLING_EVENT_ID }, "idempotency_conflict"],
+    [{ status: "max_retries_exceeded", billingEventId: BILLING_EVENT_ID }, "max_retries_exceeded"],
+    [{ status: "retry" }, "claim_failed_retry"],
+  ] satisfies Array<[BillingEventClaim, string]>)(
+    "surfaces an unclaimed event as %s",
+    async (claim, expectedError) => {
+      const store = claimedStore();
+      store.claimBillingEvent.mockResolvedValue(claim);
+      const processor = new BillingEventProcessor(store as unknown as BillingStore);
+
+      const result = await processor.ingestBillingEvent({
+        ...event(`evt_${expectedError}`, BillingEventType.INVOICE_CREATED),
+        invoice: {
+          providerInvoiceId: `in_${expectedError}`,
+          status: "draft",
+          amountPaidMinor: 0,
+          amountDueMinor: 1000,
+          currency: "USD",
+        },
+      });
+
+      expect(result).toEqual({ handled: false, error: expectedError });
+      expect(store.completeBillingEvent).not.toHaveBeenCalled();
+      expect(store.failBillingEvent).not.toHaveBeenCalled();
+    },
+  );
 
   it("reports and requeues a rejected completion", async () => {
     const store = claimedStore();
@@ -120,28 +150,31 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
     );
   });
 
-  it.each([
-    ["   ", "Error"],
-    [`  ${"x".repeat(9_000)}  `, "x".repeat(8_192)],
-  ])("normalizes processing error %j before persistence", async (rawMessage, expected) => {
-    const store = claimedStore();
-    store.upsertBillingCustomer.mockRejectedValue(new Error(rawMessage));
-    const processor = new BillingEventProcessor(store as unknown as BillingStore);
+  it.each(["   ", `  ${"x".repeat(9_000)}  `])(
+    "persists only the processing error type for %j",
+    async (rawMessage) => {
+      const store = claimedStore();
+      store.upsertBillingCustomer.mockRejectedValue(new Error(rawMessage));
+      const processor = new BillingEventProcessor(store as unknown as BillingStore);
 
-    const result = await processor.ingestBillingEvent({
-      ...event("evt_failure_message", BillingEventType.CUSTOMER_CREATED),
-      accountId: "00000000-0000-0000-0000-000000000001",
-      customer: { providerCustomerId: "cus_failure" },
-    });
+      const result = await processor.ingestBillingEvent({
+        ...event("evt_failure_message", BillingEventType.CUSTOMER_CREATED),
+        accountId: "00000000-0000-0000-0000-000000000001",
+        customer: { providerCustomerId: "cus_failure" },
+      });
 
-    expect(result).toEqual({ handled: false, error: expected });
-    expect(store.failBillingEvent).toHaveBeenCalledWith(
-      "stripe",
-      "evt_failure_message",
-      CLAIM_TOKEN,
-      expected,
-    );
-  });
+      expect(result).toEqual({
+        handled: false,
+        error: "billing_event_processing_failed:Error",
+      });
+      expect(store.failBillingEvent).toHaveBeenCalledWith(
+        "stripe",
+        "evt_failure_message",
+        CLAIM_TOKEN,
+        "billing_event_processing_failed:Error",
+      );
+    },
+  );
 });
 
 describe("billing diagnostic and repository boundaries", () => {
@@ -177,6 +210,19 @@ describe("billing diagnostic and repository boundaries", () => {
       indeterminate: true,
     });
   });
+
+  it.each(["idempotency_conflict", "max_retries_exceeded"] as const)(
+    "rejects a malformed %s claim without its stored event id",
+    async (status) => {
+      const repository = new BillingEventRepository(
+        vi.fn().mockResolvedValue([{ result: status, event_id: null, claim_token: null }]),
+      );
+
+      await expect(
+        repository.claim("stripe", "evt_malformed", "invoice.paid", "{}"),
+      ).rejects.toMatchObject({ name: StoreError.name, indeterminate: true });
+    },
+  );
 });
 
 describe("subscription plan-change provisioning", () => {

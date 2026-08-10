@@ -30,6 +30,7 @@ from bursar.billing.types import (
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     CheckoutIntent,
+    CheckoutIntentStatus,
 )
 from bursar.commerce.errors import (
     ActiveSubscriptionError,
@@ -113,6 +114,7 @@ from bursar.providers.types import (
     UpdatePaymentMethodProvider,
     WebhookRequest,
 )
+from bursar.shared.diagnostics import persisted_diagnostic_summary
 from bursar.shared.idempotency import require_stable_key, scope_stable_key
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
@@ -531,13 +533,16 @@ class CommerceService:
             "provider": provider.provider,
             "quantity": quantity,
         }
-        request_digest = hashlib.sha256(json.dumps(digest_value, separators=(",", ":")).encode()).hexdigest()
+        request_digest = hashlib.sha256(
+            json.dumps(digest_value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
 
         def create_intent():
             return self.billing.create_or_get_checkout_intent(
                 CheckoutIntentCreate(
                     subject_id=input.subject_id,
                     provider=provider.provider,
+                    operation_key=input.operation_key,
                     checkout_kind=checkout_kind,
                     product_key=offer_key,
                     request_digest=request_digest,
@@ -549,79 +554,80 @@ class CommerceService:
 
         intent = create_intent()
         if intent.request_digest != request_digest:
-            raise CheckoutConflictError("A checkout is already in progress for a different offer")
+            raise CheckoutConflictError("This operation key is already bound to a different checkout request")
+        if intent.status == CheckoutIntentStatus.completed:
+            raise CheckoutCompletedError()
+        if intent.status != CheckoutIntentStatus.open:
+            raise CheckoutConflictError(
+                "This checkout operation is terminal; start a new checkout with a new operation key"
+            )
         if intent.checkout_url:
             locally_expired = datetime.fromisoformat(intent.expires_at) <= datetime.now(UTC)
-            state = None
-            if not locally_expired:
-                if not intent.provider_session_id or not isinstance(provider, CheckoutStatusProvider):
-                    raise CheckoutConflictError(
-                        "A checkout is already in progress; continue it in the existing checkout window"
-                    )
-                state = await provider.get_checkout_session_status(intent.provider_session_id)
-            payment_status = state.payment_status if state else None
-            if payment_status == "succeeded":
-                self.billing.update_checkout_intent(
-                    intent.id,
-                    CheckoutIntentUpdate(status="completed"),
-                )
-                raise CheckoutCompletedError()
-            if not locally_expired and state is not None and payment_status not in _TERMINAL_CHECKOUT_STATUSES:
+            if locally_expired:
+                self.billing.update_checkout_intent(intent.id, CheckoutIntentUpdate(status="expired"))
                 raise CheckoutConflictError(
-                    "A checkout is already in progress; continue it in the existing checkout window"
+                    "This checkout operation expired; start a new checkout with a new operation key"
                 )
-            self.billing.update_checkout_intent(
-                intent.id,
-                CheckoutIntentUpdate(status="expired" if state is None else "failed"),
-            )
-            intent = create_intent()
-
-        try:
-            session = await provider.create_checkout_session(
-                CheckoutParams(
-                    account_id=input.account_id,
-                    customer_id=(provider_customer.provider_customer_id if provider_customer else None),
-                    email=input.email,
-                    product_id=_external_id(reference),
-                    type=("subscription" if isinstance(offer, SubscriptionOffer) else "credit_pack"),
-                    quantity=quantity,
-                    return_url=_replace_intent(input.return_url, intent.id),
-                    cancel_url=_replace_intent(input.cancel_url, intent.id),
-                    metadata={**metadata, "checkout_intent_id": intent.id},
-                    idempotency_key=input.operation_key,
-                )
-            )
-            self.billing.update_checkout_intent(
-                intent.id,
-                CheckoutIntentUpdate(
-                    provider_session_id=session.provider_session_id,
-                    checkout_url=session.url,
-                ),
-            )
-            customer_id = session.customer_id
-            if (
-                input.account_id
-                and customer_id
-                and (provider_customer is None or customer_id != provider_customer.provider_customer_id)
-            ):
-                self.billing.upsert_customer(
-                    provider.provider,
-                    customer_id,
-                    input.account_id,
-                    input.email,
-                )
+            if intent.provider_session_id and isinstance(provider, CheckoutStatusProvider):
+                state = await provider.get_checkout_session_status(intent.provider_session_id)
+                payment_status = state.payment_status if state else None
+                if payment_status == "succeeded":
+                    self.billing.update_checkout_intent(intent.id, CheckoutIntentUpdate(status="completed"))
+                    raise CheckoutCompletedError()
+                if state is not None and payment_status in _TERMINAL_CHECKOUT_STATUSES:
+                    self.billing.update_checkout_intent(intent.id, CheckoutIntentUpdate(status="failed"))
+                    raise CheckoutConflictError(
+                        "This checkout operation is no longer active; start a new checkout with a new operation key"
+                    )
             return CreateCheckoutResult(
                 intent_id=intent.id,
-                url=session.url,
+                url=intent.checkout_url,
                 provider=provider.provider,
                 offer_key=offer_key,
             )
-        except Exception:
-            self.billing.update_checkout_intent(
-                intent.id,
-                CheckoutIntentUpdate(status="failed"),
+
+        session = await provider.create_checkout_session(
+            CheckoutParams(
+                account_id=input.account_id,
+                customer_id=(provider_customer.provider_customer_id if provider_customer else None),
+                email=input.email,
+                product_id=_external_id(reference),
+                type=("subscription" if isinstance(offer, SubscriptionOffer) else "credit_pack"),
+                quantity=quantity,
+                return_url=_replace_intent(input.return_url, intent.id),
+                cancel_url=_replace_intent(input.cancel_url, intent.id),
+                metadata={**metadata, "checkout_intent_id": intent.id},
+                idempotency_key=input.operation_key,
             )
-            raise
+        )
+        # Complete every fallible local write before publishing the session on
+        # the intent. If either write fails, an exact replay reaches the
+        # provider with the same idempotency key and repairs the open intent.
+        customer_id = session.customer_id
+        if (
+            input.account_id
+            and customer_id
+            and (provider_customer is None or customer_id != provider_customer.provider_customer_id)
+        ):
+            self.billing.upsert_customer(
+                provider.provider,
+                customer_id,
+                input.account_id,
+                input.email,
+            )
+        self.billing.update_checkout_intent(
+            intent.id,
+            CheckoutIntentUpdate(
+                provider_session_id=session.provider_session_id,
+                checkout_url=session.url,
+            ),
+        )
+        return CreateCheckoutResult(
+            intent_id=intent.id,
+            url=session.url,
+            provider=provider.provider,
+            offer_key=offer_key,
+        )
 
     def get_checkout_status(
         self,
@@ -1123,7 +1129,7 @@ class CommerceService:
                 change.id,
                 BillingSubscriptionChangeUpdate(
                     state="failed",
-                    error_message=str(failure),
+                    error_message=persisted_diagnostic_summary(failure, "subscription_change_failed"),
                 ),
             )
             if failure is exc:

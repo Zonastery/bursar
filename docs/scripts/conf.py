@@ -27,7 +27,7 @@ templates_path = ["_templates"]
 
 # Bursar imports these packages only when their optional adapters are used.
 # Mock them so the public API can be rendered from a base SDK installation.
-autodoc_mock_imports = ["psycopg2", "httpx"]
+autodoc_mock_imports = ["psycopg2", "httpx", "opentelemetry"]
 
 
 class DocusaurusMarkdownTranslator(MarkdownTranslator):

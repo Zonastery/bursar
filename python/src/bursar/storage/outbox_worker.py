@@ -6,15 +6,33 @@ import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
+from time import perf_counter
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from bursar.shared.diagnostics import bounded_diagnostic_message
+from bursar.shared.diagnostics import persisted_diagnostic_summary
 from bursar.storage.ports import OutboxEvent, OutboxHandler, OutboxStore
 
 
 class _OutboxModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+OutboxEventOutcomeStatus = Literal["delivered", "delivery_failed", "claim_lost"]
+OutboxClaimLossPhase = Literal["heartbeat", "complete", "fail"]
+
+
+class OutboxEventOutcome(_OutboxModel):
+    topic: str
+    attempt_count: int
+    status: OutboxEventOutcomeStatus
+    # Persistence-safe diagnostic summary; never a raw exception message.
+    summary: str | None
+    duration_ms: float = Field(ge=0)
+    retry_delay_seconds: int | None
+    dead_lettered: bool
+    claim_loss_phase: OutboxClaimLossPhase | None
 
 
 class OutboxWorkerOptions(_OutboxModel):
@@ -24,8 +42,9 @@ class OutboxWorkerOptions(_OutboxModel):
     poll_interval_ms: int = Field(default=1_000, strict=True, ge=10, le=3_600_000)
     retry_delay_seconds: int = Field(default=30, strict=True, ge=1, le=86_400)
     max_retry_delay_seconds: int = Field(default=3_600, strict=True, ge=1, le=86_400)
-    attempt_limit: int = Field(default=10, strict=True, ge=1, le=1_000)
+    attempt_limit: int = Field(default=10, strict=True, ge=1, le=100)
     on_error: Callable[[BaseException], None] | None = None
+    on_event_outcome: Callable[[OutboxEventOutcome], None] | None = None
 
     @model_validator(mode="after")
     def validate_retry_delays(self) -> OutboxWorkerOptions:
@@ -38,6 +57,51 @@ class OutboxRunResult(_OutboxModel):
     claimed: int
     delivered: int
     failed: int
+    claim_lost: int = Field(ge=0)
+
+
+class _ClaimHeartbeat:
+    def __init__(self, store: OutboxStore, event: OutboxEvent, lease_seconds: int) -> None:
+        self._store = store
+        self._event = event
+        self._lease_seconds = lease_seconds
+        self._interval_seconds = max(0.1, lease_seconds / 3)
+        self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._claim_lost = False
+        self._summary: str | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"bursar-outbox-heartbeat-{event.event_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> tuple[bool, str | None]:
+        self._stop_event.set()
+        if self._thread is not threading.current_thread():
+            self._thread.join()
+        with self._state_lock:
+            return self._claim_lost, self._summary
+
+    def _lose_claim(self, error: object | None) -> None:
+        with self._state_lock:
+            self._claim_lost = True
+            self._summary = persisted_diagnostic_summary(error, "outbox_claim_lost")
+        self._stop_event.set()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                renewed = self._store.renew(self._event, self._lease_seconds)
+            except BaseException as error:
+                self._lose_claim(error)
+                return
+            if not renewed:
+                self._lose_claim(None)
+                return
 
 
 class OutboxWorker:
@@ -56,6 +120,9 @@ class OutboxWorker:
         if not handlers:
             msg = "OutboxWorker requires at least one handler"
             raise ValueError(msg)
+        if not callable(getattr(store, "renew", None)):
+            msg = "OutboxWorker store must support claim renewal"
+            raise TypeError(msg)
         self._store = store
         self._handlers: dict[str, list[OutboxHandler]] = {}
         for handler in handlers:
@@ -134,21 +201,44 @@ class OutboxWorker:
                     self._active_thread_id = None
 
     def _dispatch_once(self) -> OutboxRunResult:
-        events = self._store.claim(
-            self._topics,
-            self._options.batch_size,
-            self._options.lease_seconds,
-        )
-        if not events:
-            return OutboxRunResult(claimed=0, delivered=0, failed=0)
-        worker_count = min(self._options.concurrency, len(events))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            delivered = list(executor.map(self._dispatch_event, events))
-        delivered_count = sum(delivered)
+        claimed_count = 0
+        delivered_count = 0
+        failed_count = 0
+        claim_lost_count = 0
+        remaining_budget = self._options.batch_size
+
+        while remaining_budget > 0:
+            available_slots = min(self._options.concurrency, remaining_budget)
+            events = self._store.claim(
+                self._topics,
+                available_slots,
+                self._options.lease_seconds,
+            )
+            if not events:
+                break
+            if len(events) > available_slots:
+                msg = f"Outbox store returned {len(events)} events for {available_slots} available slots"
+                raise RuntimeError(msg)
+
+            claimed_count += len(events)
+            remaining_budget -= len(events)
+            with ThreadPoolExecutor(max_workers=len(events)) as executor:
+                outcomes = list(executor.map(self._dispatch_event, events))
+            for outcome in outcomes:
+                if outcome == "delivered":
+                    delivered_count += 1
+                else:
+                    failed_count += 1
+                    if outcome == "claim_lost":
+                        claim_lost_count += 1
+            if len(events) < available_slots:
+                break
+
         return OutboxRunResult(
-            claimed=len(events),
+            claimed=claimed_count,
             delivered=delivered_count,
-            failed=len(events) - delivered_count,
+            failed=failed_count,
+            claim_lost=claim_lost_count,
         )
 
     def _run_loop(self) -> None:
@@ -161,7 +251,16 @@ class OutboxWorker:
                         self._options.on_error(error)
             self._stop_event.wait(self._options.poll_interval_ms / 1_000)
 
-    def _dispatch_event(self, event: OutboxEvent) -> bool:
+    def _report_outcome(self, outcome: OutboxEventOutcome) -> None:
+        if self._options.on_event_outcome is not None:
+            with suppress(BaseException):
+                self._options.on_event_outcome(outcome)
+
+    def _dispatch_event(self, event: OutboxEvent) -> OutboxEventOutcomeStatus:
+        started_at = perf_counter()
+        heartbeat = _ClaimHeartbeat(self._store, event, self._options.lease_seconds)
+        heartbeat.start()
+        delivery_error: BaseException | None = None
         try:
             handlers = self._handlers.get(event.topic)
             if not handlers:
@@ -172,21 +271,101 @@ class OutboxWorker:
             else:
                 with ThreadPoolExecutor(max_workers=len(handlers)) as executor:
                     list(executor.map(lambda handler: handler.handle(event), handlers))
-            if not self._store.complete(event):
-                msg = f"Lost outbox claim for event {event.event_id}"
-                raise RuntimeError(msg)
-            return True
         except BaseException as error:
-            message = bounded_diagnostic_message(
-                f"{type(error).__name__}: {error}",
-                "outbox_delivery_failed",
-            )
-            exponential_delay = self._options.retry_delay_seconds * 2 ** max(event.attempt_count - 1, 0)
-            retry_delay = min(exponential_delay, self._options.max_retry_delay_seconds)
-            self._store.fail(
+            delivery_error = error
+
+        heartbeat_lost, heartbeat_summary = heartbeat.stop()
+        if heartbeat_lost:
+            return self._claim_lost(event, "heartbeat", heartbeat_summary, started_at)
+        if delivery_error is not None:
+            return self._fail_delivery(event, delivery_error, started_at)
+
+        try:
+            if not self._store.complete(event):
+                return self._claim_lost(
+                    event,
+                    "complete",
+                    persisted_diagnostic_summary(None, "outbox_claim_lost"),
+                    started_at,
+                )
+        except BaseException as error:
+            return self._claim_lost(
                 event,
-                message,
+                "complete",
+                persisted_diagnostic_summary(error, "outbox_claim_lost"),
+                started_at,
+            )
+
+        self._report_outcome(
+            OutboxEventOutcome(
+                topic=event.topic,
+                attempt_count=event.attempt_count,
+                status="delivered",
+                summary=None,
+                duration_ms=max((perf_counter() - started_at) * 1_000, 0.0),
+                retry_delay_seconds=None,
+                dead_lettered=False,
+                claim_loss_phase=None,
+            )
+        )
+        return "delivered"
+
+    def _fail_delivery(
+        self,
+        event: OutboxEvent,
+        error: BaseException,
+        started_at: float,
+    ) -> OutboxEventOutcomeStatus:
+        summary = persisted_diagnostic_summary(error, "outbox_delivery_failed")
+        exponential_delay = self._options.retry_delay_seconds * 2 ** max(event.attempt_count - 1, 0)
+        retry_delay = min(exponential_delay, self._options.max_retry_delay_seconds)
+        try:
+            if not self._store.fail(
+                event,
+                summary,
                 retry_delay,
                 self._options.attempt_limit,
+            ):
+                return self._claim_lost(event, "fail", summary, started_at)
+        except BaseException as failure_error:
+            return self._claim_lost(
+                event,
+                "fail",
+                persisted_diagnostic_summary(failure_error, "outbox_claim_lost"),
+                started_at,
             )
-            return False
+
+        self._report_outcome(
+            OutboxEventOutcome(
+                topic=event.topic,
+                attempt_count=event.attempt_count,
+                status="delivery_failed",
+                summary=summary,
+                duration_ms=max((perf_counter() - started_at) * 1_000, 0.0),
+                retry_delay_seconds=retry_delay,
+                dead_lettered=event.attempt_count >= self._options.attempt_limit,
+                claim_loss_phase=None,
+            )
+        )
+        return "delivery_failed"
+
+    def _claim_lost(
+        self,
+        event: OutboxEvent,
+        phase: OutboxClaimLossPhase,
+        summary: str | None,
+        started_at: float,
+    ) -> OutboxEventOutcomeStatus:
+        self._report_outcome(
+            OutboxEventOutcome(
+                topic=event.topic,
+                attempt_count=event.attempt_count,
+                status="claim_lost",
+                summary=summary or persisted_diagnostic_summary(None, "outbox_claim_lost"),
+                duration_ms=max((perf_counter() - started_at) * 1_000, 0.0),
+                retry_delay_seconds=None,
+                dead_lettered=False,
+                claim_loss_phase=phase,
+            )
+        )
+        return "claim_lost"

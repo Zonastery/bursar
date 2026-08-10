@@ -53,7 +53,7 @@ class FakeOutboxStore:
         self.events = events
         self.claim_calls: list[tuple[Sequence[str], int, int]] = []
         self.completed: list[OutboxEvent] = []
-        self.failed: list[tuple[OutboxEvent, str, int, int]] = []
+        self.failed: list[tuple[OutboxEvent, object | None, int, int]] = []
 
     def claim(
         self,
@@ -64,6 +64,10 @@ class FakeOutboxStore:
         self.claim_calls.append((topics, limit, lease_seconds))
         return self.events
 
+    def renew(self, event: OutboxEvent, lease_seconds: int) -> bool:
+        del event, lease_seconds
+        return True
+
     def complete(self, event: OutboxEvent) -> bool:
         self.completed.append(event)
         return True
@@ -71,7 +75,7 @@ class FakeOutboxStore:
     def fail(
         self,
         event: OutboxEvent,
-        error: str,
+        error: object | None,
         retry_delay_seconds: int,
         attempt_limit: int,
     ) -> bool:
@@ -182,8 +186,8 @@ def test_outbox_worker_claims_registered_topics_and_acknowledges() -> None:
         [FakeHandler(("usage.charge_recorded",), handled.append)],
     )
 
-    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=1, failed=0)
-    assert store.claim_calls == [(["usage.charge_recorded"], 100, 60)]
+    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=1, failed=0, claim_lost=0)
+    assert store.claim_calls == [(["usage.charge_recorded"], 4, 60)]
     assert handled == [OUTBOX_EVENT]
     assert store.completed == [OUTBOX_EVENT]
     assert store.failed == []
@@ -219,12 +223,12 @@ def test_outbox_worker_releases_failure_with_bounded_backoff() -> None:
         ),
     )
 
-    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=0, failed=1)
+    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=0, failed=1, claim_lost=0)
     assert store.completed == []
     assert store.failed == [
         (
             OUTBOX_EVENT,
-            "RuntimeError: ClickHouse unavailable",
+            "outbox_delivery_failed:RuntimeError",
             10,
             7,
         )
@@ -242,8 +246,8 @@ def test_outbox_worker_normalizes_failure_diagnostics() -> None:
         [FakeHandler(("usage.charge_recorded",), fail_handler)],
     )
 
-    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=0, failed=1)
-    assert store.failed[0][1] == "RuntimeError:   failed\ufffddelivery"
+    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=0, failed=1, claim_lost=0)
+    assert store.failed[0][1] == "outbox_delivery_failed:RuntimeError"
 
 
 def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
@@ -406,10 +410,11 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     )
 
     assert runtime.worker is None
+    assert runtime.outbox_recovery is not None
     assert runtime.clickhouse is None
     assert runtime.s3 is None
     runtime.start(BursarRuntimeStartOptions(load_catalog=False))
-    assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0)
+    assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0, claim_lost=0)
     runtime.close()
     pool.closeall.assert_not_called()
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { NotFoundError } from "dodopayments";
+import DodoPayments, { NotFoundError } from "dodopayments";
 import type Stripe from "stripe";
-import { ProviderResponseError } from "../src/errors.js";
+import { ProviderResponseError, StoreUnavailableError } from "../src/errors.js";
 import { callBillingEventSink } from "../src/providers/_shared.js";
 import type { BillingEventSink } from "../src/billing/contracts.js";
 import type { DodoClient } from "../src/providers/dodo/client-contract.js";
@@ -41,9 +41,49 @@ describe("payment provider adapter contracts", () => {
     }
   });
 
+  it.each(["invalid_request", "idempotency_conflict", "max_retries_exceeded"])(
+    "acknowledges the permanent billing claim outcome %s",
+    async (error) => {
+      const result = { handled: false, error };
+
+      await expect(
+        callBillingEventSink(
+          { ingestBillingEvent: vi.fn().mockResolvedValue(result) },
+          {
+            provider: "stripe",
+            eventId: `evt_${error}`,
+            eventType: "invoice.paid",
+            occurredAt: "2026-07-29T12:00:00.000Z",
+          },
+        ),
+      ).resolves.toEqual(result);
+    },
+  );
+
+  it("keeps a legacy retry claim retryable", async () => {
+    await expect(
+      callBillingEventSink(
+        {
+          ingestBillingEvent: vi
+            .fn()
+            .mockResolvedValue({ handled: false, error: "claim_failed_retry" }),
+        },
+        {
+          provider: "stripe",
+          eventId: "evt_claim_retry",
+          eventType: "invoice.paid",
+          occurredAt: "2026-07-29T12:00:00.000Z",
+        },
+      ),
+    ).rejects.toBeInstanceOf(StoreUnavailableError);
+  });
+
   it("maps Dodo requests, idempotency, and response DTOs", async () => {
     const calls: unknown[][] = [];
     const customerCreate = vi.fn(async () => ({ customer_id: "cus_1" }));
+    const updatePaymentMethod = vi.fn(async () => ({
+      payment_link: "https://update-payment-method.test",
+    }));
     const client = {
       webhooks: {
         unwrap: () => ({ type: "payment.succeeded", data: {} }),
@@ -93,10 +133,14 @@ describe("payment provider adapter contracts", () => {
         retrieve: async (id: string) =>
           id === "pay_auto"
             ? { payment_id: id, status: "succeeded", total_amount: 500, currency: "USD" }
-            : { payment_link: "https://invoice.test" },
+            : {
+                invoice_url: "https://invoice.test/document.pdf",
+                payment_link: "https://checkout.test/not-an-invoice",
+              },
       },
       subscriptions: {
         update: async (...args: unknown[]) => calls.push(args),
+        updatePaymentMethod,
         changePlan: async (...args: unknown[]) => calls.push(args),
         previewChangePlan: async () => ({
           immediate_charge: {
@@ -145,7 +189,7 @@ describe("payment provider adapter contracts", () => {
         cancel_url: "https://cancel",
         metadata: { bursar_account_id: "user-1" },
       },
-      { idempotencyKey: "idem_1" },
+      { headers: { "Idempotency-Key": "idem_1" } },
     ]);
     await expect(provider.getCheckoutSessionStatus("sess_1")).resolves.toEqual({
       paymentStatus: "paid",
@@ -153,6 +197,31 @@ describe("payment provider adapter contracts", () => {
     await expect(
       provider.createCustomerPortalSession({ customerId: "cus_1", returnUrl: "https://return" }),
     ).resolves.toEqual({ url: "https://portal.test" });
+    await expect(
+      provider.createUpdatePaymentMethodSession({
+        customerId: "cus_1",
+        subscriptionId: "sub_1",
+        returnUrl: "https://return/update",
+      }),
+    ).resolves.toEqual({ url: "https://update-payment-method.test" });
+    expect(updatePaymentMethod).toHaveBeenCalledWith("sub_1", {
+      payment_method: { type: "new", return_url: "https://return/update" },
+    });
+    await expect(
+      provider.createPaymentMethodSetupSession({
+        customerId: "cus_1",
+        returnUrl: "https://return/setup",
+      }),
+    ).resolves.toEqual({ url: "https://checkout.test" });
+    expect(calls[1]).toEqual([
+      {
+        product_cart: [{ product_id: "setup", quantity: 1 }],
+        customer: { customer_id: "cus_1" },
+        return_url: "https://return/setup",
+        metadata: { purpose: "setup_payment_method" },
+        subscription_data: { on_demand: { mandate_only: true } },
+      },
+    ]);
     await expect(provider.listPaymentMethods("cus_1")).resolves.toEqual([
       {
         id: "pm_1",
@@ -173,7 +242,9 @@ describe("payment provider adapter contracts", () => {
         idempotencyKey: "auto_1",
       }),
     ).resolves.toMatchObject({ providerPaymentId: "pay_auto", status: "succeeded" });
-    await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({ url: "https://invoice.test" });
+    await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({
+      url: "https://invoice.test/document.pdf",
+    });
     await expect(
       provider.createCustomer({
         email: "u1@example.com",
@@ -184,7 +255,7 @@ describe("payment provider adapter contracts", () => {
     ).resolves.toEqual({ customerId: "cus_1" });
     expect(customerCreate).toHaveBeenCalledWith(
       { email: "u1@example.com", name: "User One", metadata: {} },
-      { idempotencyKey: "customer:user-1" },
+      { headers: { "Idempotency-Key": "customer:user-1" } },
     );
     await expect(
       provider.previewChangePlan({
@@ -193,6 +264,177 @@ describe("payment provider adapter contracts", () => {
         prorationBillingMode: "prorated_immediately",
       }),
     ).resolves.toMatchObject({ totalAmount: 12, settlementAmount: 10 });
+  });
+
+  it("locks a submitted email in the hosted Dodo checkout", async () => {
+    const create = vi.fn(async () => ({
+      checkout_url: "https://checkout.test",
+      session_id: "sess_guest",
+    }));
+    const client = { checkoutSessions: { create } } as unknown as DodoClient;
+    const provider = new DodoProvider({
+      getClient: () => client,
+      webhookKey: "k",
+      eventSink: sink,
+    });
+
+    await provider.createCheckoutSession({
+      accountId: "guest-account-1",
+      email: "guest@example.com",
+      productId: "prod_guest",
+      type: "subscription",
+      returnUrl: "https://return.test",
+      cancelUrl: "https://cancel.test",
+      metadata: { checkout_intent_id: "intent-1" },
+      idempotencyKey: "guest-checkout:1",
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      {
+        product_cart: [{ product_id: "prod_guest", quantity: 1 }],
+        customer: { email: "guest@example.com" },
+        return_url: "https://return.test",
+        cancel_url: "https://cancel.test",
+        metadata: {
+          checkout_intent_id: "intent-1",
+          bursar_account_id: "guest-account-1",
+        },
+        feature_flags: { allow_customer_editing_email: false },
+      },
+      { headers: { "Idempotency-Key": "guest-checkout:1" } },
+    );
+  });
+
+  it("sends explicit Dodo idempotency headers for every keyed provider mutation", async () => {
+    const checkoutCreate = vi.fn(async (...args: unknown[]) => {
+      const body = args[0] as Record<string, unknown>;
+      return body.confirm === true
+        ? { session_id: "sess_charge", payment_id: "pay_charge" }
+        : { checkout_url: "https://checkout.test", session_id: "sess_checkout" };
+    });
+    const customerCreate = vi.fn(async () => ({ customer_id: "cus_1" }));
+    const subscriptionUpdate = vi.fn(async () => undefined);
+    const cancelChangePlan = vi.fn(async () => undefined);
+    const changePlan = vi.fn(async () => undefined);
+    const client = {
+      checkoutSessions: { create: checkoutCreate },
+      customers: { create: customerCreate },
+      payments: {
+        retrieve: vi.fn(async () => ({
+          payment_id: "pay_charge",
+          status: "succeeded",
+          total_amount: 500,
+          currency: "USD",
+        })),
+      },
+      subscriptions: {
+        update: subscriptionUpdate,
+        cancelChangePlan,
+        changePlan,
+      },
+    } as unknown as DodoClient;
+    const provider = new DodoProvider({
+      getClient: () => client,
+      webhookKey: "k",
+      eventSink: sink,
+    });
+    const requestOptions = (key: string) => ({ headers: { "Idempotency-Key": key } });
+
+    await provider.createCheckoutSession({
+      accountId: "user-1",
+      productId: "prod_checkout",
+      type: "subscription",
+      returnUrl: "https://return.test",
+      cancelUrl: "https://cancel.test",
+      metadata: {},
+      idempotencyKey: "checkout:1",
+    });
+    await provider.cancelSubscription("sub_1", "cancel:1");
+    await provider.reactivateSubscription("sub_1", "reactivate:1");
+    await provider.cancelScheduledPlanChange("sub_1", null, "cancel-change:1");
+    await provider.chargeSavedPaymentMethod({
+      customerId: "cus_1",
+      paymentMethodId: "pm_1",
+      productId: "prod_charge",
+      quantity: 1,
+      metadata: {},
+      idempotencyKey: "charge:1",
+    });
+    await provider.createCustomer({
+      email: "user@example.com",
+      name: "User",
+      metadata: {},
+      idempotencyKey: "customer:1",
+    });
+    await provider.changePlan({
+      providerSubscriptionId: "sub_1",
+      productId: "prod_plan",
+      prorationBillingMode: "do_not_bill",
+      idempotencyKey: "change-plan:1",
+    });
+
+    expect(checkoutCreate).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Object),
+      requestOptions("checkout:1"),
+    );
+    expect(subscriptionUpdate).toHaveBeenNthCalledWith(
+      1,
+      "sub_1",
+      { cancel_at_next_billing_date: true },
+      requestOptions("cancel:1"),
+    );
+    expect(subscriptionUpdate).toHaveBeenNthCalledWith(
+      2,
+      "sub_1",
+      { cancel_at_next_billing_date: false },
+      requestOptions("reactivate:1"),
+    );
+    expect(cancelChangePlan).toHaveBeenCalledWith("sub_1", requestOptions("cancel-change:1"));
+    expect(checkoutCreate).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Object),
+      requestOptions("charge:1"),
+    );
+    expect(customerCreate).toHaveBeenCalledWith(expect.any(Object), requestOptions("customer:1"));
+    expect(changePlan).toHaveBeenCalledWith(
+      "sub_1",
+      expect.any(Object),
+      requestOptions("change-plan:1"),
+    );
+  });
+
+  it("transports explicit idempotency headers through the installed Dodo SDK", async () => {
+    const requests: Request[] = [];
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        requests.push(new Request(input, init));
+        return new Response(
+          JSON.stringify({
+            checkout_url: "https://checkout.test",
+            session_id: "sess_transport",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    const client = new DodoPayments({
+      bearerToken: "test_token",
+      baseURL: "https://api.test.invalid",
+      fetch: fetchMock,
+      maxRetries: 0,
+    });
+
+    await client.checkoutSessions.create(
+      {
+        product_cart: [{ product_id: "prod_1", quantity: 1 }],
+        return_url: "https://return.test",
+      },
+      { headers: { "Idempotency-Key": "transport:1" } },
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(requests[0]?.headers.get("idempotency-key")).toBe("transport:1");
   });
 
   it("maps Stripe checkout calls and rejects missing webhook signatures", async () => {

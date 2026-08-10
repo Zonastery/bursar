@@ -230,7 +230,7 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
         usage_event = next(event for event in claimed if event.topic == "usage.charge_recorded")
         billing_event = next(event for event in claimed if event.topic == "billing.webhook_completed")
         assert repository.complete(usage_event) is True
-        assert repository.fail(billing_event, "archive unavailable", 0, 3) is True
+        assert repository.fail(billing_event, "outbox_delivery_failed:RuntimeError", 0, 3) is True
     finally:
         client.close()
 
@@ -253,7 +253,7 @@ def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
     )
     try:
         assert runtime.health().started is False
-        assert runtime.flush() == OutboxRunResult(claimed=2, delivered=2, failed=0)
+        assert runtime.flush() == OutboxRunResult(claimed=2, delivered=2, failed=0, claim_lost=0)
         assert clickhouse.writes[0][0].operation == "completion"
         assert archive.events[0].event_id == billing_event_id
 
@@ -296,7 +296,7 @@ def test_bursar_runtime_start_health_and_no_worker_flush(
         runtime.start(BursarRuntimeStartOptions(load_catalog=False))
         assert clickhouse.initialized is True
         assert runtime.health().started is True
-        assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0)
+        assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0, claim_lost=0)
     finally:
         runtime.close()
 
@@ -441,7 +441,7 @@ def test_s3_runtime_archives_received_outbox_payload(
             {"id": "evt-storage-s3-runtime-1", "amount": 1200},
         )
         assert claim.status == "claimed"
-        assert runtime.flush() == OutboxRunResult(claimed=1, delivered=1, failed=0)
+        assert runtime.flush() == OutboxRunResult(claimed=1, delivered=1, failed=0, claim_lost=0)
         assert archive.events[0].envelope == {"id": "evt-storage-s3-runtime-1", "amount": 1200}
     finally:
         billing_store.close()

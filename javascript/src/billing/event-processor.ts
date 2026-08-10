@@ -5,7 +5,7 @@ import type { BillingEvent, BillingEventHandler, BillingEventResult } from "./ty
 import { assertBillingEvent, BillingEventType } from "./types/index.js";
 import { BillingEventHandlers } from "./event-handlers.js";
 import type { BillingServiceOptions } from "./service-types.js";
-import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
+import { boundedDiagnosticMessage, persistedDiagnosticSummary } from "../shared/diagnostics.js";
 
 export class BillingEventProcessor {
   private readonly eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
@@ -64,6 +64,18 @@ export class BillingEventProcessor {
       this.logger.debug("[BillingService] event is already processing", { eventId: event.eventId });
       return { handled: false, error: "claim_busy" };
     }
+    if (
+      claim.status === "invalid_request" ||
+      claim.status === "idempotency_conflict" ||
+      claim.status === "max_retries_exceeded"
+    ) {
+      this.logger.warn("[BillingService] permanent claim rejection", {
+        status: claim.status,
+        eventId: event.eventId,
+        ...(claim.status === "invalid_request" ? {} : { billingEventId: claim.billingEventId }),
+      });
+      return { handled: false, error: claim.status };
+    }
     if (claim.status === "retry") {
       this.logger.warn("[BillingService] claim retry", { eventId: event.eventId });
       return { handled: false, error: "claim_failed_retry" };
@@ -82,7 +94,7 @@ export class BillingEventProcessor {
 
     if (!result.handled) {
       const message = boundedDiagnosticMessage(result.error, "billing_event_not_handled");
-      await this.recordBillingEventFailure(event, claim.claimToken, message, false);
+      await this.recordBillingEventFailure(event, claim.claimToken, message, false, true);
       return { ...result, error: message };
     }
 
@@ -102,6 +114,8 @@ export class BillingEventProcessor {
         event,
         claim.claimToken,
         "billing_event_completion_rejected",
+        true,
+        true,
       );
     }
     return result;
@@ -112,8 +126,11 @@ export class BillingEventProcessor {
     claimToken: string,
     error: unknown,
     logAsError = true,
+    trustedCode = false,
   ): Promise<BillingEventResult> {
-    const message = boundedDiagnosticMessage(error, "billing_event_processing_failed");
+    const message = trustedCode
+      ? boundedDiagnosticMessage(error, "billing_event_processing_failed")
+      : persistedDiagnosticSummary(error, "billing_event_processing_failed");
     const log = logAsError ? this.logger.error : this.logger.warn;
     log(`[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`, {
       error: message,
@@ -160,7 +177,7 @@ export class BillingEventProcessor {
     } catch (err) {
       this.logger.error(
         `[BillingService] event handler failed for ${event.provider}/${event.eventId}`,
-        { error: err instanceof Error ? err.message : String(err) },
+        { error: persistedDiagnosticSummary(err, "billing_event_callback_failed") },
       );
     }
   }

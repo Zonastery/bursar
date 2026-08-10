@@ -1,4 +1,4 @@
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 
 import { ConfigError } from "../errors.js";
 import type { Availability, BillingInterval, Duration, ExpiryPolicy, Window } from "./types.js";

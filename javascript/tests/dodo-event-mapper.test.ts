@@ -289,6 +289,30 @@ describe("event type routing", () => {
     );
   });
 
+  it("subscription.paused → subscription.paused", async () => {
+    const sink = makeSink();
+    await mapDodoEvent(
+      "subscription.paused",
+      {
+        ...DODO_SUBSCRIPTION_ON_HOLD,
+        subscription_id: "sub_dodo_paused_001",
+        status: "paused",
+      },
+      "user_1",
+      {},
+      sink,
+    );
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "subscription.paused",
+        subscription: expect.objectContaining({
+          providerSubscriptionId: "sub_dodo_paused_001",
+          status: "paused",
+        }),
+      }),
+    );
+  });
+
   it("subscription.plan_changed → subscription.plan_changed with product_id refs", async () => {
     const sink = makeSink();
     await mapDodoEvent(
@@ -337,6 +361,17 @@ describe("event type routing", () => {
       expect.objectContaining({
         eventType: "payment.failed",
         subscription: { providerSubscriptionId: "sub_dodo_active_001" },
+      }),
+    );
+  });
+
+  it("payment.cancelled → terminal canceled payment", async () => {
+    const sink = makeSink();
+    await mapDodoEvent("payment.cancelled", DODO_PAYMENT_FAILED, "user_1", {}, sink);
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "payment.failed",
+        payment: expect.objectContaining({ status: "canceled" }),
       }),
     );
   });

@@ -49,19 +49,37 @@ jobs:
         run: pyright src/
 
   test:
+    name: Python ${{ matrix.python-version }} / PostgreSQL ${{ matrix.postgres.major }}
     runs-on: ubuntu-latest
     env:
       BURSAR_REQUIRE_POSTGRES_TESTS: "1"
+      BURSAR_TEST_PG_IMAGE: ${{ matrix.postgres.test_image }}
     strategy:
       fail-fast: false
       matrix:
-        # Supported Python runtimes.
+        # Supported Python runtimes and PostgreSQL majors. Base images are
+        # immutable, multi-architecture OCI indexes; the Dockerfile separately
+        # verifies the matching pg_jsonschema package checksum.
         python-version: ["3.12", "3.13"]
-    # The fixture builds Bursar's upstream-PostgreSQL test image and starts it
-    # through testcontainers, so integration tests run against the same
-    # extension set locally and in CI.
+        postgres:
+          - major: "16"
+            base_image: postgres:16.10-bookworm@sha256:38471f330eb885e04de130b768d6db4e10469e2311879c7e5c699f6d2d8a1c74
+            test_image: bursar/postgres-test:16.10-pg-jsonschema-0.3.4
+          - major: "17"
+            base_image: postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+            test_image: bursar/postgres-test:17.10-pg-jsonschema-0.3.4
+    # CI builds the selected immutable base explicitly; the fixture then owns
+    # only the container lifecycle through Testcontainers.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build pinned PostgreSQL ${{ matrix.postgres.major }} test image
+        env:
+          POSTGRES_IMAGE: ${{ matrix.postgres.base_image }}
+        run: |
+          docker build \
+            --build-arg "POSTGRES_IMAGE=${POSTGRES_IMAGE}" \
+            --tag "${BURSAR_TEST_PG_IMAGE}" \
+            tests/postgres
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -81,24 +99,41 @@ jobs:
             javascript/src/generated/pricing-config.schema.json \
             python/src/bursar/sql/001_schema_and_types.sql
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && matrix.postgres.major == '17'
         with:
           name: python-coverage-report
           path: python/coverage.xml
 
   js-test:
+    name: Node.js ${{ matrix.node-version }} / PostgreSQL ${{ matrix.postgres.major }}
     runs-on: ubuntu-latest
     env:
       BURSAR_REQUIRE_POSTGRES_TESTS: "1"
+      BURSAR_TEST_PG_IMAGE: ${{ matrix.postgres.test_image }}
     strategy:
       fail-fast: false
       matrix:
-        # Supported Node.js LTS/current runtimes.
+        # Supported Node.js runtimes and the same PostgreSQL support boundary
+        # exercised by the Python SDK.
         node-version: ["22", "24"]
-    # Vitest global setup builds Bursar's upstream-PostgreSQL image and manages
-    # its container lifecycle through testcontainers.
+        postgres:
+          - major: "16"
+            base_image: postgres:16.10-bookworm@sha256:38471f330eb885e04de130b768d6db4e10469e2311879c7e5c699f6d2d8a1c74
+            test_image: bursar/postgres-test:16.10-pg-jsonschema-0.3.4
+          - major: "17"
+            base_image: postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+            test_image: bursar/postgres-test:17.10-pg-jsonschema-0.3.4
+    # Vitest global setup starts the prebuilt image and owns its lifecycle.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build pinned PostgreSQL ${{ matrix.postgres.major }} test image
+        env:
+          POSTGRES_IMAGE: ${{ matrix.postgres.base_image }}
+        run: |
+          docker build \
+            --build-arg "POSTGRES_IMAGE=${POSTGRES_IMAGE}" \
+            --tag "${BURSAR_TEST_PG_IMAGE}" \
+            tests/postgres
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
@@ -120,7 +155,7 @@ jobs:
           bunx --no-install vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1
           bunx --no-install vitest --config vitest.providers.config.ts run --coverage
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.node-version == '22'
+        if: matrix.node-version == '22' && matrix.postgres.major == '17'
         with:
           name: js-coverage-report
           path: javascript/coverage/
@@ -196,6 +231,12 @@ jobs:
   package-smoke:
     name: Published artifact smoke test
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
+      BURSAR_MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
+      BURSAR_OPERATOR_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
+      BURSAR_TENANT_ID: 00000000-0000-4000-8000-000000000201
+      BURSAR_PROVIDER_ENVIRONMENT: test
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -214,26 +255,66 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-bun-1.3.14-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-bun-1.3.14-
+      - name: Start package-smoke PostgreSQL
+        run: |
+          docker build --tag bursar/postgres-test:package-smoke tests/postgres
+          docker run --detach --name bursar-package-smoke-postgres \
+            --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=bursar \
+            --publish 5432:5432 \
+            bursar/postgres-test:package-smoke
+          for attempt in $(seq 1 30); do
+            if docker exec bursar-package-smoke-postgres pg_isready -U postgres -d bursar; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs bursar-package-smoke-postgres
+          exit 1
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
           bun run build
           mkdir -p /tmp/bursar-npm
           bun pm pack --destination /tmp/bursar-npm --ignore-scripts
-      - name: Install npm artifact in a clean consumer
-        run: |
-          consumer=$(mktemp -d)
-          cd "$consumer"
-          npm init -y >/dev/null
-          npm install --ignore-scripts --no-save /tmp/bursar-npm/*.tgz
-          node --input-type=module -e 'const sdk = await import("@zonastery/bursar"); if (!sdk.Bursar || !sdk.PricingEngine) process.exit(1)'
-      - name: Build and import Python wheel in a clean consumer
+      - name: Build and exercise Python wheel in a clean consumer
         run: |
           mkdir -p /tmp/bursar-wheel
           python -m pip wheel --no-deps --wheel-dir /tmp/bursar-wheel ./python
           python -m venv /tmp/bursar-python-consumer
           /tmp/bursar-python-consumer/bin/pip install /tmp/bursar-wheel/*.whl
           /tmp/bursar-python-consumer/bin/python -c 'import bursar; assert bursar.Bursar and bursar.PricingEngine'
+          wheel=$(find /tmp/bursar-wheel -name '*.whl' -print -quit)
+          /tmp/bursar-python-consumer/bin/pip install "${wheel}[postgres,s3,opentelemetry]"
+          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "031_outbox_recovery.sql").is_file()'
+          /tmp/bursar-python-consumer/bin/bursar migrate
+          /tmp/bursar-python-consumer/bin/bursar tenant bootstrap package-smoke \
+            .github/package-smoke/pricing.json \
+            --id "$BURSAR_TENANT_ID" \
+            --display-name "Package smoke" \
+            --label initial
+          /tmp/bursar-python-consumer/bin/python .github/package-smoke/python-postgres-smoke.py
+      - name: Install and exercise npm artifact in a clean consumer
+        run: |
+          mkdir -p /tmp/bursar-npm-consumer
+          cd /tmp/bursar-npm-consumer
+          npm init -y >/dev/null
+          npm pkg set type=module
+          npm install --ignore-scripts --no-save /tmp/bursar-npm/*.tgz typescript pg decimal.js
+          cp "$GITHUB_WORKSPACE"/.github/package-smoke/npm-consumer-base.ts .
+          cp "$GITHUB_WORKSPACE"/.github/package-smoke/tsconfig.base.json .
+          npx --no-install tsc -p tsconfig.base.json
+          node --input-type=module -e 'const sdk = await import("@zonastery/bursar"); const nodeSdk = await import("@zonastery/bursar/node"); if (!sdk.Bursar || !sdk.PricingEngine || !nodeSdk.BursarRuntime || !nodeSdk.S3BillingArchive) process.exit(1)'
+          npm install --ignore-scripts --no-save /tmp/bursar-npm/*.tgz typescript pg decimal.js @opentelemetry/api
+          cp "$GITHUB_WORKSPACE"/.github/package-smoke/npm-consumer-opentelemetry.ts .
+          cp "$GITHUB_WORKSPACE"/.github/package-smoke/npm-postgres-smoke.mjs .
+          cp "$GITHUB_WORKSPACE"/.github/package-smoke/tsconfig.opentelemetry.json .
+          npx --no-install tsc -p tsconfig.opentelemetry.json
+          node --input-type=module -e 'const telemetry = await import("@zonastery/bursar/opentelemetry"); if (!telemetry.createOpenTelemetryInstrumentation) process.exit(1)'
+          node npm-postgres-smoke.mjs
+      - name: Stop package-smoke PostgreSQL
+        if: always()
+        run: docker rm --force bursar-package-smoke-postgres || true
 
   # Both SDK test suites load the same tests/parity/expression_cases.json
   # fixture, so a divergence between the Python and JS engines fails one of
@@ -253,7 +334,16 @@ jobs:
 
   release-preflight:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, typecheck, test, js-test, js-quality, sdk-contract-parity, package-smoke]
+    needs:
+      [
+        lint,
+        typecheck,
+        test,
+        js-test,
+        js-quality,
+        sdk-contract-parity,
+        package-smoke,
+      ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

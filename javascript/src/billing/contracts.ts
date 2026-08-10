@@ -1,5 +1,5 @@
 import type { AutoRechargeService } from "./auto-recharge-service.js";
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeAttemptState,
@@ -24,6 +24,7 @@ import type {
 export interface CheckoutIntentCreate {
   subjectId: string;
   provider: string;
+  operationKey: string;
   checkoutKind: "subscription" | "credit_topup";
   productKey: string;
   requestDigest: string;

@@ -1,4 +1,4 @@
-import type Decimal from "decimal.js";
+import type { Decimal } from "decimal.js";
 
 /** One provider-neutral billable operation. */
 export interface UsageMetrics {
