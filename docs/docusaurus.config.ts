@@ -147,6 +147,13 @@ const config: Config = {
 
   headTags: [
     {
+      tagName: "meta",
+      attributes: {
+        name: "google-site-verification",
+        content: "IWTuIskdYhoIL0MCB517DjpPh6I4uaZrRB3WQaCpCaU",
+      },
+    },
+    {
       tagName: "script",
       attributes: {
         type: "application/ld+json",
