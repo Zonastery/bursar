@@ -64,6 +64,7 @@ def test_bursar_credits_exposes_only_the_curated_capability() -> None:
         "reserve",
         "revoke_credits_by_entry_type",
         "run_billed",
+        "resume_billed_operation",
         "set_user_plan",
         "settle",
         "spend_by_model",

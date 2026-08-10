@@ -201,6 +201,9 @@
     "entry": [
       "src/{index,cli,main}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}"
     ],
+    "ignoreDependencies": [
+      "lefthook"
+    ],
     "ignore": [
       "scripts/export-contract-results.mjs"
     ]
