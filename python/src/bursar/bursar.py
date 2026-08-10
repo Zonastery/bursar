@@ -281,6 +281,16 @@ class CreditsCapability(Protocol):
         options: BeginBilledOperationOptions,
     ) -> BilledOperation: ...
 
+    def resume_billed_operation(
+        self,
+        user_id: str,
+        lease_id: str,
+        operation_key: str,
+        *,
+        feature: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> BilledOperation: ...
+
     def deduct(
         self,
         user_id: str,

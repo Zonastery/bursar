@@ -107,7 +107,7 @@ from bursar.credits.store import (
     RefundError,
     StoreError,
 )
-from bursar.credits.types import CreditMetadata
+from bursar.credits.types import CreditMetadata, RefundResult
 from bursar.engine import PricingEngine
 from bursar.errors import (
     AutoRechargeDisabledError,
@@ -251,6 +251,7 @@ __all__ = [
     "QuotaExceededError",
     "QuoteChangedError",
     "RefundError",
+    "RefundResult",
     "ReserveOptions",
     "RunBilledAsyncOptions",
     "RunBilledOptions",

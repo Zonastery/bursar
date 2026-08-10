@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from bursar.credits.service import CreditsService
+from bursar.bursar import CreditsCapability
 from bursar.credits.service_types import BeginBilledOperationOptions
 from bursar.credits.types import CreditMetadata
 from bursar.errors import (
@@ -78,7 +78,7 @@ class BursarPlugin(BasePlugin):
 
     def __init__(
         self,
-        credits: CreditsService,
+        credits: CreditsCapability,
         *,
         estimate: UsageMetrics,
         operation_type: str | None = None,
