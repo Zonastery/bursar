@@ -27,6 +27,7 @@ USER_ID = "00000000-0000-0000-0000-000000000901"
 REPLAY_USER_ID = "00000000-0000-0000-0000-000000000911"
 TEAM_REPLAY_OWNER_ID = "00000000-0000-0000-0000-000000000921"
 TEAM_CONCURRENT_OWNER_ID = "00000000-0000-0000-0000-000000000922"
+TEAM_CHANGED_OWNER_ID = "00000000-0000-0000-0000-000000000923"
 
 CONFIG = {
     "version": 1,
@@ -270,10 +271,14 @@ def _team_creation_snapshot(
                 ) AS tenant_team_count,
                 (
                     SELECT count(*)::int
-                    FROM bursar.credit_accounts AS team_account
-                    WHERE team_account.tenant_id = %s
-                      AND team_account.account_kind = 'team'
-                ) AS tenant_team_account_count,
+                    FROM bursar.credit_team_members AS tenant_member
+                    WHERE tenant_member.tenant_id = %s
+                ) AS tenant_member_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_accounts AS tenant_account
+                    WHERE tenant_account.tenant_id = %s
+                ) AS tenant_account_count,
                 (
                     SELECT count(*)::int
                     FROM bursar.credit_ledger_entries AS tenant_entry
@@ -289,6 +294,7 @@ def _team_creation_snapshot(
             [
                 TEST_TENANT_ID,
                 idempotency_key,
+                TEST_TENANT_ID,
                 TEST_TENANT_ID,
                 TEST_TENANT_ID,
                 TEST_TENANT_ID,
@@ -1120,6 +1126,7 @@ def test_team_creation_replay_posts_one_initial_grant(store: PostgresStore) -> N
         Decimal("9.000"),
         idempotency_key=idempotency_key,
     )
+    before_replay = _team_creation_snapshot(store.database_url, idempotency_key)
     replay = store.create_team(
         TEAM_REPLAY_OWNER_ID,
         "Replay-safe team",
@@ -1130,15 +1137,14 @@ def test_team_creation_replay_posts_one_initial_grant(store: PostgresStore) -> N
     assert first.idempotent is False
     assert replay.model_copy(update={"idempotent": False}) == first
     assert replay.idempotent is True
-    assert _team_creation_snapshot(store.database_url, idempotency_key) | {} == {
-        **_team_creation_snapshot(store.database_url, idempotency_key),
-        "team_id": first.team_id,
-        "name": "Replay-safe team",
-        "balance": Decimal("9.000000"),
-        "team_count": 1,
-        "member_count": 1,
-        "initial_grant_count": 1,
-    }
+    after_replay = _team_creation_snapshot(store.database_url, idempotency_key)
+    assert after_replay == before_replay
+    assert after_replay["team_id"] == first.team_id
+    assert after_replay["name"] == "Replay-safe team"
+    assert after_replay["balance"] == Decimal("9.000000")
+    assert after_replay["team_count"] == 1
+    assert after_replay["member_count"] == 1
+    assert after_replay["initial_grant_count"] == 1
 
 
 def test_team_creation_conflicts_have_no_persistent_side_effects(store: PostgresStore) -> None:
@@ -1164,6 +1170,13 @@ def test_team_creation_conflicts_have_no_persistent_side_effects(store: Postgres
             TEAM_REPLAY_OWNER_ID,
             "Conflict-safe team",
             Decimal("8"),
+            idempotency_key=idempotency_key,
+        )
+    with pytest.raises(StoreError, match="^idempotency_conflict$"):
+        store.create_team(
+            TEAM_CHANGED_OWNER_ID,
+            "Conflict-safe team",
+            Decimal("7"),
             idempotency_key=idempotency_key,
         )
 

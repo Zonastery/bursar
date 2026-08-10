@@ -116,10 +116,9 @@ BEGIN
         'sha256'
     );
 
-    INSERT INTO bursar.subjects(id)
-    VALUES (p_owner_subject_id)
-    ON CONFLICT (tenant_id, id) DO NOTHING;
-
+    -- Reject a known pseudonymized owner before claiming the operation key.
+    -- A missing subject is created only after this request wins the upsert, so
+    -- a changed-owner conflict cannot leave an orphan subject behind.
     IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
         RETURN QUERY SELECT
             NULL::uuid,
@@ -198,6 +197,30 @@ BEGIN
             v_account,
             true,
             NULL::text;
+        RETURN;
+    END IF;
+
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_owner_subject_id)
+    ON CONFLICT (tenant_id, id) DO NOTHING;
+
+    -- Close the race with concurrent pseudonymization after the preflight
+    -- check. No children exist yet, so the winning request can cleanly release
+    -- its claimed team and candidate subject before returning.
+    IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
+        DELETE FROM bursar.credit_teams
+        WHERE id = v_team;
+
+        DELETE FROM bursar.subjects
+        WHERE id = v_candidate_team_subject;
+
+        RETURN QUERY SELECT
+            NULL::uuid,
+            NULL::text,
+            NULL::uuid,
+            NULL::uuid,
+            false,
+            'subject_pseudonymized'::text;
         RETURN;
     END IF;
 

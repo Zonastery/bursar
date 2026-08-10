@@ -20,6 +20,7 @@ const USER_ID = "00000000-0000-0000-0000-000000000902";
 const REPLAY_USER_ID = "00000000-0000-0000-0000-000000000912";
 const TEAM_REPLAY_OWNER_ID = "00000000-0000-0000-0000-000000000922";
 const TEAM_CONCURRENT_OWNER_ID = "00000000-0000-0000-0000-000000000923";
+const TEAM_CHANGED_OWNER_ID = "00000000-0000-0000-0000-000000000924";
 
 const CONFIG = {
   version: 1,
@@ -265,7 +266,8 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       initial_grant_count: number;
       tenant_subject_count: number;
       tenant_team_count: number;
-      tenant_team_account_count: number;
+      tenant_member_count: number;
+      tenant_account_count: number;
       tenant_ledger_count: number;
     }>(
       `SELECT
@@ -303,10 +305,14 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
          ) AS tenant_team_count,
          (
            SELECT count(*)::int
-           FROM bursar.credit_accounts AS team_account
-           WHERE team_account.tenant_id = $1::uuid
-             AND team_account.account_kind = 'team'
-         ) AS tenant_team_account_count,
+           FROM bursar.credit_team_members AS tenant_member
+           WHERE tenant_member.tenant_id = $1::uuid
+         ) AS tenant_member_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_accounts AS tenant_account
+           WHERE tenant_account.tenant_id = $1::uuid
+         ) AS tenant_account_count,
          (
            SELECT count(*)::int
            FROM bursar.credit_ledger_entries AS tenant_entry
@@ -781,6 +787,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       idempotencyKey,
       initialBalance: new Decimal("9.000"),
     });
+    const beforeReplay = await teamCreationSnapshot(idempotencyKey);
     const replay = await store.createTeam(TEAM_REPLAY_OWNER_ID, "Replay-safe team", {
       idempotencyKey,
       initialBalance: new Decimal("9"),
@@ -788,7 +795,9 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
 
     expect(first.idempotent).toBe(false);
     expect(replay).toEqual({ ...first, idempotent: true });
-    await expect(teamCreationSnapshot(idempotencyKey)).resolves.toMatchObject({
+    const afterReplay = await teamCreationSnapshot(idempotencyKey);
+    expect(afterReplay).toEqual(beforeReplay);
+    expect(afterReplay).toMatchObject({
       team_id: first.teamId,
       name: "Replay-safe team",
       balance: "9.000000",
@@ -821,6 +830,13 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     await expect(changedBalance).rejects.toBeInstanceOf(StoreError);
     await expect(changedBalance).rejects.toThrow("idempotency_conflict");
 
+    const changedOwner = store.createTeam(TEAM_CHANGED_OWNER_ID, "Conflict-safe team", {
+      idempotencyKey,
+      initialBalance: new Decimal(7),
+    });
+    await expect(changedOwner).rejects.toBeInstanceOf(StoreError);
+    await expect(changedOwner).rejects.toThrow("idempotency_conflict");
+
     expect(await teamCreationSnapshot(idempotencyKey)).toEqual(before);
   });
 
@@ -844,7 +860,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       });
     });
 
-    expect(new Set(results.map((result) => result.teamId))).toHaveLength(1);
+    expect(new Set(results.map((result) => result.teamId)).size).toBe(1);
     expect(results.filter((result) => !result.idempotent)).toHaveLength(1);
     expect(results.filter((result) => result.idempotent)).toHaveLength(workerCount - 1);
     await expect(teamCreationSnapshot(idempotencyKey)).resolves.toMatchObject({
