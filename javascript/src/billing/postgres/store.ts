@@ -37,6 +37,10 @@ import {
   type PostgresPool,
   type PostgresPoolConstructor,
 } from "../../shared/postgres-client.js";
+import {
+  normalizeProviderEnvironment,
+  type ProviderEnvironment,
+} from "../../providers/environment.js";
 import { StoreClosedError, StoreError } from "../../errors.js";
 import { optionalBoundedDiagnosticMessage } from "../../shared/diagnostics.js";
 import {
@@ -127,11 +131,16 @@ function billingCreditPostingResult(
   };
 }
 
-export interface PostgresBillingStoreOptions extends PostgresConnectionOptions {
+export interface PostgresBillingStoreOptions extends Omit<
+  PostgresConnectionOptions,
+  "providerEnvironment"
+> {
   /** PostgreSQL connection string or an application-owned pool. */
   postgres: PostgresPool | string;
   /** Tenant UUID bound to every store transaction. */
   tenantId: string;
+  /** Explicit financial namespace; billing stores never guess live vs test. */
+  providerEnvironment: ProviderEnvironment;
   /** Injectable `pg.Pool` constructor for custom runtimes and tests. */
   poolConstructor?: PostgresPoolConstructor;
   billingPayloadBackend?: "postgres" | "s3";
@@ -139,6 +148,7 @@ export interface PostgresBillingStoreOptions extends PostgresConnectionOptions {
 
 export class PostgresBillingStore extends BillingStore {
   private readonly postgres: PostgresClient;
+  readonly providerEnvironment: ProviderEnvironment;
 
   private _offer: BillingOfferRepository | null = null;
   private _topup: BillingTopupRepository | null = null;
@@ -160,8 +170,11 @@ export class PostgresBillingStore extends BillingStore {
     if (typeof options.postgres !== "string" && options.poolConstructor !== undefined) {
       throw new TypeError("poolConstructor cannot be used with an existing PostgreSQL pool");
     }
+    const providerEnvironment = normalizeProviderEnvironment(options.providerEnvironment);
+    this.providerEnvironment = providerEnvironment;
     this.postgres = new PostgresClient(options.postgres, {
       tenantId: options.tenantId,
+      providerEnvironment,
       poolConstructor: options.poolConstructor,
       billingPayloadBackend: options.billingPayloadBackend,
       connectionTimeoutMs: options.connectionTimeoutMs,

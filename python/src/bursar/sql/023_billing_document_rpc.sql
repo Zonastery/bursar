@@ -66,7 +66,7 @@ BEGIN
     FROM bursar.billing_events AS event
     WHERE event.id = payload.event_id
       AND event.payload_received_at = payload.received_at
-      AND payload.envelope->>'userId' = p_subject_id::text;
+      AND payload.envelope->>'accountId' = p_subject_id::text;
 
     UPDATE bursar.subjects
     SET pseudonymized_at = COALESCE(pseudonymized_at, now())

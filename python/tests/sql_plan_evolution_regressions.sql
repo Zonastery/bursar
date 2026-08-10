@@ -12,6 +12,7 @@ SELECT set_config(
     '00000000-0000-0000-0000-000000000777',
     false
 );
+SELECT set_config('bursar.provider_environment', 'test', false);
 
 DO $$
 DECLARE
@@ -25,6 +26,7 @@ DECLARE
     v_doc jsonb := $json$
     {
       "version": 1,
+      "catalog": {"default_plan": "seeker"},
       "pricing": {
         "operations": {
           "chat": {

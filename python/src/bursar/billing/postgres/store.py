@@ -75,6 +75,7 @@ from bursar.credits.postgres.repositories._utils import (
     require_mapping_row,
 )
 from bursar.errors import BursarError, StoreError
+from bursar.providers.types import ProviderEnvironment
 from bursar.shared.diagnostics import optional_bounded_diagnostic_message
 from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, PostgresPool
 
@@ -128,6 +129,7 @@ class PostgresBillingStore(BillingStore):
         database_url: str | None = None,
         *,
         tenant_id: str | UUID,
+        provider_environment: ProviderEnvironment,
         pool: PostgresPool | None = None,
         billing_payload_backend: Literal["postgres", "s3"] = "postgres",
         connection_timeout_seconds: float = 10.0,
@@ -145,12 +147,14 @@ class PostgresBillingStore(BillingStore):
             assert database_url is not None
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id)))
+        self._provider_environment: ProviderEnvironment = provider_environment
         self._billing_payload_backend = billing_payload_backend
         self._client = (
             PostgresClient.from_pool(
                 pool,
                 tenant_id=self._tenant_id,
                 billing_payload_backend=billing_payload_backend,
+                provider_environment=provider_environment,
                 connection_timeout_seconds=connection_timeout_seconds,
                 statement_timeout_ms=statement_timeout_ms,
                 idle_transaction_timeout_ms=idle_transaction_timeout_ms,
@@ -163,6 +167,7 @@ class PostgresBillingStore(BillingStore):
                 cast(str, database_url),
                 tenant_id=self._tenant_id,
                 billing_payload_backend=billing_payload_backend,
+                provider_environment=provider_environment,
                 connection_timeout_seconds=connection_timeout_seconds,
                 statement_timeout_ms=statement_timeout_ms,
                 idle_transaction_timeout_ms=idle_transaction_timeout_ms,
@@ -171,6 +176,11 @@ class PostgresBillingStore(BillingStore):
                 postgres_options=postgres_options,
             )
         )
+
+    @property
+    def provider_environment(self) -> ProviderEnvironment:
+        """Provider namespace used by every billing transaction."""
+        return self._provider_environment
 
     def close(self) -> None:
         """Close all connections in the pool."""

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 # --------------------------------------------------------------------------
 # The cast.  Every notebook refers to the same users so the story is coherent.
 # --------------------------------------------------------------------------
-USER_ADA = "11111111-1111-4111-8111-111111111111"   # individual Pro subscriber
+USER_ADA = "11111111-1111-4111-8111-111111111111"  # individual Pro subscriber
 USER_ALEX = "22222222-2222-4222-8222-222222222222"  # team member at Acme
 USER_JAMAL = "33333333-3333-4333-8333-333333333333"  # team member at Acme
 TEAM_ACME = "44444444-4444-4444-8444-444444444444"  # Acme's team credit pool
@@ -188,8 +188,14 @@ _BASE_CONFIG = {
                 "type": "subscription",
                 "display_name": "Pro Monthly",
                 "description": "Pro plan with a 50,000-credit monthly grant",
-                "price": {"amount_minor": 2000, "currency": "USD", "tax_behavior": "unspecified"},
-                "providers": {"stripe": {"type": "stripe_price", "price_id": "price_pro_monthly"}},
+                "price": {
+                    "amount_minor": 2000,
+                    "currency": "USD",
+                    "tax_behavior": "unspecified",
+                },
+                "providers": {
+                    "stripe": {"type": "stripe_price", "price_id": "price_pro_monthly"}
+                },
                 "plan": "pro",
                 "billing_interval": {"unit": "month", "count": 1},
                 "cycle_grant": {
@@ -202,8 +208,14 @@ _BASE_CONFIG = {
                 "type": "topup",
                 "display_name": "10,000 Credits",
                 "description": "Prepaid credit pack",
-                "price": {"amount_minor": 500, "currency": "USD", "tax_behavior": "unspecified"},
-                "providers": {"stripe": {"type": "stripe_price", "price_id": "price_credits_10k"}},
+                "price": {
+                    "amount_minor": 500,
+                    "currency": "USD",
+                    "tax_behavior": "unspecified",
+                },
+                "providers": {
+                    "stripe": {"type": "stripe_price", "price_id": "price_credits_10k"}
+                },
                 "credits_per_unit": "10000",
                 "quantity": {"minimum": 1, "maximum": 10, "default": 1},
                 "bucket": "purchased",
@@ -235,7 +247,7 @@ def publish_config(store, config: dict, label: str = "notebooks") -> "Bursar":
     """
     from bursar import Bursar
 
-    bursar = Bursar.create(credit_store=store)
+    bursar = Bursar(credit_store=store)
     bursar.catalog.publish_and_activate(config, label=label)
     return bursar
 
@@ -259,63 +271,6 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
-
-
-def _preseed_supabase_objects(dsn: str) -> None:
-    """Create the minimal Supabase objects bursar's SQL expects (idempotent).
-
-    Mirrors what hosted Supabase provides automatically: the ``auth`` schema
-    with ``uid()``/``role()``, a minimal ``auth.users`` table, the standard
-    roles, and the platform-level grants. Without this, ``run_migrations``
-    refuses to bootstrap on a bare Postgres.
-    """
-    import psycopg2
-
-    conn = psycopg2.connect(dsn)
-    try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("CREATE SCHEMA IF NOT EXISTS auth")
-            cur.execute(
-                """
-                CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
-                LANGUAGE sql STABLE
-                AS $$ SELECT coalesce(
-                    nullif(current_setting('request.jwt.claim.sub', true), ''),
-                    current_setting('request.jwt.claims', true)::jsonb ->> 'sub'
-                )::uuid $$;
-                """
-            )
-            cur.execute(
-                """
-                CREATE OR REPLACE FUNCTION auth.role() RETURNS text
-                LANGUAGE sql STABLE
-                AS $$ SELECT coalesce(
-                    nullif(current_setting('request.jwt.claim.role', true), ''),
-                    'service_role'
-                ) $$;
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS auth.users (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    email TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                );
-                """
-            )
-            for role in ("anon", "authenticated", "service_role"):
-                try:
-                    cur.execute(f"CREATE ROLE {role}")
-                except Exception:
-                    conn.rollback()
-            cur.execute("ALTER ROLE service_role BYPASSRLS")
-            cur.execute("GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role")
-            cur.execute("GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role")
-            cur.execute("ALTER ROLE service_role CREATEROLE")
-    finally:
-        conn.close()
 
 
 def start_postgres_store(pgdata: str | None = None) -> tuple:
@@ -345,7 +300,9 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
     with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
         f.write(f"port={port}\nlisten_addresses='localhost'\n")
     with open(os.path.join(pgdata, "pg_hba.conf"), "w") as f:
-        f.write("local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\n")
+        f.write(
+            "local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\n"
+        )
 
     subprocess.run(
         [pg_ctl, "start", "-w", "-D", pgdata, "-l", os.path.join(pgdata, "log")],
@@ -354,26 +311,50 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
     )
 
     subprocess.run(
-        [os.path.join(pg_bin, "createdb"), "-h", "localhost", "-p", port, "bursar_demo"],
+        [
+            os.path.join(pg_bin, "createdb"),
+            "-h",
+            "localhost",
+            "-p",
+            port,
+            "bursar_demo",
+        ],
         check=True,
         capture_output=True,
     )
 
-    dsn = f"host=localhost port={port} dbname=bursar_demo user={user}"
-    _preseed_supabase_objects(dsn)
-    run_migrations(dsn)
+    migration_dsn = f"host=localhost port={port} dbname=bursar_demo user={user}"
+    run_migrations(migration_dsn)
     tenant_id = os.environ.get(
         "BURSAR_TENANT_ID",
         "00000000-0000-0000-0000-000000000001",
     )
     import psycopg2
 
-    with psycopg2.connect(dsn) as connection, connection.cursor() as cursor:
+    with psycopg2.connect(migration_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE ROLE bursar_notebook_app
+            LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+            NOREPLICATION NOBYPASSRLS
+            """
+        )
+        cursor.execute(
+            "GRANT bursar_client TO bursar_notebook_app WITH INHERIT FALSE, SET TRUE"
+        )
+        cursor.execute("SET LOCAL ROLE bursar_operator")
         cursor.execute(
             "SELECT bursar.create_tenant(%s, %s, %s)",
             (tenant_id, "notebook-demo", "Notebook demo"),
         )
-    store = PostgresStore(dsn, tenant_id=tenant_id)
+    runtime_dsn = (
+        f"host=localhost port={port} dbname=bursar_demo user=bursar_notebook_app"
+    )
+    store = PostgresStore(
+        runtime_dsn,
+        tenant_id=tenant_id,
+        provider_environment="test",
+    )
     return store, pgdata
 
 
@@ -385,6 +366,7 @@ def cleanup(pgdata: str) -> None:
     subprocess.run(
         [os.path.join(pg_bin, "pg_ctl"), "stop", "-D", pgdata],
         capture_output=True,
+        check=False,
     )
     shutil.rmtree(pgdata, ignore_errors=True)
     print("Cleaned up.")

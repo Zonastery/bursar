@@ -2,10 +2,7 @@ import type { Decimal } from "decimal.js";
 import type { CreditMetadata } from "./account.js";
 
 export type GrantProgramTrigger =
-  | "account_created"
-  | "referral_completed"
-  | "promo_code_redeemed"
-  | "manual";
+  "account_created" | "referral_completed" | "promo_code_redeemed" | "manual";
 
 /** One application event that may award one or more catalog grants. */
 export interface ExecuteGrantProgramRequest {

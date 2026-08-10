@@ -8,7 +8,6 @@ def test_auto_recharge_config_is_guardrails_not_forced_activation() -> None:
         {
             "version": 1,
             "credits": {
-                "accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"},
                 "buckets": {"purchased": {"priority": 10}},
                 "default_bucket": "purchased",
             },

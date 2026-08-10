@@ -18,18 +18,18 @@ import type {
   ChangePlanPreview,
   PaymentMethodInfo,
   PaymentProvider,
-  ResolveUserCallback,
   SavedPaymentChargeResult,
   WebhookResult,
 } from "../providers/types.js";
 import type { BillingEventSink } from "../billing/contracts.js";
 import type { AutoRechargeOutcome } from "../billing/auto-recharge-service.js";
 import type { Logger } from "../shared/logger.js";
+import type { ProviderEnvironment } from "../providers/environment.js";
 
 export interface CommerceProviderFactoryContext {
   tenantId?: string;
+  providerEnvironment: ProviderEnvironment;
   eventSink: BillingEventSink;
-  identityResolver?: ResolveUserCallback;
 }
 
 export type CommerceProviderFactory = (
@@ -46,19 +46,22 @@ export interface CommercePreferenceDefaults {
 
 export interface CommerceOptions {
   tenantId?: string;
+  /** Explicit financial namespace shared with billing persistence. */
+  providerEnvironment: ProviderEnvironment;
   providers: Record<string, CommerceProviderFactory>;
   defaultProvider?: string;
   checkoutIntentTtlMs?: number;
   preferenceDefaults?: Partial<CommercePreferenceDefaults>;
-  identityResolver?: ResolveUserCallback;
   logger?: Logger | null;
 }
 
 export type CommerceCheckoutKind = "subscription" | "credit_pack";
 
 export interface CreateCheckoutInput {
+  /** Authenticated actor that owns and may inspect the checkout intent. */
   subjectId: string;
-  accountId?: string;
+  /** Financial subject that receives the subscription or purchased credits. */
+  accountId: string;
   email?: string;
   offerKey: string;
   provider?: string;
@@ -136,11 +139,7 @@ export interface CancelAllSubscriptionsResult {
 }
 
 export type PlanChangeClassification =
-  | "unchanged"
-  | "upgrade"
-  | "downgrade"
-  | "lateral"
-  | "cadence_change";
+  "unchanged" | "upgrade" | "downgrade" | "lateral" | "cadence_change";
 
 interface PlanChangePreviewResultBase {
   planId: string;

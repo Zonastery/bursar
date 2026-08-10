@@ -1,4 +1,4 @@
-# Bursar for Python
+# Bursar Python SDK for AI credits and usage billing
 
 [![PyPI](https://img.shields.io/pypi/v/bursar.svg)](https://pypi.org/project/bursar/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/bursar.svg)](https://pypi.org/project/bursar/)
@@ -20,34 +20,51 @@ JavaScript SDK. Python 3.12 and 3.13 are supported.
 ## Installation
 
 ```bash
-pip install bursar[postgres]
+python -m pip install "bursar[postgres]"
 ```
 
-Extras: `postgres` (default recommended), `providers` (Stripe, Dodo),
-`s3` (optional billing archive), `google-adk` (model-call admission and
-settlement plugin), and `test` (dev/test tooling).
+Extras: `postgres` (default recommended), `stripe` or `dodo` for that payment
+provider, `s3` (optional billing archive), `google-adk` (model-call admission
+and settlement plugin), and `test` (dev/test tooling).
 
 Apply the SQL baseline before starting an application:
 
 ```bash
-export DATABASE_URL=postgresql://...
+export BURSAR_MIGRATION_DATABASE_URL=postgresql://bursar_migrator@db.example.com/bursar
 bursar migrate
 ```
 
 `bursar migrate` applies the ordered SQL files, records checksums, and is safe
-to re-run. Repeat `--post-migrate-sql` to run idempotent host-owned SQL in the
-same transaction.
+to re-run. Use a dedicated migration principal; applications connect with a
+separate least-privilege runtime principal.
+See the [CLI guide](https://zonastery.github.io/bursar/docs/cli) for the
+separate migration, operator, and application credentials.
 
 ## Usage
 
 ```python
+from decimal import Decimal
+
 from bursar import Bursar, PostgresStore
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
-bursar = Bursar.create(credit_store=store)
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
+)
+bursar = Bursar(credit_store=store)
 
-grant = bursar.credits.add_credits(user_id, 500, entry_type="purchase", idempotency_key="checkout:42")
-charge = bursar.credits.deduct_credits(user_id, 20, idempotency_key="job:42")
+grant = bursar.credits.add_credits(
+    user_id,
+    Decimal("500"),
+    entry_type="purchase",
+    idempotency_key="checkout:42",
+)
+charge = bursar.credits.deduct_credits(
+    user_id,
+    Decimal("20"),
+    idempotency_key="job:42",
+)
 refund = bursar.credits.refund_credits(charge.entry_id, idempotency_key="refund:job:42")
 
 page = bursar.credits.list_ledger_entries(user_id, limit=25)
@@ -55,9 +72,10 @@ while page.next_cursor is not None:
     page = bursar.credits.list_ledger_entries(user_id, limit=25, cursor=page.next_cursor)
 ```
 
-`LedgerEntry`, `LedgerCursor`, and `LedgerPage` are exported from `bursar`;
-pagination is cursor-only. `PostgresStore` is the production, tenant-scoped
-store; `CreditStore` is the abstract base for custom implementations.
+`LedgerEntry`, `LedgerCursor`, and `LedgerPage` are available from
+`bursar.credits.types`; pagination is cursor-only. `PostgresStore` is the
+production, tenant-scoped store; `CreditStore` is the abstract base for custom
+implementations.
 
 Publish one versioned configuration document through the facade — billing and
 auto-recharge read the same active document:
@@ -78,6 +96,7 @@ runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=os.environ["DATABASE_URL"],
         tenant_id=os.environ["BURSAR_TENANT_ID"],
+        provider_environment="test",
     )
 )
 runtime.start()

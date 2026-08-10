@@ -1,7 +1,7 @@
 ---
 title: Integrate subscriptions and payments
 sidebar_label: Integrate subscriptions
-description: Turn verified provider events into subscription, invoice, top-up, and auto-recharge mutations.
+description: Create provider-backed checkouts and process signature-verified webhooks through Bursar.
 ---
 
 import Tabs from "@theme/Tabs";
@@ -9,21 +9,50 @@ import TabItem from "@theme/TabItem";
 
 # Integrate subscriptions and payments
 
+This guide wires one payment provider into Bursar, creates a hosted checkout,
+and sends the provider's raw webhook request through signature verification.
+
 ## Prerequisites
 
-- Follow [multi-tenancy](./multitenancy.mdx) to provision a tenant and get a `DATABASE_URL`.
-- Publish a [validated configuration](../concepts/configuration.mdx) whose `commerce` section declares your provider, offers, and auto-recharge policy.
-- Read [billing concepts](../concepts/billing.mdx) for the offer model, normalized `BillingEvent`s, and subscription semantics.
-- Have provider credentials ready, for example a Stripe secret key and webhook secret.
+- Follow [multi-tenancy](./multitenancy.mdx) to provision a tenant and separate migration and runtime database credentials.
+- Publish a [validated configuration](../concepts/configuration.mdx) whose `commerce` section declares your provider and offers.
+- Read [billing concepts](../concepts/billing.mdx) for offer and subscription semantics.
+- Create provider products and prices, register a webhook endpoint, and store the API and webhook secrets on the server.
 
-## Outcome
+Install the provider SDK alongside Bursar:
 
-- A facade that turns provider webhooks into canonical credit mutations — plan assignment, cycle grants, and top-ups.
-- Auto-recharge after deductions and quote-checked plan changes, driven from the same config.
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-Bursar's billing capability turns provider lifecycle events into canonical
-credit mutations. Construct the facade with a billing store and commerce
-options when an application needs subscriptions, top-ups, or auto-recharge:
+```bash title="Terminal"
+python -m pip install "bursar[postgres,stripe]"
+```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+```bash title="Terminal"
+npm install @zonastery/bursar pg stripe
+```
+
+  </TabItem>
+</Tabs>
+
+:::important Provider catalog ownership
+
+Bursar does not create or synchronize products and prices in Stripe, Dodo, or
+another provider. Your deployment process owns that catalog. Every provider
+identifier in the active Bursar config must already exist in the same provider
+environment as the API key.
+
+:::
+
+## 1. Construct billing and commerce
+
+Create both tenant-bound stores, register a lazy provider factory, then require
+the commerce capability once. `commerce` is nullable on an unconfigured
+facade; `require_commerce()` and `requireCommerce()` turn a configuration
+mistake into a typed error at startup.
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -31,24 +60,42 @@ options when an application needs subscriptions, top-ups, or auto-recharge:
 ```python
 import os
 
+import stripe
+
 from bursar import Bursar, CommerceOptions, PostgresBillingStore, PostgresStore
 from bursar.providers import StripeProvider
 
-billing_store = PostgresBillingStore(database_url, tenant_id=tenant_id)
+stripe_client = stripe.StripeClient(os.environ["STRIPE_SECRET_KEY"])
+provider_environment = "test"
 
-bursar = Bursar.create(
-    credit_store=PostgresStore(database_url, tenant_id=tenant_id),
+credit_store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment=provider_environment,
+)
+billing_store = PostgresBillingStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment=provider_environment,
+)
+
+bursar = Bursar(
+    credit_store=credit_store,
     billing_store=billing_store,
     commerce_options=CommerceOptions(
+        tenant_id=tenant_id,
+        provider_environment=provider_environment,
         default_provider="stripe",
         providers={
             "stripe": lambda context: StripeProvider(
-                context.event_sink,
+                get_client=lambda: stripe_client,
                 webhook_secret=os.environ["STRIPE_WEBHOOK_SECRET"],
+                event_sink=context.event_sink,
             ),
         },
     ),
 )
+commerce = bursar.require_commerce()
 ```
 
   </TabItem>
@@ -56,195 +103,259 @@ bursar = Bursar.create(
 
 ```ts
 import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
-import { StripeProvider } from "@zonastery/bursar/providers";
+import { StripeProvider } from "@zonastery/bursar/providers/stripe";
+import Stripe from "stripe";
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+const providerEnvironment = "test" as const;
+
+const creditStore = new PostgresStore({
+  postgres: databaseUrl,
+  tenantId,
+  providerEnvironment,
+});
 const billingStore = new PostgresBillingStore({
   postgres: databaseUrl,
   tenantId,
+  providerEnvironment,
 });
 
 const bursar = new Bursar({
-  creditStore: new PostgresStore({ postgres: databaseUrl, tenantId }),
+  creditStore,
   billingStore,
   commerceOptions: {
+    tenantId,
+    providerEnvironment,
     defaultProvider: "stripe",
     providers: {
       stripe: (context) =>
-        new StripeProvider(
-          () => stripe,
-          context.eventSink,
-          process.env.STRIPE_WEBHOOK_SECRET,
-        ),
+        new StripeProvider({
+          getClient: () => stripe,
+          webhookSecret: process.env.STRIPE_WEBHOOK_SECRET!,
+          eventSink: context.eventSink,
+        }),
     },
   },
 });
+const commerce = bursar.requireCommerce();
 ```
 
   </TabItem>
 </Tabs>
 
-:::note
-`commerce_options` is a plain value in both SDKs: Python takes the
-`CommerceOptions` model, TypeScript takes a plain object literal with the same
-fields (`providers`, optional `defaultProvider`).
-:::
+The provider factory is lazy and receives Bursar's event sink. Bursar-created
+checkouts attach the trusted financial account as `bursar_account_id`; later
+events that do not repeat that metadata are reconciled through persisted
+customer, subscription, and payment references.
 
-The active `commerce` section of `BursarConfig` supplies the offers, top-ups,
-and auto-recharge policy — see [configuration and catalog revisions](../concepts/configuration.mdx).
-The event model and subscription semantics are covered in
-[billing concepts](../concepts/billing.mdx).
+Use `test` for test-mode provider credentials, `live` for production
+credentials, and `sandbox` for a provider sandbox distinct from test mode.
+Credit, billing, and commerce objects in one facade must use the same value.
 
-## Provider webhooks
+### Use Dodo instead
 
-Provider adapters map raw webhooks to a normalized `BillingEvent` and submit
-it through the facade. `ingest_billing_event` claims each event on
-`(provider, event_id, event_type)` first, so redelivered webhooks are ignored
-and subscription grants never double-post:
+Install `dodopayments` in TypeScript or use
+`python -m pip install "bursar[postgres,dodo]"`, then replace the Stripe client
+and factory:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
 ```python
-from datetime import UTC, datetime
+from typing import Literal
 
-from bursar.billing.types import (
-    BillingCustomerInfo,
-    BillingEvent,
-    BillingEventType,
-    BillingSubscriptionInfo,
-    ProviderRef,
+from dodopayments import AsyncDodoPayments
+
+from bursar.providers import DodoProvider
+
+dodo_environment: Literal["live_mode", "test_mode"] = (
+    "live_mode"
+    if os.environ.get("DODO_PAYMENTS_ENVIRONMENT") == "live_mode"
+    else "test_mode"
+)
+dodo = AsyncDodoPayments(
+    bearer_token=os.environ["DODO_PAYMENTS_API_KEY"],
+    environment=dodo_environment,
 )
 
-bursar.ingest_billing_event(
-    BillingEvent(
-        provider="stripe",
-        event_id="evt_1Paid",
-        event_type=BillingEventType.subscription_created,
-        occurred_at=datetime.now(UTC).isoformat(),
-        user_id=user_id,
-        customer=BillingCustomerInfo(provider_customer_id="cus_123", email="billing@example.com"),
-        subscription=BillingSubscriptionInfo(
-            provider_subscription_id="sub_123",
-            status="active",
-            refs=ProviderRef(price_id="price_pro_monthly"),
-            interval="month",
-            interval_count=1,
-        ),
+def dodo_factory(context):
+    return DodoProvider(
+        get_client=lambda: dodo,
+        webhook_key=os.environ["DODO_PAYMENTS_WEBHOOK_KEY"],
+        event_sink=context.event_sink,
     )
-)
 ```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
 ```ts
-import {
-  BillingCustomerInfo,
-  BillingEvent,
-  BillingEventType,
-  BillingSubscriptionInfo,
-  ProviderRef,
-} from "@zonastery/bursar";
+import type { CommerceProviderFactory } from "@zonastery/bursar";
+import { DodoProvider } from "@zonastery/bursar/providers/dodo";
+import DodoPayments from "dodopayments";
 
-await bursar.ingestBillingEvent({
-  provider: "stripe",
-  eventId: "evt_1Paid",
-  eventType: BillingEventType.subscription_created,
-  occurredAt: new Date().toISOString(),
-  userId,
-  customer: { providerCustomerId: "cus_123", email: "billing@example.com" },
-  subscription: {
-    providerSubscriptionId: "sub_123",
-    status: "active",
-    refs: { priceId: "price_pro_monthly" },
-    interval: "month",
-    intervalCount: 1,
-  },
+const dodo = new DodoPayments({
+  bearerToken: process.env.DODO_PAYMENTS_API_KEY!,
+  environment:
+    process.env.DODO_PAYMENTS_ENVIRONMENT === "live_mode"
+      ? "live_mode"
+      : "test_mode",
 });
+
+const dodoFactory: CommerceProviderFactory = (context) =>
+  new DodoProvider({
+    getClient: () => dodo,
+    webhookKey: process.env.DODO_PAYMENTS_WEBHOOK_KEY!,
+    eventSink: context.eventSink,
+  });
 ```
 
   </TabItem>
 </Tabs>
 
-Events that identify the user only through the customer or subscription are
-resolved from persisted billing state before handling.
+Register that factory under `dodo`, set `default_provider="dodo"` or
+`defaultProvider: "dodo"`, and install `dodopayments` instead of `stripe`.
 
-## Subscription-driven plan assignment
+## 2. Create checkout from authenticated server code
 
-A `subscription_created`, `subscription_activated`, or
-`subscription_plan_changed` event in a positive state assigns the offer's
-plan through the credits service, anchoring the allowance window to the
-provider's `period_start`. Cancellation, expiry, pause, and customer deletion
-revoke the plan (unset it, or move the user to the configured
-`terminal_plan_key`) — but only when that subscription is the user's current
-one.
-
-A `subscription_renewed` (or `invoice_paid` / `payment_succeeded` with a
-subscription) event also grants the offer's cycle credits. The grant is an
-idempotency-keyed canonical ledger entry, and a `replace_previous` renewal
-expires the previous cycle's leftover in the bucket before the new grant
-lands:
-
-```python
-bursar.ingest_billing_event(
-    BillingEvent(
-        provider="stripe",
-        event_id="evt_1Renewed",
-        event_type=BillingEventType.subscription_renewed,
-        occurred_at=datetime.now(UTC).isoformat(),
-        user_id=user_id,
-        subscription=BillingSubscriptionInfo(
-            provider_subscription_id="sub_123",
-            status="active",
-            refs=ProviderRef(price_id="price_pro_monthly"),
-            interval="month",
-            interval_count=1,
-        ),
-    )
-)
-```
-
-The TypeScript shape is the same as the webhook example above, with
-`eventType: BillingEventType.subscription_renewed`.
-
-## Offer and top-up resolution
-
-Offers are resolved from the active config by provider reference — `resolve_offer`
-/ `resolve_offer_by_lookup` for subscriptions, `resolve_topup` for credit
-packs. A `payment_succeeded` event with `purpose="credit_topup"` resolves the
-top-up, computes credits from `credits_per_unit` and quantity, and posts a
-`purchase`-type grant. A succeeded `refund_created` for that payment claws
-the grant back through a `refund_clawback` ledger entry.
-
-## Auto-recharge after deduction
-
-When commerce is configured, every deduction runs a post-deduction hook:
-`auto_recharge.process_if_needed` checks the account's profile against the
-config's `auto_recharge` section (`eligible_topups`, `balance_below`,
-`rearm_above`, `quantity`, and the limits: `max_purchases`, `max_charge_minor`,
-`cooldown`, `max_consecutive_failures`, `failure_action`). A payment attempt
-is claimed per user so concurrent deductions cannot start duplicate
-purchases. Users opt in through `bursar.commerce.auto_recharge.enable`, and
-the resulting `payment_succeeded` webhook grants the top-up and re-arms the
-profile.
-
-## Plan changes
-
-`commerce.preview_plan_change` quotes the provider's change and returns a
-fingerprint; `confirm_plan_change` re-quotes and rejects the change if the
-quote moved (`QuoteChangedError`). The config's `SubscriptionChangePolicy`
-drives whether the change is `immediate` or at `renewal`, and whether it
-prorates. Scheduled changes are persisted as billing subscription changes and
-can be cancelled before they take effect.
+`subject_id`/`subjectId` is the authenticated member or actor authorizing the
+checkout. `account_id`/`accountId` is the financial subject receiving the
+subscription or credits, so it may identify that member's team. The two values
+may be equal for a personal account, but they are not aliases. Derive the actor
+from the verified server session or token, resolve and authorize the account
+through your trusted application mapping, and do not trust either identifier
+directly from the browser.
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
 ```python
-preview = await bursar.commerce.preview_plan_change(user_id, offer_key="pro_monthly")
-confirmed = await bursar.commerce.confirm_plan_change(
-    user_id,
-    "downgrade-1",
+from bursar import CreateCheckoutInput
+
+checkout = await commerce.create_checkout(
+    CreateCheckoutInput(
+        subject_id=actor_id,
+        account_id=account_id,
+        offer_key="pro_monthly",
+        return_url="https://app.example.com/billing/success",
+        cancel_url="https://app.example.com/billing",
+        operation_key=f"checkout:{request_id}",
+    )
+)
+return {"checkout_url": checkout.url}
+```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+```ts
+const checkout = await commerce.createCheckout({
+  subjectId: actorId,
+  accountId,
+  offerKey: "pro_monthly",
+  returnUrl: "https://app.example.com/billing/success",
+  cancelUrl: "https://app.example.com/billing",
+  operationKey: `checkout:${requestId}`,
+});
+return Response.json({ checkoutUrl: checkout.url });
+```
+
+  </TabItem>
+</Tabs>
+
+Treat the return URL as navigation only. Credits and subscription access change
+after a verified provider webhook, not when a browser reaches that URL.
+
+## 3. Verify and ingest raw webhooks
+
+Pass the exact raw body and request headers to commerce before parsing JSON.
+The selected provider adapter verifies the signature, normalizes the event, and
+submits it through Bursar's idempotent billing event sink.
+
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
+
+```python
+from fastapi import FastAPI, HTTPException, Request
+
+app = FastAPI()
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    result = await commerce.handle_webhook(
+        provider="stripe",
+        raw_body=(await request.body()).decode("utf-8"),
+        headers=dict(request.headers),
+    )
+    if not result.received:
+        status = 503 if result.retryable else 400
+        raise HTTPException(status_code=status, detail="Webhook rejected")
+    return {"received": True}
+```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+```ts
+// app/api/webhooks/stripe/route.ts
+export async function POST(request: Request) {
+  const result = await commerce.handleWebhook({
+    provider: "stripe",
+    rawBody: await request.text(),
+    headers: Object.fromEntries(request.headers.entries()),
+  });
+
+  const status = result.received ? 200 : result.retryable ? 503 : 400;
+  return Response.json({ received: result.received }, { status });
+}
+```
+
+  </TabItem>
+</Tabs>
+
+Never call `ingest_billing_event` or `ingestBillingEvent` directly from a
+public webhook route. Those methods accept an already trusted normalized
+event and exist for verified custom adapters.
+
+The normalized constants use each language's public naming convention:
+Python uses `BillingEventType.subscription_created` and
+`BillingEventType.subscription_renewed`; TypeScript uses
+`BillingEventType.SUBSCRIPTION_CREATED` and
+`BillingEventType.SUBSCRIPTION_RENEWED`.
+
+## Subscription lifecycle
+
+A subscription-created, activated, or plan-changed event in a positive state
+assigns the offer's plan. Cancellation, expiry, pause, and customer deletion
+remove that assignment or move the account to the configured terminal plan.
+
+A renewal or successful subscription invoice grants the offer's cycle credits.
+The provider event identifier makes the grant replay-safe. A
+`replace_previous` renewal expires the previous cycle's remainder before the
+new grant lands.
+
+## Auto-recharge after deduction
+
+When commerce is configured, every deduction runs the configured auto-recharge
+check. Users opt in through `commerce.auto_recharge` in Python or
+`commerce.autoRecharge` in TypeScript. The active config controls eligible
+top-ups, thresholds, cooldowns, limits, and failure behavior; the verified
+successful-payment webhook posts the resulting credits.
+
+## Plan changes
+
+Preview first, show the provider quote to the customer, then confirm with the
+returned fingerprint. Bursar re-quotes and raises `QuoteChangedError` if the
+amount or effective time moved.
+
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
+
+```python
+preview = await commerce.preview_plan_change(account_id, offer_key="pro_monthly")
+confirmed = await commerce.confirm_plan_change(
+    account_id,
+    "plan-change:0195",
     offer_key="pro_monthly",
     quote_fingerprint=preview.quote_fingerprint,
 )
@@ -254,13 +365,13 @@ confirmed = await bursar.commerce.confirm_plan_change(
   <TabItem value="ts" label="TypeScript">
 
 ```ts
-const preview = await bursar.commerce.previewPlanChange({
-  accountId: userId,
+const preview = await commerce.previewPlanChange({
+  accountId,
   offerKey: "pro_monthly",
 });
-const confirmed = await bursar.commerce.confirmPlanChange({
-  accountId: userId,
-  operationKey: "downgrade-1",
+const confirmed = await commerce.confirmPlanChange({
+  accountId,
+  operationKey: "plan-change:0195",
   offerKey: "pro_monthly",
   quoteFingerprint: preview.quoteFingerprint,
 });

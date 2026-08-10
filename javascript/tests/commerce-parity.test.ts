@@ -3,13 +3,13 @@ import { describe, expect, it } from "vitest";
 
 import { loadConfigFromDict } from "../src/config.js";
 import {
-  CommerceProviderRegistry,
   InvalidOfferQuantityError,
   ProviderCapabilityNotSupportedError,
   QuoteChangedError,
   UnknownOfferError,
   classifySubscriptionChange,
 } from "../src/commerce/index.js";
+import { CommerceProviderRegistry } from "../src/commerce/provider-registry.js";
 import type { PaymentProvider } from "../src/providers/types.js";
 
 interface ParityFixture {
@@ -99,8 +99,8 @@ describe("shared commerce parity fixture", () => {
 
   it("validates provider factories and preserves newer loads when a cleared load fails", async () => {
     const invalid = new CommerceProviderRegistry(
-      { providers: { alpha: () => ({ provider: "alpha" }) as never } },
-      { eventSink: {} as never },
+      { providerEnvironment: "test", providers: { alpha: () => ({ provider: "alpha" }) as never } },
+      { providerEnvironment: "test", eventSink: {} as never },
     );
     await expect(invalid.get("alpha")).rejects.toThrow("did not return a valid payment provider");
 
@@ -111,6 +111,7 @@ describe("shared commerce parity fixture", () => {
     });
     const registry = new CommerceProviderRegistry(
       {
+        providerEnvironment: "test",
         providers: {
           alpha: async () => {
             calls += 1;
@@ -122,7 +123,7 @@ describe("shared commerce parity fixture", () => {
           },
         },
       },
-      { eventSink: {} as never },
+      { providerEnvironment: "test", eventSink: {} as never },
     );
 
     const stale = registry.get("alpha");
@@ -137,20 +138,28 @@ describe("shared commerce parity fixture", () => {
 
   it("rejects ambiguous provider registry configuration at construction", () => {
     expect(
-      () => new CommerceProviderRegistry({ providers: {} }, { eventSink: {} as never }),
+      () =>
+        new CommerceProviderRegistry(
+          { providerEnvironment: "test", providers: {} },
+          { providerEnvironment: "test", eventSink: {} as never },
+        ),
     ).toThrow("At least one payment provider must be registered");
     expect(
       () =>
         new CommerceProviderRegistry(
-          { providers: { " ": () => minimalProvider() } },
-          { eventSink: {} as never },
+          { providerEnvironment: "test", providers: { " ": () => minimalProvider() } },
+          { providerEnvironment: "test", eventSink: {} as never },
         ),
     ).toThrow("Payment provider names must not be empty");
     expect(
       () =>
         new CommerceProviderRegistry(
-          { providers: { alpha: () => minimalProvider() }, defaultProvider: " " },
-          { eventSink: {} as never },
+          {
+            providerEnvironment: "test",
+            providers: { alpha: () => minimalProvider() },
+            defaultProvider: " ",
+          },
+          { providerEnvironment: "test", eventSink: {} as never },
         ),
     ).toThrow("Default payment provider must not be empty");
   });

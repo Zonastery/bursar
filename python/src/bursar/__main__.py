@@ -3,7 +3,8 @@
 Built on :mod:`argparse` so flags, ``--help``, exit codes and type coercion are
 handled by the stdlib rather than hand-rolled ``argv`` slicing.
 
-Connection secrets are taken from ``DATABASE_URL``, never the command line.
+Connection secrets are taken from role-specific environment variables, never
+the command line.
 """
 
 from __future__ import annotations
@@ -14,24 +15,15 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from uuid import UUID, uuid4
+from typing import TYPE_CHECKING, Any, cast
+from uuid import UUID
 
+from bursar.providers.types import ProviderEnvironment
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
 
 if TYPE_CHECKING:
     from bursar.credits.store import CreditStore
     from bursar.credits.types import CatalogRevision
-
-load_dotenv: Callable[..., bool] | None
-try:
-    from dotenv import load_dotenv as _load_dotenv
-except ImportError:
-    load_dotenv = None
-else:
-    load_dotenv = _load_dotenv
-
 
 # ── Retry tuning ────────────────────────────────────────────────────────────
 # Retry typed transient PostgreSQL failures, but never a mutation whose commit
@@ -39,13 +31,6 @@ else:
 _RETRY_INITIAL_DELAY = 1.0
 _RETRY_MAX_DELAY = 8.0
 _RETRIES = 5
-
-
-def _load_env() -> None:
-    """Load ``.env`` from CWD. Existing environment variables win."""
-    env_path = Path.cwd() / ".env"
-    if env_path.is_file() and load_dotenv:
-        load_dotenv(env_path, override=False)
 
 
 # Extra name → top-level import names needed
@@ -104,20 +89,53 @@ def _store_from_env(
 ) -> CreditStore:
     """Create the Postgres store from its required environment variables."""
     _require_extra("postgres")
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        print("DATABASE_URL required", file=sys.stderr)
-        raise SystemExit(1)
+    database_url = _database_url_from_env("DATABASE_URL")
+    provider_environment = _provider_environment_from_env()
     resolved_tenant_id = tenant_id or os.environ.get("BURSAR_TENANT_ID")
     if not resolved_tenant_id:
         print("BURSAR_TENANT_ID required", file=sys.stderr)
         raise SystemExit(1)
     from bursar.credits.postgres.store import PostgresStore
 
-    return PostgresStore(database_url=database_url, tenant_id=resolved_tenant_id)
+    return PostgresStore(
+        database_url=database_url,
+        tenant_id=resolved_tenant_id,
+        provider_environment=provider_environment,
+    )
 
 
 # ── File loading ─────────────────────────────────────────────────────────────
+
+
+def _database_url_from_env(variable: str) -> str:
+    """Return one explicit role-specific database URL or exit cleanly."""
+    database_url = os.environ.get(variable, "").strip()
+    if not database_url:
+        print(f"{variable} is required", file=sys.stderr)
+        raise SystemExit(1)
+    return database_url
+
+
+def _provider_environment_from_env() -> ProviderEnvironment:
+    """Return the explicit financial namespace for database-backed commands."""
+    value = os.environ.get("BURSAR_PROVIDER_ENVIRONMENT", "").strip()
+    if value not in ("live", "test", "sandbox"):
+        print(
+            "BURSAR_PROVIDER_ENVIRONMENT must be one of: live, test, sandbox",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return cast(ProviderEnvironment, value)
+
+
+def _read_config_file(filepath: str) -> dict[str, Any]:
+    """Read a JSON or YAML Bursar config, preserving typed parse errors."""
+    from bursar.load_config_file import load_config_file, load_config_text
+
+    if filepath == "-":
+        # JSON is a YAML subset, so stdin uses one strict documented grammar.
+        return load_config_text(sys.stdin.read(), is_yaml=True, source="<stdin>")
+    return load_config_file(filepath)
 
 
 def _load_config_file(filepath: str) -> dict[str, Any]:
@@ -128,12 +146,9 @@ def _load_config_file(filepath: str) -> dict[str, Any]:
     tracebacks.
     """
     from bursar.errors import ConfigError
-    from bursar.load_config_file import load_config_file, load_config_text
 
     try:
-        if filepath == "-":
-            return load_config_text(sys.stdin.read(), is_yaml=False, source="<stdin>")
-        return load_config_file(filepath)
+        return _read_config_file(filepath)
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
@@ -142,55 +157,37 @@ def _load_config_file(filepath: str) -> dict[str, Any]:
 # ── Command handlers ─────────────────────────────────────────────────────────
 
 
-def _read_post_migrate_sql(paths: list[str]) -> list[tuple[str, str]]:
-    """Read trusted host SQL before opening the migration transaction."""
-    statements: list[tuple[str, str]] = []
-    for raw_path in paths:
-        path = Path(raw_path)
-        try:
-            sql = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"Cannot read post-migration SQL file {path}: {exc}", file=sys.stderr)
-            raise SystemExit(1) from None
-        if not sql.strip():
-            print(f"Post-migration SQL file is empty: {path}", file=sys.stderr)
-            raise SystemExit(1)
-        statements.append((str(path), sql))
-    return statements
-
-
-def _cmd_migrate(args: argparse.Namespace) -> None:
+def _cmd_migrate(_args: argparse.Namespace) -> None:
     _require_extra("postgres")
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        print("DATABASE_URL is required", file=sys.stderr)
-        raise SystemExit(1)
+    database_url = _database_url_from_env("BURSAR_MIGRATION_DATABASE_URL")
     from bursar.credits.postgres.store import run_migrations
+    from bursar.errors import StoreError
 
-    post_migration_sql = _read_post_migrate_sql(args.post_migrate_sql)
-    run_migrations(database_url, post_migration_sql=post_migration_sql)
+    try:
+        run_migrations(database_url)
+    except StoreError as exc:
+        print(f"Migration failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
     print("Migrations applied successfully.")
 
 
 def _provision_tenant(
     *,
-    tenant_id: UUID,
+    tenant_id: UUID | None,
     slug: str,
     display_name: str | None,
 ) -> UUID:
     _require_extra("postgres")
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        print("DATABASE_URL is required", file=sys.stderr)
-        raise SystemExit(1)
+    database_url = _database_url_from_env("BURSAR_OPERATOR_DATABASE_URL")
 
     import psycopg2
 
     try:
         with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE bursar_operator")
             cursor.execute(
                 "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
-                (str(tenant_id), slug, display_name),
+                (str(tenant_id) if tenant_id is not None else None, slug, display_name),
             )
             row = cursor.fetchone()
             if row is None:
@@ -204,9 +201,7 @@ def _provision_tenant(
     return UUID(str(created_id))
 
 
-def _parse_tenant_id(raw_tenant_id: str | None, *, generate: bool) -> UUID:
-    if raw_tenant_id is None and generate:
-        return uuid4()
+def _parse_tenant_id(raw_tenant_id: str | None) -> UUID:
     if raw_tenant_id is None:
         print("BURSAR_TENANT_ID or --id is required", file=sys.stderr)
         raise SystemExit(1)
@@ -218,7 +213,7 @@ def _parse_tenant_id(raw_tenant_id: str | None, *, generate: bool) -> UUID:
 
 
 def _cmd_tenant_create(args: argparse.Namespace) -> None:
-    tenant_id = _parse_tenant_id(args.id, generate=True)
+    tenant_id = _parse_tenant_id(args.id) if args.id is not None else None
     created_id = _provision_tenant(
         tenant_id=tenant_id,
         slug=args.slug,
@@ -229,10 +224,7 @@ def _cmd_tenant_create(args: argparse.Namespace) -> None:
 
 def _cmd_tenant_status(args: argparse.Namespace) -> None:
     _require_extra("postgres")
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        print("DATABASE_URL is required", file=sys.stderr)
-        raise SystemExit(1)
+    database_url = _database_url_from_env("BURSAR_OPERATOR_DATABASE_URL")
 
     try:
         tenant_id = UUID(args.id)
@@ -244,6 +236,7 @@ def _cmd_tenant_status(args: argparse.Namespace) -> None:
 
     try:
         with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE bursar_operator")
             cursor.execute(
                 "SELECT bursar.set_tenant_status(%s::uuid, %s::text)",
                 (str(tenant_id), args.status),
@@ -266,8 +259,8 @@ def _cmd_tenant_status(args: argparse.Namespace) -> None:
 def _cmd_config_validate(args: argparse.Namespace) -> None:
     from bursar.config import ConfigError, load_config_from_dict
 
-    data = _load_config_file(args.file)
     try:
+        data = _read_config_file(args.file)
         load_config_from_dict(data)
     except ConfigError as exc:
         if args.json:
@@ -362,8 +355,11 @@ def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
     data = _validated_config(args.file)
     tenant_id = _parse_tenant_id(
         args.id or os.environ.get("BURSAR_TENANT_ID"),
-        generate=False,
     )
+    # Resolve every runtime target before the operator mutation so a missing or
+    # invalid config credential cannot leave a partially bootstrapped tenant.
+    _database_url_from_env("DATABASE_URL")
+    _provider_environment_from_env()
     created_id = _provision_tenant(
         tenant_id=tenant_id,
         slug=args.slug,
@@ -489,16 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate = sub.add_parser(
         "migrate",
         help="Run database migrations (bursar[postgres])",
-        description="Run bundled SQL migrations using DATABASE_URL.",
-    )
-    p_migrate.add_argument(
-        "--post-migrate-sql",
-        action="append",
-        default=[],
-        metavar="FILE",
-        help=(
-            "Trusted host SQL file to run after bundled migrations in the same transaction; repeat for multiple files"
-        ),
+        description=("Run bundled SQL migrations using BURSAR_MIGRATION_DATABASE_URL."),
     )
     p_migrate.set_defaults(func=_cmd_migrate)
 
@@ -572,7 +559,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     psub = p_config.add_subparsers(dest="subcommand", metavar="<subcommand>")
 
-    p_set = psub.add_parser("set", help="Apply config (always creates a new version)")
+    p_set = psub.add_parser("set", help="Apply config when it differs from the active version")
     p_set.add_argument("file", help="JSON/YAML Bursar config file, or '-' for stdin")
     p_set.add_argument("--label", default=None, help="Optional label/message for this version")
     p_set.add_argument(
@@ -645,7 +632,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    _load_env()
     parser = build_parser()
     args = parser.parse_args(argv)
 

@@ -16,11 +16,11 @@ consumed highest-priority-first.
 ## Balances and adjustments
 
 ```ts
-const grant = await bursar.credits.addCredits(userId, 100, {
+const grant = await bursar.credits.addCredits(userId, "100", {
   type: "purchase",
   idempotencyKey: "purchase:1",
 });
-const charge = await bursar.credits.deductCredits(userId, 5, {
+const charge = await bursar.credits.deductCredits(userId, "5", {
   entryType: "adjustment",
   idempotencyKey: "operation:1",
 });
@@ -35,20 +35,24 @@ prior entry. Every successful monetary result identifies its canonical ledger
 row (`entryId` for adjustments, `refundEntryId` for refunds). `getBalance`,
 `getAvailable`, and `getBucketBalances` are advisory reads.
 
+Pass raw credit amounts as decimal strings or `Decimal` instances. Native
+JavaScript numbers are rejected so financial input cannot arrive through a
+binary floating-point value. Monetary result fields are `Decimal` instances.
+
 ### Idempotency — read carefully
 
 All three adjustment methods require a caller-stable `idempotencyKey`:
 retrying with the same key replays the original result instead of
 double-applying.
 
-| Method              | Parameters                                                                     | Returns                         |
-| ------------------- | ------------------------------------------------------------------------------ | ------------------------------- |
-| `addCredits`        | `userId: string`, `amount: Decimal \| number`, `options: AddCreditsOptions`    | `Promise<AddCreditsResult>`     |
-| `deductCredits`     | `userId: string`, `amount: Decimal \| number`, `options: DeductCreditsOptions` | `Promise<AddCreditsResult>`     |
-| `refundCredits`     | `entryId: string`, `options: RefundCreditsOptions`                             | `Promise<RefundResult>`         |
-| `getBalance`        | `userId: string`                                                               | `Promise<BalanceResult>`        |
-| `getAvailable`      | `userId: string`                                                               | `Promise<AvailableResult>`      |
-| `getBucketBalances` | `userId: string`                                                               | `Promise<BucketBalancesResult>` |
+| Method              | Parameters                                                               | Returns                         |
+| ------------------- | ------------------------------------------------------------------------ | ------------------------------- |
+| `addCredits`        | `userId: string`, `amount: ExactAmount`, `options: AddCreditsOptions`    | `Promise<AddCreditsResult>`     |
+| `deductCredits`     | `userId: string`, `amount: ExactAmount`, `options: DeductCreditsOptions` | `Promise<AddCreditsResult>`     |
+| `refundCredits`     | `entryId: string`, `options: RefundCreditsOptions`                       | `Promise<RefundResult>`         |
+| `getBalance`        | `userId: string`                                                         | `Promise<BalanceResult>`        |
+| `getAvailable`      | `userId: string`                                                         | `Promise<AvailableResult>`      |
+| `getBucketBalances` | `userId: string`                                                         | `Promise<BucketBalancesResult>` |
 
 ## Metered charging
 
@@ -75,15 +79,16 @@ const result = await bursar.credits.deduct(
 and quotas can block the charge. `feature` additionally requires a plan
 feature. `deductFlatJob` and `grantSubscriptionCycle` are specialized siblings
 for flat-rate jobs and billing-cycle grants. `revokeCreditsByEntryType`
-reverses every deduction of a given entry type, and
+removes all remaining lots sourced by one matching ledger operation; it is a
+broad cohort operation, not a single-transaction refund.
 `sweepExpiredCredits(dryRun = false)` expires eligible credit lots.
 
-| Method                     | Parameters                                                           | Returns                            |
-| -------------------------- | -------------------------------------------------------------------- | ---------------------------------- |
-| `deduct`                   | `userId: string`, `metrics: UsageMetrics`, `options: DeductOptions`  | `Promise<DeductionResult>`         |
-| `deductFlatJob`            | `userId: string`, `jobName: string`, `options: DeductFlatJobOptions` | `Promise<DeductionResult>`         |
-| `revokeCreditsByEntryType` | `userId: string`, `entryType: string`                                | `Promise<Record<string, unknown>>` |
-| `sweepExpiredCredits`      | `dryRun = false`                                                     | `Promise<SweepResult>`             |
+| Method                     | Parameters                                                           | Returns                        |
+| -------------------------- | -------------------------------------------------------------------- | ------------------------------ |
+| `deduct`                   | `userId: string`, `metrics: UsageMetrics`, `options: DeductOptions`  | `Promise<DeductionResult>`     |
+| `deductFlatJob`            | `userId: string`, `jobName: string`, `options: DeductFlatJobOptions` | `Promise<DeductionResult>`     |
+| `revokeCreditsByEntryType` | `userId: string`, `entryType: string`                                | `Promise<RevokeCreditsResult>` |
+| `sweepExpiredCredits`      | `dryRun = false`                                                     | `Promise<SweepResult>`         |
 
 ## AI and batch usage accounting
 

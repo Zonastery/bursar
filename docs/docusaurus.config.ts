@@ -2,13 +2,48 @@ import { themes as prismThemes } from "prism-react-renderer";
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 
-const repositoryUrl = "https://github.com/zonastery/bursar";
+const repositoryUrl = "https://github.com/Zonastery/bursar";
+const siteUrl = "https://zonastery.github.io/bursar/";
+const siteTitle = "Bursar AI Credits";
+const corpusTitle = "Bursar — Open-source AI credits and usage billing";
 const siteDescription =
-  "Usage metering, prepaid credits, plans, and billing for AI products, backed by an exact PostgreSQL ledger.";
+  "PostgreSQL-native usage metering, prepaid credits, plans, and reserve-settle billing for AI SaaS, available as Python and TypeScript SDKs.";
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": `${siteUrl}#website`,
+      name: "Bursar",
+      alternateName: "Bursar AI credits and usage billing",
+      url: siteUrl,
+      description: siteDescription,
+      inLanguage: "en",
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": `${repositoryUrl}#software`,
+      name: "Bursar",
+      alternateName: "Bursar AI Credits SDK",
+      description: siteDescription,
+      url: siteUrl,
+      codeRepository: repositoryUrl,
+      license: `${repositoryUrl}/blob/main/LICENSE`,
+      programmingLanguage: ["Python", "TypeScript", "SQL"],
+      runtimePlatform: ["Python 3.12–3.13", "Node.js 22+", "PostgreSQL 16+"],
+      isAccessibleForFree: true,
+      sameAs: [
+        "https://pypi.org/project/bursar/",
+        "https://www.npmjs.com/package/@zonastery/bursar",
+      ],
+    },
+  ],
+};
 
 const config: Config = {
-  title: "Bursar",
-  tagline: "Usage metering and billing infrastructure for AI products",
+  title: siteTitle,
+  tagline: "PostgreSQL-native credits, usage metering, and billing for AI SaaS",
   favicon: "img/logo.png",
 
   url: "https://zonastery.github.io",
@@ -55,7 +90,7 @@ const config: Config = {
     [
       "docusaurus-plugin-llms",
       {
-        title: "Bursar documentation",
+        title: corpusTitle,
         description: siteDescription,
         version: "2.x",
         docsDir: "docs",
@@ -74,6 +109,7 @@ const config: Config = {
           "guides/index.mdx",
           "guides/multitenancy.mdx",
           "guides/storage-backends.mdx",
+          "guides/ai-saas-credits.mdx",
           "guides/financial-safety.mdx",
           "guides/credit-lifecycle.mdx",
           "guides/subscription-integration.mdx",
@@ -107,6 +143,16 @@ const config: Config = {
         language: ["en"],
       },
     ],
+  ],
+
+  headTags: [
+    {
+      tagName: "script",
+      attributes: {
+        type: "application/ld+json",
+      },
+      innerHTML: JSON.stringify(structuredData),
+    },
   ],
 
   themes: ["@docusaurus/theme-mermaid"],
@@ -145,8 +191,14 @@ const config: Config = {
     image: "img/social-card.png",
     metadata: [
       { name: "description", content: siteDescription },
+      {
+        name: "keywords",
+        content:
+          "AI SaaS billing, AI credits, usage-based billing, usage metering, prepaid credits, credit ledger, LLM billing, PostgreSQL, Python SDK, TypeScript SDK",
+      },
       { name: "twitter:card", content: "summary_large_image" },
       { property: "og:type", content: "website" },
+      { property: "og:site_name", content: "Bursar" },
       { name: "theme-color", content: "#102a43" },
     ],
     mermaid: {

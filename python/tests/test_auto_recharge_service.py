@@ -87,9 +87,11 @@ async def test_unknown_attempt_resumes_with_its_original_provider_idempotency_ke
 
         def __init__(self) -> None:
             self.keys: list[str] = []
+            self.metadata: list[dict[str, str]] = []
 
         async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
             self.keys.append(params.idempotency_key)
+            self.metadata.append(params.metadata)
             return SavedPaymentChargeResult(
                 provider_payment_id="payment-1",
                 status="processing",
@@ -107,4 +109,11 @@ async def test_unknown_attempt_resumes_with_its_original_provider_idempotency_ke
 
     assert result.outcome == "submitted"
     assert provider.keys == [existing.idempotency_key]
+    assert provider.metadata == [
+        {
+            "auto_recharge_attempt_id": existing.id,
+            "bursar_account_id": "user-1",
+            "purpose": "credit_topup",
+        }
+    ]
     assert billing.update_auto_recharge_attempt.call_args.args[0].state == "processing"

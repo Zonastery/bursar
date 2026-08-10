@@ -32,7 +32,11 @@ from bursar import Bursar, PostgresStore
 from shared import USER_ADA, base_config, publish_config
 
 bursar = publish_config(
-    PostgresStore(database_url, tenant_id=tenant_id),
+    PostgresStore(
+        database_url,
+        tenant_id=tenant_id,
+        provider_environment="test",
+    ),
     base_config(),
 )
 user_id = USER_ADA
@@ -46,7 +50,11 @@ import { Bursar, PostgresStore } from "@zonastery/bursar";
 import { USER_ADA, baseConfig, publishConfig } from "./shared";
 
 const bursar = await publishConfig(
-  new PostgresStore({ postgres: databaseUrl, tenantId }),
+  new PostgresStore({
+    postgres: databaseUrl,
+    tenantId,
+    providerEnvironment: "test",
+  }),
   baseConfig(),
 );
 const userId = USER_ADA;
@@ -66,7 +74,7 @@ Call the account-created boundary from the durable signup handler. It assigns th
 result = bursar.accounts.on_account_created(
     user_id, event_key="signup", region="us-east-1"
 )
-print(result["plan_key"], result["plan_assigned"], result["grants"])
+print(result.plan_key, result.plan_assigned, result.grants)
 ```
 
   </TabItem>
@@ -94,9 +102,11 @@ Post purchased credits only after the payment adapter verifies and normalizes a 
   <TabItem value="python" label="Python">
 
 ```python
+from decimal import Decimal
+
 grant = bursar.credits.add_credits(
     user_id,
-    50000,
+    Decimal("50000"),
     entry_type="purchase",
     idempotency_key="checkout:cs_123456",
 )
@@ -107,7 +117,7 @@ print(grant.entry_id, grant.new_balance, grant.bucket, grant.idempotent)
   <TabItem value="ts" label="TypeScript">
 
 ```ts
-const grant = await bursar.credits.addCredits(userId, new Decimal(50000), {
+const grant = await bursar.credits.addCredits(userId, "50000", {
   type: "purchase",
   idempotencyKey: "checkout:cs_123456",
 });
@@ -190,7 +200,7 @@ Refund a charge by its entry identifier. Pass an `amount` only for a partial ref
 ```python
 refund = bursar.credits.refund_credits(
     charge.entry_id,
-    amount=0.000030,
+    amount=Decimal("0.000030"),
     reason="user_reported_bad_output",
     idempotency_key="refund:chat:turn:42:partial",
 )
@@ -202,7 +212,7 @@ print(refund.refund_entry_id, refund.new_balance)
 
 ```ts
 const refund = await bursar.credits.refundCredits(charge.entryId, {
-  amount: new Decimal("0.000030"),
+  amount: "0.000030",
   reason: "user_reported_bad_output",
   idempotencyKey: "refund:chat:turn:42:partial",
 });
@@ -252,35 +262,19 @@ balance — expiry is an accounting event, not a read filter. Run the sweep on
 a schedule (for example hourly) or enable lazy expiry so a user's own next
 operation clears their due lots first.
 
-## 6. Revocation
+## 6. Bulk revocation
 
-If a purchase is fraudulent or violates your ToS, revoke all credits of an
-entry type rather than adjusting the balance by hand:
+`revoke_credits_by_entry_type` and `revokeCreditsByEntryType` are broad
+lifecycle operations. They remove every remaining credit lot for the account
+whose source ledger operation matches the supplied value, then return a typed
+`RevokeCreditsResult` (`revoked` and `balance_after` in Python;
+`revoked` and `balanceAfter` in TypeScript).
 
-<Tabs groupId="lang">
-  <TabItem value="python" label="Python">
-
-```python
-revoked = bursar.credits.revoke_credits_by_entry_type(user_id, "purchase")
-print(revoked["amount"], revoked["new_balance"])
-```
-
-  </TabItem>
-  <TabItem value="ts" label="TypeScript">
-
-```ts
-const revoked = await bursar.credits.revokeCreditsByEntryType(
-  userId,
-  "purchase",
-);
-console.log(revoked.amount, revoked.new_balance);
-```
-
-  </TabItem>
-</Tabs>
-
-Revocation walks the `purchase` lots LIFO across tiers and posts `revocation`
-ledger entries, so the audit trail shows exactly what was taken back and why.
+Do not pass a shared value such as `purchase` to resolve one disputed order;
+that can revoke unrelated purchases. Use this operation only when your grant
+path assigned a dedicated operation to the entire cohort you intend to remove.
+Provider refund webhooks and bounded administrative deductions handle
+transaction-specific clawbacks.
 
 ## 7. Reading the ledger
 

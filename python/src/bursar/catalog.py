@@ -174,7 +174,7 @@ def project_public_catalog(config: BursarConfig) -> PublicCatalog:
     topups.sort(key=lambda offer: (offer["sort_order"], offer["key"]))
     return {
         "version": 1,
-        "default_plan": config.catalog.default_plan or (plans[0]["key"] if plans else None),
+        "default_plan": config.catalog.default_plan,
         "credit_display": (
             {
                 "currency": config.credits.display.currency,

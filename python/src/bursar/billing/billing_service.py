@@ -28,7 +28,6 @@ from bursar.billing.contracts import (
 from bursar.billing.service_types import (
     BillingProvisioningPort,
     BillingServiceOptions,
-    ResolveUser,
 )
 from bursar.billing.types import (
     BillingAutoRechargeAttempt,
@@ -139,7 +138,6 @@ class BillingService:
         billing_store: BillingStore,
         options: BillingServiceOptions | None = None,
         *,
-        resolve_user: ResolveUser | None = None,
         event_handlers: dict[BillingEventType, BillingEventHandler] | None = None,
         auto_select_entitlement_source: bool | None = None,
         provisioning: BillingProvisioningPort | None = None,
@@ -147,7 +145,6 @@ class BillingService:
         past_due_grace_period_ms: float | None = None,
     ) -> None:
         options = options or BillingServiceOptions()
-        resolve_user = resolve_user if resolve_user is not None else options.resolve_user
         event_handlers = event_handlers if event_handlers is not None else options.event_handlers
         auto_select_entitlement_source = (
             auto_select_entitlement_source
@@ -164,7 +161,6 @@ class BillingService:
         self._store = billing_store
         self._logger: NormalizedLogger = normalize_logger(options.logger)
         self._provisioning = provisioning
-        self._resolve_user = resolve_user
         self._event_handlers = event_handlers or {}
         self._auto_select_entitlement_source = auto_select_entitlement_source
         self._terminal_plan_key = terminal_plan_key
@@ -609,7 +605,7 @@ class BillingService:
             return BillingEventResult(handled=False, error="unhandled_event_type")
         result = handler(event)
         if result.handled:
-            self._fire_event_handlers(event, event.user_id)
+            self._fire_event_handlers(event, event.account_id)
         return result
 
     def _update_checkout_intent_from_event(
@@ -624,14 +620,14 @@ class BillingService:
                 CheckoutIntentUpdate(status=status),
             )
 
-    def _fire_event_handlers(self, event: BillingEvent, user_id: str | None) -> None:
-        if not user_id:
+    def _fire_event_handlers(self, event: BillingEvent, account_id: str | None) -> None:
+        if not account_id:
             return
         handler = self._event_handlers.get(event.event_type)
         if handler is None:
             return
         try:
-            result = handler(event, user_id)
+            result = handler(event, account_id)
             if inspect.isawaitable(result):
                 _wait_for_handler(result)
         except Exception as exc:
@@ -644,16 +640,16 @@ class BillingService:
                 },
             )
 
-    def _resolve_user_id(self, event: BillingEvent) -> str | None:
-        if event.user_id:
-            return event.user_id
+    def _resolve_account_id(self, event: BillingEvent) -> str | None:
+        if event.account_id:
+            return event.account_id
         if event.customer and event.customer.provider_customer_id:
             uid = self._store.get_billing_customer(
                 event.provider,
                 event.customer.provider_customer_id,
             )
             if uid:
-                event.user_id = uid
+                event.account_id = uid
                 return uid
         if event.subscription and event.subscription.provider_subscription_id:
             existing = self._store.get_billing_subscription(
@@ -661,21 +657,12 @@ class BillingService:
                 event.subscription.provider_subscription_id,
             )
             if existing and existing.user_id:
-                event.user_id = existing.user_id
+                event.account_id = existing.user_id
                 return existing.user_id
-        if self._resolve_user and event.customer:
-            uid = self._resolve_user(
-                event.provider,
-                event.customer.provider_customer_id,
-                event.customer.email,
-            )
-            if uid:
-                event.user_id = uid
-                return uid
         # Refund/dispute events (e.g. a Stripe dashboard refund) carry no customer
         # or subscription — the only link to the user is the stored payment row.
         # Without this tier a refund's credit clawback is silently skipped (parity
-        # with the JS resolveUserId payment fallback).
+        # with the JS resolveAccountId payment fallback).
         provider_payment_id = (
             (event.payment.provider_payment_id if event.payment else None)
             or (event.refund.provider_payment_id if event.refund else None)
@@ -685,7 +672,7 @@ class BillingService:
             payment = self._store.get_billing_payment(event.provider, provider_payment_id)
             uid = payment.get("user_id") if isinstance(payment, dict) else None
             if isinstance(uid, str) and uid:
-                event.user_id = uid
+                event.account_id = uid
                 return uid
         return None
 
@@ -798,9 +785,9 @@ class BillingService:
         provision_on_positive: bool = True,
     ) -> BillingEventResult:
         """Common path for all subscription event handlers."""
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
         if not uid:
-            return BillingEventResult(handled=False, error="user_not_found")
+            return BillingEventResult(handled=False, error="account_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
@@ -869,7 +856,7 @@ class BillingService:
 
     def _handle_customer_upserted(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
-            uid = self._resolve_user_id(event)
+            uid = self._resolve_account_id(event)
             if uid:
                 self._store.upsert_billing_customer(
                     event.provider,
@@ -882,14 +869,14 @@ class BillingService:
 
     def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
-            uid = self._resolve_user_id(event)
+            uid = self._resolve_account_id(event)
             if uid and self._provisioning:
                 self._revoke_subscription(uid)
         return BillingEventResult(handled=True, action="customer_deleted")
 
     def _handle_checkout_completed(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
-            uid = self._resolve_user_id(event)
+            uid = self._resolve_account_id(event)
             if uid:
                 self._store.upsert_billing_customer(
                     event.provider,
@@ -903,9 +890,9 @@ class BillingService:
         return BillingEventResult(handled=True, action="checkout_completed")
 
     def _handle_subscription_created(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
         if not uid:
-            return BillingEventResult(handled=False, error="user_not_found")
+            return BillingEventResult(handled=False, error="account_not_found")
         if event.customer and event.customer.provider_customer_id:
             self._store.upsert_billing_customer(
                 event.provider,
@@ -1010,7 +997,7 @@ class BillingService:
             provision_on_positive=False,
         )
         if result.handled:
-            uid = self._resolve_user_id(event)
+            uid = self._resolve_account_id(event)
             if uid:
                 self._re_evaluate_access(uid, event)
         return result
@@ -1063,9 +1050,9 @@ class BillingService:
         )
 
     def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
         if not uid:
-            return BillingEventResult(handled=False, error="user_not_found")
+            return BillingEventResult(handled=False, error="account_not_found")
         if not event.subscription or not event.subscription.provider_subscription_id:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
@@ -1123,7 +1110,7 @@ class BillingService:
             provision_on_positive=False,
         )
         if result.handled:
-            uid = self._resolve_user_id(event)
+            uid = self._resolve_account_id(event)
             if uid and self._provisioning and event.subscription:
                 self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
         return result
@@ -1137,7 +1124,7 @@ class BillingService:
             provision_on_positive=False,
         )
         if result.handled:
-            uid = self._resolve_user_id(event)
+            uid = self._resolve_account_id(event)
             if uid and self._provisioning and event.subscription:
                 self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
         return result
@@ -1152,7 +1139,7 @@ class BillingService:
         )
 
     def _handle_trial_will_end(self, event: BillingEvent) -> BillingEventResult:
-        self._resolve_user_id(event)
+        self._resolve_account_id(event)
         return BillingEventResult(handled=True, action="trial_will_end_notified")
 
     def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:
@@ -1165,7 +1152,7 @@ class BillingService:
         )
         if not renewal_result.handled:
             return renewal_result
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
         if uid:
             self._store.upsert_billing_invoice(
                 BillingInvoiceUpsert(
@@ -1191,7 +1178,7 @@ class BillingService:
         if not event.payment:
             return BillingEventResult(handled=False, error="no_payment_data")
 
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
 
         topup_config = None
         if event.payment.purpose == "credit_topup" and event.payment.refs:
@@ -1300,7 +1287,7 @@ class BillingService:
     def _handle_payment_failed(self, event: BillingEvent) -> BillingEventResult:
         if event.payment is None:
             return BillingEventResult(handled=False, error="no_payment_data")
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
         if uid:
             self._store.upsert_billing_payment(
                 BillingPaymentUpsert(
@@ -1347,7 +1334,7 @@ class BillingService:
     def _handle_refund_created(self, event: BillingEvent) -> BillingEventResult:
         if event.refund is None:
             return BillingEventResult(handled=False, error="no_refund_data")
-        uid = self._resolve_user_id(event)
+        uid = self._resolve_account_id(event)
         if uid:
             refund = event.refund
             refund_id = self._store.upsert_billing_refund(

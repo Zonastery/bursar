@@ -27,6 +27,7 @@ REPLAY_USER_ID = "00000000-0000-0000-0000-000000000911"
 
 CONFIG = {
     "version": 1,
+    "catalog": {"default_plan": "pro"},
     "pricing": {
         "operations": {
             "completion": {
@@ -68,7 +69,6 @@ CONFIG = {
         },
     },
     "credits": {
-        "accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"},
         "buckets": {
             "grant": {
                 "priority": 10,
@@ -88,7 +88,11 @@ CONFIG = {
 
 @pytest.fixture
 def store(pg_database_url: str) -> PostgresStore:
-    return PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
+    return PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
+    )
 
 
 def test_catalog_shape_validator_rejects_removed_nested_fields(
@@ -209,42 +213,6 @@ def test_concurrent_migrations_serialize_pristine_database(pg_database_url: str)
                 cursor.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(database_name)))
         finally:
             admin.close()
-
-
-def test_post_migration_sql_is_ordered_and_transactional(
-    pg_database_url: str,
-) -> None:
-    table = "public.bursar_post_migration_sql_test"
-    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        cursor.execute(f"DROP TABLE IF EXISTS {table}")
-
-    try:
-        run_migrations(
-            pg_database_url,
-            post_migration_sql=[
-                ("create.sql", f"CREATE TABLE {table} (value integer NOT NULL);"),
-                ("insert.sql", f"INSERT INTO {table} (value) VALUES (42);"),
-            ],
-        )
-        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-            cursor.execute(f"SELECT value FROM {table}")
-            assert cursor.fetchone() == (42,)
-
-        with pytest.raises(StoreError, match="post-migration SQL failed for broken.sql"):
-            run_migrations(
-                pg_database_url,
-                post_migration_sql=[
-                    ("update.sql", f"UPDATE {table} SET value = 99;"),
-                    ("broken.sql", "SELECT * FROM public.table_that_does_not_exist;"),
-                ],
-            )
-
-        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-            cursor.execute(f"SELECT value FROM {table}")
-            assert cursor.fetchone() == (42,)
-    finally:
-        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStore) -> None:

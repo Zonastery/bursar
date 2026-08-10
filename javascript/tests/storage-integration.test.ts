@@ -21,6 +21,7 @@ async function seedStorageRows(pool: pg.Pool): Promise<{
   try {
     await client.query("BEGIN");
     await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+    await client.query("SELECT set_config('bursar.provider_environment', 'test', true)");
     const account = await client.query(`
       WITH subject AS (
         INSERT INTO bursar.subjects DEFAULT VALUES
@@ -95,6 +96,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     postgres = new PostgresClient(pool, {
       tenantId: TEST_TENANT_ID,
       accessRole: "bursar_operator",
+      providerEnvironment: "test",
     });
     repository = new PostgresStorageRepository(postgres.query, TEST_TENANT_ID);
   }, 60000);
@@ -217,6 +219,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     const runtime = await createBursarRuntime({
       postgres: pool,
       tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
       clickhouse,
       s3,
       outbox: { batchSize: 10, pollIntervalMs: 60_000 },

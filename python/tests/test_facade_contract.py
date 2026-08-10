@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from bursar.bursar import AccountService, Bursar, CatalogService
-from bursar.credits.service import CreditsService
+from bursar.bursar import AccountService, Bursar, CatalogService, CreditsCapability
 from bursar.storage.runtime import BursarRuntime
 
 CONTRACT = json.loads((Path(__file__).parents[2] / "common" / "facade-contract.json").read_text())
@@ -15,7 +14,7 @@ SURFACES = {
     "bursar": Bursar,
     "catalog": CatalogService,
     "accounts": AccountService,
-    "credits": CreditsService,
+    "credits": CreditsCapability,
     "runtime": BursarRuntime,
 }
 

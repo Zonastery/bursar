@@ -13,9 +13,6 @@ import type { CreditPolicy, CreditsConfig, GrantProgram } from "./types.js";
 
 export function parseCredits(value: unknown): CreditsConfig {
   const raw = asObject(value);
-  const accountingRaw = asObject(
-    raw.accounting ?? { unit: "credit", scale: 6, rounding: "half_up" },
-  );
   const bucketsRaw = asObject(raw.buckets ?? {});
   const policiesRaw = asObject(raw.policies ?? {});
   const programsRaw = asObject(raw.grant_programs ?? {});
@@ -103,11 +100,6 @@ export function parseCredits(value: unknown): CreditsConfig {
   }
 
   return {
-    accounting: {
-      unit: accountingRaw.unit as "credit",
-      scale: asInteger(accountingRaw.scale) as 6,
-      rounding: accountingRaw.rounding as "half_up",
-    },
     buckets,
     ...(defaultBucket == null ? {} : { defaultBucket }),
     policies,

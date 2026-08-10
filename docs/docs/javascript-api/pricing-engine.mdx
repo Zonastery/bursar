@@ -21,7 +21,8 @@ const engine = PricingEngine.fromDict(configDict);
 `fromDict` accepts a canonical config document and returns an engine, or
 throws `ConfigError`. Unknown fields, undeclared measures or dimensions,
 invalid matcher types, and unsafe cross-references are rejected at
-construction. Fixed credit accounting and plan rank have authoring defaults.
+construction. Credit accounting is a fixed Bursar convention rather than a
+configuration field; plan rank has an authoring default.
 
 ## Calculating cost
 
@@ -129,7 +130,7 @@ const cost = engine.calculate({
 // Exact decimals: 2,000,000 × 0.0025/M + 500,000 × 0.0100/M = 0.01
 const expected = new Decimal("0.0025")
   .times(2)
-  .plus(new Decimal("0.0100").times(0.5));
+  .plus(new Decimal("0.0100").times("0.5"));
 if (!cost.total.equals(expected)) {
   throw new Error(`unexpected total: ${cost.total.toString()}`);
 }

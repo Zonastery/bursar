@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from bursar.billing.types import BillingEvent, BillingEventResult, BillingSubscriptionStatus
 from bursar.errors import BursarError, StoreUnavailableError
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
+from bursar.shared.numbers import MAX_SAFE_INTEGER
 
 if TYPE_CHECKING:
     from bursar.billing.contracts import BillingEventSink
@@ -51,9 +52,9 @@ def require_minor_units(value: object, field: str, *, positive: bool = False) ->
         amount = int(value)
     else:
         raise ValueError(f"{field} must be an integer")
-    if amount < (1 if positive else 0):
+    if amount < (1 if positive else 0) or amount > MAX_SAFE_INTEGER:
         qualifier = "positive" if positive else "non-negative"
-        raise ValueError(f"{field} must be {qualifier}")
+        raise ValueError(f"{field} must be a {qualifier} safe integer")
     return amount
 
 
@@ -97,7 +98,7 @@ def call_billing_event_sink(sink: BillingEventSink, event: BillingEvent) -> Bill
             "Billing event claim could not be acquired",
             details={"reason": result.error},
         )
-    if not result.handled and result.error not in ("unhandled_event_type", "user_not_found"):
+    if not result.handled and result.error not in ("unhandled_event_type", "account_not_found"):
         raise BursarError(
             "Bursar failed to ingest the billing event",
             details={"reason": result.error or "unknown"},

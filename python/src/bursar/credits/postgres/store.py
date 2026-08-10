@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from functools import cached_property
@@ -89,6 +89,7 @@ from bursar.credits.types import (
     UsageRecordResult,
 )
 from bursar.errors import BursarError
+from bursar.providers.types import ProviderEnvironment
 from bursar.shared.idempotency import require_stable_key
 from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, PostgresPool
 from bursar.sql import _get_sql_files
@@ -169,6 +170,7 @@ class PostgresStore(CreditStore):
         max_pool_size: int = 20,
         pool: PostgresPool | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
+        provider_environment: ProviderEnvironment,
         connection_timeout_seconds: float = 10.0,
         statement_timeout_ms: int = 30_000,
         idle_transaction_timeout_ms: int = 30_000,
@@ -185,12 +187,14 @@ class PostgresStore(CreditStore):
             assert database_url is not None
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id)))
+        self._provider_environment: ProviderEnvironment = provider_environment
         self._usage_backend = usage_backend
         self._client = (
             PostgresClient.from_pool(
                 pool,
                 tenant_id=self._tenant_id,
                 usage_backend=usage_backend,
+                provider_environment=provider_environment,
                 connection_timeout_seconds=connection_timeout_seconds,
                 statement_timeout_ms=statement_timeout_ms,
                 idle_transaction_timeout_ms=idle_transaction_timeout_ms,
@@ -204,6 +208,7 @@ class PostgresStore(CreditStore):
                 max_connections=max_pool_size,
                 tenant_id=self._tenant_id,
                 usage_backend=usage_backend,
+                provider_environment=provider_environment,
                 connection_timeout_seconds=connection_timeout_seconds,
                 statement_timeout_ms=statement_timeout_ms,
                 idle_transaction_timeout_ms=idle_transaction_timeout_ms,
@@ -212,6 +217,11 @@ class PostgresStore(CreditStore):
                 postgres_options=postgres_options,
             )
         )
+
+    @property
+    def provider_environment(self) -> ProviderEnvironment:
+        """Provider namespace used by catalog and credit transactions."""
+        return self._provider_environment
 
     @property
     def database_url(self) -> str:
@@ -294,18 +304,12 @@ class PostgresStore(CreditStore):
     # ── Schema management ──────────────────────────────────────────────
 
     @staticmethod
-    def _migrate(
-        database_url: str,
-        *,
-        post_migration_sql: Sequence[tuple[str, str]] = (),
-    ) -> None:
+    def _migrate(database_url: str) -> None:
         """Apply bundled migrations exactly once, transactionally.
 
         A migration ledger records each filename and SHA-256 checksum. An
         advisory transaction lock serializes concurrent deploys, and any
-        failed migration aborts the setup transaction. Trusted host SQL runs
-        after the bundled files, in the supplied order and in the same
-        transaction, but is not recorded in Bursar's migration ledger.
+        failed migration aborts the setup transaction.
         """
         try:
             conn = psycopg2.connect(
@@ -351,11 +355,6 @@ class PostgresStore(CreditStore):
                         (sql_file.name, checksum),
                     )
 
-                for source, sql in post_migration_sql:
-                    try:
-                        cur.execute(sql)
-                    except psycopg2.Error as exc:
-                        raise StoreError(f"post-migration SQL failed for {source}: {exc}") from exc
             conn.commit()
         except StoreError:
             conn.rollback()
@@ -1686,17 +1685,8 @@ class PostgresStore(CreditStore):
         ]
 
 
-def run_migrations(
-    database_url: str,
-    *,
-    post_migration_sql: Sequence[tuple[str, str]] = (),
-) -> None:
-    """Run bundled SQL migrations against *database_url*.
-
-    ``post_migration_sql`` contains trusted ``(source, SQL)`` pairs that run
-    after Bursar's migrations, in order and in the same transaction. This is
-    the host-integration hook used by the CLI's ``--post-migrate-sql`` option.
-    """
+def run_migrations(database_url: str) -> None:
+    """Run bundled, checksummed SQL migrations against *database_url*."""
     if not isinstance(database_url, str) or not database_url.strip():
         raise ValueError("database_url must not be empty")
-    PostgresStore._migrate(database_url, post_migration_sql=post_migration_sql)
+    PostgresStore._migrate(database_url)

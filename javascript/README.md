@@ -1,4 +1,4 @@
-# Bursar for JavaScript
+# Bursar JavaScript and TypeScript SDK for AI credits and usage billing
 
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
@@ -21,14 +21,14 @@ is ESM-only and requires Node.js 22 or newer.
 ## Installation
 
 ```bash
-npm install @zonastery/bursar
+npm install @zonastery/bursar pg
 ```
 
-Optional peer dependencies: `pg` (PostgresStore), `stripe` and `dodopayments`
-(provider billing), `js-yaml` (YAML config loading), plus framework adapters
+Install `stripe` or `dodopayments` when using that payment provider. Other
+optional peer dependencies are framework adapters
 such as `@dodopayments/nextjs`, `@dodopayments/better-auth`, `next`, and
 `better-auth`, and `@dodopayments/react-native-checkout`. No peer is required
-for core credits.
+for the database-free pricing core.
 
 ## Database setup
 
@@ -36,10 +36,14 @@ Database installation belongs to the SQL baseline, not to the SDK. Apply it
 with the Python migration CLI:
 
 ```bash
-pip install bursar[postgres]
-export DATABASE_URL=postgresql://...
+python -m pip install "bursar[postgres]"
+export BURSAR_MIGRATION_DATABASE_URL=postgresql://bursar_migrator@db.example.com/bursar
 bursar migrate
 ```
+
+The Python-only CLI is intentional. Install the same Bursar release as the
+TypeScript SDK, run migrations with a dedicated migration principal, and use a
+separate least-privilege `DATABASE_URL` in the application.
 
 ## Usage
 
@@ -49,17 +53,18 @@ import { Bursar, PostgresStore } from "@zonastery/bursar";
 const store = new PostgresStore({
   postgres: process.env.DATABASE_URL!,
   tenantId,
+  providerEnvironment: "test",
   connectionTimeoutMs: 10_000,
   statementTimeoutMs: 30_000,
   onPoolError: (error) => console.error("Bursar PostgreSQL pool error", error),
 });
 const bursar = new Bursar({ creditStore: store });
 
-const grant = await bursar.credits.addCredits(userId, 500, {
+const grant = await bursar.credits.addCredits(userId, "500", {
   type: "purchase",
   idempotencyKey: "checkout:42",
 });
-const charge = await bursar.credits.deductCredits(userId, 20, {
+const charge = await bursar.credits.deductCredits(userId, "20", {
   idempotencyKey: "job:42",
 });
 const refund = await bursar.credits.refundCredits(charge.entryId, {
@@ -97,9 +102,6 @@ import { createDodoNextWebhookHandler } from "@zonastery/bursar/providers/dodo/n
 export const POST = createDodoNextWebhookHandler({
   webhookKey: process.env.DODO_PAYMENTS_WEBHOOK_SECRET!,
   getEventSink: () => bursar.requireBilling(),
-  resolveUser: async ({ customerId, email, metadata }) => {
-    return metadata.userId ?? lookupAccount(customerId, email);
-  },
 });
 ```
 
@@ -215,6 +217,7 @@ import { createBursarRuntime } from "@zonastery/bursar/node";
 const runtime = await createBursarRuntime({
   postgres: process.env.DATABASE_URL!,
   tenantId: process.env.BURSAR_TENANT_ID!,
+  providerEnvironment: "test",
 });
 await runtime.start();
 const bursar = runtime.bursar;

@@ -172,7 +172,7 @@ def test_postgres_client_configures_deadlines_and_tenant_scope() -> None:
     assert cursor.calls[0][0] == "SET LOCAL ROLE bursar_client"
     configuration = cursor.calls[1]
     assert "statement_timeout" in configuration[0]
-    assert configuration[1] == [TENANT_ID, "postgres", "postgres", "1234", "5678"]
+    assert configuration[1] == [TENANT_ID, "postgres", "postgres", "live", "1234", "5678"]
     assert cursor.calls[2][0] == "SET LOCAL search_path TO bursar, public"
     assert pool.put_calls == [(connection, False)]
 
@@ -241,6 +241,7 @@ def test_runtime_close_attempts_every_resource_and_replays_failure() -> None:
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID(TENANT_ID),
+            provider_environment="test",
         )
     )
     runtime._owns_pool = True

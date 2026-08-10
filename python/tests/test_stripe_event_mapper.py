@@ -21,7 +21,7 @@ def subscription_fixture() -> dict:
         "customer": "cus_1",
         "status": "active",
         "cancel_at_period_end": False,
-        "metadata": {"userId": "u1"},
+        "metadata": {"bursar_account_id": "u1"},
         "trial_end": None,
         "cancel_at": None,
         "ended_at": None,
@@ -118,7 +118,7 @@ async def test_current_subscription_periods_and_invoice_parent_references(sink: 
                 "type": "subscription_details",
                 "subscription_details": {
                     "subscription": "sub_1",
-                    "metadata": {"userId": "u1", "source": "subscription"},
+                    "metadata": {"bursar_account_id": "u1", "source": "subscription"},
                 },
             },
             "customer": "cus_1",
@@ -143,9 +143,9 @@ async def test_current_subscription_periods_and_invoice_parent_references(sink: 
     assert events[0].subscription.period_end == "2026-01-01T00:00:00+00:00"
     assert events[0].subscription.refs.price_id == "price_pro"
     assert events[0].subscription.refs.product_id == "prod_pro"
-    assert events[2].user_id == "u1"
+    assert events[2].account_id == "u1"
     assert events[2].metadata == {
-        "userId": "u1",
+        "bursar_account_id": "u1",
         "source": "subscription",
         "invoice_key": "invoice_value",
     }
@@ -190,7 +190,7 @@ async def test_delayed_checkout_events_wait_and_separate_tax(sink: MagicMock) ->
     )
     succeeded = sink.ingest_billing_event.call_args_list[0].args[0]
     assert succeeded.event_type == "payment.succeeded"
-    assert succeeded.user_id == "u1"
+    assert succeeded.account_id == "u1"
     assert succeeded.customer.provider_customer_id == "cus_1"
     assert succeeded.customer.email == "u1@example.com"
     assert succeeded.metadata == {"checkout_intent_id": "intent_1"}
@@ -268,7 +268,7 @@ async def test_failed_invoice_maps_to_canonical_failed_payment(sink: MagicMock) 
                 "type": "subscription_details",
                 "subscription_details": {
                     "subscription": "sub_1",
-                    "metadata": {"userId": "u1"},
+                    "metadata": {"bursar_account_id": "u1"},
                 },
             },
             "customer": "cus_1",
@@ -350,7 +350,7 @@ async def test_payment_intent_event_uses_webhook_type_for_outcome(
             "status": provider_status,
             "metadata": {
                 "auto_recharge_attempt_id": "attempt_1",
-                "userId": "u1",
+                "bursar_account_id": "u1",
                 "price_id": "price_topup",
             },
         },
@@ -387,7 +387,7 @@ async def test_refund_event_preserves_lifecycle_state(
             "amount": 500,
             "currency": "usd",
             "status": provider_status,
-            "metadata": {"userId": "u1"},
+            "metadata": {"bursar_account_id": "u1"},
         },
         sink,
         SimpleNamespace(),

@@ -29,6 +29,7 @@ def test_documentation_canonical_yaml_examples_validate() -> None:
 def test_generic_operation_example_validates() -> None:
     config = {
         "version": 1,
+        "catalog": {"default_plan": "free"},
         "pricing": {
             "operations": {
                 "image_generation": {
@@ -69,11 +70,6 @@ def test_generic_operation_example_validates() -> None:
             },
         },
         "credits": {
-            "accounting": {
-                "unit": "credit",
-                "scale": 6,
-                "rounding": "half_up",
-            },
             "buckets": {
                 "purchased": {
                     "priority": 10,

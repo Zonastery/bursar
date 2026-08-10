@@ -19,7 +19,7 @@ export class BillingFinancialEventHandlers {
     private readonly store: BillingStore,
     private readonly logger: NormalizedLogger,
     private readonly pastDueGracePeriodMs: number,
-    private readonly resolveUserId: (event: BillingEvent) => Promise<string | null>,
+    private readonly resolveAccountId: (event: BillingEvent) => Promise<string | null>,
     private readonly handleSubscriptionRenewed: (
       event: BillingEvent,
     ) => Promise<BillingEventResult>,
@@ -49,7 +49,7 @@ export class BillingFinancialEventHandlers {
       ? await this.handleSubscriptionRenewed(event)
       : { handled: true, action: "invoice_paid" };
     if (!renewalResult.handled) return renewalResult;
-    const uid = await this.resolveUserId(event);
+    const uid = await this.resolveAccountId(event);
     if (uid) {
       await this.store.upsertBillingInvoice({
         provider: event.provider,
@@ -77,7 +77,7 @@ export class BillingFinancialEventHandlers {
     });
     if (!event.payment) return { handled: false, error: "no_payment_data" };
 
-    const uid = await this.resolveUserId(event);
+    const uid = await this.resolveAccountId(event);
     const refs = event.payment.refs;
     let topupConfig: BillingTopupResult | null = null;
     if (refs) {
@@ -175,7 +175,7 @@ export class BillingFinancialEventHandlers {
       eventId: event.eventId,
     });
     if (!event.payment) return { handled: false, error: "no_payment_data" };
-    const uid = await this.resolveUserId(event);
+    const uid = await this.resolveAccountId(event);
     if (uid) {
       await this.store.upsertBillingPayment({
         provider: event.provider,
@@ -214,7 +214,7 @@ export class BillingFinancialEventHandlers {
 
   async handleRefundCreated(event: BillingEvent): Promise<BillingEventResult> {
     if (!event.refund) return { handled: false, error: "no_refund_data" };
-    const uid = await this.resolveUserId(event);
+    const uid = await this.resolveAccountId(event);
     if (uid) {
       const refundId = await this.store.upsertBillingRefund({
         provider: event.provider,

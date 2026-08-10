@@ -95,7 +95,7 @@ export async function callBillingEventSink(
   if (
     !result.handled &&
     result.error !== "unhandled_event_type" &&
-    result.error !== "user_not_found"
+    result.error !== "account_not_found"
   ) {
     throw new BursarError("Bursar failed to ingest the billing event", {
       details: { reason: result.error ?? "unknown" },

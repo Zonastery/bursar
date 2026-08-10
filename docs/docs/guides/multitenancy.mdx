@@ -11,7 +11,7 @@ import TabItem from "@theme/TabItem";
 
 ## Prerequisites
 
-- Install the Bursar CLI and have a PostgreSQL `DATABASE_URL` — see [CLI and deployment](../cli.mdx).
+- Install the Bursar CLI and prepare separate migration, operator, and application runtime PostgreSQL credentials — see [CLI and deployment](../cli.mdx).
 - Read [credit accounting](../concepts/data-model.mdx) for the tenant-scoped accounting entities.
 - Have a [validated configuration](../concepts/configuration.mdx) if you want to bootstrap pricing with the tenant.
 
@@ -28,11 +28,14 @@ from referencing another tenant's rows even if privileged code has a bug.
 
 ## Provision and bind a tenant
 
-1. Run the migrations with `DATABASE_URL` set (see [CLI and deployment](../cli.mdx)).
-2. Provision the tenant with an operator connection:
+1. Run migrations with the dedicated migration owner in
+   `BURSAR_MIGRATION_DATABASE_URL`
+   (see [CLI and deployment](../cli.mdx)).
+2. Provision the separate operator and application logins described in the
+   CLI guide, then create the tenant with the operator connection:
 
 ```bash title="Terminal"
-export DATABASE_URL=postgresql://...
+export BURSAR_OPERATOR_DATABASE_URL=postgresql://bursar_ops@db.example.com/bursar
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
@@ -43,7 +46,9 @@ bursar tenant create acme \
    provisioning:
 
 ```bash title="Terminal"
+export DATABASE_URL=postgresql://bursar_app@db.example.com/bursar
 export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+export BURSAR_PROVIDER_ENVIRONMENT=test
 bursar tenant bootstrap acme ./pricing.yaml \
   --display-name "Acme"
 ```
@@ -54,7 +59,9 @@ storage and lifecycle are Bursar implementation details behind the operator
 CLI.
 :::
 
-Pass the tenant UUID when constructing a store. The store comes from the
+Pass the tenant UUID and the application runtime connection when constructing
+a store. The runtime principal must not be a superuser, have `BYPASSRLS`, or
+use Supabase's `service_role`. The store comes from the
 package top level; the optional runtime composition root lives in
 `bursar.storage` (Python) and the `@zonastery/bursar/node` subpath
 (TypeScript):
@@ -66,12 +73,17 @@ package top level; the optional runtime composition root lives in
 from bursar import PostgresStore
 from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
+)
 
 runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=database_url,
         tenant_id=tenant_id,
+        provider_environment="test",
     )
 )
 ```
@@ -83,11 +95,16 @@ runtime = create_bursar_runtime(
 import { PostgresStore } from "@zonastery/bursar";
 import { createBursarRuntime } from "@zonastery/bursar/node";
 
-const store = new PostgresStore({ postgres: databaseUrl, tenantId });
+const store = new PostgresStore({
+  postgres: databaseUrl,
+  tenantId,
+  providerEnvironment: "test",
+});
 
 const runtime = await createBursarRuntime({
   postgres: databaseUrl,
   tenantId,
+  providerEnvironment: "test",
 });
 ```
 
@@ -102,15 +119,10 @@ next caller.
 
 ## Database enforcement
 
-Tenant RPCs are `SECURITY DEFINER` functions owned by the `bursar_runtime`
-role. That role is `NOLOGIN` and `NOBYPASSRLS`. Business tables use forced
-row level security, so isolation remains active even when the application
-connects as PostgreSQL `service_role`, which normally bypasses RLS.
-
-The tenant can also come from `request.jwt.claims.app_metadata.tenant_id` for
-a trusted PostgREST integration. Bursar never reads `user_metadata`, because
-an end user can change it. Server SDKs should prefer explicit
-transaction-local binding.
+Business tables use forced row-level security. Server SDKs supply the tenant
+only through transaction-local `bursar.tenant_id` on the same checked-out
+connection as the RPC. Bursar does not derive the tenant from PostgREST JWT
+metadata, and a privileged connection is not an isolation boundary.
 
 Missing tenant context fails closed on writes. Suspended and closed tenants
 cannot read or mutate business rows. Operators change lifecycle state:

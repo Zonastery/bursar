@@ -2,15 +2,8 @@ import type { Logger } from "../shared/logger.js";
 import type { SetUserPlanResult, UnsetUserPlanResult } from "../credits/types/index.js";
 import type { BillingEventHandler, BillingEventType } from "./types/index.js";
 
-export type ResolveUser = (
-  provider: string,
-  providerCustomerId: string | null,
-  email: string | null,
-) => string | null;
-
 export interface BillingServiceOptions {
   provisioning?: BillingProvisioningPort | null;
-  resolveUser?: ResolveUser | null;
   eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
   autoSelectEntitlementSource?: boolean;
   /** Access grace after a failed subscription payment. Defaults to seven days. */

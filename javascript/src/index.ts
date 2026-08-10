@@ -80,11 +80,13 @@ export { AccountService, Bursar, CatalogService } from "./bursar.js";
 export type {
   AccountCreatedInput,
   AccountCreatedResult,
+  BillingBursarOptions,
   BursarOptions,
   BillingCapability,
   BillingEventSink,
   CommerceOptions,
   CreditsService,
+  CreditsOnlyBursarOptions,
 } from "./bursar.js";
 export * from "./commerce/index.js";
 
@@ -169,6 +171,7 @@ export type {
   DeductFlatJobOptions,
   DeductOptions,
   DeductTeamOptions,
+  ExactAmount,
   GrantSubscriptionCycleOptions,
   LowBalanceConfig,
   MetricsOrAmount,
@@ -185,6 +188,8 @@ export { CreditStore } from "./credits/store.js";
 export { PostgresStore } from "./credits/postgres/store.js";
 export type { PostgresStoreOptions } from "./credits/postgres/store.js";
 export type { PostgresConnectionOptions } from "./shared/postgres-client.js";
+export { PROVIDER_ENVIRONMENTS } from "./providers/environment.js";
+export type { ProviderEnvironment } from "./providers/environment.js";
 
 // Events
 export type { CreditEvent, CreditEventType } from "./credits/events.js";

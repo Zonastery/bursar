@@ -281,7 +281,7 @@ export class AutoRechargeService {
         metadata: {
           auto_recharge_attempt_id: attempt.id,
           purpose: "credit_topup",
-          userId: input.userId,
+          bursar_account_id: input.userId,
         },
       });
     } catch (error) {

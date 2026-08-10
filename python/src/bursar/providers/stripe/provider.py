@@ -39,6 +39,7 @@ from bursar.providers.types import (
     normalize_provider_logger,
 )
 from bursar.shared.idempotency import require_stable_key, scope_stable_key
+from bursar.shared.numbers import MAX_SAFE_INTEGER
 
 if TYPE_CHECKING:
     from stripe.params import CustomerCreateParams, SubscriptionScheduleUpdateParams, SubscriptionUpdateParams
@@ -58,7 +59,7 @@ def _require_stripe_int(
     *,
     minimum: int = 0,
 ) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > MAX_SAFE_INTEGER:
         raise ProviderResponseError("stripe", operation, details={"field": field})
     return value
 
@@ -219,13 +220,13 @@ class StripeProvider:
         self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
-        if not params.user_id:
+        if not params.account_id:
             raise ValueError("Authentication required for checkout")
         stripe = self._get_stripe()
 
         customer_id = params.customer_id
         if not customer_id:
-            customer_kwargs: dict[str, Any] = {"metadata": {"userId": params.user_id}}
+            customer_kwargs: dict[str, Any] = {"metadata": {"bursar_account_id": params.account_id}}
             if params.email:
                 customer_kwargs["email"] = params.email
             customer_idempotency_key = _scoped_idempotency_key(params.idempotency_key, "customer")
@@ -236,27 +237,28 @@ class StripeProvider:
             customer_id = _require_stripe_text(customer.id, "create_checkout_session", "customer.id")
 
         quantity = params.quantity if params.quantity is not None else 1
+        metadata = {**(params.metadata or {}), "bursar_account_id": params.account_id}
         common: dict[str, Any] = {
             "customer": customer_id,
             "line_items": [{"price": params.product_id, "quantity": quantity}],
             "success_url": params.return_url,
             "cancel_url": params.cancel_url,
-            "client_reference_id": params.user_id,
+            "client_reference_id": params.account_id,
             "automatic_tax": {"enabled": True},
-            "metadata": params.metadata or {},
+            "metadata": metadata,
         }
         if params.type == "subscription":
             common.update(
                 mode="subscription",
                 subscription_data={
-                    "metadata": {"userId": params.user_id, **(params.metadata or {})},
+                    "metadata": metadata,
                 },
             )
         else:
             common.update(
                 mode="payment",
                 payment_intent_data={
-                    "metadata": {"userId": params.user_id, **(params.metadata or {})},
+                    "metadata": metadata,
                 },
             )
         session = await stripe.v1.checkout.sessions.create_async(
@@ -353,13 +355,13 @@ class StripeProvider:
         data_dict = _stripe_dict(data)
         md = data_dict.get("metadata", {}) or {}
         metadata = {str(k): str(v) for k, v in md.items()}
-        user_id = metadata.get("userId")
+        account_id = metadata.get("bursar_account_id")
 
         await handle_stripe_billing_event(
             event.type,
             event.id,
             data,
-            user_id,
+            account_id,
             metadata,
             self._sink,
             stripe,

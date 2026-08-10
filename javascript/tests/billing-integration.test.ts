@@ -10,6 +10,7 @@ import pg from "pg";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import { CreditsService } from "../src/credits/service.js";
 import { PostgresBillingStore, BillingService, BillingEventType } from "../src/billing/index.js";
+import type { BursarConfigData } from "../src/config.js";
 import type {
   BillingEvent,
   BillingPreferences,
@@ -38,6 +39,7 @@ const TEST_INSTANT = "2025-01-01T00:00:00.000Z";
 
 const PRICING_DICT = {
   version: 1,
+  catalog: { default_plan: "free" },
   pricing: {
     operations: {
       inference: {
@@ -64,7 +66,6 @@ const PRICING_DICT = {
     },
   },
   credits: {
-    accounting: { unit: "credit", scale: 6, rounding: "half_up" },
     buckets: {
       purchased: {
         priority: 10,
@@ -191,13 +192,21 @@ const PRICING_DICT = {
       },
     },
   },
-};
+} satisfies BursarConfigData;
 
 async function makePgComponents(pool: pg.Pool) {
-  const cs = new PostgresStore({ postgres: pool, tenantId: TEST_TENANT_ID });
+  const cs = new PostgresStore({
+    postgres: pool,
+    tenantId: TEST_TENANT_ID,
+    providerEnvironment: "test",
+  });
   const cm = new CreditsService(cs);
   await cm.publishAndActivateCatalog(PRICING_DICT);
-  const bs = new PostgresBillingStore({ postgres: pool, tenantId: TEST_TENANT_ID });
+  const bs = new PostgresBillingStore({
+    postgres: pool,
+    tenantId: TEST_TENANT_ID,
+    providerEnvironment: "test",
+  });
   const bm = new BillingService(bs, { provisioning: cm });
   return { cs, cm, bs, bm };
 }
@@ -351,7 +360,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: EVENT_ID,
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_event_idempotency" },
     };
     const r1 = await bm.ingestBillingEvent(event);
@@ -386,7 +395,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     try {
       const claims = await Promise.all(
         workers.map(async (worker, i) => {
-          const local = new PostgresBillingStore({ postgres: worker, tenantId: TEST_TENANT_ID });
+          const local = new PostgresBillingStore({
+            postgres: worker,
+            tenantId: TEST_TENANT_ID,
+            providerEnvironment: "test",
+          });
           ready.add(i);
           if (ready.size === workers.length) release();
           await start;
@@ -463,7 +476,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_customer_1",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       invoice: {
         providerInvoiceId: "in_unhandled",
         status: "draft",
@@ -478,7 +491,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_create_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: CUSTOMER_ID },
       subscription: {
         providerSubscriptionId: SUB_ID,
@@ -505,7 +518,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_cancel_1",
       eventType: "subscription.canceled",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: CUSTOMER_ID },
       subscription: {
         providerSubscriptionId: SUB_ID,
@@ -526,7 +539,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_stale_old_create",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       subscription: {
         providerSubscriptionId: "sub_stale_old",
         status: "active",
@@ -550,7 +563,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_stale_old_cancel",
       eventType: "subscription.canceled",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       subscription: { providerSubscriptionId: "sub_stale_old", status: "canceled" },
     });
 
@@ -566,7 +579,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_provider_migration_stripe",
       eventType: "subscription.created",
       occurredAt: "2025-06-01T00:00:00Z",
-      userId: USER_ID2,
+      accountId: USER_ID2,
       subscription: {
         providerSubscriptionId: "sub_provider_migration_stripe",
         status: "active",
@@ -578,7 +591,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_provider_migration_dodo",
       eventType: "subscription.created",
       occurredAt: "2025-06-02T00:00:00Z",
-      userId: USER_ID2,
+      accountId: USER_ID2,
       subscription: {
         providerSubscriptionId: "sub_provider_migration_dodo",
         status: "active",
@@ -607,7 +620,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_conflict_first",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       subscription: {
         providerSubscriptionId: "sub_conflict_first",
         status: "active",
@@ -619,7 +632,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_conflict_second",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       subscription: {
         providerSubscriptionId: "sub_conflict_second",
         status: "active",
@@ -654,7 +667,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_checkout_payment_failed",
       eventType: "payment.failed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       metadata: { checkout_intent_id: failedIntent.id },
       payment: {
         providerPaymentId: "pay_checkout_failed",
@@ -701,7 +714,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_customer_2",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2 },
     });
     await bm.ingestBillingEvent({
@@ -709,7 +722,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_payment_2",
       eventType: "payment.succeeded",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2 },
       payment: {
         providerPaymentId: "py_test456",
@@ -732,7 +745,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_payment_metadata_credits",
       eventType: "payment.succeeded",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       metadata: { credits: "999999" },
       payment: {
         providerPaymentId: "py_metadata_credits",
@@ -756,7 +769,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_pause",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2 },
     });
     await bm.ingestBillingEvent({
@@ -764,7 +777,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_pause_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2 },
       subscription: {
         providerSubscriptionId: SUB_ID2,
@@ -779,7 +792,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_pause_2",
       eventType: "subscription.paused",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2 },
       subscription: { providerSubscriptionId: SUB_ID2 },
     });
@@ -790,7 +803,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_pause_3",
       eventType: "subscription.resumed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2 },
       subscription: {
         providerSubscriptionId: SUB_ID2,
@@ -808,7 +821,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_unhandled",
       eventType: "invoice.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       invoice: {
         providerInvoiceId: "in_unhandled",
         status: "draft",
@@ -828,7 +841,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_dup",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_dup_test" },
     });
     expect(await bs.getBillingCustomer(PROVIDER, "cus_dup_test")).toBe(USER_ID);
@@ -837,7 +850,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_dup",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: "cus_dup_test" },
     });
     expect(await bs.getBillingCustomer(PROVIDER, "cus_dup_test")).toBe(USER_ID);
@@ -866,7 +879,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "dodo:customer.created:cus_dodo_lifecycle",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       customer: { providerCustomerId: "cus_dodo_lifecycle" },
     });
 
@@ -963,7 +976,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_dodo_multi_cus",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       customer: { providerCustomerId: "cus_dodo_multi" },
     });
 
@@ -1003,7 +1016,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_dodo_date_cus",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       customer: { providerCustomerId: "cus_dodo_date" },
     });
 
@@ -1071,7 +1084,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_cg1",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       customer: { providerCustomerId: CUSTOMER_ID2 },
     });
     await bm.ingestBillingEvent({
@@ -1079,7 +1092,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_cg1",
       eventType: "subscription.renewed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       customer: { providerCustomerId: CUSTOMER_ID2 },
       subscription: {
         providerSubscriptionId: "sub_cg_test",
@@ -1104,7 +1117,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_refund",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: uid,
+      accountId: uid,
       customer: { providerCustomerId: "cus_refund_test" },
     });
     await bm.ingestBillingEvent({
@@ -1112,7 +1125,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pay_refund",
       eventType: "payment.succeeded",
       occurredAt: new Date().toISOString(),
-      userId: uid,
+      accountId: uid,
       customer: { providerCustomerId: "cus_refund_test" },
       payment: {
         providerPaymentId: paymentId,
@@ -1132,7 +1145,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_refund_1",
       eventType: "refund.created",
       occurredAt: new Date().toISOString(),
-      userId: uid,
+      accountId: uid,
       customer: { providerCustomerId: "cus_refund_test" },
       refund: {
         providerRefundId: "refund_1",
@@ -1162,7 +1175,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_cg2",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID4,
+      accountId: USER_ID4,
       customer: { providerCustomerId: "cus_cg_replace" },
     });
     await bm.ingestBillingEvent({
@@ -1170,7 +1183,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_cg2a",
       eventType: "subscription.renewed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID4,
+      accountId: USER_ID4,
       customer: { providerCustomerId: "cus_cg_replace" },
       subscription: {
         providerSubscriptionId: "sub_cg_replace",
@@ -1191,7 +1204,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_cg2b",
       eventType: "subscription.renewed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID4,
+      accountId: USER_ID4,
       customer: { providerCustomerId: "cus_cg_replace" },
       subscription: {
         providerSubscriptionId: "sub_cg_replace",
@@ -1364,7 +1377,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_del_1",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_del_test" },
     });
     await bm.ingestBillingEvent({
@@ -1372,7 +1385,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_sub_del_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_del_test" },
       subscription: {
         providerSubscriptionId: "sub_del_test",
@@ -1386,7 +1399,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_del_2",
       eventType: "customer.deleted",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_del_test" },
     });
     expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
@@ -1401,7 +1414,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_chk_1",
       eventType: "checkout.completed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_chk_test" },
       subscription: {
         providerSubscriptionId: "sub_chk_test",
@@ -1421,7 +1434,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_chk_2",
       eventType: "checkout.completed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_chk2" },
     });
     expect(result.action).toBe("checkout_completed");
@@ -1436,7 +1449,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_act_1",
       eventType: "subscription.activated",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_act" },
       subscription: {
         providerSubscriptionId: "sub_act",
@@ -1456,7 +1469,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cancel_unknown_with_refs",
       eventType: "subscription.canceled",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_cancel_unknown_with_refs",
         status: "canceled",
@@ -1480,7 +1493,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cancel_unknown_without_refs",
       eventType: "subscription.canceled",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_cancel_unknown_without_refs",
         status: "canceled",
@@ -1501,7 +1514,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cs_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_cs_test",
         status: "active",
@@ -1513,7 +1526,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cs_2",
       eventType: "subscription.cancellation_scheduled",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: { providerSubscriptionId: "sub_cs_test" },
     });
     expect(schedResult.action).toBe("cancellation_scheduled");
@@ -1523,7 +1536,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cs_3",
       eventType: "subscription.cancellation_unscheduled",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: { providerSubscriptionId: "sub_cs_test" },
     });
     expect(unschedResult.action).toBe("cancellation_unscheduled");
@@ -1538,7 +1551,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_exp_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       subscription: {
         providerSubscriptionId: "sub_exp_test",
         status: "active",
@@ -1550,7 +1563,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_exp_2",
       eventType: "subscription.expired",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       subscription: { providerSubscriptionId: "sub_exp_test" },
     });
     expect((await cm.getUserPlan(USER_ID5)).planId).toBeNull();
@@ -1570,7 +1583,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pf_1",
       eventType: "subscription.created",
       occurredAt: new Date(now - 5_000).toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       subscription: {
         providerSubscriptionId: "sub_pf_test",
         status: "active",
@@ -1582,7 +1595,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pf_2",
       eventType: "payment.failed",
       occurredAt: new Date(now - 2_000).toISOString(),
-      userId: USER_ID5,
+      accountId: USER_ID5,
       customer: { providerCustomerId: "cus_pf" },
       payment: {
         providerPaymentId: "py_pf",
@@ -1627,6 +1640,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     try {
       await tenantClient.query("BEGIN");
       await tenantClient.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+      await tenantClient.query("SELECT set_config('bursar.provider_environment', 'test', true)");
       await tenantClient.query(
         `INSERT INTO bursar.external_identities(
            subject_id, provider, external_subject
@@ -1705,7 +1719,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_disp_1",
       eventType: "dispute.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_disp" },
       dispute: {
         providerDisputeId: "dp_cycle",
@@ -1720,7 +1734,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_disp_2",
       eventType: "dispute.closed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_disp" },
       dispute: {
         providerDisputeId: "dp_cycle",
@@ -1741,7 +1755,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_ip_1",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_ip" },
     });
     await bm.ingestBillingEvent({
@@ -1749,7 +1763,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_ip_2",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_ip" },
       subscription: {
         providerSubscriptionId: "sub_ip",
@@ -1764,7 +1778,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_ip_3",
       eventType: "invoice.paid",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_ip" },
       subscription: {
         providerSubscriptionId: "sub_ip",
@@ -1793,11 +1807,19 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   it("subscription trial will end callback", async () => {
     let called = false;
     const pool2 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    const cs2 = new PostgresStore({ postgres: DATABASE_URL!, tenantId: TEST_TENANT_ID });
+    const cs2 = new PostgresStore({
+      postgres: DATABASE_URL!,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+    });
     try {
       const cm2 = new CreditsService(cs2);
       await cm2.publishAndActivateCatalog(PRICING_DICT);
-      const bs2 = new PostgresBillingStore({ postgres: pool2, tenantId: TEST_TENANT_ID });
+      const bs2 = new PostgresBillingStore({
+        postgres: pool2,
+        tenantId: TEST_TENANT_ID,
+        providerEnvironment: "test",
+      });
       const bm2 = new BillingService(bs2, {
         provisioning: cm2,
         eventHandlers: {
@@ -1811,7 +1833,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         eventId: "evt_twe_1",
         eventType: "subscription.trial_will_end",
         occurredAt: new Date().toISOString(),
-        userId: USER_ID,
+        accountId: USER_ID,
         subscription: { providerSubscriptionId: "sub_trial_will_end" },
       });
       expect(result.handled).toBe(true);
@@ -1831,7 +1853,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_up_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_up",
         status: "active",
@@ -1843,7 +1865,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_up_2",
       eventType: "subscription.updated",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_up",
         status: "active",
@@ -1863,7 +1885,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pc_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_pc",
         status: "active",
@@ -1887,7 +1909,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pc_2",
       eventType: "subscription.plan_changed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       subscription: {
         providerSubscriptionId: "sub_pc",
         status: "active",
@@ -1911,7 +1933,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_ign_1",
       eventType: "checkout.expired",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
     });
     expect(result.handled).toBe(true);
     expect(result.action).toBe("ignored");
@@ -1926,7 +1948,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pay_norefs",
       eventType: "payment.succeeded",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       payment: {
         providerPaymentId: "py_norefs",
         amountMinor: 500,
@@ -1947,7 +1969,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_pay_cap",
       eventType: "payment.succeeded",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_paycap" },
       payment: {
         providerPaymentId: "py_cap",
@@ -1967,9 +1989,17 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   it("subscription created without credit manager", async () => {
     const pool3 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     try {
-      const bs3 = new PostgresBillingStore({ postgres: pool3, tenantId: TEST_TENANT_ID });
+      const bs3 = new PostgresBillingStore({
+        postgres: pool3,
+        tenantId: TEST_TENANT_ID,
+        providerEnvironment: "test",
+      });
       const bm3 = new BillingService(bs3);
-      const cs3 = new PostgresStore({ postgres: pool3, tenantId: TEST_TENANT_ID });
+      const cs3 = new PostgresStore({
+        postgres: pool3,
+        tenantId: TEST_TENANT_ID,
+        providerEnvironment: "test",
+      });
       const cm3 = new CreditsService(cs3);
       await cm3.publishAndActivateCatalog(PRICING_DICT);
       const result = await bm3.ingestBillingEvent({
@@ -1977,7 +2007,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         eventId: "evt_nocm_1",
         eventType: "subscription.created",
         occurredAt: new Date().toISOString(),
-        userId: "00000000-0000-0000-0000-000000000010",
+        accountId: "00000000-0000-0000-0000-000000000010",
         subscription: {
           providerSubscriptionId: "sub_nocm",
           status: "active",
@@ -1998,7 +2028,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         eventId: "evt_disp_noop",
         eventType: "dispute.created",
         occurredAt: new Date().toISOString(),
-        userId: USER_ID,
+        accountId: USER_ID,
       }),
     ).rejects.toThrow("dispute.created requires dispute data");
   });
@@ -2070,7 +2100,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventId: "evt_cus_upd_1",
       eventType: "customer.updated",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: "cus_upd", email: "updated@test.com" },
     });
     expect(result.handled).toBe(true);

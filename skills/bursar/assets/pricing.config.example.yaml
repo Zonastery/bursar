@@ -2,15 +2,15 @@
 #
 # One strict, versioned document drives pricing, credit buckets, plans, and
 # commerce. Validates with:  bursar config validate pricing.config.example.yaml
-# Publish with:              bursar config set pricing.config.example.yaml
+# Publish after setting DATABASE_URL, BURSAR_TENANT_ID, and
+# BURSAR_PROVIDER_ENVIRONMENT: bursar config set pricing.config.example.yaml
 #
 # Rules of thumb:
 #   - Every exact decimal value is a STRING ("0.0025", "10000"). Floats are
 #     rejected.
 #   - Offer prices are integer minor units with an explicit currency.
 #   - Unknown keys anywhere are rejected (additionalProperties: false).
-#   - `credits.accounting` is fixed v1 (unit: credit, scale: 6,
-#     rounding: half_up) and may be omitted — it is shown here commented out.
+#   - `catalog.default_plan` is required whenever `plans` is non-empty.
 
 version: 1
 
@@ -18,7 +18,7 @@ version: 1
 # catalog — catalog-wide publication settings
 # ---------------------------------------------------------------------------
 catalog:
-  default_plan: free # signup plan; falls back to the lowest-rank plan
+  default_plan: free # required signup plan because this document defines plans
 
 # ---------------------------------------------------------------------------
 # pricing — usage operations (measures + dimensions) and reusable rate cards
@@ -102,13 +102,9 @@ pricing:
 # credits — buckets, spending policies, grants, display conversion
 # ---------------------------------------------------------------------------
 credits:
-  # accounting:                # fixed v1 convention — omit to use the defaults
-  #   unit: credit
-  #   scale: 6
-  #   rounding: half_up
   buckets:
     promotional:
-      { priority: 1, expiry: { type: fixed_at, at: "2026-12-31T23:59:59Z" } }
+      { priority: 1, expiry: { type: fixed_at, at: 2026-12-31T23:59:59Z } }
     purchased: { priority: 10 } # lower priority spends first
   default_bucket: purchased
   policies: # floors applied to deductions

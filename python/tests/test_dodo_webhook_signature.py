@@ -11,16 +11,18 @@ from dodopayments import AsyncDodoPayments, NotFoundError
 
 from bursar.billing.types import BillingEvent, BillingEventResult
 from bursar.providers.dodo.provider import DodoProvider
-from bursar.providers.types import ResolveIdentityInput, WebhookRequest
+from bursar.providers.types import WebhookRequest
 from tests.dodo_fixtures import DODO_ISO_DATE, dodo_event_id
 
 
 class FakeSink:
     def __init__(self) -> None:
         self.called = False
+        self.event: BillingEvent | None = None
 
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         self.called = True
+        self.event = event
         return BillingEventResult(handled=True, action="ok")
 
 
@@ -63,17 +65,7 @@ class FakeModel(SimpleNamespace):
         return {key: convert(value) for key, value in vars(self).items()}
 
 
-class FakeResolveUser:
-    def __init__(self) -> None:
-        self.called = False
-
-    async def __call__(self, identity: ResolveIdentityInput) -> str | None:
-        del identity
-        self.called = True
-        return "00000000-0000-0000-0000-000000000001"
-
-
-USER_ID = "00000000-0000-0000-0000-000000000001"
+ACCOUNT_ID = "team-account-1"
 
 
 @pytest.fixture
@@ -95,7 +87,7 @@ async def test_returns_received_true_when_unwrap_succeeds(sink: FakeSink, logger
             data=FakeModel(
                 id="evt_test_valid",
                 subscription_id="sub_test_valid",
-                metadata={"userId": USER_ID, "plan_slug": "monk"},
+                metadata={"bursar_account_id": ACCOUNT_ID, "plan_slug": "monk"},
             ),
         ),
     )
@@ -103,11 +95,10 @@ async def test_returns_received_true_when_unwrap_succeeds(sink: FakeSink, logger
         get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
-        resolve_user=None,
         logger=logger,
     )
     req = WebhookRequest(
-        raw_body=f'{{"type":"subscription.active","data":{{"metadata":{{"userId":"{USER_ID}"}}}}}}',
+        raw_body=(f'{{"type":"subscription.active","data":{{"metadata":{{"bursar_account_id":"{ACCOUNT_ID}"}}}}}}}}'),
         headers={"content-type": "application/json", "x-webhook-signature": "valid_signature"},
     )
     result = await provider.handle_webhook(req)
@@ -116,6 +107,8 @@ async def test_returns_received_true_when_unwrap_succeeds(sink: FakeSink, logger
     assert result.provider == "dodo"
     assert result.event_id == dodo_event_id("subscription.active", "sub_test_valid")
     assert result.event_type == "subscription.active"
+    assert sink.event is not None
+    assert sink.event.account_id == ACCOUNT_ID
 
 
 @pytest.mark.asyncio
@@ -125,7 +118,6 @@ async def test_returns_non_retryable_on_signature_failure(sink: FakeSink, logger
         get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
-        resolve_user=None,
         logger=logger,
     )
     req = WebhookRequest(
@@ -146,7 +138,6 @@ async def test_returns_non_retryable_for_malformed_payload(sink: FakeSink, logge
         get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="wrong_key",
         event_sink=sink,
-        resolve_user=None,
         logger=logger,
     )
     req = WebhookRequest(
@@ -159,7 +150,7 @@ async def test_returns_non_retryable_for_malformed_payload(sink: FakeSink, logge
 
 
 @pytest.mark.asyncio
-async def test_does_not_resolve_anonymous_user_for_payment_failed(
+async def test_leaves_metadata_free_payment_failure_for_persisted_reference_resolution(
     sink: FakeSink,
     logger: FakeLogger,
 ) -> None:
@@ -172,16 +163,15 @@ async def test_does_not_resolve_anonymous_user_for_payment_failed(
                 payment_id="pay_failed",
                 total_amount=500,
                 currency="USD",
+                metadata={"userId": ACCOUNT_ID},
                 customer=FakeModel(customer_id="cus_failed", email="guest@example.com"),
             ),
         ),
     )
-    resolve_user = FakeResolveUser()
     provider = DodoProvider(
         get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
-        resolve_user=resolve_user,
         logger=logger,
     )
     req = WebhookRequest(
@@ -193,8 +183,9 @@ async def test_does_not_resolve_anonymous_user_for_payment_failed(
     assert result.provider == "dodo"
     assert result.event_id == dodo_event_id("payment.failed", "pay_failed")
     assert result.event_type == "payment.failed"
-    assert not resolve_user.called
     assert sink.called
+    assert sink.event is not None
+    assert sink.event.account_id is None
 
 
 @pytest.mark.asyncio
@@ -209,7 +200,6 @@ async def test_get_checkout_session_status_with_requires_customer_action(sink: F
         get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
-        resolve_user=None,
         logger=logger,
     )
     result = await provider.get_checkout_session_status("cks_1")
@@ -233,7 +223,6 @@ async def test_returns_none_for_missing_session(sink: FakeSink, logger: FakeLogg
         get_client=lambda: cast(AsyncDodoPayments, client),
         webhook_key="test_wh_key_12345",
         event_sink=sink,
-        resolve_user=None,
         logger=logger,
     )
     result = await provider.get_checkout_session_status("cks_missing")

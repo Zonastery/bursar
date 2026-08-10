@@ -4,13 +4,7 @@ export const AUTO_RECHARGE_STATES = ["disabled", "active", "paused"] as const;
 export type BillingAutoRechargeState = (typeof AUTO_RECHARGE_STATES)[number];
 
 export type BillingAutoRechargeAttemptState =
-  | "claimed"
-  | "submitted"
-  | "processing"
-  | "unknown"
-  | "succeeded"
-  | "failed"
-  | "action_required";
+  "claimed" | "submitted" | "processing" | "unknown" | "succeeded" | "failed" | "action_required";
 
 export interface BillingAutoRechargeProfile {
   userId: string;

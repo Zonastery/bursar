@@ -261,25 +261,21 @@ def _base_event(
     return result
 
 
-def _with_user(kw: dict, user_id: str | None) -> dict:
-    if user_id:
-        kw["user_id"] = user_id
+def _with_account(kw: dict, account_id: str | None) -> dict:
+    if account_id:
+        kw["account_id"] = account_id
     return kw
 
 
 async def _handle_subscription_active(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    if not user_id:
-        logger.error("Dodo subscription event: no userId", {"event": event_type})
-        return
-
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
 
@@ -301,22 +297,18 @@ async def _handle_subscription_active(
             **_subscription_fields(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_renewed(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    if not user_id:
-        logger.error("Dodo subscription event: no userId", {"event": event_type})
-        return
-
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
 
@@ -334,13 +326,13 @@ async def _handle_subscription_renewed(
             refs=_subscription_refs(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_cancelled(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -358,13 +350,13 @@ async def _handle_subscription_cancelled(
             **_subscription_fields(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_expired(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -382,13 +374,13 @@ async def _handle_subscription_expired(
             **_subscription_fields(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_failed(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -406,13 +398,13 @@ async def _handle_subscription_failed(
             **_subscription_fields(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_on_hold(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -430,13 +422,13 @@ async def _handle_subscription_on_hold(
             **_subscription_fields(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_updated_event(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -458,13 +450,13 @@ async def _handle_subscription_updated_event(
             refs=_subscription_refs(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_subscription_plan_changed(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -482,13 +474,13 @@ async def _handle_subscription_plan_changed(
             **_subscription_fields(data, metadata),
         ),
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_payment_succeeded(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -544,13 +536,13 @@ async def _handle_payment_succeeded(
                 "Dodo payment.next_billing_date",
             ),
         )
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_payment_failed(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -590,13 +582,13 @@ async def _handle_payment_failed(
         status="failed",
         refs=ProviderRef(product_id=product_id) if product_id else None,
     )
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_refund(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -630,13 +622,13 @@ async def _handle_refund(
         ),
         "refund": refund_info,
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_dispute_created(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -662,13 +654,13 @@ async def _handle_dispute_created(
         "event_type": BillingEventType.dispute_created,
         "dispute": dispute_info,
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 async def _handle_dispute_closed(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
@@ -694,7 +686,7 @@ async def _handle_dispute_closed(
         "event_type": BillingEventType.dispute_closed,
         "dispute": dispute_info,
     }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
 _EVENT_HANDLERS: dict[str, Any] = {
@@ -726,7 +718,7 @@ async def handle_dodo_billing_event(
     event_type: str,
     data: dict[str, Any],
     event_timestamp: object,
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     sink: BillingEventSink,
     logger: ProviderLogger | None = None,
@@ -739,4 +731,4 @@ async def handle_dodo_billing_event(
         logger.debug("Unhandled Dodo webhook event type", {"type": event_type})
         return
 
-    await handler(event_type, data, user_id, metadata, event_timestamp, sink, logger)
+    await handler(event_type, data, account_id, metadata, event_timestamp, sink, logger)

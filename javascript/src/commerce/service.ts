@@ -33,6 +33,7 @@ import type {
 } from "../providers/types.js";
 import { normalizeLogger } from "../shared/logger.js";
 import { requireStableKey, scopedStableKey } from "../shared/idempotency.js";
+import { normalizeProviderEnvironment } from "../providers/environment.js";
 import {
   ActiveSubscriptionError,
   CheckoutCompletedError,
@@ -93,11 +94,11 @@ function requireOptionalNonEmptyText(value: unknown, field: string): void {
 
 function assertCreateCheckoutInput(input: CreateCheckoutInput): void {
   requireNonEmptyText(input.subjectId, "subjectId");
+  requireNonEmptyText(input.accountId, "accountId");
   requireNonEmptyText(input.offerKey, "offerKey");
   requireNonEmptyText(input.returnUrl, "returnUrl");
   requireNonEmptyText(input.cancelUrl, "cancelUrl");
   requireStableKey(input.operationKey, "operationKey");
-  requireOptionalNonEmptyText(input.accountId, "accountId");
   requireOptionalNonEmptyText(input.email, "email");
   requireOptionalNonEmptyText(input.provider, "provider");
   if (input.type !== undefined && input.type !== "subscription" && input.type !== "credit_pack") {
@@ -351,26 +352,12 @@ export class CommerceService {
     ) {
       throw new TypeError("checkoutIntentTtlMs must be a positive safe integer");
     }
+    const providerEnvironment = normalizeProviderEnvironment(options.providerEnvironment);
     this.logger = normalizeLogger(options.logger);
-    const identityResolver = options.identityResolver
-      ? async (input: Parameters<NonNullable<CommerceOptions["identityResolver"]>>[0]) => {
-          const accountId = await options.identityResolver!(input);
-          requireOptionalNonEmptyText(accountId, "identity resolver accountId");
-          if (accountId && input.customerId) {
-            await this.billing.upsertCustomer(
-              input.provider,
-              input.customerId,
-              accountId,
-              input.email,
-            );
-          }
-          return accountId;
-        }
-      : undefined;
     this.providers = new CommerceProviderRegistry(options, {
       tenantId: options.tenantId,
+      providerEnvironment,
       eventSink,
-      identityResolver,
     });
     this.autoRecharge = new CommerceAutoRechargeService(this, (name) => this.providers.get(name));
   }
@@ -418,7 +405,7 @@ export class CommerceService {
       return 1;
     }
     const quantity = requested ?? offer.quantity.default;
-    if (!Number.isInteger(quantity) || quantity < offer.quantity.minimum) {
+    if (!Number.isSafeInteger(quantity) || quantity < offer.quantity.minimum) {
       throw new InvalidOfferQuantityError(
         `Minimum quantity is ${offer.quantity.minimum}`,
         offer.quantity.minimum,
@@ -448,12 +435,10 @@ export class CommerceService {
     assertCreateCheckoutInput(input);
     const resolved = await this.resolveOffer(input);
     const quantity = this.quantity(resolved.offer, input.quantity);
-    const accountState = input.accountId
-      ? await Promise.all([
-          this.billing.getBlockingSubscription(input.accountId),
-          this.billing.getCustomerByUserId(input.accountId),
-        ])
-      : ([null, null] as const);
+    const accountState = await Promise.all([
+      this.billing.getBlockingSubscription(input.accountId),
+      this.billing.getCustomerByUserId(input.accountId),
+    ]);
     if (resolved.offer.type === "subscription" && accountState[0]) {
       throw new ActiveSubscriptionError();
     }
@@ -466,13 +451,11 @@ export class CommerceService {
     const reference = resolved.offer.providers[provider.provider];
     if (!reference) throw new UnknownOfferError("Offer has no reference for the selected provider");
     const productId = externalId(reference);
-    const customer = input.accountId
-      ? await this.billing.getCustomerByUserId(input.accountId, provider.provider)
-      : null;
+    const customer = await this.billing.getCustomerByUserId(input.accountId, provider.provider);
 
     const metadata: Record<string, string> = {
       ...(input.metadata ?? {}),
-      ...(input.accountId ? { userId: input.accountId } : {}),
+      bursar_account_id: input.accountId,
     };
     if (resolved.offer.type === "subscription") {
       metadata.plan_slug = resolved.offer.plan;
@@ -489,6 +472,7 @@ export class CommerceService {
           offerKey: resolved.offerKey,
           provider: provider.provider,
           quantity,
+          accountId: input.accountId,
         }),
       )
       .digest("hex");
@@ -541,7 +525,7 @@ export class CommerceService {
 
     try {
       const session = await provider.createCheckoutSession({
-        ...(input.accountId ? { userId: input.accountId } : {}),
+        accountId: input.accountId,
         ...(customer?.providerCustomerId ? { customerId: customer.providerCustomerId } : {}),
         ...(input.email ? { email: input.email } : {}),
         productId,
@@ -556,11 +540,7 @@ export class CommerceService {
         providerSessionId: session.providerSessionId,
         checkoutUrl: session.url,
       });
-      if (
-        input.accountId &&
-        session.customerId &&
-        session.customerId !== customer?.providerCustomerId
-      ) {
+      if (session.customerId && session.customerId !== customer?.providerCustomerId) {
         await this.billing.upsertCustomer(
           provider.provider,
           session.customerId,
@@ -618,7 +598,7 @@ export class CommerceService {
       eventId: `cancel_${input.accountId}_${input.operationKey}`,
       eventType: "subscription.cancellation_scheduled",
       occurredAt: new Date().toISOString(),
-      userId: input.accountId,
+      accountId: input.accountId,
       customer: { providerCustomerId: subscription.providerCustomerId },
       subscription: {
         providerSubscriptionId: subscription.providerSubscriptionId,
@@ -653,7 +633,7 @@ export class CommerceService {
       eventId: `reactivate_${input.accountId}_${input.operationKey}`,
       eventType: "subscription.cancellation_unscheduled",
       occurredAt: new Date().toISOString(),
-      userId: input.accountId,
+      accountId: input.accountId,
       customer: { providerCustomerId: subscription.providerCustomerId },
       subscription: {
         providerSubscriptionId: subscription.providerSubscriptionId,
@@ -686,7 +666,7 @@ export class CommerceService {
             eventId: `cancel_all_${input.accountId}_${operationKey}`,
             eventType: "subscription.cancellation_scheduled",
             occurredAt: new Date().toISOString(),
-            userId: input.accountId,
+            accountId: input.accountId,
             customer: { providerCustomerId: subscription.providerCustomerId },
             subscription: {
               providerSubscriptionId: subscription.providerSubscriptionId,
@@ -974,7 +954,7 @@ export class CommerceService {
         ...providerPlanChangeParams(context.policy!),
         onPaymentFailure: context.policy!.paymentFailure,
         metadata: {
-          userId: input.accountId,
+          bursar_account_id: input.accountId,
           plan_slug: context.targetOffer.plan,
           billing_interval: context.targetInterval,
         },

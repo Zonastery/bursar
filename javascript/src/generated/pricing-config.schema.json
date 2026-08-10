@@ -20,6 +20,7 @@
         "max_in_flight": {
           "anyOf": [
             {
+              "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
             },
@@ -109,6 +110,7 @@
       "additionalProperties": false,
       "properties": {
         "max_purchases": {
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Max Purchases",
           "type": "integer"
@@ -125,6 +127,7 @@
           "title": "Window"
         },
         "max_charge_minor": {
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Max Charge Minor",
           "type": "integer"
@@ -134,6 +137,7 @@
         },
         "max_consecutive_failures": {
           "default": 3,
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Max Consecutive Failures",
           "type": "integer"
@@ -209,6 +213,7 @@
         },
         "count": {
           "default": 1,
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Count",
           "type": "integer"
@@ -244,6 +249,7 @@
       "additionalProperties": false,
       "properties": {
         "priority": {
+          "maximum": 9007199254740991,
           "minimum": 0,
           "title": "Priority",
           "type": "integer"
@@ -305,6 +311,7 @@
         },
         "count": {
           "default": 1,
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Count",
           "type": "integer"
@@ -470,31 +477,6 @@
       "title": "CommerceConfig",
       "type": "object"
     },
-    "CreditAccounting": {
-      "additionalProperties": false,
-      "properties": {
-        "unit": {
-          "const": "credit",
-          "default": "credit",
-          "title": "Unit",
-          "type": "string"
-        },
-        "scale": {
-          "const": 6,
-          "default": 6,
-          "title": "Scale",
-          "type": "integer"
-        },
-        "rounding": {
-          "const": "half_up",
-          "default": "half_up",
-          "title": "Rounding",
-          "type": "string"
-        }
-      },
-      "title": "CreditAccounting",
-      "type": "object"
-    },
     "CreditAllowance": {
       "additionalProperties": false,
       "properties": {
@@ -508,6 +490,7 @@
         },
         "priority": {
           "description": "Spend priority shared with credit buckets. Lower values are used first.",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "title": "Priority",
           "type": "integer"
@@ -594,10 +577,6 @@
     "CreditsConfig": {
       "additionalProperties": false,
       "properties": {
-        "accounting": {
-          "$ref": "#/$defs/CreditAccounting",
-          "description": "Fixed v1 accounting convention. It may be omitted; canonical output includes the defaults."
-        },
         "buckets": {
           "additionalProperties": {
             "$ref": "#/$defs/BucketDefinition"
@@ -884,6 +863,7 @@
           "type": "string"
         },
         "count": {
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Count",
           "type": "integer"
@@ -1280,6 +1260,7 @@
         },
         "max_awards_per_subject": {
           "default": 1,
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Max Awards Per Subject",
           "type": "integer"
@@ -1349,11 +1330,15 @@
         },
         "default": {
           "type": "integer",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "title": "Default"
         },
         "minimum": {
           "anyOf": [
             {
+              "maximum": 9007199254740991,
+              "minimum": -9007199254740991,
               "type": "integer"
             },
             {
@@ -1366,6 +1351,8 @@
         "maximum": {
           "anyOf": [
             {
+              "maximum": 9007199254740991,
+              "minimum": -9007199254740991,
               "type": "integer"
             },
             {
@@ -1387,17 +1374,20 @@
       "additionalProperties": false,
       "properties": {
         "minimum": {
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Minimum",
           "type": "integer"
         },
         "maximum": {
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Maximum",
           "type": "integer"
         },
         "default": {
           "type": "integer",
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Default"
         }
@@ -1481,6 +1471,7 @@
       "additionalProperties": false,
       "properties": {
         "amount_minor": {
+          "maximum": 9007199254740991,
           "minimum": 0,
           "title": "Amount Minor",
           "type": "integer"
@@ -1511,6 +1502,7 @@
       "additionalProperties": false,
       "properties": {
         "max_in_flight": {
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Max In Flight",
           "type": "integer"
@@ -1704,6 +1696,7 @@
         "rank": {
           "default": 0,
           "description": "Public catalog ordering. Lower ranks appear first; ties are ordered by plan key.",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "title": "Rank",
           "type": "integer"
@@ -1746,6 +1739,8 @@
                 "type": "boolean"
               },
               {
+                "maximum": 9007199254740991,
+                "minimum": -9007199254740991,
                 "type": "integer"
               },
               {
@@ -1986,18 +1981,21 @@
       "properties": {
         "minimum": {
           "default": 1,
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Minimum",
           "type": "integer"
         },
         "maximum": {
           "default": 1,
+          "maximum": 9007199254740991,
           "minimum": 1,
           "title": "Maximum",
           "type": "integer"
         },
         "default": {
           "type": "integer",
+          "maximum": 9007199254740991,
           "minimum": 1,
           "default": 1,
           "title": "Default"
@@ -2404,6 +2402,8 @@
         },
         "sort_order": {
           "default": 0,
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "title": "Sort Order",
           "type": "integer"
         },
@@ -2573,6 +2573,8 @@
         },
         "sort_order": {
           "default": 0,
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
           "title": "Sort Order",
           "type": "integer"
         },

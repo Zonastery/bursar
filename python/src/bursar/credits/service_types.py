@@ -27,10 +27,22 @@ from bursar.shared.logger import Logger
 
 PolicyPreset = Literal["strict_prepaid", "overdraft"]
 PostDeductionSource = Literal["deduct", "settle", "raw"]
-MetricsOrAmount = UsageMetrics | Decimal | int
+ExactAmount = Decimal | int | str
+MetricsOrAmount = UsageMetrics | ExactAmount
 
 
 ReplayKey = StableKey
+
+
+def _parse_exact_amount(value: object, field_name: str) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{field_name} must be a Decimal, integer, or decimal string")
+    try:
+        return Decimal(value)
+    except ArithmeticError as error:
+        raise ValueError(f"{field_name} must be a valid decimal string") from error
 
 
 class _CreditsServiceModel(BaseModel):
@@ -44,16 +56,19 @@ class PostDeductionContext(_CreditsServiceModel):
 
 
 class LowBalanceConfig(_CreditsServiceModel):
-    thresholds: list[Decimal] | None = None
+    thresholds: list[ExactAmount] | None = None
     on_trigger: Callable[[CreditEvent], None | Awaitable[None]] | None = None
     max_tracked_users: int = Field(default=100_000, strict=True, ge=1)
 
-    @field_validator("thresholds")
+    @field_validator("thresholds", mode="before")
     @classmethod
-    def validate_thresholds(cls, values: list[Decimal] | None) -> list[Decimal] | None:
-        if values is not None and any(not value.is_finite() or value < 0 for value in values):
+    def validate_thresholds(cls, values: object) -> object:
+        if values is None or not isinstance(values, (list, tuple)):
+            return values
+        normalized = [_parse_exact_amount(value, "low-balance threshold") for value in values]
+        if any(not value.is_finite() or value < 0 for value in normalized):
             raise ValueError("low-balance thresholds must be finite non-negative amounts")
-        return values
+        return normalized
 
 
 class CreditsServiceOptions(_CreditsServiceModel):
@@ -61,7 +76,7 @@ class CreditsServiceOptions(_CreditsServiceModel):
     analytics: UsageAnalyticsStore | None = None
     usage_store: UsageChargeStore | None = None
     policy: PolicyPreset = "strict_prepaid"
-    overdraft_floor: Decimal | None = None
+    overdraft_floor: ExactAmount | None = None
     max_concurrent: int | None = Field(default=None, strict=True, ge=1)
     low_balance: LowBalanceConfig | None = None
     default_ttl_seconds: int = Field(default=600, strict=True, ge=1)
@@ -69,12 +84,15 @@ class CreditsServiceOptions(_CreditsServiceModel):
     catalog_cache_ttl_ms: int = Field(default=300_000, strict=True, ge=0)
     post_deduction: Callable[[PostDeductionContext], None | Awaitable[None]] | None = None
 
-    @field_validator("overdraft_floor")
+    @field_validator("overdraft_floor", mode="before")
     @classmethod
-    def validate_overdraft_floor(cls, value: Decimal | None) -> Decimal | None:
-        if value is not None and (not value.is_finite() or value > 0):
+    def validate_overdraft_floor(cls, value: object) -> object:
+        if value is None:
+            return None
+        normalized = _parse_exact_amount(value, "overdraft_floor")
+        if not normalized.is_finite() or normalized > 0:
             raise ValueError("overdraft_floor must be finite and <= 0")
-        return value
+        return normalized
 
 
 class ReserveOptions(_CreditsServiceModel):
@@ -146,6 +164,7 @@ __all__ = [
     "CanAffordOptions",
     "BeginBilledOperationOptions",
     "CreditsServiceOptions",
+    "ExactAmount",
     "GrantSubscriptionCycleOptions",
     "LowBalanceConfig",
     "MetricsOrAmount",

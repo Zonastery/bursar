@@ -1,6 +1,6 @@
 import { NotFoundError } from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
-import type { CheckoutPaymentStatus, PaymentProvider, ResolveUserCallback } from "../types.js";
+import type { CheckoutPaymentStatus, PaymentProvider } from "../types.js";
 import {
   deduplicatePaymentMethods,
   type ProviderLogger,
@@ -28,11 +28,9 @@ import { ProviderResponseError } from "../../errors.js";
 import { requireStableKey } from "../../shared/idempotency.js";
 import type { DodoClient, DodoWebhookPayload } from "./client-contract.js";
 import { dodoBillingEventId, handleDodoBillingEvent } from "./event-mapper.js";
-import { optionalProviderString } from "../_shared.js";
 
 export interface DodoWebhookProcessorOptions {
   eventSink: BillingEventSink;
-  resolveUser?: ResolveUserCallback;
   logger?: ProviderLogger | null;
 }
 
@@ -42,30 +40,8 @@ export interface DodoProviderOptions extends DodoWebhookProcessorOptions {
   setupProductId?: string;
 }
 
-const NORMALIZED_DODO_EVENT_TYPES: Record<string, string> = {
-  "subscription.active": "subscription.created",
-  "subscription.renewed": "subscription.renewed",
-  "subscription.cancelled": "subscription.canceled",
-  "subscription.expired": "subscription.expired",
-  "subscription.failed": "subscription.updated",
-  "subscription.on_hold": "subscription.updated",
-  "subscription.updated": "subscription.updated",
-  "subscription.plan_changed": "subscription.plan_changed",
-  "payment.succeeded": "payment.succeeded",
-  "payment.failed": "payment.failed",
-  "refund.succeeded": "refund.created",
-  "refund.failed": "refund.failed",
-  "dispute.opened": "dispute.created",
-  "dispute.challenged": "dispute.created",
-  "dispute.won": "dispute.closed",
-  "dispute.lost": "dispute.closed",
-  "dispute.accepted": "dispute.closed",
-  "dispute.cancelled": "dispute.closed",
-  "dispute.expired": "dispute.closed",
-};
-
 const BURSAR_METADATA_KEYS = new Set([
-  "userId",
+  "bursar_account_id",
   "plan_slug",
   "billing_interval",
   "credits",
@@ -122,45 +98,6 @@ function requireProviderInteger(
   return parsed;
 }
 
-function identityInput(
-  provider: string,
-  providerEventType: string,
-  data: Record<string, unknown>,
-  metadata: Record<string, string>,
-) {
-  if (
-    data.customer !== null &&
-    data.customer !== undefined &&
-    (typeof data.customer !== "object" || Array.isArray(data.customer))
-  ) {
-    throw new TypeError("Dodo customer must be an object");
-  }
-  const customer = (data.customer as Record<string, unknown> | null | undefined) ?? {};
-  const customerId =
-    optionalProviderString(data.customer_id, "Dodo customer_id") ??
-    optionalProviderString(customer.customer_id, "Dodo customer.customer_id") ??
-    null;
-  const email =
-    optionalProviderString(customer.email, "Dodo customer.email")?.toLowerCase() ?? null;
-  return {
-    provider,
-    providerEventType,
-    normalizedEventType: NORMALIZED_DODO_EVENT_TYPES[providerEventType] ?? null,
-    customerId,
-    email,
-    metadata,
-    successful:
-      providerEventType === "payment.succeeded" ||
-      providerEventType === "subscription.active" ||
-      providerEventType === "subscription.renewed",
-    checkoutKind: providerEventType.startsWith("subscription.")
-      ? ("subscription" as const)
-      : metadata.credits
-        ? ("credit_topup" as const)
-        : null,
-  };
-}
-
 /**
  * Maps an already verified Dodo payload into Bursar's provider-neutral billing
  * lifecycle. Framework integrations use this after the official Dodo adapter
@@ -168,12 +105,10 @@ function identityInput(
  */
 export class DodoWebhookProcessor {
   private readonly sink: BillingEventSink;
-  private readonly resolveUser?: ResolveUserCallback;
   private readonly logger: ReturnType<typeof normalizeProviderLogger>;
 
   constructor(options: DodoWebhookProcessorOptions) {
     this.sink = options.eventSink;
-    this.resolveUser = options.resolveUser;
     this.logger = normalizeProviderLogger(options.logger);
   }
 
@@ -184,14 +119,9 @@ export class DodoWebhookProcessor {
     const data = payload.data as Record<string, unknown>;
     const type = payload.type;
     const metadata = normalizeMetadata(data.metadata);
-    let userId: string | null = metadata.userId ?? null;
+    const accountId = metadata.bursar_account_id ?? null;
 
-    const resolvesUserWithoutMetadata = type !== "payment.failed";
-    if (!userId && this.resolveUser && resolvesUserWithoutMetadata) {
-      userId = await this.resolveUser(identityInput("dodo", type, data, metadata));
-    }
-
-    await handleDodoBillingEvent(payload, userId, metadata, this.sink, this.logger);
+    await handleDodoBillingEvent(payload, accountId, metadata, this.sink, this.logger);
     return {
       received: true,
       retryable: false,
@@ -227,11 +157,17 @@ export class DodoProvider implements PaymentProvider {
     this.logger.info("[DodoProvider] createCheckoutSession", {
       productId: params.productId,
       type: params.type,
-      hasUserId: Boolean(params.userId),
+      hasAccountId: Boolean(params.accountId),
     });
     const client = this.getClient();
+    const quantity = requireProviderInteger(
+      params.quantity ?? 1,
+      "createCheckoutSession",
+      "quantity",
+      { min: 1 },
+    );
     const body: CheckoutSessionCreateParams = {
-      product_cart: [{ product_id: params.productId, quantity: params.quantity ?? 1 }],
+      product_cart: [{ product_id: params.productId, quantity }],
       customer: params.customerId
         ? { customer_id: params.customerId }
         : params.email
@@ -239,7 +175,7 @@ export class DodoProvider implements PaymentProvider {
           : undefined,
       return_url: params.returnUrl,
       cancel_url: params.cancelUrl,
-      metadata: params.metadata,
+      metadata: { ...params.metadata, bursar_account_id: params.accountId },
     };
     const session = await client.checkoutSessions.create(body, {
       idempotencyKey,

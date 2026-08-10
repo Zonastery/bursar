@@ -179,6 +179,7 @@ def pg_store(pg_database_url: str) -> Iterator[PostgresStore]:
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
         max_pool_size=2,
+        provider_environment="test",
     )
     try:
         yield store

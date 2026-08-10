@@ -25,10 +25,13 @@ commerce:
 At runtime, each provider is a `PaymentProvider` adapter (Stripe, Dodo, or
 custom) registered in `CommerceOptions.providers`. Adapters do two jobs: they
 create checkout sessions, and they map provider webhooks to **normalized
-`BillingEvent`s**. Events enter through `bursar.ingest_billing_event(event)` /
-`ingestBillingEvent`, which claims each event by
-`(provider, event_id, event_type)`, routes it through the lifecycle handlers,
-and replays nothing twice.
+`BillingEvent`s**. Send the provider's unmodified body and headers through
+`commerce.handle_webhook(...)` / `handleWebhook(...)`, or use an official
+signature-verifying framework adapter. The verified adapter then submits the
+normalized event, which Bursar claims by `(provider, event_id, event_type)` so
+a redelivery cannot apply the lifecycle mutation twice. Direct
+`ingest_billing_event` / `ingestBillingEvent` calls are only for already
+trusted custom adapters.
 
 ## Offers
 
@@ -104,7 +107,8 @@ from the subscription state. `resolve_offer(provider, product_id=None, price_id=
 maps a provider object to the configured offer, e.g. from a webhook payload:
 
 ```python
-offer = bursar.billing.resolve_offer("stripe", price_id="price_pro_monthly")
+billing = bursar.require_billing()
+offer = billing.resolve_offer("stripe", price_id="price_pro_monthly")
 ```
 
 ## Plan changes

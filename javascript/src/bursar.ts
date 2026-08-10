@@ -15,7 +15,7 @@ import { CommerceService as CommerceServiceImpl } from "./commerce/service.js";
 import { CommerceNotConfiguredError } from "./commerce/errors.js";
 import type { CommerceOptions } from "./commerce/types.js";
 import { loadConfigFromDict } from "./config.js";
-import type { CatalogRollout, ParsedBursarConfig } from "./config/types.js";
+import type { BursarConfigData, CatalogRollout, ParsedBursarConfig } from "./config/types.js";
 import { CapabilityNotConfiguredError, ConfigError, CatalogNotLoadedError } from "./errors.js";
 import { projectPublicCatalog, type PublicCatalog } from "./catalog.js";
 import type { CreditMetadata, GrantProgramAwardResult } from "./credits/types/index.js";
@@ -86,15 +86,28 @@ type CatalogCreditsService = Pick<
   | "applyDuePlanChanges"
 >;
 
-/** Options for constructing the single application-facing Bursar service. */
-export interface BursarOptions {
+interface BaseBursarOptions {
   creditStore: CreditStore;
-  billingStore?: BillingStore | null;
-  creditsOptions?: CreditsServiceOptions | null;
-  billingOptions?: BillingServiceOptions | null;
-  commerceOptions?: CommerceOptions | null;
-  emitter?: CreditEventEmitter | null;
+  creditsOptions?: CreditsServiceOptions;
+  emitter?: CreditEventEmitter;
 }
+
+/** Credits-only construction rejects billing options that would otherwise be ignored. */
+export interface CreditsOnlyBursarOptions extends BaseBursarOptions {
+  billingStore?: undefined;
+  billingOptions?: never;
+  commerceOptions?: never;
+}
+
+/** Billing construction owns provisioning and may optionally enable commerce. */
+export interface BillingBursarOptions extends BaseBursarOptions {
+  billingStore: BillingStore;
+  billingOptions?: Omit<BillingServiceOptions, "provisioning">;
+  commerceOptions?: CommerceOptions;
+}
+
+/** Options for constructing the single application-facing Bursar service. */
+export type BursarOptions = CreditsOnlyBursarOptions | BillingBursarOptions;
 
 /** Catalog operations. Configuration writes live here, never in BillingService. */
 export class CatalogService {
@@ -135,21 +148,18 @@ export class CatalogService {
     return projectPublicCatalog(await this.getConfig());
   }
 
-  publishDraft(config: Record<string, unknown>, label?: string | null): Promise<string> {
+  publishDraft(config: BursarConfigData, label?: string | null): Promise<string> {
     return this.credits.publishCatalogDraft(config, label);
   }
 
-  activate(
-    version: number,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<string> {
+  activate(version: number, rollout?: CatalogRollout | null): Promise<string> {
     return this.credits.activateCatalogRevision(version, rollout);
   }
 
   publishAndActivate(
-    config: Record<string, unknown>,
+    config: BursarConfigData,
     label?: string | null,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
+    rollout?: CatalogRollout | null,
   ): Promise<string> {
     return this.credits.publishAndActivateCatalog(config, label, rollout);
   }
@@ -187,12 +197,14 @@ export class AccountService {
   ) {}
 
   async onAccountCreated(input: AccountCreatedInput): Promise<AccountCreatedResult> {
-    if (!input.eventKey.trim()) throw new ConfigError("eventKey must not be empty");
+    if (typeof input.accountId !== "string" || !input.accountId.trim()) {
+      throw new TypeError("accountId must be a non-empty string");
+    }
+    if (typeof input.eventKey !== "string" || !input.eventKey.trim()) {
+      throw new TypeError("eventKey must be a non-empty string");
+    }
     const config = await retryBursarOperation(() => this.catalog.getConfig());
-    const fallback = Object.entries(config.plans).sort(
-      ([aKey, a], [bKey, b]) => a.rank - b.rank || aKey.localeCompare(bKey),
-    )[0]?.[0];
-    const planKey = config.catalog.defaultPlan ?? fallback;
+    const planKey = config.catalog.defaultPlan;
     if (!planKey) throw new ConfigError("The active catalog has no default account plan");
 
     const current = await retryBursarOperation(() => this.credits.getUserPlan(input.accountId));
@@ -244,6 +256,43 @@ export class Bursar implements BillingEventSink {
   readonly accounts: AccountService;
 
   constructor(options: BursarOptions) {
+    if (typeof options !== "object" || options === null) {
+      throw new TypeError("Bursar options are required");
+    }
+    if (options.billingStore === null) {
+      throw new TypeError("billingStore must be a BillingStore when provided");
+    }
+    for (const optionName of [
+      "creditsOptions",
+      "billingOptions",
+      "commerceOptions",
+      "emitter",
+    ] as const) {
+      if (options[optionName] === null) {
+        throw new TypeError(`${optionName} must not be null`);
+      }
+    }
+    if (
+      options.billingStore === undefined &&
+      (options.billingOptions !== undefined || options.commerceOptions !== undefined)
+    ) {
+      throw new TypeError("billingOptions and commerceOptions require billingStore");
+    }
+    if (options.billingOptions && "provisioning" in options.billingOptions) {
+      throw new TypeError("billingOptions.provisioning is owned by Bursar");
+    }
+    const environments = [
+      ["creditStore", options.creditStore.providerEnvironment],
+      ["billingStore", options.billingStore?.providerEnvironment],
+      ["commerceOptions", options.commerceOptions?.providerEnvironment],
+    ].filter((entry): entry is [string, NonNullable<(typeof entry)[1]>] => entry[1] !== undefined);
+    if (new Set(environments.map(([, environment]) => environment)).size > 1) {
+      throw new TypeError(
+        `Bursar provider environments must match: ${environments
+          .map(([name, environment]) => `${name}=${environment}`)
+          .join(", ")}`,
+      );
+    }
     const credits = new CreditsServiceImpl(
       options.creditStore,
       undefined,

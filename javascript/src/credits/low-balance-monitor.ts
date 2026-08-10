@@ -5,6 +5,7 @@ import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEvent, CreditEventType } from "./events.js";
 import type { DeductionSuccess } from "./types/index.js";
 import type { LowBalanceConfig } from "./service-types.js";
+import { toDecimal } from "./amount.js";
 
 const DEFAULT_MAX_TRACKED_USERS = 100_000;
 
@@ -31,9 +32,7 @@ export class LowBalanceMonitor {
     private readonly logger: NormalizedLogger,
   ) {
     this.thresholds = config?.thresholds?.length
-      ? config.thresholds
-          .map((value) => (value instanceof Decimal ? value : new Decimal(value)))
-          .sort((left, right) => right.comparedTo(left))
+      ? config.thresholds.map(toDecimal).sort((left, right) => right.comparedTo(left))
       : null;
     this.handler = config?.onTrigger ?? null;
     const maxTrackedUsers = config?.maxTrackedUsers ?? DEFAULT_MAX_TRACKED_USERS;

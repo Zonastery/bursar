@@ -26,6 +26,11 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from bursar.errors import ConfigError as ConfigError
+from bursar.shared.numbers import (
+    NonNegativeSafeInteger,
+    PositiveSafeInteger,
+    SafeInteger,
+)
 
 IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
@@ -45,7 +50,7 @@ DecimalValue = Annotated[
     PlainSerializer(lambda value: format(value, "f"), return_type=str),
     WithJsonSchema({"type": "string", "pattern": DECIMAL_RE.pattern, "examples": ["10.500000"]}),
 ]
-FeatureValue = bool | int | str
+FeatureValue = bool | SafeInteger | str
 
 
 def _validate_identifier(value: str, path: str) -> None:
@@ -82,18 +87,18 @@ class StrictModel(BaseModel):
 
 class Duration(StrictModel):
     unit: Literal["second", "minute", "hour", "day", "week"]
-    count: int = Field(ge=1)
+    count: PositiveSafeInteger
 
 
 class BillingInterval(StrictModel):
     unit: Literal["day", "week", "month", "year"]
-    count: int = Field(default=1, ge=1)
+    count: PositiveSafeInteger = 1
 
 
 class CalendarWindow(StrictModel):
     type: Literal["calendar"]
     unit: Literal["day", "week", "month", "year"]
-    count: int = Field(default=1, ge=1)
+    count: PositiveSafeInteger = 1
     timezone: str = "UTC"
 
     @field_validator("timezone")
@@ -370,14 +375,8 @@ class RateCard(StrictModel):
     operations: dict[str, OperationPricing] = Field(default_factory=dict)
 
 
-class CreditAccounting(StrictModel):
-    unit: Literal["credit"] = "credit"
-    scale: Literal[6] = 6
-    rounding: Literal["half_up"] = "half_up"
-
-
 class BucketDefinition(StrictModel):
-    priority: int = Field(ge=0)
+    priority: NonNegativeSafeInteger
     expiry: ExpiryPolicy = Field(default_factory=lambda: NeverExpiry(type="never"))
 
 
@@ -419,7 +418,7 @@ class GrantProgram(StrictModel):
     awards: list[GrantAward] = Field(min_length=1)
     availability: Availability | None = None
     eligibility: GrantEligibility = Field(default_factory=GrantEligibility)
-    max_awards_per_subject: int = Field(default=1, ge=1)
+    max_awards_per_subject: PositiveSafeInteger = 1
     idempotency_scope: Literal["subject", "event"] = "subject"
 
     @model_validator(mode="after")
@@ -435,10 +434,6 @@ class CreditDisplay(StrictModel):
 
 
 class CreditsConfig(StrictModel):
-    accounting: CreditAccounting = Field(
-        default_factory=CreditAccounting,
-        description="Fixed v1 accounting convention. It may be omitted; canonical output includes the defaults.",
-    )
     buckets: dict[str, BucketDefinition] = Field(default_factory=dict)
     default_bucket: str | None = None
     policies: dict[str, CreditPolicy] = Field(default_factory=dict)
@@ -467,9 +462,9 @@ class EnumFeature(StrictModel):
 
 class IntegerFeature(StrictModel):
     type: Literal["integer"]
-    default: int
-    minimum: int | None = None
-    maximum: int | None = None
+    default: SafeInteger
+    minimum: SafeInteger | None = None
+    maximum: SafeInteger | None = None
 
     @model_validator(mode="after")
     def validate_bounds(self) -> IntegerFeature:
@@ -506,11 +501,11 @@ class EntitlementsConfig(StrictModel):
 
 
 class OperationAdmission(StrictModel):
-    max_in_flight: int = Field(ge=1)
+    max_in_flight: PositiveSafeInteger
 
 
 class AdmissionPolicy(StrictModel):
-    max_in_flight: int | None = Field(default=None, ge=1)
+    max_in_flight: PositiveSafeInteger | None = None
     operations: dict[str, OperationAdmission] = Field(default_factory=dict)
 
 
@@ -520,8 +515,7 @@ class AdmissionConfig(StrictModel):
 
 class CreditAllowance(StrictModel):
     amount: DecimalValue = Field(ge=0)
-    priority: int = Field(
-        ge=0,
+    priority: NonNegativeSafeInteger = Field(
         description="Spend priority shared with credit buckets. Lower values are used first.",
     )
     window: Window
@@ -585,9 +579,8 @@ class CatalogRollout(StrictModel):
 
 class PlanDefinition(StrictModel):
     display_name: str = Field(min_length=1)
-    rank: int = Field(
+    rank: NonNegativeSafeInteger = Field(
         default=0,
-        ge=0,
         description="Public catalog ordering. Lower ranks appear first; ties are ordered by plan key.",
     )
     description: str | None = None
@@ -646,7 +639,7 @@ ProviderReference = Annotated[
 
 
 class OfferPrice(StrictModel):
-    amount_minor: int = Field(ge=0)
+    amount_minor: NonNegativeSafeInteger
     currency: str
     tax_behavior: Literal["inclusive", "exclusive", "unspecified"] = "unspecified"
 
@@ -661,7 +654,7 @@ class OfferPrice(StrictModel):
 class OfferBase(StrictModel):
     display_name: str = Field(min_length=1)
     description: str | None = None
-    sort_order: int = 0
+    sort_order: SafeInteger = 0
     availability: Availability | None = None
     price: OfferPrice
     providers: dict[str, ProviderReference] = Field(min_length=1)
@@ -683,9 +676,9 @@ class SubscriptionOffer(OfferBase):
 
 
 class QuantityBounds(StrictModel):
-    minimum: int = Field(default=1, ge=1)
-    maximum: int = Field(default=1, ge=1)
-    default: int = Field(default=1, ge=1)
+    minimum: PositiveSafeInteger = 1
+    maximum: PositiveSafeInteger = 1
+    default: PositiveSafeInteger = 1
 
     @model_validator(mode="after")
     def validate_bounds(self) -> QuantityBounds:
@@ -721,9 +714,9 @@ class DecimalRange(StrictModel):
 
 
 class IntegerRange(StrictModel):
-    minimum: int = Field(ge=1)
-    maximum: int = Field(ge=1)
-    default: int = Field(ge=1)
+    minimum: PositiveSafeInteger
+    maximum: PositiveSafeInteger
+    default: PositiveSafeInteger
 
     @model_validator(mode="after")
     def validate_bounds(self) -> IntegerRange:
@@ -733,11 +726,11 @@ class IntegerRange(StrictModel):
 
 
 class AutoRechargeLimits(StrictModel):
-    max_purchases: int = Field(ge=1)
+    max_purchases: PositiveSafeInteger
     window: CalendarWindow | RollingWindow
-    max_charge_minor: int = Field(ge=1)
+    max_charge_minor: PositiveSafeInteger
     cooldown: Duration
-    max_consecutive_failures: int = Field(default=3, ge=1)
+    max_consecutive_failures: PositiveSafeInteger = 3
     failure_action: Literal["pause"] = "pause"
 
 

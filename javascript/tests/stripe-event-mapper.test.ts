@@ -10,7 +10,7 @@ function subscriptionFixture() {
     customer: "cus_1",
     status: "active",
     cancel_at_period_end: false,
-    metadata: { userId: "u1" },
+    metadata: { bursar_account_id: "u1" },
     trial_end: null,
     cancel_at: null,
     ended_at: null,
@@ -91,7 +91,7 @@ describe("Stripe webhook mapper", () => {
           type: "subscription_details",
           subscription_details: {
             subscription: "sub_1",
-            metadata: { userId: "u1", source: "subscription" },
+            metadata: { bursar_account_id: "u1", source: "subscription" },
           },
         },
         customer: "cus_1",
@@ -117,9 +117,9 @@ describe("Stripe webhook mapper", () => {
       refs: { priceId: "price_pro", productId: "prod_pro" },
     });
     expect(target.events[2]).toMatchObject({
-      userId: "u1",
+      accountId: "u1",
       metadata: {
-        userId: "u1",
+        bursar_account_id: "u1",
         source: "subscription",
         invoice_key: "invoice_value",
       },
@@ -167,7 +167,7 @@ describe("Stripe webhook mapper", () => {
     );
     expect(target.events[0]).toMatchObject({
       eventType: "payment.succeeded",
-      userId: "u1",
+      accountId: "u1",
       customer: { providerCustomerId: "cus_1", email: "u1@example.com" },
       metadata: { checkout_intent_id: "intent_1" },
       payment: {
@@ -249,7 +249,7 @@ describe("Stripe webhook mapper", () => {
           type: "subscription_details",
           subscription_details: {
             subscription: "sub_1",
-            metadata: { userId: "u1" },
+            metadata: { bursar_account_id: "u1" },
           },
         },
         customer: "cus_1",

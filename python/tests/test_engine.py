@@ -57,7 +57,7 @@ def base_config() -> dict:
                 }
             },
         },
-        "credits": {"accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"}},
+        "credits": {},
     }
 
 

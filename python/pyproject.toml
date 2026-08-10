@@ -1,18 +1,36 @@
 [project]
 name = "bursar"
 version = "2.0.1"
-description = "Usage metering, credits, subscriptions, and payments for AI applications"
+description = "Open-source PostgreSQL credit ledger, usage metering, and billing SDK for AI SaaS"
 readme = "README.md"
 license = "AGPL-3.0-only"
 # Bursar supports the two Python versions exercised by its release matrix.
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "pydantic>=2.13.4,<3",
-    "python-dotenv>=1.2.2,<2",
     "pyyaml>=6.0.3,<7",
     "tenacity>=9.1.4,<10",
 ]
-keywords = ["credits", "billing", "llm", "usage-metering", "pricing"]
+keywords = [
+    "ai-saas",
+    "ai-billing",
+    "usage-based-billing",
+    "usage-metering",
+    "prepaid-credits",
+    "credit-ledger",
+    "credits",
+    "billing",
+    "pricing",
+    "llm",
+    "llmops",
+    "postgresql",
+    "python",
+    "stripe",
+    "dodo-payments",
+    "entitlements",
+    "quotas",
+    "finops",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -27,6 +45,8 @@ Homepage = "https://zonastery.github.io/bursar/"
 Source = "https://github.com/Zonastery/bursar"
 Documentation = "https://zonastery.github.io/bursar/"
 Issues = "https://github.com/Zonastery/bursar/issues"
+Changelog = "https://github.com/Zonastery/bursar/releases"
+Security = "https://github.com/Zonastery/bursar/security/policy"
 
 [build-system]
 requires = ["setuptools>=83.0.0"]
@@ -39,9 +59,11 @@ bursar = "bursar.__main__:main"
 where = ["src"]
 
 [project.optional-dependencies]
-providers = [
-    "stripe>=15.4.0",
-    "dodopayments[webhooks]>=1.111.0",
+stripe = [
+    "stripe>=15.4.0,<16",
+]
+dodo = [
+    "dodopayments[webhooks]>=1.111.0,<2",
 ]
 postgres = [
     "psycopg2-binary>=2.9.12",
@@ -65,8 +87,8 @@ test = [
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
-    "stripe>=15.4.0",
-    "dodopayments[webhooks]>=1.111.0",
+    "stripe>=15.4.0,<16",
+    "dodopayments[webhooks]>=1.111.0,<2",
     "boto3>=1.43.66,<2",
     "google-adk>=2.6.3,<2.7.0",
 ]
@@ -150,8 +172,8 @@ test-deps = [
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
-    "stripe>=15.4.0",
-    "dodopayments[webhooks]>=1.111.0",
+    "stripe>=15.4.0,<16",
+    "dodopayments[webhooks]>=1.111.0,<2",
     "boto3>=1.43.66,<2",
     "google-adk>=2.6.3,<2.7.0",
 ]

@@ -13,6 +13,7 @@ from bursar.billing.types import (
     BillingEventResult,
     BillingSubscriptionChangeState,
 )
+from bursar.shared.numbers import NonNegativeSafeInteger, PositiveSafeInteger
 
 
 class _BillingContract(BaseModel):
@@ -54,8 +55,8 @@ class BillingPaymentUpsert(_BillingContract):
     provider_payment_id: str
     provider_invoice_id: str | None = None
     user_id: str
-    amount_minor: int = Field(ge=0)
-    tax_minor: int = Field(ge=0)
+    amount_minor: NonNegativeSafeInteger
+    tax_minor: NonNegativeSafeInteger
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     purpose: Literal["subscription", "credit_topup"]
     status: Literal["pending", "succeeded", "failed", "canceled"]
@@ -68,7 +69,7 @@ class BillingCreditGrantCreate(_BillingContract):
     subscription_id: str | None = None
     topup_id: str | None = None
     configured_credits: Decimal
-    quantity: int = Field(gt=0)
+    quantity: PositiveSafeInteger
     billing_event_id: str | None = None
 
 
@@ -77,7 +78,7 @@ class BillingRefundUpsert(_BillingContract):
     provider_refund_id: str
     provider_payment_id: str
     user_id: str
-    amount_minor: int = Field(gt=0)
+    amount_minor: PositiveSafeInteger
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     reason: str | None = None
     status: Literal["pending", "succeeded", "failed", "canceled"]
@@ -91,8 +92,8 @@ class BillingInvoiceUpsert(_BillingContract):
     provider_subscription_id: str | None = None
     user_id: str
     status: Literal["draft", "open", "paid", "void", "uncollectible"]
-    amount_paid_minor: int = Field(ge=0)
-    amount_due_minor: int = Field(ge=0)
+    amount_paid_minor: NonNegativeSafeInteger
+    amount_due_minor: NonNegativeSafeInteger
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     period_start: str | None = None
     period_end: str | None = None

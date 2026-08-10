@@ -11,6 +11,7 @@ import { ConfigError } from "../src/errors.js";
 
 export const baseConfig = () => ({
   version: 1,
+  catalog: { default_plan: "pro" },
   pricing: {
     operations: {
       completion: {
@@ -63,7 +64,6 @@ export const baseConfig = () => ({
     },
   },
   credits: {
-    accounting: { unit: "credit", scale: 6, rounding: "half_up" },
     buckets: {
       gifted: {
         priority: 10,
@@ -143,7 +143,7 @@ describe("typed v1 config", () => {
 
   it("rejects the removed catalog activation field", () => {
     const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
-    config.catalog = { activation: { mode: "on_publish" } };
+    (config as Record<string, unknown>).catalog = { activation: { mode: "on_publish" } };
 
     expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
   });
@@ -189,19 +189,20 @@ describe("typed v1 config", () => {
     expect(() => loadConfigFromDict(config)).toThrow(/requires a subscription offer/);
   });
 
-  it("defaults fixed accounting and plan rank for config authors", () => {
+  it("rejects the removed accounting knob and requires an explicit default plan", () => {
     const config = baseConfig();
-    delete (config.credits as Partial<typeof config.credits>).accounting;
-    delete (config.plans.pro as Partial<typeof config.plans.pro>).rank;
-
-    const parsed = loadConfigFromDict(config);
-
-    expect(parsed.credits.accounting).toEqual({
-      unit: "credit",
-      scale: 6,
-      rounding: "half_up",
+    Object.assign(config.credits, {
+      accounting: {
+        unit: "credit",
+        scale: 6,
+        rounding: "half_up",
+      },
     });
-    expect(parsed.plans.pro!.rank).toBe(0);
+    expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
+
+    const missingDefault = baseConfig();
+    delete (missingDefault as Partial<typeof missingDefault>).catalog;
+    expect(() => loadConfigFromDict(missingDefault)).toThrow(/default_plan is required/);
   });
 
   it("projects public plans and prices without provider identifiers", () => {

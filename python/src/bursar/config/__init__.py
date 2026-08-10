@@ -56,7 +56,7 @@ from bursar.config.types import (
     _validate_map_keys,
 )
 
-BursarConfigData = BursarConfig
+BursarConfigData = BursarConfig | dict[str, Any]
 ParsedBursarConfig = BursarConfig
 
 
@@ -245,6 +245,8 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:
     _validate_admission(config.admission)
     _validate_commerce(config.commerce)
     _validate_map_keys(config.plans, "plans")
+    if config.plans and config.catalog.default_plan is None:
+        raise ValueError("catalog.default_plan is required when plans are configured")
     if config.catalog.default_plan is not None and config.catalog.default_plan not in config.plans:
         raise ValueError(f"catalog.default_plan references unknown plan '{config.catalog.default_plan}'")
     subscription_plans = {
@@ -273,8 +275,10 @@ def load_config_from_dict(data: dict[str, Any]) -> BursarConfig:
         raise ConfigError(str(exc)) from exc
 
 
-def canonical_bursar_config_dict(data: dict[str, Any]) -> dict[str, Any]:
-    return load_config_from_dict(data).model_dump(mode="json", exclude_none=True)
+def canonical_bursar_config_dict(data: BursarConfigData) -> dict[str, Any]:
+    config = data if isinstance(data, BursarConfig) else load_config_from_dict(data)
+    validate_bursar_config(config)
+    return config.model_dump(mode="json", exclude_none=True)
 
 
 def canonical_catalog_rollout_dict(

@@ -18,7 +18,6 @@ from bursar.commerce.plan_change import (
     ClassifiedSubscriptionChange,
     classify_subscription_change,
 )
-from bursar.commerce.provider_registry import CommerceProviderRegistry
 from bursar.commerce.service import CommerceAutoRecharge, CommerceService
 from bursar.commerce.types import (
     AccountAllowanceOverview,
@@ -42,6 +41,7 @@ from bursar.commerce.types import (
     CommercePreferenceDefaults,
     CommerceProviderFactory,
     CommerceProviderFactoryContext,
+    CommerceRuntimeOptions,
     CommerceSectionAvailability,
     CommerceWebhookInput,
     CommerceWebhookResult,
@@ -84,13 +84,13 @@ __all__ = [
     "CommerceError",
     "CommerceNotConfiguredError",
     "CommerceOptions",
+    "CommerceRuntimeOptions",
     "CommerceAutoRecharge",
     "CommerceCheckoutKind",
     "CommerceCheckoutStatus",
     "CommercePreferenceDefaults",
     "CommerceProviderFactory",
     "CommerceProviderFactoryContext",
-    "CommerceProviderRegistry",
     "CommerceResourceNotFoundError",
     "CommerceSectionAvailability",
     "CommerceService",

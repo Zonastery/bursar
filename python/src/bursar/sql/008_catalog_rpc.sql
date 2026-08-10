@@ -34,31 +34,6 @@ BEGIN
 
     PERFORM bursar.require_catalog_document_shape(p_source_document);
 
-    -- Canonicalize documented v1 defaults before hashing, storing, and
-    -- projecting the document. Omitting the fixed accounting block must be
-    -- semantically identical to spelling it out explicitly.
-    p_source_document := jsonb_set(
-        p_source_document,
-        '{credits,accounting}',
-        COALESCE(
-            p_source_document #> '{credits,accounting}',
-            '{
-                "unit": "credit",
-                "scale": 6,
-                "rounding": "half_up"
-            }'::jsonb
-        ),
-        true
-    );
-
-    IF p_source_document #>> '{credits,accounting,unit}' <> 'credit'
-       OR p_source_document #>> '{credits,accounting,scale}' <> '6'
-       OR p_source_document #>> '{credits,accounting,rounding}' <> 'half_up'
-    THEN
-        RAISE EXCEPTION 'unsupported_credit_accounting'
-            USING ERRCODE = '22023';
-    END IF;
-
     v_default_bucket := p_source_document #>> '{credits,default_bucket}';
 
     IF v_default_bucket IS NOT NULL

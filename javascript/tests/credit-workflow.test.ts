@@ -211,7 +211,6 @@ describe("credit lease workflow", () => {
         },
       },
       credits: {
-        accounting: { unit: "credit", scale: 6, rounding: "half_up" },
         buckets: { purchased: { priority: 20 } },
         default_bucket: "purchased",
         policies: { prepaid: { type: "prepaid" } },

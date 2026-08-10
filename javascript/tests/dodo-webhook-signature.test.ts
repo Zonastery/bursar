@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { BillingEventSink } from "../src/billing/contracts.js";
 import type { DodoClient } from "../src/providers/dodo/client-contract.js";
 import { DodoProvider } from "../src/providers/dodo/provider.js";
-import type { ResolveUserCallback, WebhookRequest } from "../src/providers/types.js";
+import type { WebhookRequest } from "../src/providers/types.js";
 import { DODO_ISO_DATE, dodoEventId } from "./helpers/dodo-fixtures.js";
 
 const ingestBillingEvent = vi
@@ -19,18 +19,14 @@ const mockLogger = {
 };
 
 const WEBHOOK_KEY = "test_wh_key_12345";
-const USER_ID = "00000000-0000-0000-0000-000000000001";
+const ACCOUNT_ID = "team-account-1";
 
-function webhookProvider(
-  unwrap: DodoClient["webhooks"]["unwrap"],
-  resolveUser?: ResolveUserCallback,
-): DodoProvider {
+function webhookProvider(unwrap: DodoClient["webhooks"]["unwrap"]): DodoProvider {
   const client = { webhooks: { unwrap } } as unknown as DodoClient;
   return new DodoProvider({
     getClient: () => client,
     webhookKey: WEBHOOK_KEY,
     eventSink: mockSink,
-    resolveUser,
     logger: mockLogger,
   });
 }
@@ -47,7 +43,7 @@ describe("DodoProvider webhook signature verification", () => {
       data: {
         id: "evt_test_valid",
         subscription_id: "sub_test_valid",
-        metadata: { userId: USER_ID, plan_slug: "monk" },
+        metadata: { bursar_account_id: ACCOUNT_ID, plan_slug: "monk" },
       },
     });
     const provider = webhookProvider(unwrap);
@@ -55,7 +51,7 @@ describe("DodoProvider webhook signature verification", () => {
     const req: WebhookRequest = {
       rawBody: JSON.stringify({
         type: "subscription.active",
-        data: { metadata: { userId: USER_ID } },
+        data: { metadata: { bursar_account_id: ACCOUNT_ID } },
       }),
       headers: {
         "content-type": "application/json",
@@ -75,6 +71,9 @@ describe("DodoProvider webhook signature verification", () => {
       headers: req.headers,
       key: WEBHOOK_KEY,
     });
+    expect(ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: ACCOUNT_ID }),
+    );
   });
 
   it("treats the SDK-verified payload as authoritative", async () => {
@@ -84,25 +83,24 @@ describe("DodoProvider webhook signature verification", () => {
       data: {
         id: "evt_signed_extensions",
         subscription_id: "sub_signed_extensions",
+        metadata: { userId: ACCOUNT_ID },
       },
     });
-    const resolveUser = vi.fn().mockResolvedValue(null);
-    const provider = webhookProvider(unwrap, resolveUser);
+    const provider = webhookProvider(unwrap);
 
     await provider.handleWebhook({
       rawBody: JSON.stringify({
         type: "subscription.active",
         data: {
-          metadata: { userId: USER_ID },
+          metadata: { bursar_account_id: ACCOUNT_ID },
           product_cart: [{ product_id: "pdt_signed_extensions" }],
         },
       }),
       headers: { "webhook-signature": "verified-by-unwrap" },
     });
 
-    expect(resolveUser).toHaveBeenCalledOnce();
     const event = ingestBillingEvent.mock.calls[0]?.[0];
-    expect(event?.userId).toBeUndefined();
+    expect(event?.accountId).toBeUndefined();
     expect(event?.subscription?.refs).toBeUndefined();
   });
 
@@ -118,7 +116,7 @@ describe("DodoProvider webhook signature verification", () => {
       data: {
         id: "evt_adapter_verified",
         subscription_id: "sub_adapter_verified",
-        metadata: { userId: USER_ID, plan_slug: "monk" },
+        metadata: { bursar_account_id: ACCOUNT_ID, plan_slug: "monk" },
       },
     });
 
@@ -178,7 +176,7 @@ describe("DodoProvider webhook signature verification", () => {
     });
   });
 
-  it("does not resolve an anonymous user for payment.failed", async () => {
+  it("leaves metadata-free payment failures for persisted-reference resolution", async () => {
     const unwrap = vi.fn().mockReturnValue({
       type: "payment.failed",
       timestamp: DODO_ISO_DATE,
@@ -190,8 +188,7 @@ describe("DodoProvider webhook signature verification", () => {
         customer: { customer_id: "cus_failed", email: "guest@example.com" },
       },
     });
-    const resolveUser = vi.fn().mockRejectedValue(new Error("user lookup should be skipped"));
-    const provider = webhookProvider(unwrap, resolveUser);
+    const provider = webhookProvider(unwrap);
 
     const result = await provider.handleWebhook({
       rawBody: JSON.stringify({
@@ -208,8 +205,9 @@ describe("DodoProvider webhook signature verification", () => {
       eventId: dodoEventId("payment.failed", "pay_failed"),
       eventType: "payment.failed",
     });
-    expect(resolveUser).not.toHaveBeenCalled();
-    expect(ingestBillingEvent).toHaveBeenCalled();
+    const event = ingestBillingEvent.mock.calls[0]?.[0];
+    expect(event).toMatchObject({ eventType: "payment.failed" });
+    expect(event).not.toHaveProperty("accountId");
   });
 
   it("retrieves checkout payment status and treats a missing session as expired", async () => {

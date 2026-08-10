@@ -1,31 +1,24 @@
 import Decimal from "decimal.js";
 import { LRUCache } from "lru-cache";
-import { canonicalBursarConfigDict, type CatalogRollout } from "../config.js";
+import {
+  canonicalBursarConfigDict,
+  type BursarConfigData,
+  type CatalogRollout,
+} from "../config.js";
 import type { PricingEngine } from "../engine.js";
 import { PricingEngine as PricingEngineClass } from "../engine.js";
 import { LeaseNotFoundError, CatalogNotLoadedError } from "../errors.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditStore } from "./store.js";
-import type { MetricsOrAmount } from "./service-types.js";
+import type { ExactAmount, MetricsOrAmount } from "./service-types.js";
+import { isAmount, rejectNativeCreditAmount, toDecimal } from "./amount.js";
 
-export function toDecimal(value: Decimal | number): Decimal {
-  if (value instanceof Decimal) return value;
-  if (typeof value !== "number") {
-    throw new TypeError("amount must be a Decimal or number");
-  }
-  return new Decimal(value);
-}
-
-function toNonNegativeAmount(value: Decimal | number): Decimal {
+function toNonNegativeAmount(value: ExactAmount): Decimal {
   const amount = toDecimal(value);
   if (!amount.isFinite() || amount.isNegative()) {
     throw new RangeError("amount must be finite and non-negative");
   }
   return amount;
-}
-
-export function isAmount(value: MetricsOrAmount): value is Decimal | number {
-  return value instanceof Decimal || typeof value === "number";
 }
 
 /** Owns catalog publication, cache refresh, and revision-aware pricing engines. */
@@ -89,9 +82,9 @@ export class CatalogRuntime {
   }
 
   async publishAndActivate(
-    config: Record<string, unknown>,
+    config: BursarConfigData,
     label?: string | null,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
+    rollout?: CatalogRollout | null,
   ): Promise<string> {
     this.logger.info("[CatalogService] publishing and activating catalog", { label });
     const canonical = canonicalBursarConfigDict(config);
@@ -101,14 +94,11 @@ export class CatalogRuntime {
     return revisionId;
   }
 
-  async publishDraft(config: Record<string, unknown>, label?: string | null): Promise<string> {
+  async publishDraft(config: BursarConfigData, label?: string | null): Promise<string> {
     return this.store.publishCatalogDraft(canonicalBursarConfigDict(config), label);
   }
 
-  async activateRevision(
-    version: number,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<string> {
+  async activateRevision(version: number, rollout?: CatalogRollout | null): Promise<string> {
     const id = await this.store.activateCatalogRevision(version, rollout);
     await this.loadFromStore();
     return id;
@@ -119,6 +109,7 @@ export class CatalogRuntime {
     userId?: string | null,
     leaseId?: string | null,
   ): Promise<{ amount: Decimal; model: string | null }> {
+    rejectNativeCreditAmount(metricsOrAmount);
     if (isAmount(metricsOrAmount)) {
       return { amount: toNonNegativeAmount(metricsOrAmount), model: null };
     }

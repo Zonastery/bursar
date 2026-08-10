@@ -6,6 +6,7 @@ import {
   loadCatalogRollout,
   loadConfigFromDict,
   validateCatalogRollout,
+  type BursarConfigData,
   type CatalogRollout,
 } from "../../config.js";
 import {
@@ -107,12 +108,15 @@ export interface PostgresStoreOptions extends PostgresConnectionOptions {
   postgres: string | PgPool;
   /** Tenant UUID bound to every store transaction. */
   tenantId: string;
+  /** Explicit financial namespace for catalog provider references. */
+  providerEnvironment: NonNullable<PostgresConnectionOptions["providerEnvironment"]>;
   /** Injectable `pg.Pool` constructor for custom runtimes and tests. */
   poolConstructor?: PgPoolConstructor;
   usageBackend?: "postgres" | "clickhouse";
 }
 
 export class PostgresStore extends CreditStore {
+  readonly providerEnvironment: NonNullable<PostgresConnectionOptions["providerEnvironment"]>;
   private readonly postgres: PostgresClient;
 
   private _balanceRepo: BalanceRepository | null = null;
@@ -188,8 +192,10 @@ export class PostgresStore extends CreditStore {
     if (typeof options.postgres !== "string" && options.poolConstructor !== undefined) {
       throw new TypeError("poolConstructor cannot be used with an existing PostgreSQL pool");
     }
+    this.providerEnvironment = options.providerEnvironment;
     this.postgres = new PostgresClient(options.postgres, {
       tenantId: options.tenantId,
+      providerEnvironment: options.providerEnvironment,
       usageBackend: options.usageBackend,
       poolConstructor: options.poolConstructor,
       connectionTimeoutMs: options.connectionTimeoutMs,
@@ -563,9 +569,9 @@ export class PostgresStore extends CreditStore {
   }
 
   async publishAndActivateCatalog(
-    config: Record<string, unknown>,
+    config: BursarConfigData,
     label?: string | null,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
+    rollout?: CatalogRollout | null,
   ): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
     const parsed = loadConfigFromDict(canonical);
@@ -580,10 +586,7 @@ export class PostgresStore extends CreditStore {
     return row.id;
   }
 
-  async publishCatalogDraft(
-    config: Record<string, unknown>,
-    label?: string | null,
-  ): Promise<string> {
+  async publishCatalogDraft(config: BursarConfigData, label?: string | null): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
     const row = await this.catalogRepo.publishCatalogDraft(
       JSON.stringify(canonical),
@@ -608,10 +611,7 @@ export class PostgresStore extends CreditStore {
     return row === null ? null : normalizeCatalogRevision(row);
   }
 
-  async activateCatalogRevision(
-    version: number,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<string> {
+  async activateCatalogRevision(version: number, rollout?: CatalogRollout | null): Promise<string> {
     const target = await this.getCatalogRevision(version);
     const parsedRollout = loadCatalogRollout(rollout ?? {});
     if (target != null) {

@@ -14,21 +14,18 @@ pip install "bursar[postgres]"
 
 ## Constructing the facade
 
-`Bursar.create` wires a store, the optional billing/commerce capabilities, and
+`Bursar` wires a store, the optional billing/commerce capabilities, and
 an optional event emitter into one application-facing facade:
 
 ```python
 from bursar import Bursar, PostgresStore
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
-bursar = Bursar.create(
-    credit_store=store,
-    billing_store=None,
-    credits_options=None,
-    billing_options=None,
-    commerce_options=None,
-    emitter=None,
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
 )
+bursar = Bursar(credit_store=store)
 ```
 
 - `credit_store` is the only required argument. `PostgresStore` is the bundled
@@ -41,10 +38,41 @@ bursar = Bursar.create(
 Apply the database schema with `bursar migrate` before constructing a store —
 the package never runs migrations from the store itself.
 
+## Errors, deadlines, and retries
+
+All Bursar-classified failures extend `BursarError` and expose stable `code`,
+`category`, and `retryable` fields. `to_dict()` returns the safe logging shape
+without exposing the underlying driver exception.
+
+Use the Tenacity-backed retry helper only for reads or mutations protected by
+a stable idempotency key:
+
+```python
+from bursar import BursarRetryOptions, is_bursar_error, retry_bursar_operation
+
+try:
+    balance = retry_bursar_operation(
+        bursar.credits.get_balance,
+        user_id,
+        retry_options=BursarRetryOptions(max_attempts=3),
+    )
+except Exception as error:
+    if is_bursar_error(error):
+        logger.error("Bursar request failed", extra={"bursar": error.to_dict()})
+    raise
+```
+
+`StoreError.indeterminate` means a transport failure occurred after a mutation
+may have reached PostgreSQL. Retry only with the same idempotency key. Custom
+stores should use `StoreUnavailableError` or `StoreTimeoutError` for classified
+transient failures rather than matching error-message text.
+
 ## Package layout
 
-`bursar` is a flat namespace: everything you need is importable from the top
-level.
+The `bursar` top level exposes the application-facing facade, stores, pricing
+engine, common inputs, errors, and retry helpers. Domain-specific result and
+provider types remain grouped under focused modules such as
+`bursar.credits.types` and `bursar.providers`.
 
 | Export                  | Purpose                                                                                     |
 | ----------------------- | ------------------------------------------------------------------------------------------- |
@@ -57,6 +85,7 @@ level.
 | `UsageMetrics`          | One billable operation (measures + dimensions)                                              |
 | `load_config_from_dict` | Validate and canonicalize a config document                                                 |
 | errors                  | `BursarError`, `CreditError`, `ConfigError`, `StoreError`, `CapabilityNotSupportedError`, … |
+| retry helpers           | `BursarRetryOptions`, `retry_bursar_operation`, and its async counterpart                   |
 
 `PostgresStore` and `PostgresBillingStore` are lazy-imported: they are only
 available when the optional `psycopg2` extra is installed.

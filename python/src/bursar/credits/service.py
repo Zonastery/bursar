@@ -10,7 +10,11 @@ Example::
     from bursar import PostgresStore, UsageMetrics
     from bursar.credits import CreditsService
 
-    store = PostgresStore(database_url, tenant_id=tenant_id)
+    store = PostgresStore(
+        database_url,
+        tenant_id=tenant_id,
+        provider_environment="test",
+    )
     manager = CreditsService(store=store)
 
     # One-time setup (creates tables + RPCs)
@@ -47,12 +51,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from bursar.config import ConfigError
+from bursar.config import BursarConfigData, ConfigError
 from bursar.credits.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.credits.service_types import (
     BeginBilledOperationOptions,
     CanAffordOptions,
     CreditsServiceOptions,
+    ExactAmount,
     GrantSubscriptionCycleOptions,
     MetricsOrAmount,
     PostDeductionContext,
@@ -387,23 +392,26 @@ class CreditsService:
                 self._emit("credits.quota_threshold", user_id, data)
 
     @staticmethod
-    def _to_decimal(value: Decimal | int) -> Decimal:
-        """Coerce the public numeric input without treating booleans as credits."""
+    def _to_decimal(value: ExactAmount) -> Decimal:
+        """Coerce exact public input without accepting binary floating-point values."""
         if isinstance(value, Decimal):
             return value
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError("amount must be a Decimal or integer")
-        return Decimal(value)
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError("amount must be a Decimal, integer, or decimal string")
+        try:
+            return Decimal(value)
+        except ArithmeticError as error:
+            raise ValueError("amount must be a valid decimal string") from error
 
     @classmethod
-    def _positive_amount(cls, value: Decimal | int, operation: str) -> Decimal:
+    def _positive_amount(cls, value: ExactAmount, operation: str) -> Decimal:
         amount = cls._to_decimal(value)
         if not amount.is_finite() or amount <= 0:
             raise ValueError(f"{operation} amount must be finite and greater than zero")
         return amount
 
     @classmethod
-    def _non_negative_amount(cls, value: Decimal | int) -> Decimal:
+    def _non_negative_amount(cls, value: ExactAmount) -> Decimal:
         amount = cls._to_decimal(value)
         if not amount.is_finite() or amount < 0:
             raise ValueError("amount must be finite and non-negative")
@@ -427,7 +435,7 @@ class CreditsService:
 
     def publish_and_activate_catalog(
         self,
-        config: dict[str, Any],
+        config: BursarConfigData,
         label: str | None = None,
         rollout: dict[str, Any] | None = None,
     ) -> str:
@@ -448,7 +456,7 @@ class CreditsService:
 
     def publish_catalog_draft(
         self,
-        config: dict[str, Any],
+        config: BursarConfigData,
         label: str | None = None,
     ) -> str:
         """Publish an inactive catalog draft without mutating the live catalog."""
@@ -531,7 +539,7 @@ class CreditsService:
     def add_credits(
         self,
         user_id: str,
-        amount: Decimal | int,
+        amount: ExactAmount,
         *,
         idempotency_key: str,
         entry_type: str = "adjustment",
@@ -579,7 +587,7 @@ class CreditsService:
     def deduct_credits(
         self,
         user_id: str,
-        amount: Decimal | int,
+        amount: ExactAmount,
         *,
         idempotency_key: str,
         entry_type: str = "adjustment",
@@ -640,7 +648,7 @@ class CreditsService:
     def grant_subscription_cycle(
         self,
         user_id: str,
-        amount: Decimal | int,
+        amount: ExactAmount,
         options: GrantSubscriptionCycleOptions,
     ) -> AddCreditsResult:
         """Grant a subscription cycle's credits idempotently (safe for webhook redelivery).
@@ -935,7 +943,7 @@ class CreditsService:
 
     def _cost_of(
         self,
-        metrics_or_amount: UsageMetrics | Decimal | int,
+        metrics_or_amount: MetricsOrAmount,
         user_id: str | None = None,
         *,
         lease_id: str | None = None,
@@ -1703,7 +1711,7 @@ class CreditsService:
         entry_id: str,
         *,
         idempotency_key: str,
-        amount: Decimal | int | None = None,
+        amount: ExactAmount | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> RefundResult:

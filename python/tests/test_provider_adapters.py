@@ -196,6 +196,7 @@ def test_custom_provider_only_requires_the_js_core_contract() -> None:
     [
         (
             lambda: CheckoutParams(
+                account_id="user-1",
                 product_id="product-1",
                 type="credit_pack",
                 quantity=0,
@@ -203,6 +204,19 @@ def test_custom_provider_only_requires_the_js_core_contract() -> None:
                 cancel_url="https://cancel.test",
                 metadata={},
                 idempotency_key="invalid-quantity",
+            ),
+            "quantity",
+        ),
+        (
+            lambda: CheckoutParams(
+                account_id="user-1",
+                product_id="product-1",
+                type="credit_pack",
+                quantity=2**53,
+                return_url="https://return.test",
+                cancel_url="https://cancel.test",
+                metadata={},
+                idempotency_key="unsafe-quantity",
             ),
             "quantity",
         ),
@@ -226,6 +240,7 @@ def test_provider_contracts_reject_malformed_payment_data(factory: Any, match: s
 def test_provider_mutation_keys_are_not_silently_trimmed() -> None:
     with pytest.raises(ValueError, match="trimmed non-empty string"):
         CheckoutParams(
+            account_id="user-1",
             product_id="product-1",
             type="credit_pack",
             return_url="https://return.test",
@@ -296,12 +311,13 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
     checkout = run(
         provider.create_checkout_session(
             CheckoutParams(
+                account_id="user-1",
                 product_id="prod_1",
                 type="subscription",
                 return_url="https://return",
                 cancel_url="",
                 quantity=2,
-                metadata={"plan": "pro"},
+                metadata={"plan": "pro", "bursar_account_id": "spoofed"},
                 idempotency_key="checkout-1",
             )
         )
@@ -313,7 +329,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
         {
             "product_cart": [{"product_id": "prod_1", "quantity": 2}],
             "return_url": "https://return",
-            "metadata": {"plan": "pro"},
+            "metadata": {"plan": "pro", "bursar_account_id": "user-1"},
             "extra_headers": {"Idempotency-Key": "checkout-1"},
         },
     )
@@ -349,7 +365,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
             CreateCustomerParams(
                 email="test@example.com",
                 name="Test User",
-                metadata={},
+                metadata={"source": "test"},
                 idempotency_key="dodo-customer-1",
             )
         )
@@ -417,7 +433,7 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     result = run(
         provider.create_checkout_session(
             CheckoutParams(
-                user_id="u1",
+                account_id="u1",
                 product_id="price_1",
                 type="subscription",
                 return_url="https://ok",
@@ -433,8 +449,11 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     assert result.provider_session_id == "cs_1"
     assert calls[0][0] == "customer"
     assert calls[0][1]["email"] == "u1@example.com"
+    assert calls[0][1]["metadata"] == {"bursar_account_id": "u1"}
     assert calls[0][2] == {"idempotency_key": "idem_1:customer"}
     assert calls[1][1]["line_items"] == [{"price": "price_1", "quantity": 1}]
+    assert calls[1][1]["metadata"]["bursar_account_id"] == "u1"
+    assert calls[1][1]["subscription_data"]["metadata"]["bursar_account_id"] == "u1"
     assert calls[1][2] == {"idempotency_key": "idem_1"}
     customer = run(
         provider.create_customer(
@@ -647,6 +666,7 @@ def test_mock_provider_is_a_complete_deterministic_test_double() -> None:
     checkout = run(
         provider.create_checkout_session(
             CheckoutParams(
+                account_id="user-1",
                 product_id="mock",
                 type="subscription",
                 return_url="https://return",

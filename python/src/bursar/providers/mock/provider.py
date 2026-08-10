@@ -18,8 +18,6 @@ from bursar.providers.types import (
     PortalParams,
     PreviewChangePlanParams,
     ProviderUrlResult,
-    ResolveIdentityInput,
-    ResolveUserCallback,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
@@ -36,10 +34,8 @@ class MockPaymentProvider:
         self,
         *,
         event_sink: BillingEventSink,
-        resolve_user: ResolveUserCallback | None = None,
     ) -> None:
         self._sink = event_sink
-        self._resolve_user = resolve_user
         self._customer_ids = count(1)
         self._customers_by_key: dict[str, str] = {}
 
@@ -128,36 +124,6 @@ class MockPaymentProvider:
             )
 
         event = BillingEvent.model_validate({**payload, "provider": self.provider})
-        user_id = event.user_id
-
-        if not user_id and self._resolve_user:
-            metadata: dict[str, str] = {}
-            for key, value in (event.metadata or {}).items():
-                if not isinstance(value, str):
-                    raise ValueError(f"mock billing event metadata.{key} must be a string")
-                metadata[key] = value
-            user_id = await self._resolve_user(
-                ResolveIdentityInput(
-                    provider=self.provider,
-                    provider_event_type=event.event_type.value,
-                    normalized_event_type=event.event_type.value,
-                    customer_id=(event.customer.provider_customer_id if event.customer else None),
-                    email=(event.customer.email if event.customer else None),
-                    metadata=metadata,
-                    successful=event.event_type.value
-                    in {"payment.succeeded", "subscription.created", "subscription.renewed"},
-                    checkout_kind=(
-                        "subscription"
-                        if event.event_type.value.startswith("subscription.")
-                        else "credit_topup"
-                        if metadata.get("credits")
-                        else None
-                    ),
-                )
-            )
-
-        if user_id is not None:
-            event = event.model_copy(update={"user_id": user_id})
         self._sink.ingest_billing_event(event)
         return WebhookResult(
             received=True,

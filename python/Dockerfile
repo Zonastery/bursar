@@ -33,7 +33,8 @@ COPY --from=build /install /usr/local
 USER bursar
 WORKDIR /home/bursar
 
-# `bursar migrate` / `bursar pricing …` read secrets from the environment
-# (DATABASE_URL, SUPABASE_URL, SUPABASE_SECRET_KEY) — never bake them in.
+# `migrate` reads BURSAR_MIGRATION_DATABASE_URL; tenant commands read
+# BURSAR_OPERATOR_DATABASE_URL; database-backed config commands read
+# DATABASE_URL and BURSAR_TENANT_ID. Never bake any of them into the image.
 ENTRYPOINT ["bursar"]
 CMD ["--help"]

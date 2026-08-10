@@ -655,7 +655,7 @@ def make_harness(
         billing,
         credits,
         Sink(),
-        CommerceOptions(providers=providers),
+        CommerceOptions(provider_environment="test", providers=providers),
     )
     return service, billing, credits, selected
 
@@ -687,8 +687,43 @@ async def test_checkout_resolves_offer_key_before_calling_provider() -> None:
     assert result.provider == "alpha"
     assert result.url == "https://checkout.example/alpha-starter-month"
     assert len(provider.checkout_params) == 1
+    assert provider.checkout_params[0].account_id == "account-1"
     assert provider.checkout_params[0].product_id == "alpha-starter-month"
     assert provider.checkout_params[0].return_url.endswith("intent=intent-1")
+
+
+@pytest.mark.asyncio
+async def test_checkout_replay_is_bound_to_the_financial_account() -> None:
+    commerce, billing, _credits, _provider = make_harness()
+    existing: CheckoutIntent | None = None
+
+    def shared_subject_intent(input: CheckoutIntentCreate) -> CheckoutIntent:
+        nonlocal existing
+        if existing is None:
+            existing = CheckoutIntent(
+                id="intent-shared-subject",
+                subject_id=input.subject_id,
+                provider=input.provider,
+                checkout_kind=input.checkout_kind,
+                product_key=input.product_key,
+                request_digest=input.request_digest,
+                status=CheckoutIntentStatus.open,
+                expires_at=input.expires_at,
+            )
+        return existing
+
+    billing.intent_factory = shared_subject_intent
+    common = {
+        "subject_id": "actor-1",
+        "offer_key": "starter_month",
+        "return_url": "https://app.example/return",
+        "cancel_url": "https://app.example/cancel",
+        "operation_key": "actor-checkout",
+    }
+    await commerce.create_checkout(CreateCheckoutInput.model_validate({**common, "account_id": "account-1"}))
+
+    with pytest.raises(CheckoutConflictError, match="different offer"):
+        await commerce.create_checkout(CreateCheckoutInput.model_validate({**common, "account_id": "account-2"}))
 
 
 @pytest.mark.asyncio
@@ -697,6 +732,7 @@ async def test_checkout_rejects_unknown_catalog_offer() -> None:
         await service(RecordingProvider()).create_checkout(
             CreateCheckoutInput(
                 subject_id="subject-1",
+                account_id="account-1",
                 offer_key="alpha-starter-month",
                 return_url="https://app.example/return",
                 cancel_url="https://app.example/cancel",
@@ -714,6 +750,7 @@ async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> Non
         await commerce.create_checkout(
             CreateCheckoutInput(
                 subject_id="subject-1",
+                account_id="account-1",
                 offer_key="pack",
                 type="subscription",
                 return_url="https://app.example/return",
@@ -725,6 +762,7 @@ async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> Non
         await commerce.create_checkout(
             CreateCheckoutInput(
                 subject_id="subject-1",
+                account_id="account-1",
                 offer_key="pack",
                 quantity=6,
                 return_url="https://app.example/return",
@@ -754,6 +792,7 @@ async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> Non
         await commerce.create_checkout(
             CreateCheckoutInput(
                 subject_id="subject-1",
+                account_id="account-1",
                 offer_key="pack",
                 return_url="https://app.example/return",
                 cancel_url="https://app.example/cancel",
@@ -768,6 +807,7 @@ async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> Non
         await commerce.create_checkout(
             CreateCheckoutInput(
                 subject_id="subject-1",
+                account_id="account-1",
                 offer_key="pack",
                 return_url="https://app.example/return",
                 cancel_url="https://app.example/cancel",

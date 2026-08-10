@@ -23,8 +23,8 @@ import type { PaymentProvider } from "../src/providers/types.js";
 function catalog() {
   return {
     version: 1,
+    catalog: { default_plan: "basic" },
     credits: {
-      accounting: { unit: "credit", scale: 6, rounding: "half_up" },
       buckets: { general: { priority: 10 } },
       default_bucket: "general",
       policies: { prepaid: { type: "prepaid" } },
@@ -325,6 +325,7 @@ function harness(input?: {
   const service = new CommerceService(billing, credits, sink, {
     providers: { alpha: alphaFactory, beta: betaFactory },
     ...input?.options,
+    providerEnvironment: input?.options?.providerEnvironment ?? "test",
   });
   return {
     service,
@@ -374,10 +375,11 @@ describe("CommerceService", () => {
   });
 
   it("lazily selects the provider referenced by an offer without an implicit default", async () => {
-    const { service, betaFactory, alphaFactory, beta } = harness();
+    const { service, billing, betaFactory, alphaFactory, beta } = harness();
 
     const result = await service.createCheckout({
-      subjectId: "subject-1",
+      subjectId: "actor-1",
+      accountId: "account-1",
       offerKey: "pack",
       type: "credit_pack",
       returnUrl: "https://app.example/return?intent={intentId}",
@@ -387,14 +389,42 @@ describe("CommerceService", () => {
 
     expect(result).toMatchObject({ provider: "beta", offerKey: "pack", intentId: "intent-1" });
     expect(betaFactory).toHaveBeenCalledOnce();
+    expect(betaFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ providerEnvironment: "test" }),
+    );
     expect(alphaFactory).not.toHaveBeenCalled();
     expect(beta.createCheckoutSession).toHaveBeenCalledWith(
       expect.objectContaining({
+        accountId: "account-1",
         quantity: 2,
         productId: "beta-pack",
         returnUrl: "https://app.example/return?intent=intent-1",
       }),
     );
+    expect(billing.createOrGetCheckoutIntent).toHaveBeenCalledWith(
+      expect.objectContaining({ subjectId: "actor-1" }),
+    );
+  });
+
+  it("binds a delegated checkout's financial account into its conflict digest", async () => {
+    const { service, billing } = harness();
+    const checkout = (accountId: string, operationKey: string) =>
+      service.createCheckout({
+        subjectId: "actor-1",
+        accountId,
+        offerKey: "pack",
+        returnUrl: "https://app.example/return",
+        cancelUrl: "https://app.example/cancel",
+        operationKey,
+      });
+
+    await checkout("account-1", "checkout-account-1");
+    await checkout("account-2", "checkout-account-2");
+
+    const [first, second] = billing.createOrGetCheckoutIntent.mock.calls.map(
+      ([input]) => input.requestDigest,
+    );
+    expect(first).not.toBe(second);
   });
 
   it("resolves only catalog offer keys while enforcing offer type and quantity", async () => {
@@ -402,6 +432,7 @@ describe("CommerceService", () => {
     await expect(
       service.createCheckout({
         subjectId: "subject-1",
+        accountId: "account-1",
         offerKey: "missing",
         returnUrl: "https://app.example",
         cancelUrl: "https://app.example",
@@ -411,6 +442,7 @@ describe("CommerceService", () => {
     await expect(
       service.createCheckout({
         subjectId: "subject-1",
+        accountId: "account-1",
         offerKey: "pack",
         type: "subscription",
         returnUrl: "https://app.example",
@@ -421,6 +453,7 @@ describe("CommerceService", () => {
     await expect(
       service.createCheckout({
         subjectId: "subject-1",
+        accountId: "account-1",
         offerKey: "pack",
         quantity: 6,
         returnUrl: "https://app.example",
@@ -446,6 +479,7 @@ describe("CommerceService", () => {
     await expect(
       service.createCheckout({
         subjectId: "subject-1",
+        accountId: "account-1",
         offerKey: "pack",
         returnUrl: "https://app.example",
         cancelUrl: "https://app.example",
@@ -487,7 +521,7 @@ describe("CommerceService", () => {
     expect(billing.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.cancellation_scheduled",
-        userId: "user-1",
+        accountId: "user-1",
         subscription: expect.objectContaining({
           providerSubscriptionId: "subscription-1",
           cancelAtPeriodEnd: true,

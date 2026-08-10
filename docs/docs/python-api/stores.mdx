@@ -16,19 +16,24 @@ backend must implement.
 ```python
 from bursar import PostgresStore
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
+)
 ```
 
 Connects through `psycopg2` and runs every mutation as a canonical SQL function
 (RPC). Requires the `bursar[postgres]` extra
 (`pip install "bursar[postgres]"`).
 
-| Parameter       | Type                             | Meaning                                                           |
-| --------------- | -------------------------------- | ----------------------------------------------------------------- |
-| `database_url`  | `str`                            | Postgres connection string (positional)                           |
-| `tenant_id`     | `str \| UUID`                    | Required keyword argument scoping every transaction to one tenant |
-| `max_pool_size` | `int = 20`                       | Upper bound of the internal `ThreadedConnectionPool`              |
-| `pool`          | `ThreadedConnectionPool \| None` | Reuse an existing pool instead of creating one                    |
+| Parameter              | Type                             | Meaning                                                           |
+| ---------------------- | -------------------------------- | ----------------------------------------------------------------- |
+| `database_url`         | `str`                            | Postgres connection string (positional)                           |
+| `tenant_id`            | `str \| UUID`                    | Required keyword argument scoping every transaction to one tenant |
+| `provider_environment` | `"live" \| "test" \| "sandbox"`  | Required financial provider namespace                             |
+| `max_pool_size`        | `int = 20`                       | Upper bound of the internal `ThreadedConnectionPool`              |
+| `pool`                 | `ThreadedConnectionPool \| None` | Reuse an existing pool instead of creating one                    |
 
 The store owns its pool: call `store.close()` to drain it. `database_url` is
 exposed as a read-only property.
@@ -38,16 +43,21 @@ exposed as a read-only property.
 ```python
 from bursar import PostgresBillingStore
 
-billing_store = PostgresBillingStore(database_url, tenant_id=tenant_id)
+billing_store = PostgresBillingStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
+)
 ```
 
-Same shape: `database_url` (positional), required keyword `tenant_id`, and an
-optional `pool` (defaults to a fresh pool, max 10). It wraps all billing
+Same shape: `database_url` (positional), required `tenant_id` and
+`provider_environment` keywords, and an optional `pool` (defaults to a fresh
+pool, max 10). It wraps all billing
 repositories (offer, topup, customer, subscription, event, payment, refund,
-invoice, dispute, config) behind one interface and is passed as
-`billing_store=` to `Bursar.create` to enable the billing and commerce
-capabilities. Also lazily imported from the top level; requires the
-`[postgres]` extra.
+invoice, dispute, config) behind one interface. Pass it as `billing_store=` to
+enable billing. Commerce additionally requires `commerce_options=` with the
+provider environment and factories. The store is lazily imported from the top
+level and requires the `[postgres]` extra.
 
 ## The CreditStore contract
 
@@ -77,11 +87,12 @@ The package never applies SQL on construction — neither `PostgresStore` nor
 CLI during deployment, before constructing any store:
 
 ```bash title="Terminal"
-DATABASE_URL=postgres://... bursar migrate
+BURSAR_MIGRATION_DATABASE_URL=postgres://... bursar migrate
 ```
 
-The CLI reads `DATABASE_URL` from the environment. See [CLI](/docs/cli) for
-`tenant`, `config`, and validation subcommands.
+The migration command reads `BURSAR_MIGRATION_DATABASE_URL`. See
+[CLI](/docs/cli) for the separate tenant, runtime/config, and local-validation
+credentials.
 
 See [Storage backends](/docs/guides/storage-backends) for S3/ClickHouse
 adapters and the storage runtime, and [custom stores](/docs/notebooks/custom_stores)

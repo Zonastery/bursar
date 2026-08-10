@@ -30,9 +30,10 @@ const outboxWorkerOptionsSchema = z
     maxRetryDelaySeconds: z.number().finite().int().min(1).max(86_400).default(3_600),
     attemptLimit: z.number().finite().int().min(1).max(1_000).default(10),
     onError: z
-      .custom<
-        (error: unknown) => void | Promise<void>
-      >((value) => typeof value === "function", "onError must be a function")
+      .custom<(error: unknown) => void | Promise<void>>(
+        (value) => typeof value === "function",
+        "onError must be a function",
+      )
       .optional(),
   })
   .strict()

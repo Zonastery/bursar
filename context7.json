@@ -1,8 +1,8 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
-  "projectTitle": "Bursar",
-  "description": "Open-source credit-ledger and billing SDK for AI SaaS applications, with synchronized Python and JavaScript clients.",
-  "folders": ["docs/docs"],
+  "projectTitle": "Bursar — AI credits and usage billing",
+  "description": "Open-source PostgreSQL credit ledger, usage metering, and reserve-settle billing SDK for AI SaaS, with synchronized Python and TypeScript clients.",
+  "folders": ["docs/docs", "skills/bursar"],
   "excludeFolders": [
     "**/.docusaurus",
     "**/.git",

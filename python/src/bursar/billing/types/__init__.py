@@ -7,6 +7,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
+from bursar.shared.numbers import NonNegativeSafeInteger, PositiveSafeInteger
+
 
 class BaseModel(PydanticBaseModel):
     """Strict base for public billing contracts."""
@@ -110,7 +112,7 @@ class BillingSubscriptionInfo(BaseModel):
     ended_at: str | None = None
     refs: ProviderRef | None = None
     interval: Literal["day", "week", "month", "year"] | None = None
-    interval_count: int | None = Field(default=None, gt=0)
+    interval_count: PositiveSafeInteger | None = None
 
     @field_validator("period_start", "period_end", "trial_end", "cancel_at", "ended_at")
     @classmethod
@@ -121,8 +123,8 @@ class BillingSubscriptionInfo(BaseModel):
 class BillingInvoiceInfo(BaseModel):
     provider_invoice_id: NonEmptyString
     status: Literal["draft", "open", "paid", "void", "uncollectible"]
-    amount_paid_minor: int = Field(ge=0)
-    amount_due_minor: int = Field(ge=0)
+    amount_paid_minor: NonNegativeSafeInteger
+    amount_due_minor: NonNegativeSafeInteger
     currency: CurrencyCode
     period_start: str | None = None
     period_end: str | None = None
@@ -141,8 +143,8 @@ class BillingInvoiceRecord(BillingInvoiceInfo):
 
 class BillingPaymentInfo(BaseModel):
     provider_payment_id: NonEmptyString
-    amount_minor: int = Field(ge=0)
-    tax_minor: int = Field(ge=0)
+    amount_minor: NonNegativeSafeInteger
+    tax_minor: NonNegativeSafeInteger
     currency: CurrencyCode
     refs: ProviderRef | None = None
     purpose: Literal["subscription", "credit_topup"]
@@ -159,8 +161,8 @@ class BillingPaymentRecord(BaseModel):
     provider_payment_id: str
     provider_invoice_id: str | None = None
     user_id: str
-    amount_minor: int
-    tax_minor: int
+    amount_minor: NonNegativeSafeInteger
+    tax_minor: NonNegativeSafeInteger
     currency: str
     purpose: Literal["subscription", "credit_topup"]
     status: Literal["pending", "succeeded", "failed", "canceled"]
@@ -188,7 +190,7 @@ class BillingCreditPostingResult(BaseModel):
 class BillingRefundInfo(BaseModel):
     provider_refund_id: NonEmptyString
     provider_payment_id: NonEmptyString
-    amount_minor: int = Field(gt=0)
+    amount_minor: PositiveSafeInteger
     currency: CurrencyCode
     reason: str | None = None
     status: Literal["pending", "succeeded", "failed", "canceled"]
@@ -207,7 +209,7 @@ class BillingEvent(BaseModel):
     event_type: BillingEventType
     occurred_at: str
 
-    user_id: NonEmptyString | None = None
+    account_id: NonEmptyString | None = None
     customer: BillingCustomerInfo | None = None
     subscription: BillingSubscriptionInfo | None = None
     invoice: BillingInvoiceInfo | None = None
@@ -345,7 +347,7 @@ class BillingSubscriptionState(BaseModel):
     ended_at: str | None = None
     cancel_at_period_end: bool
     interval: str | None = None
-    interval_count: int | None = None
+    interval_count: PositiveSafeInteger | None = None
     grace_ends_at: str | None = None
     grace_expired_at: str | None = None
     provider_updated_at: str
@@ -390,7 +392,7 @@ class BillingSubscriptionOfferContext(BaseModel):
     plan_id: NonEmptyString
     plan: NonEmptyString
     interval: BillingOfferInterval
-    interval_count: int = Field(gt=0)
+    interval_count: PositiveSafeInteger
 
 
 class BillingSubscriptionChange(BaseModel):
@@ -444,7 +446,7 @@ class BillingOfferResult(BaseModel):
     plan_id: str
     plan: str
     interval: Literal["day", "week", "month", "year"]
-    interval_count: int = Field(gt=0)
+    interval_count: PositiveSafeInteger
     grant: BillingGrantResult | None
 
 
@@ -455,13 +457,13 @@ class BillingTopupResult(BaseModel):
     topup_key: str
     credits_per_unit: Decimal = Field(gt=0)
     deposit_to: str = Field(min_length=1)
-    amount_minor: int = Field(ge=0)
+    amount_minor: NonNegativeSafeInteger
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    min_quantity: int = Field(gt=0)
-    max_quantity: int = Field(gt=0)
-    default_quantity: int = Field(gt=0)
-    min_amount_minor: int = Field(ge=0)
-    max_amount_minor: int = Field(ge=0)
+    min_quantity: PositiveSafeInteger
+    max_quantity: PositiveSafeInteger
+    default_quantity: PositiveSafeInteger
+    min_amount_minor: NonNegativeSafeInteger
+    max_amount_minor: NonNegativeSafeInteger
 
 
 class BillingPreferences(BaseModel):
@@ -497,11 +499,11 @@ class BillingAutoRechargeProfile(BaseModel):
     armed: bool = True
     provider: str | None
     topup_id: str | None
-    quantity: int
+    quantity: PositiveSafeInteger
     threshold: Decimal
-    max_charges_per_window: int | None
+    max_charges_per_window: PositiveSafeInteger | None
     window_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"]
-    window_count: int
+    window_count: PositiveSafeInteger
     window_anchor: Literal["calendar", "rolling"]
     window_timezone: str
     updated_at: str | None = None
@@ -516,11 +518,11 @@ class BillingAutoRechargeAttempt(BaseModel):
     idempotency_key: str
     provider_attempt_id: str | None
     topup_id: str
-    quantity: int
+    quantity: PositiveSafeInteger
     state: BillingAutoRechargeAttemptState
     window_start: str
     window_end: str
-    quoted_amount_minor: int | None
+    quoted_amount_minor: NonNegativeSafeInteger | None
     currency: str | None
     failure_code: str | None
     failure_message: str | None
@@ -536,17 +538,17 @@ class BillingAutoRechargeStatus(BaseModel):
     state: BillingAutoRechargeState
     threshold_credits: Decimal
     topup_key: str
-    quantity: int
-    max_recharges: int
+    quantity: PositiveSafeInteger
+    max_recharges: PositiveSafeInteger
     window_start: str
     window_end: str
-    recharges_in_window: int
+    recharges_in_window: NonNegativeSafeInteger
     payment_method_id: str | None
     payment_method_last4: str | None
     payment_method_brand: str | None
     suspended_reason: str | None
     pending_attempt_id: str | None
-    quote_amount_minor: int | None
+    quote_amount_minor: NonNegativeSafeInteger | None
     quote_currency: str | None
 
 

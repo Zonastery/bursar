@@ -226,6 +226,7 @@ describe("Postgres reliability boundary", () => {
         TENANT_ID,
         "postgres",
         "postgres",
+        "live",
       ]);
       expect(query).toHaveBeenCalledWith("SET LOCAL ROLE bursar_client");
       expect(query).toHaveBeenCalledWith("ROLLBACK");

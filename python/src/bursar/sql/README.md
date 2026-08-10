@@ -49,15 +49,13 @@ it calls a Bursar provisioning RPC.
 Shared-table multi-tenancy is defined directly by the baseline table,
 constraint, index, and storage migrations. Business tables have a mandatory
 `tenant_id` plus tenant-prefixed relationship and uniqueness constraints.
-`029_multitenancy_security.sql` installs forced RLS and assigns tenant RPCs to
-the `NOLOGIN NOBYPASSRLS` `bursar_runtime` role, so a Supabase `service_role`
-caller cannot bypass isolation through a security-definer RPC.
-
-Server adapters bind `bursar.tenant_id` with transaction-local `set_config` on
-the same checked-out connection as the RPC. Trusted PostgREST callers may use
-`app_metadata.tenant_id`; `user_metadata` is never accepted. Storage
-maintenance and outbox claiming remain operator-level cross-tenant operations,
-and their exports carry the owning tenant UUID.
+`029_multitenancy_security.sql` installs forced RLS and grants distinct client
+and operator capabilities. Server adapters bind `bursar.tenant_id` with
+transaction-local `set_config` on the same checked-out connection as the RPC.
+The database never derives this value from PostgREST JWT metadata. Runtime
+connections must not be superusers, have `BYPASSRLS`, or use Supabase's
+`service_role`. Storage maintenance and outbox claiming remain operator-level
+cross-tenant operations, and their exports carry the owning tenant UUID.
 
 ## Function conventions
 
@@ -67,10 +65,8 @@ and stable error codes. `SECURITY DEFINER` functions must keep an empty
 functions must use the `bursar.mutation_context` trigger contract.
 
 Catalog publication must accept every omission documented as a model default.
-The fixed credit-accounting default is canonicalized before the source
-document is digested, so omitted and explicitly stated forms do not create
-duplicate revisions. Other defaults must be applied consistently by every SQL
-projection and reader.
+Defaults must be applied consistently by every SQL projection and reader
+before the source document is digested.
 
 Externally meaningful, independently generated, and cross-system identifiers
 use RFC 9562 UUIDv7. This preserves the UUID API while giving primary and

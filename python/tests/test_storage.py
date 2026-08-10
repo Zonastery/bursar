@@ -401,6 +401,7 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
+            provider_environment="test",
         )
     )
 
@@ -419,6 +420,7 @@ def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID(TENANT_ID),
+            provider_environment="test",
         )
     )
     load_catalog = Mock(side_effect=[CatalogNotLoadedError("catalog pending"), None])
@@ -439,7 +441,9 @@ def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
 
 def test_runtime_loads_catalog_by_default() -> None:
     pool = FakePool()
-    runtime = create_bursar_runtime(BursarRuntimeOptions(postgres=pool, tenant_id=UUID(TENANT_ID)))
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(postgres=pool, tenant_id=UUID(TENANT_ID), provider_environment="test")
+    )
     runtime.bursar.load_catalog = Mock()
 
     runtime.start()
@@ -454,6 +458,7 @@ def test_runtime_verifies_normalized_tenant_slug() -> None:
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID(TENANT_ID),
+            provider_environment="test",
             tenant_slug=" Zonastery ",
         )
     )
@@ -474,6 +479,7 @@ def test_runtime_rejects_tenant_slug_mismatch() -> None:
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID(TENANT_ID),
+            provider_environment="test",
             tenant_slug="zonastery",
         )
     )
@@ -498,6 +504,7 @@ def test_runtime_routes_analytics_through_clickhouse_without_changing_store() ->
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
+            provider_environment="test",
             clickhouse=ClickHouseUsageStoreOptions(
                 client=client,
                 tenant_id=UUID(TENANT_ID),
@@ -541,6 +548,7 @@ def test_runtime_routes_usage_history_through_clickhouse() -> None:
         BursarRuntimeOptions(
             postgres=pool,
             tenant_id=UUID(TENANT_ID),
+            provider_environment="test",
             clickhouse=ClickHouseUsageStoreOptions(
                 client=client,
                 tenant_id=UUID(TENANT_ID),

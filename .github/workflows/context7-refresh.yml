@@ -4,6 +4,8 @@ on:
   release:
     types:
       - published
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +20,10 @@ jobs:
           CONTEXT7_LIBRARY: /${{ github.repository }}
         run: |
           set -euo pipefail
-          : "${CONTEXT7_API_KEY:?CONTEXT7_API_KEY secret is required}"
+          if [ -z "${CONTEXT7_API_KEY:-}" ]; then
+            echo "::notice::CONTEXT7_API_KEY is not configured; skipping the optional refresh"
+            exit 0
+          fi
 
           request_body="$(jq -cn --arg libraryName "$CONTEXT7_LIBRARY" '{libraryName: $libraryName}')"
           curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \

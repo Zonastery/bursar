@@ -6,7 +6,6 @@ it("parses opt-in auto-recharge guardrails", () => {
   const config = loadConfigFromDict({
     version: 1,
     credits: {
-      accounting: { unit: "credit", scale: 6, rounding: "half_up" },
       buckets: { purchased: { priority: 10 } },
       default_bucket: "purchased",
     },

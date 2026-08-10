@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
 
 from bursar.shared.idempotency import StableKey
+from bursar.shared.numbers import NonNegativeSafeInteger, PositiveSafeInteger
+
+ProviderEnvironment = Literal["live", "test", "sandbox"]
 
 
 @runtime_checkable
@@ -77,14 +79,6 @@ def normalize_provider_logger(logger: Any = None) -> ProviderLogger:
     return _NormalizedProviderLogger(logger)
 
 
-@runtime_checkable
-class ResolveUserCallback(Protocol):
-    def __call__(
-        self,
-        identity: ResolveIdentityInput,
-    ) -> Awaitable[str | None]: ...
-
-
 class _ProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -100,8 +94,8 @@ NonEmptyString = Annotated[
     Field(strict=True),
     AfterValidator(_require_trimmed_non_empty_string),
 ]
-PositiveInt = Annotated[int, Field(strict=True, gt=0)]
-NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+PositiveInt = PositiveSafeInteger
+NonNegativeInt = NonNegativeSafeInteger
 
 
 def _require_finite_number(value: object) -> int | float:
@@ -131,17 +125,6 @@ CurrencyCode = Annotated[str, Field(strict=True), AfterValidator(_normalize_curr
 ProviderInstant = Annotated[str, Field(strict=True), AfterValidator(_normalize_instant)]
 
 
-class ResolveIdentityInput(_ProviderModel):
-    provider: NonEmptyString
-    provider_event_type: NonEmptyString
-    normalized_event_type: NonEmptyString | None = None
-    customer_id: NonEmptyString | None = None
-    email: NonEmptyString | None = None
-    metadata: dict[str, str]
-    successful: bool = Field(strict=True)
-    checkout_kind: Literal["subscription", "credit_topup"] | None = None
-
-
 class WebhookRequest(_ProviderModel):
     raw_body: str
     headers: dict[str, str]
@@ -156,7 +139,7 @@ class WebhookResult(_ProviderModel):
 
 
 class CheckoutParams(_ProviderModel):
-    user_id: NonEmptyString | None = None
+    account_id: NonEmptyString
     customer_id: NonEmptyString | None = None
     email: NonEmptyString | None = None
     product_id: NonEmptyString

@@ -127,7 +127,14 @@ it("resubmits an unknown auto-recharge outcome with its original provider key", 
     }),
   ).resolves.toMatchObject({ outcome: "submitted" });
   expect(chargeSavedPaymentMethod).toHaveBeenCalledWith(
-    expect.objectContaining({ idempotencyKey: "auto-recharge:original" }),
+    expect.objectContaining({
+      idempotencyKey: "auto-recharge:original",
+      metadata: {
+        auto_recharge_attempt_id: "00000000-0000-0000-0000-000000000020",
+        bursar_account_id: "00000000-0000-0000-0000-000000000001",
+        purpose: "credit_topup",
+      },
+    }),
   );
   expect(updateAutoRechargeAttempt).toHaveBeenCalledWith(
     expect.objectContaining({ state: "processing", providerAttemptId: "payment-1" }),

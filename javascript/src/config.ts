@@ -92,6 +92,9 @@ export function loadConfigFromDict(
   if (defaultPlan != null && !plans[defaultPlan]) {
     semanticError(`catalog.default_plan references unknown plan '${defaultPlan}'`);
   }
+  if (Object.keys(plans).length > 0 && defaultPlan == null) {
+    semanticError("catalog.default_plan is required when plans are configured");
+  }
   return {
     version: 1,
     catalog: {

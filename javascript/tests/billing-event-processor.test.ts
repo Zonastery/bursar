@@ -130,7 +130,7 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
 
     const result = await processor.ingestBillingEvent({
       ...event("evt_failure_message", BillingEventType.CUSTOMER_CREATED),
-      userId: "00000000-0000-0000-0000-000000000001",
+      accountId: "00000000-0000-0000-0000-000000000001",
       customer: { providerCustomerId: "cus_failure" },
     });
 
@@ -217,7 +217,7 @@ describe("subscription plan-change provisioning", () => {
       eventId: "evt_plan_change_with_pending",
       eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
       occurredAt: "2026-08-05T00:00:00Z",
-      userId: "user-1",
+      accountId: "user-1",
       subscription: {
         providerSubscriptionId: "sub-1",
         status: "active",
@@ -265,7 +265,7 @@ describe("subscription plan-change provisioning", () => {
       eventId: "evt_plan_change",
       eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
       occurredAt: "2026-08-05T00:00:00Z",
-      userId: "user-1",
+      accountId: "user-1",
       subscription: {
         providerSubscriptionId: "sub-1",
         status: "active",

@@ -146,17 +146,17 @@ export class BillingEventProcessor {
     }
     const result = await handler(event);
     if (result.handled) {
-      await this.fireEventHandlers(event, event.userId ?? null);
+      await this.fireEventHandlers(event, event.accountId ?? null);
     }
     return result;
   }
 
-  private async fireEventHandlers(event: BillingEvent, userId: string | null): Promise<void> {
-    if (!userId) return;
+  private async fireEventHandlers(event: BillingEvent, accountId: string | null): Promise<void> {
+    if (!accountId) return;
     const handler = this.eventHandlers[event.eventType];
     if (!handler) return;
     try {
-      await handler(event, userId);
+      await handler(event, accountId);
     } catch (err) {
       this.logger.error(
         `[BillingService] event handler failed for ${event.provider}/${event.eventId}`,

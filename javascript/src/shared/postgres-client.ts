@@ -1,4 +1,8 @@
 import { type BursarError, ImportError as BursarImportError, StoreClosedError } from "../errors.js";
+import {
+  normalizeProviderEnvironment,
+  type ProviderEnvironment,
+} from "../providers/environment.js";
 import { normalizePostgresError, type PostgresOperationPhase } from "./postgres-errors.js";
 import type { QueryFn } from "./postgres-types.js";
 
@@ -51,6 +55,8 @@ function assertPostgresPool(value: unknown): asserts value is PostgresPool {
 
 /** PostgreSQL deadline, pool, and observability controls. */
 export interface PostgresConnectionOptions {
+  /** Financial provider namespace. Low-level credit-only clients default to `live`. */
+  providerEnvironment?: ProviderEnvironment;
   /** Time allowed to establish or acquire a connection. Defaults to 10 seconds. */
   connectionTimeoutMs?: number;
   /** Server-side statement deadline. Defaults to 30 seconds; set 0 to disable. */
@@ -79,6 +85,7 @@ export interface PostgresClientOptions extends PostgresConnectionOptions {
 export type PostgresAccessRole = "bursar_client" | "bursar_operator";
 
 interface NormalizedPostgresConnectionOptions {
+  providerEnvironment: ProviderEnvironment;
   connectionTimeoutMs: number;
   statementTimeoutMs: number;
   idleTransactionTimeoutMs: number;
@@ -117,6 +124,7 @@ function normalizeConnectionOptions(
     throw new TypeError("applicationName must not contain null bytes");
   }
   return {
+    providerEnvironment: normalizeProviderEnvironment(options.providerEnvironment ?? "live"),
     connectionTimeoutMs: integerOption(
       options.connectionTimeoutMs,
       DEFAULT_CONNECTION_TIMEOUT_MS,
@@ -230,6 +238,7 @@ export class PostgresClient {
   private readonly accessRole: PostgresAccessRole | null;
   private readonly usageBackend: "postgres" | "clickhouse";
   private readonly billingPayloadBackend: "postgres" | "s3";
+  private readonly providerEnvironment: ProviderEnvironment;
   private readonly connectionOptions: NormalizedPostgresConnectionOptions;
   private removePoolObserver: (() => void) | null = null;
   private closePromise: Promise<void> | null = null;
@@ -278,6 +287,7 @@ export class PostgresClient {
     this.accessRole = options.accessRole ?? (this.tenantId ? "bursar_client" : null);
     this.usageBackend = options.usageBackend ?? "postgres";
     this.billingPayloadBackend = options.billingPayloadBackend ?? "postgres";
+    this.providerEnvironment = this.connectionOptions.providerEnvironment;
     if (this.pool) {
       this.removePoolObserver = observePool(this.pool, this.connectionOptions.onPoolError);
     }
@@ -332,8 +342,14 @@ export class PostgresClient {
           `set_config('bursar.tenant_id', $3, true)`,
           `set_config('bursar.usage_backend', $4, true)`,
           `set_config('bursar.billing_payload_backend', $5, true)`,
+          `set_config('bursar.provider_environment', $6, true)`,
         );
-        values.push(this.tenantId, this.usageBackend, this.billingPayloadBackend);
+        values.push(
+          this.tenantId,
+          this.usageBackend,
+          this.billingPayloadBackend,
+          this.providerEnvironment,
+        );
       }
       await client.query(`SELECT ${settings.join(", ")}`, values);
       phase = "query";

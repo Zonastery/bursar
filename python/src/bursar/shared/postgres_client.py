@@ -16,6 +16,7 @@ import psycopg2.pool
 from pydantic.json_schema import SkipJsonSchema
 
 from bursar.errors import BursarError, StoreClosedError
+from bursar.providers.types import ProviderEnvironment
 from bursar.shared.postgres_errors import normalize_postgres_error
 
 PostgresAccessRole = Literal["bursar_client", "bursar_operator"]
@@ -127,6 +128,7 @@ class PostgresClient:
         access_role: PostgresAccessRole | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
         billing_payload_backend: Literal["postgres", "s3"] = "postgres",
+        provider_environment: ProviderEnvironment = "live",
         connection_timeout_seconds: float = 10.0,
         statement_timeout_ms: int = 30_000,
         idle_transaction_timeout_ms: int = 30_000,
@@ -159,6 +161,7 @@ class PostgresClient:
             ("postgres", "s3"),
             "billing_payload_backend",
         )
+        self._provider_environment = _normalize_provider_environment(provider_environment)
         effective_max_connections = self._options.max_connections if postgres_options is not None else max_connections
         if effective_max_connections < min_connections:
             raise ValueError("max_connections must be at least min_connections")
@@ -180,6 +183,7 @@ class PostgresClient:
         access_role: PostgresAccessRole | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
         billing_payload_backend: Literal["postgres", "s3"] = "postgres",
+        provider_environment: ProviderEnvironment = "live",
         connection_timeout_seconds: float = 10.0,
         statement_timeout_ms: int = 30_000,
         idle_transaction_timeout_ms: int = 30_000,
@@ -208,6 +212,7 @@ class PostgresClient:
             ("postgres", "s3"),
             "billing_payload_backend",
         )
+        instance._provider_environment = _normalize_provider_environment(provider_environment)
         return instance
 
     def query(self, text: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
@@ -314,9 +319,12 @@ class PostgresClient:
                     "set_config('bursar.tenant_id', %s, true)",
                     "set_config('bursar.usage_backend', %s, true)",
                     "set_config('bursar.billing_payload_backend', %s, true)",
+                    "set_config('bursar.provider_environment', %s, true)",
                 ]
             )
-            params.extend([self._tenant_id, self._usage_backend, self._billing_payload_backend])
+            params.extend(
+                [self._tenant_id, self._usage_backend, self._billing_payload_backend, self._provider_environment]
+            )
         for name, value in settings:
             expressions.append(f"set_config('{name}', %s, true)")
             params.append(value)
@@ -370,6 +378,12 @@ def _normalize_backend(value: str, choices: tuple[str, ...], name: str) -> str:
     if value not in choices:
         raise ValueError(f"{name} must be one of {choices}")
     return value
+
+
+def _normalize_provider_environment(value: str) -> ProviderEnvironment:
+    if value not in {"live", "test", "sandbox"}:
+        raise ValueError("provider_environment must be 'live', 'test', or 'sandbox'")
+    return cast(ProviderEnvironment, value)
 
 
 def create_pool(

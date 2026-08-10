@@ -8,7 +8,7 @@ describe("LowBalanceMonitor", () => {
   it("bounds retained breach state with the configured LRU capacity", async () => {
     const emit = vi.fn();
     const monitor = new LowBalanceMonitor(
-      { thresholds: [10], maxTrackedUsers: 2 },
+      { thresholds: ["10"], maxTrackedUsers: 2 },
       emit,
       noopLogger,
     );
@@ -23,7 +23,7 @@ describe("LowBalanceMonitor", () => {
 
   it("rejects invalid cache capacities at construction", () => {
     expect(
-      () => new LowBalanceMonitor({ thresholds: [10], maxTrackedUsers: 0 }, vi.fn(), noopLogger),
+      () => new LowBalanceMonitor({ thresholds: ["10"], maxTrackedUsers: 0 }, vi.fn(), noopLogger),
     ).toThrow(/positive safe integer/);
   });
 });

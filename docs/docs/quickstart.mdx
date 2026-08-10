@@ -22,7 +22,8 @@ Prepare these dependencies before continuing:
 
 - Python 3.12 or 3.13 for the Bursar command-line interface (CLI)
 - PostgreSQL 16 or newer with `pg_partman` 5.x and `pg_jsonschema` 0.3+ available to the migration role
-- A PostgreSQL connection string for a database you may modify
+- A PostgreSQL migration-owner connection and permission to create two
+  least-privilege login roles
 - Node.js 22 or newer if you will use the TypeScript example
 
 :::caution Use a development database
@@ -37,28 +38,55 @@ Install the Python package with PostgreSQL support. The package supplies the CLI
 
 ```bash title="Terminal"
 python -m pip install "bursar[postgres]"
-export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/bursar"
+export BURSAR_MIGRATION_DATABASE_URL="postgresql://bursar_migrator:password@localhost:5432/bursar"
 bursar migrate
 ```
+
+As the migration owner, create separate operator and application logins. Set
+real passwords through your database provider or secret tooling rather than
+placing them in shell history:
+
+```sql title="PostgreSQL"
+CREATE ROLE bursar_app
+  LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+GRANT bursar_client TO bursar_app WITH INHERIT FALSE, SET TRUE;
+
+CREATE ROLE bursar_ops
+  LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+GRANT bursar_operator TO bursar_ops WITH INHERIT FALSE, SET TRUE;
+```
+
+Give each login only the role shown above, then supply its connection through
+your normal secret manager. These illustrative local URLs keep the two trust
+boundaries explicit:
+
+```bash title="Terminal"
+export BURSAR_OPERATOR_DATABASE_URL="postgresql://bursar_ops:password@localhost:5432/bursar"
+export DATABASE_URL="postgresql://bursar_app:password@localhost:5432/bursar"
+export BURSAR_PROVIDER_ENVIRONMENT="test"
+```
+
+`BURSAR_PROVIDER_ENVIRONMENT` selects an isolated financial namespace. Use
+`test` for this tutorial and provider test credentials; production uses `live`.
 
 TypeScript applications also install the Node.js package:
 
 ```bash title="Terminal"
-npm install @zonastery/bursar
+npm install @zonastery/bursar pg
 ```
 
 `bursar migrate` applies the ordered SQL baseline and records each file checksum. Re-running the command is a no-op. The command fails if an applied migration file has changed.
 
 ## 2. Create a tenant
 
-Create a tenant and retain the returned universally unique identifier (UUID). Every store binds to one tenant before it reads or writes business data.
+Create a tenant with an explicit universally unique identifier (UUID). Every store binds to one tenant before it reads or writes business data.
 
 ```bash title="Terminal"
-bursar tenant create acme --display-name "Acme"
+bursar tenant create acme \
+  --id 018f7f5f-7b4a-7000-8000-000000000001 \
+  --display-name "Acme"
 export BURSAR_TENANT_ID="018f7f5f-7b4a-7000-8000-000000000001"
 ```
-
-Use the UUID printed by your command for `BURSAR_TENANT_ID`. The value above is an example.
 
 ## 3. Define and publish pricing
 
@@ -119,23 +147,35 @@ from bursar import Bursar, PostgresStore
 
 database_url = os.environ["DATABASE_URL"]
 tenant_id = os.environ["BURSAR_TENANT_ID"]
+provider_environment = os.environ["BURSAR_PROVIDER_ENVIRONMENT"]
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
-bursar = Bursar.create(credit_store=store)
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment=provider_environment,
+)
+bursar = Bursar(credit_store=store)
 ```
 
   </TabItem>
   <TabItem value="typescript" label="TypeScript">
 
 ```typescript
-import { Bursar, PostgresStore } from "@zonastery/bursar";
+import {
+  Bursar,
+  PostgresStore,
+  type ProviderEnvironment,
+} from "@zonastery/bursar";
 
 const databaseUrl = process.env.DATABASE_URL!;
 const tenantId = process.env.BURSAR_TENANT_ID!;
+const providerEnvironment = process.env
+  .BURSAR_PROVIDER_ENVIRONMENT! as ProviderEnvironment;
 
 const store = new PostgresStore({
   postgres: databaseUrl,
   tenantId,
+  providerEnvironment,
 });
 const bursar = new Bursar({ creditStore: store });
 ```

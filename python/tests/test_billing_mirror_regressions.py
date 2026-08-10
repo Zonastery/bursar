@@ -16,6 +16,7 @@ from bursar.billing.contracts import (
 )
 from bursar.billing.postgres.repositories.subscription import BillingSubscriptionRepository
 from bursar.billing.postgres.store import PostgresBillingStore
+from bursar.billing.service_types import BillingProvisioningPort, BillingServiceOptions
 from bursar.billing.types import (
     BillingAutoRechargeProfile,
     BillingCustomerInfo,
@@ -31,6 +32,16 @@ from bursar.billing.types import (
     ProviderRef,
 )
 from bursar.errors import StoreError
+
+
+def test_billing_service_uses_provisioning_from_options() -> None:
+    provisioning = MagicMock(spec=BillingProvisioningPort)
+    service = BillingService(
+        MagicMock(),
+        BillingServiceOptions(provisioning=provisioning),
+    )
+
+    assert service._provisioning is provisioning
 
 
 def _subscription(status: BillingSubscriptionStatus, subscription_id: str) -> BillingSubscriptionState:
@@ -75,7 +86,7 @@ def _cancellation_event(*, event_id: str, refs: ProviderRef | None) -> BillingEv
         event_id=event_id,
         event_type=BillingEventType.subscription_canceled,
         occurred_at="2026-07-29T00:00:00Z",
-        user_id="00000000-0000-0000-0000-000000000001",
+        account_id="00000000-0000-0000-0000-000000000001",
         subscription=BillingSubscriptionInfo(
             provider_subscription_id="sub_unknown",
             refs=refs,
@@ -238,7 +249,7 @@ def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -
         event_id="evt_provision",
         event_type=BillingEventType.subscription_activated,
         occurred_at="2026-07-29T00:00:00Z",
-        user_id=user_id,
+        account_id=user_id,
         subscription=BillingSubscriptionInfo(provider_subscription_id="sub_provision"),
     )
     offer = BillingOfferResult(
@@ -561,7 +572,7 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
         event_id="evt_plan_change",
         event_type=BillingEventType.subscription_plan_changed,
         occurred_at="2026-07-29T00:00:00Z",
-        user_id="00000000-0000-0000-0000-000000000001",
+        account_id="00000000-0000-0000-0000-000000000001",
         subscription=BillingSubscriptionInfo(
             provider_subscription_id="sub_1",
             status=BillingSubscriptionStatus.active,
@@ -611,7 +622,7 @@ def test_plan_change_captures_allowance_anchor_before_advancing() -> None:
         event_id="evt_plan_change_anchor",
         event_type=BillingEventType.subscription_plan_changed,
         occurred_at="2026-07-29T00:00:00Z",
-        user_id="00000000-0000-0000-0000-000000000001",
+        account_id="00000000-0000-0000-0000-000000000001",
         subscription=BillingSubscriptionInfo(
             provider_subscription_id="sub_1",
             status=BillingSubscriptionStatus.active,
@@ -622,9 +633,9 @@ def test_plan_change_captures_allowance_anchor_before_advancing() -> None:
     result = service._handle_subscription_plan_changed(event)
 
     assert result.handled
-    assert provisioning.method_calls[0].args == (event.user_id,)
+    assert provisioning.method_calls[0].args == (event.account_id,)
     provisioning.set_user_plan.assert_called_once_with(
-        event.user_id,
+        event.account_id,
         "sage",
         plan_assigned_at=anchor,
     )
@@ -640,7 +651,7 @@ def test_event_claim_envelope_matches_javascript_shape() -> None:
         event_id="evt_shape",
         event_type=BillingEventType.subscription_updated,
         occurred_at="2026-07-29T00:00:00Z",
-        user_id="00000000-0000-0000-0000-000000000001",
+        account_id="00000000-0000-0000-0000-000000000001",
         subscription=BillingSubscriptionInfo(
             provider_subscription_id="sub_1",
             cancel_at_period_end=True,
@@ -654,7 +665,7 @@ def test_event_claim_envelope_matches_javascript_shape() -> None:
     envelope = store.claim_billing_event.call_args.args[3]
     assert envelope["eventId"] == "evt_shape"
     assert envelope["eventType"] == "subscription.updated"
-    assert envelope["userId"] == "00000000-0000-0000-0000-000000000001"
+    assert envelope["accountId"] == "00000000-0000-0000-0000-000000000001"
     assert envelope["subscription"]["providerSubscriptionId"] == "sub_1"
     assert envelope["subscription"]["cancelAtPeriodEnd"] is True
     assert envelope["subscription"]["refs"] == {"priceId": "price_1"}

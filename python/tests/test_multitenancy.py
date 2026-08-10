@@ -2,13 +2,15 @@
 
 from copy import deepcopy
 from decimal import Decimal
+from uuid import uuid4
 
 import psycopg2
 import pytest
 from psycopg2 import sql
+from psycopg2.extensions import make_dsn
 
 from bursar.billing.postgres.store import PostgresBillingStore
-from bursar.credits.postgres.store import PostgresStore
+from bursar.credits.postgres.store import PostgresStore, run_migrations
 from bursar.credits.store import StoreError
 from tests.conftest import TEST_TENANT_ID, TEST_TENANT_SLUG
 from tests.test_store_integration import CONFIG
@@ -132,6 +134,111 @@ def test_bursar_roles_are_fail_closed(pg_database_url: str) -> None:
         ]
 
 
+def test_migrations_accept_a_set_only_least_privilege_client(
+    pg_database_url: str,
+) -> None:
+    suffix = uuid4().hex[:16]
+    database_name = f"bursar_role_contract_{suffix}"
+    client_role = f"bursar_app_{suffix}"
+    client_password = uuid4().hex
+    admin_dsn = make_dsn(pg_database_url, dbname="postgres")
+    pristine_dsn = make_dsn(pg_database_url, dbname=database_name)
+    client_dsn = make_dsn(
+        pristine_dsn,
+        user=client_role,
+        password=client_password,
+    )
+    role_created = False
+    database_created = False
+
+    admin = psycopg2.connect(admin_dsn)
+    try:
+        admin.autocommit = True
+        with admin.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "CREATE ROLE {} LOGIN PASSWORD %s NOSUPERUSER NOCREATEDB "
+                    "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+                ).format(sql.Identifier(client_role)),
+                (client_password,),
+            )
+            role_created = True
+            cursor.execute(
+                sql.SQL("GRANT bursar_client TO {} WITH INHERIT FALSE, SET TRUE").format(sql.Identifier(client_role))
+            )
+            cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+            database_created = True
+
+        # The caller membership exists before this database's baseline runs.
+        # Migration validation must accept it without weakening the role.
+        run_migrations(pristine_dsn)
+        with psycopg2.connect(pristine_dsn) as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE bursar_operator")
+            cursor.execute(
+                "SELECT bursar.create_tenant(%s, %s, %s)",
+                (TEST_TENANT_ID, "role-contract", "Role contract"),
+            )
+
+        with psycopg2.connect(client_dsn) as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE bursar_client")
+            cursor.execute(
+                "SELECT set_config('bursar.tenant_id', %s, true)",
+                (TEST_TENANT_ID,),
+            )
+            cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
+            cursor.execute(
+                "SELECT balance FROM bursar.get_credit_state(%s)",
+                (SHARED_SUBJECT_ID,),
+            )
+            assert cursor.fetchone() is None
+
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cursor.execute("SELECT count(*) FROM bursar.tenants")
+
+        with psycopg2.connect(client_dsn) as connection, connection.cursor() as cursor:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cursor.execute("SET LOCAL ROLE bursar_operator")
+    finally:
+        admin.close()
+        cleanup = psycopg2.connect(admin_dsn)
+        try:
+            cleanup.autocommit = True
+            with cleanup.cursor() as cursor:
+                if database_created:
+                    cursor.execute(
+                        "SELECT pg_terminate_backend(pid) "
+                        "FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (database_name,),
+                    )
+                    cursor.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(database_name)))
+                if role_created:
+                    cursor.execute(sql.SQL("REVOKE bursar_client FROM {}").format(sql.Identifier(client_role)))
+                    cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(client_role)))
+        finally:
+            cleanup.close()
+
+
+def test_provider_environment_fails_closed_without_transaction_context(
+    pg_database_url: str,
+) -> None:
+    with (
+        psycopg2.connect(pg_database_url) as connection,
+        connection.cursor() as cursor,
+        pytest.raises(
+            psycopg2.errors.InvalidParameterValue,
+            match="bursar provider environment is required",
+        ),
+    ):
+        cursor.execute("SELECT set_config('bursar.provider_environment', '', true)")
+        cursor.execute("SELECT bursar.current_provider_environment()")
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'sandbox', true)")
+        cursor.execute("SELECT bursar.current_provider_environment()")
+        assert cursor.fetchone() == ("sandbox",)
+
+
 def test_tenant_aware_host_trigger_assigns_default_plan_and_signup_grants(
     pg_database_url: str,
 ) -> None:
@@ -152,7 +259,11 @@ def test_tenant_aware_host_trigger_assigns_default_plan_and_signup_grants(
             "idempotency_scope": "subject",
         }
     }
-    store = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
+    store = PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
+    )
     try:
         store.publish_and_activate_catalog(config, "host-trigger")
     finally:
@@ -241,15 +352,25 @@ def test_tenants_isolate_catalog_credit_and_provider_idempotency(
 ) -> None:
     _ensure_second_tenant(pg_database_url)
 
-    first = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
-    second = PostgresStore(pg_database_url, tenant_id=SECOND_TENANT_ID)
+    first = PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
+    )
+    second = PostgresStore(
+        pg_database_url,
+        tenant_id=SECOND_TENANT_ID,
+        provider_environment="test",
+    )
     first_billing = PostgresBillingStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
     )
     second_billing = PostgresBillingStore(
         pg_database_url,
         tenant_id=SECOND_TENANT_ID,
+        provider_environment="test",
     )
     try:
         first_catalog_id = first.publish_and_activate_catalog(CONFIG, "first")
@@ -342,10 +463,12 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
     first_billing = PostgresBillingStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
     )
     second_billing = PostgresBillingStore(
         pg_database_url,
         tenant_id=SECOND_TENANT_ID,
+        provider_environment="test",
     )
     first_event = first_billing.claim_billing_event(
         "stripe",
@@ -471,8 +594,16 @@ def test_only_explicit_bursar_context_selects_a_tenant(
     pg_database_url: str,
 ) -> None:
     _ensure_second_tenant(pg_database_url)
-    first = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
-    second = PostgresStore(pg_database_url, tenant_id=SECOND_TENANT_ID)
+    first = PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
+    )
+    second = PostgresStore(
+        pg_database_url,
+        tenant_id=SECOND_TENANT_ID,
+        provider_environment="test",
+    )
     try:
         first.publish_and_activate_catalog(CONFIG, "context-first")
         second.publish_and_activate_catalog(CONFIG, "context-second")
@@ -644,6 +775,7 @@ def test_partition_children_are_forced_rls_and_not_client_accessible(
     billing = PostgresBillingStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
     )
     try:
         billing.claim_billing_event(
@@ -704,8 +836,16 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
     pg_database_url: str,
 ) -> None:
     _ensure_second_tenant(pg_database_url)
-    first = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
-    second = PostgresStore(pg_database_url, tenant_id=SECOND_TENANT_ID)
+    first = PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
+    )
+    second = PostgresStore(
+        pg_database_url,
+        tenant_id=SECOND_TENANT_ID,
+        provider_environment="test",
+    )
     try:
         first.publish_and_activate_catalog(CONFIG, "lock-first")
         second.publish_and_activate_catalog(CONFIG, "lock-second")
@@ -723,10 +863,12 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
             "SELECT set_config('bursar.tenant_id', %s, true)",
             (TEST_TENANT_ID,),
         )
+        first_cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
         second_cursor.execute(
             "SELECT set_config('bursar.tenant_id', %s, true)",
             (SECOND_TENANT_ID,),
         )
+        second_cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
         second_cursor.execute("SET LOCAL statement_timeout = '2s'")
 
         first_cursor.execute("SELECT bursar.activate_catalog_revision(1)")

@@ -25,7 +25,7 @@ Do not maintain the same technical fact in multiple prose documents. Follow this
 | Python signatures             | Public `bursar` exports and docstrings | Sphinx Autosummary in `docs/python-api/reference/`                        |
 | TypeScript signatures         | TypeScript source and TSDoc            | TypeDoc Markdown in `docs/javascript-api/reference/`                      |
 | Database structure            | Ordered SQL migrations                 | Mermaid entity-relationship diagram in `docs/concepts/database-schema.md` |
-| Configuration shape           | Pydantic models and generated schema   | `pricing-config.schema.json`                                              |
+| Configuration shape           | Pydantic models and generated schema   | `pricing-config.schema.json`, copied into the built site at the same path |
 | Executable tutorials          | Jupyter notebooks                      | MDX pages in `docs/notebooks/`                                            |
 | Navigation and page summaries | Docusaurus sidebar and front matter    | Search, sitemap, `llms.txt`, and `llms-full.txt`                          |
 | Agent procedure               | `../skills/bursar/SKILL.md`            | Linked from `docs/agent-skills.mdx`                                       |
@@ -80,9 +80,15 @@ Run individual checks while editing:
 ```bash
 npm run format:check
 npm run typecheck
+npm run smoke
 npm run generate:notebooks
 npm run build
 ```
+
+`npm run smoke` executes one Python provider/webhook path and compiles one
+TypeScript provider/webhook path. These two checks cover the public facade,
+provider factory, exact amount, nullable commerce, event-constant, and raw
+webhook contracts without duplicating the SDK integration suites.
 
 ## Authoring standard
 

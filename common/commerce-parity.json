@@ -1,12 +1,10 @@
 {
   "catalog": {
     "version": 1,
+    "catalog": {
+      "default_plan": "starter"
+    },
     "credits": {
-      "accounting": {
-        "unit": "credit",
-        "scale": 6,
-        "rounding": "half_up"
-      },
       "buckets": {
         "general": {
           "priority": 10

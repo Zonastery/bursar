@@ -12,7 +12,8 @@ export interface WebhookResult {
 }
 
 export interface CheckoutParams {
-  userId?: string;
+  /** Financial subject receiving the subscription or credit purchase. */
+  accountId: string;
   customerId?: string;
   email?: string;
   productId: string;
@@ -21,8 +22,7 @@ export interface CheckoutParams {
   returnUrl: string;
   cancelUrl: string;
   metadata: Record<string, string>;
-  /** Provider-level idempotency key. Prevents duplicate checkout sessions on
-   *  network retries or double-clicks. Generated server-side per request. */
+  /** Caller-stable provider idempotency key for checkout retries. */
   idempotencyKey: string;
 }
 
@@ -132,19 +132,6 @@ export function deduplicatePaymentMethods(methods: PaymentMethodInfo[]): Payment
   });
 }
 
-export interface ResolveIdentityInput {
-  provider: string;
-  providerEventType: string;
-  normalizedEventType: string | null;
-  customerId: string | null;
-  email: string | null;
-  metadata: Record<string, string>;
-  successful: boolean;
-  checkoutKind: "subscription" | "credit_topup" | null;
-}
-
-export type ResolveUserCallback = (input: ResolveIdentityInput) => Promise<string | null>;
-
 export { noopLogger, normalizeLogger as normalizeProviderLogger } from "../shared/logger.js";
 export type {
   Logger as ProviderLogger,
@@ -169,10 +156,7 @@ export interface ChangePlanParams {
   providerSubscriptionId: string;
   productId: string;
   prorationBillingMode:
-    | "prorated_immediately"
-    | "full_immediately"
-    | "difference_immediately"
-    | "do_not_bill";
+    "prorated_immediately" | "full_immediately" | "difference_immediately" | "do_not_bill";
   effectiveAt?: "immediately" | "next_billing_date";
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;

@@ -13,7 +13,7 @@ from bursar.commerce import (
     AccountCreditDisplay,
     CommerceOptions,
     CommerceProviderFactoryContext,
-    CommerceProviderRegistry,
+    CreateCheckoutInput,
     InvalidOfferQuantityError,
     PlanChangePreviewResult,
     ProviderCapabilityNotSupportedError,
@@ -22,6 +22,7 @@ from bursar.commerce import (
     UnknownOfferError,
     classify_subscription_change,
 )
+from bursar.commerce.provider_registry import CommerceProviderRegistry
 from bursar.config import SubscriptionOffer, load_config_from_dict
 from bursar.providers.mock.provider import MockPaymentProvider
 
@@ -64,9 +65,12 @@ def test_public_commerce_types_hide_provider_product_and_quote_aliases() -> None
 
 def test_public_commerce_models_reject_ambiguous_states() -> None:
     with pytest.raises(ValidationError):
-        CommerceOptions(providers={})
+        CommerceOptions(provider_environment="test", providers={})
     with pytest.raises(ValidationError):
-        CommerceOptions(providers={" ": lambda context: MockPaymentProvider(event_sink=context.event_sink)})
+        CommerceOptions(
+            provider_environment="test",
+            providers={" ": lambda context: MockPaymentProvider(event_sink=context.event_sink)},
+        )
     with pytest.raises(ValidationError):
         PlanChangePreviewResult(
             unchanged=False,
@@ -85,6 +89,16 @@ def test_public_commerce_models_reject_ambiguous_states() -> None:
         )
     with pytest.raises(ValidationError):
         AccountCreditDisplay(currency="USD", units_per_major=Decimal(0))
+    with pytest.raises(ValidationError, match="account_id"):
+        CreateCheckoutInput.model_validate(
+            {
+                "subject_id": "actor-1",
+                "offer_key": "pro",
+                "return_url": "https://app.example/return",
+                "cancel_url": "https://app.example/cancel",
+                "operation_key": "checkout-1",
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -95,10 +109,11 @@ async def test_provider_registry_validates_default_and_deduplicates_loading() ->
     ):
         CommerceProviderRegistry(
             CommerceOptions(
+                provider_environment="test",
                 providers={"mock": lambda context: MockPaymentProvider(event_sink=context.event_sink)},
                 default_provider="missing",
             ),
-            CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+            CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
         )
 
     calls = 0
@@ -110,8 +125,8 @@ async def test_provider_registry_validates_default_and_deduplicates_loading() ->
         return MockPaymentProvider(event_sink=_context.event_sink)
 
     registry = CommerceProviderRegistry(
-        CommerceOptions(providers={"mock": factory}),
-        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+        CommerceOptions(provider_environment="test", providers={"mock": factory}),
+        CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
     )
     first, second = await asyncio.gather(
         registry.get("mock"),
@@ -126,8 +141,8 @@ async def test_provider_registry_validates_default_and_deduplicates_loading() ->
 @pytest.mark.asyncio
 async def test_provider_registry_validates_factories_and_clear_invalidates_in_flight_loads() -> None:
     invalid = CommerceProviderRegistry(
-        CommerceOptions(providers={"mock": lambda _context: object()}),  # type: ignore[dict-item]
-        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+        CommerceOptions(provider_environment="test", providers={"mock": lambda _context: object()}),  # type: ignore[dict-item]
+        CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
     )
     with pytest.raises(ProviderSelectionError, match="did not return a valid payment provider"):
         await invalid.get("mock")
@@ -145,8 +160,8 @@ async def test_provider_registry_validates_factories_and_clear_invalidates_in_fl
         return MockPaymentProvider(event_sink=context.event_sink)
 
     registry = CommerceProviderRegistry(
-        CommerceOptions(providers={"mock": factory}),
-        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+        CommerceOptions(provider_environment="test", providers={"mock": factory}),
+        CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
     )
     stale_task = asyncio.create_task(registry.get("mock"))
     await first_started.wait()
@@ -174,8 +189,8 @@ async def test_cancelling_one_provider_waiter_preserves_the_shared_factory_load(
         return MockPaymentProvider(event_sink=context.event_sink)
 
     registry = CommerceProviderRegistry(
-        CommerceOptions(providers={"mock": factory}),
-        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+        CommerceOptions(provider_environment="test", providers={"mock": factory}),
+        CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
     )
     cancelled_waiter = asyncio.create_task(registry.get("mock"))
     await started.wait()
@@ -207,8 +222,8 @@ async def test_cancelled_provider_waiter_does_not_leave_an_unobserved_factory_fa
             finished.set()
 
     registry = CommerceProviderRegistry(
-        CommerceOptions(providers={"mock": factory}),
-        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+        CommerceOptions(provider_environment="test", providers={"mock": factory}),
+        CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
     )
     loop = asyncio.get_running_loop()
     previous_handler = loop.get_exception_handler()
@@ -238,8 +253,8 @@ async def test_provider_registry_propagates_factory_failure_to_active_waiter() -
         raise RuntimeError("provider factory failed")
 
     registry = CommerceProviderRegistry(
-        CommerceOptions(providers={"mock": factory}),
-        CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
+        CommerceOptions(provider_environment="test", providers={"mock": factory}),
+        CommerceProviderFactoryContext(provider_environment="test", event_sink=object()),  # type: ignore[reportArgumentType]
     )
 
     with pytest.raises(RuntimeError, match="provider factory failed"):

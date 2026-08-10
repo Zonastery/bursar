@@ -8,6 +8,7 @@ import {
   QuotaExceededError,
 } from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
+import type { BursarConfigData } from "../src/config.js";
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
@@ -16,6 +17,7 @@ const REPLAY_USER_ID = "00000000-0000-0000-0000-000000000912";
 
 const CONFIG = {
   version: 1,
+  catalog: { default_plan: "pro" },
   pricing: {
     operations: {
       completion: {
@@ -62,7 +64,6 @@ const CONFIG = {
     },
   },
   credits: {
-    accounting: { unit: "credit", scale: 6, rounding: "half_up" },
     buckets: {
       grant: {
         priority: 10,
@@ -114,11 +115,15 @@ const CONFIG = {
       allowed_operations: ["completion"],
     },
   },
-};
+} satisfies BursarConfigData;
 
 describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration", () => {
   const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 2 });
-  const store = new PostgresStore({ postgres: pool, tenantId: TEST_TENANT_ID });
+  const store = new PostgresStore({
+    postgres: pool,
+    tenantId: TEST_TENANT_ID,
+    providerEnvironment: "test",
+  });
 
   beforeAll(async () => {
     await applyMigrations(pool);

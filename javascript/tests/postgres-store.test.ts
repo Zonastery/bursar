@@ -3,6 +3,7 @@ import Decimal from "decimal.js";
 import type { PgPool, PgPoolConstructor } from "../src/credits/postgres/store.js";
 import { PostgresStore as BasePostgresStore } from "../src/credits/postgres/store.js";
 import { PostgresBillingStore as BasePostgresBillingStore } from "../src/billing/postgres/store.js";
+import { PostgresClient } from "../src/shared/postgres-client.js";
 import { StoreUnavailableError } from "../src/errors.js";
 
 const D = (n: number | string) => new Decimal(n);
@@ -17,6 +18,7 @@ class PostgresStore extends BasePostgresStore {
     super({
       postgres: typeof poolOrCtor === "object" ? poolOrCtor : databaseUrl,
       tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
       poolConstructor: typeof poolOrCtor === "function" ? poolOrCtor : undefined,
     });
   }
@@ -24,7 +26,7 @@ class PostgresStore extends BasePostgresStore {
 
 class PostgresBillingStore extends BasePostgresBillingStore {
   constructor(poolOrUrl: import("pg").Pool | string) {
-    super({ postgres: poolOrUrl, tenantId: TEST_TENANT_ID });
+    super({ postgres: poolOrUrl, tenantId: TEST_TENANT_ID, providerEnvironment: "test" });
   }
 }
 
@@ -37,7 +39,7 @@ function mockTransactionClient(query: ReturnType<typeof vi.fn>) {
 
 /** Mock pool that returns a fixed set of rows for every query. */
 function makeMockPool(rows: unknown[], subsequentRows: unknown[] = rows): PgPoolConstructor {
-  return vi.fn(() => {
+  return vi.fn(function () {
     let dataQueryCount = 0;
     const query = vi.fn((text: string) => {
       if (
@@ -89,18 +91,45 @@ function makeRecordingPool(
     dataQueryCount += 1;
     return Promise.resolve({ rows: result });
   });
-  const ctor = vi.fn(
-    () =>
-      ({
-        query,
-        connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
-        end: vi.fn().mockResolvedValue(undefined),
-      }) as unknown as PgPool,
-  ) as unknown as PgPoolConstructor;
+  const ctor = vi.fn(function () {
+    return {
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as PgPool;
+  }) as unknown as PgPoolConstructor;
   return { ctor, calls };
 }
 
 describe("PostgresStore", () => {
+  it("binds the provider environment on every tenant transaction", async () => {
+    const query = vi.fn(async (text: string, _params?: unknown[]) => ({
+      rows: text === "SELECT 1 AS value" ? [{ value: 1 }] : [],
+    }));
+    const pool = {
+      query: vi.fn(),
+      connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      end: vi.fn(),
+    } as unknown as PgPool;
+    const postgres = new PostgresClient(pool, {
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "sandbox",
+    });
+
+    await expect(postgres.query("SELECT 1 AS value")).resolves.toEqual([{ value: 1 }]);
+
+    const configureCall = query.mock.calls.find(([text]) => text.startsWith("SELECT set_config("));
+    expect(configureCall?.[0]).toContain("bursar.provider_environment");
+    expect(configureCall?.[1]).toEqual([
+      "30000",
+      "30000",
+      TEST_TENANT_ID,
+      "postgres",
+      "postgres",
+      "sandbox",
+    ]);
+  });
+
   it("constructor stores database URL", () => {
     const store = new PostgresStore("postgresql://user:pass@localhost:5432/db", makeMockPool([]));
     expect(store).toBeInstanceOf(PostgresStore);
@@ -1036,9 +1065,7 @@ describe("PostgresStore", () => {
     await expect(
       store.publishAndActivateCatalog({
         version: 1,
-        credits: {
-          accounting: { unit: "credit", scale: 6, rounding: "half_up" },
-        },
+        credits: {},
       }),
     ).rejects.toThrow(/expected exactly one result row/);
   });
@@ -1181,14 +1208,13 @@ describe("PostgresStore", () => {
       code: "ECONNREFUSED",
     });
     const query = vi.fn(() => Promise.reject(networkError));
-    const ctor = vi.fn(
-      () =>
-        ({
-          query,
-          connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
-          end: vi.fn().mockResolvedValue(undefined),
-        }) as unknown as import("../src/credits/postgres/store.js").PgPool,
-    ) as unknown as import("../src/credits/postgres/store.js").PgPoolConstructor;
+    const ctor = vi.fn(function () {
+      return {
+        query,
+        connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+        end: vi.fn().mockResolvedValue(undefined),
+      } as unknown as import("../src/credits/postgres/store.js").PgPool;
+    }) as unknown as import("../src/credits/postgres/store.js").PgPoolConstructor;
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const failure = store.getBalance("user-1");
     await expect(failure).rejects.toBeInstanceOf(StoreUnavailableError);

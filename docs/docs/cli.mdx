@@ -7,29 +7,58 @@ description: Look up migration, tenant, and configuration commands, environment 
 # Bursar CLI reference
 
 The `bursar` CLI is the operator interface for migrations, tenant lifecycle,
-and the canonical configuration. Connection secrets come from environment
-variables, never the command line:
+and the canonical configuration. Connection values and the financial
+environment come from environment variables, never the command line:
 
-| Variable           | Required for                                            |
-| ------------------ | ------------------------------------------------------- |
-| `DATABASE_URL`     | Every command                                           |
-| `BURSAR_TENANT_ID` | `config` commands and `tenant bootstrap` without `--id` |
+| Variable                        | Required for                                                                                              |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `BURSAR_MIGRATION_DATABASE_URL` | `migrate`; use a dedicated migration owner or administrator                                               |
+| `BURSAR_OPERATOR_DATABASE_URL`  | `tenant create`, `tenant status`, and the provisioning half of `tenant bootstrap`                         |
+| `DATABASE_URL`                  | Database-backed `config` commands, the config half of `tenant bootstrap`, and the application runtime     |
+| `BURSAR_TENANT_ID`              | Database-backed `config` commands and `tenant bootstrap` without `--id`; not local `validate` or `schema` |
+| `BURSAR_PROVIDER_ENVIRONMENT`   | Every database-backed `config` command and `tenant bootstrap`; exactly `live`, `test`, or `sandbox`       |
+
+`config validate` and `config schema` are local operations. They do not need a
+database connection, tenant ID, or provider environment.
 
 ## Migrate
 
 ```bash title="Terminal"
-export DATABASE_URL=postgresql://...
+export BURSAR_MIGRATION_DATABASE_URL=postgresql://bursar_migrator@db.example.com/bursar
 bursar migrate
 ```
 
 The command applies pending ordered SQL files, records checksums, and fails
 if an already-applied file changed. A second run is a no-op.
 
+## Provision caller principals
+
+After the first migration, create separate application and operator logins as
+the migration owner. Set their passwords with your database provider or secret
+tooling instead of placing credentials in shell history:
+
+```sql title="PostgreSQL"
+CREATE ROLE bursar_app
+  LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+GRANT bursar_client TO bursar_app WITH INHERIT FALSE, SET TRUE;
+
+CREATE ROLE bursar_ops
+  LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+GRANT bursar_operator TO bursar_ops WITH INHERIT FALSE, SET TRUE;
+```
+
+Give each login exactly one Bursar caller role. The SDK enters
+`bursar_client` only for tenant-scoped transactions; the tenant commands enter
+`bursar_operator` only for their operator transaction. Do not use a superuser,
+`BYPASSRLS` role, Supabase `service_role`, or one dual-role login as the
+application runtime.
+
 ## Tenants
 
-Provision tenants with the same operator connection:
+Provision tenants with the dedicated operator connection:
 
 ```bash title="Terminal"
+export BURSAR_OPERATOR_DATABASE_URL=postgresql://bursar_ops@db.example.com/bursar
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
@@ -47,30 +76,49 @@ For a deployment bootstrap, provision a tenant and publish its initial config
 through one idempotent command:
 
 ```bash title="Terminal"
+export DATABASE_URL=postgresql://bursar_app@db.example.com/bursar
 export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+export BURSAR_PROVIDER_ENVIRONMENT=test
 bursar tenant bootstrap acme ./pricing.yaml \
   --display-name "Acme"
 ```
 
 `tenant bootstrap` validates the config before provisioning. Tenant creation
 and config publication are each idempotent, so the command is safe to retry
-after an operational failure. Host applications should use these operator
-commands instead of writing Bursar-owned tables.
+after an operational failure. It intentionally needs both the operator and
+application URLs and an explicit provider environment: provisioning runs as
+`bursar_operator`, while config publication uses the tenant-scoped
+`bursar_client` path within that financial namespace. Host applications should
+use these operator commands instead of writing Bursar-owned tables.
 
 ## Config lifecycle
 
 Catalog versions are immutable and managed per tenant through `bursar config`.
-All subcommands require `BURSAR_TENANT_ID`:
+Database-backed subcommands require the application `DATABASE_URL` and
+`BURSAR_TENANT_ID` plus an explicit `BURSAR_PROVIDER_ENVIRONMENT`. Validate or
+print the schema locally without any of those values:
 
 ```bash title="Terminal"
 bursar config validate ./pricing.yaml   # validate without applying (--json for CI)
-bursar config set ./pricing.yaml         # publish + activate a new version (--label)
+bursar config schema                     # print the config JSON Schema
+```
+
+Then select the database-backed financial namespace:
+
+```bash title="Terminal"
+export DATABASE_URL=postgresql://bursar_app@db.example.com/bursar
+export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+export BURSAR_PROVIDER_ENVIRONMENT=test
+
+bursar config set ./pricing.yaml         # publish + activate a new version (--label, --rollout)
 bursar config get                        # print the active version as JSON
 bursar config list                       # list all versions (* = active)
-bursar config activate 3                 # switch the active version
+bursar config activate 3                 # switch the active version (--rollout)
+bursar config pin <subject-uuid>          # hold one current assignment on its revision
+bursar config pin <subject-uuid> --unpin  # remove that hold
+bursar config apply-due --limit 100       # apply due renewal-effective changes
 bursar config export 3                   # dump one version as JSON
 bursar config diff 2 3                   # unified diff between two versions
-bursar config schema                     # print the config JSON Schema
 ```
 
 `config set` always creates a new version and no-ops when the payload is
@@ -81,44 +129,51 @@ timestamps; `diff` compares two canonicalized versions and `schema` prints
 the JSON Schema for editor autocompletion and CI validation. `export` takes
 the version number and dumps that one immutable version as JSON.
 
-## Post-migration host SQL
+### Per-release rollout
 
-Applications can add trusted, host-owned SQL after Bursar's bundled
-migrations:
+Each plan's `evolution.default_rollout` controls normal revision adoption. To
+override selected plans for one deployment, save a rollout manifest:
 
-```bash title="Terminal"
-bursar migrate \
-  --post-migrate-sql ./database/host-integration.sql \
-  --post-migrate-sql ./database/scheduled-maintenance.sql
+```yaml title="rollout.yaml"
+plans:
+  pro:
+    effective: next_renewal
+    include_pinned: false
 ```
 
-The option is repeatable and files execute in command-line order, under the
-same advisory lock and transaction as pending Bursar migrations. A failure
-rolls back the entire transaction.
+Pass it while publishing or activating:
 
-Post-migration files are intentionally not added to Bursar's checksum ledger
-and execute on every invocation. Keep them idempotent and under the host
-application's source control. Only pass trusted files: they execute with the
-database privileges in `DATABASE_URL`.
+```bash title="Terminal"
+bursar config set ./pricing.yaml --rollout ./rollout.yaml
+bursar config activate 3 --rollout ./rollout.yaml
+```
+
+`effective` is `immediate`, `next_renewal`, or `new_assignments_only`.
+`next_renewal` is valid only for a plan referenced by a subscription offer.
+Pinned assignments are excluded unless `include_pinned` is `true`. Run
+`config apply-due` from a bounded background job to advance changes whose
+renewal time has arrived.
 
 ## A deployment workflow
 
 Deploy in this order:
 
-1. Run `bursar migrate` against `DATABASE_URL`.
-2. Provision the tenant: `bursar tenant create <slug>` or the combined
+1. Run `bursar migrate` with the dedicated migration owner in
+   `BURSAR_MIGRATION_DATABASE_URL`.
+2. Provision the two least-privilege caller logins, then put the operator login
+   in `BURSAR_OPERATOR_DATABASE_URL` and the application login in
+   `DATABASE_URL`.
+3. Provision the tenant: `bursar tenant create <slug>` or the combined
    `bursar tenant bootstrap <slug> ./pricing.yaml`.
-3. Publish and activate the canonical configuration — `bootstrap` covers
-   this; otherwise `bursar config set ./pricing.yaml` followed by
-   `bursar config activate <version>` if you are not activating the newest
-   version.
-4. Verify what is live: `bursar config get` and `bursar config list`.
-5. Start or roll the application; the store and runtime bind
-   `BURSAR_TENANT_ID` at construction time.
-6. To roll back a bad config, re-point with
+4. Set `BURSAR_PROVIDER_ENVIRONMENT` to `live`, `test`, or `sandbox`, matching
+   the provider credentials and the SDK runtime. Publish and activate the
+   canonical configuration — `bootstrap` covers this; otherwise run
+   `bursar config set ./pricing.yaml`, followed by
+   `bursar config activate <version>` when activating an older revision.
+5. Verify what is live: `bursar config get` and `bursar config list`.
+6. Start or roll the application with the least-privilege application
+   `DATABASE_URL`; the store binds `BURSAR_TENANT_ID` and the same provider
+   environment at construction time.
+7. To roll back a bad config, re-point with
    `bursar config activate <previous-version>` — versions are immutable, so
    the prior document is still exactly as published.
-
-For this greenfield cutover, drop and recreate the `bursar` schema in each
-non-production environment before applying the baseline. There is no
-compatibility or data-conversion migration.

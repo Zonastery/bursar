@@ -13,7 +13,9 @@ import type {
 } from "./types/index.js";
 
 export type PolicyPreset = "strict_prepaid" | "overdraft";
-export type MetricsOrAmount = UsageMetrics | Decimal | number;
+/** Exact decimal credit input. Native numbers are intentionally excluded. */
+export type ExactAmount = Decimal | string;
+export type MetricsOrAmount = UsageMetrics | ExactAmount;
 
 export interface PostDeductionContext {
   userId: string;
@@ -22,7 +24,7 @@ export interface PostDeductionContext {
 }
 
 export interface LowBalanceConfig {
-  thresholds?: (Decimal | number)[] | null;
+  thresholds?: ExactAmount[] | null;
   onTrigger?: ((event: CreditEvent) => void | Promise<void>) | null;
   /**
    * Maximum number of subjects whose breached-threshold state is retained in
@@ -43,7 +45,7 @@ export interface CreditsServiceOptions {
   /** Fallback credit policy for subjects without a plan assignment. */
   policy?: PolicyPreset;
   /** Planless-subject floor used with the `overdraft` fallback. */
-  overdraftFloor?: Decimal | number | null;
+  overdraftFloor?: ExactAmount | null;
   /** Planless-subject admission limit fallback. */
   maxConcurrent?: number | null;
   /**
@@ -100,7 +102,7 @@ export interface RecordUsageOptions {
 }
 
 export interface RefundCreditsOptions {
-  amount?: Decimal | number;
+  amount?: ExactAmount;
   reason?: string;
   metadata?: CreditMetadata | null;
   idempotencyKey: string;

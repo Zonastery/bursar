@@ -53,21 +53,29 @@ it. Python accepts `tenant_id` as a keyword argument. TypeScript accepts
   <TabItem value="python" label="Python">
 
 ```python
-store = PostgresStore(database_url, tenant_id=tenant_id)
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
+)
 ```
 
   </TabItem>
   <TabItem value="ts" label="TypeScript">
 
 ```ts
-const store = new PostgresStore({ postgres: databaseUrl, tenantId });
+const store = new PostgresStore({
+  postgres: databaseUrl,
+  tenantId,
+  providerEnvironment: "test",
+});
 ```
 
   </TabItem>
 </Tabs>
 
-No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
-provision the tenant before constructing a store — see
+No store performs installation. Run `bursar migrate` with
+`BURSAR_MIGRATION_DATABASE_URL` and provision the tenant before constructing a store — see
 [CLI and deployment](../cli.mdx) and [multi-tenancy](./multitenancy.mdx).
 Bursar owns the schema, migrations, and tenant lifecycle; host migrations
 must not create, alter, or seed Bursar tables.
@@ -125,6 +133,7 @@ runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=database_url,
         tenant_id=tenant_id,
+        provider_environment="test",
         clickhouse=clickhouse_options,
         s3=s3_options,
         outbox=outbox_options,
@@ -142,6 +151,7 @@ import { createBursarRuntime } from "@zonastery/bursar/node";
 const runtime = await createBursarRuntime({
   postgres: databaseUrl,
   tenantId,
+  providerEnvironment: "test",
   clickhouse: clickhouseOptions,
   s3: s3Options,
   outbox: outboxOptions,

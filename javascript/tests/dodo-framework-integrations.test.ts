@@ -18,7 +18,7 @@ import { dodoBetterAuthWebhooks } from "../src/providers/dodo/better-auth.js";
 import type { BillingEventSink } from "../src/billing/contracts.js";
 import { DODO_ISO_DATE, dodoEventId } from "./helpers/dodo-fixtures.js";
 
-const USER_ID = "00000000-0000-0000-0000-000000000001";
+const ACCOUNT_ID = "team-account-1";
 
 function verifiedPayload() {
   return {
@@ -27,7 +27,7 @@ function verifiedPayload() {
     data: {
       id: "evt_framework_adapter",
       subscription_id: "sub_framework_adapter",
-      metadata: { userId: USER_ID, plan_slug: "monk" },
+      metadata: { bursar_account_id: ACCOUNT_ID, plan_slug: "monk" },
     },
   };
 }

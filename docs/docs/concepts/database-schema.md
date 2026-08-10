@@ -22,23 +22,23 @@ erDiagram
         timestamptz updated_at
     }
     storage_settings {
-        boolean singleton "PK"
-        integer usage_payload_retention_days
-        integer quota_event_retention_days
-        integer quota_max_lateness_seconds
-        integer quota_correction_window_days
-        integer quota_retention_safety_days
-        integer billing_payload_retention_days
-        integer quota_notification_retention_days
-        integer terminal_lease_payload_retention_days
-        integer usage_rollup_retention_days
-        integer outbox_delivered_retention_days
-        integer outbox_max_retention_days
-        integer maintenance_interval_seconds
-        integer maintenance_batch_size
-        integer maintenance_lock_timeout_ms
-        timestamptz last_maintenance_at
-        timestamptz updated_at
+        BOOLEAN singleton "PK"
+        INTEGER usage_payload_retention_days
+        INTEGER quota_event_retention_days
+        INTEGER quota_max_lateness_seconds
+        INTEGER quota_correction_window_days
+        INTEGER quota_retention_safety_days
+        INTEGER billing_payload_retention_days
+        INTEGER quota_notification_retention_days
+        INTEGER terminal_lease_payload_retention_days
+        INTEGER usage_rollup_retention_days
+        INTEGER outbox_delivered_retention_days
+        INTEGER outbox_max_retention_days
+        INTEGER maintenance_interval_seconds
+        INTEGER maintenance_batch_size
+        INTEGER maintenance_lock_timeout_ms
+        TIMESTAMPTZ last_maintenance_at
+        TIMESTAMPTZ updated_at
     }
     subjects {
         UUID tenant_id "FK"

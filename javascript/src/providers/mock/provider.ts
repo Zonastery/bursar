@@ -14,7 +14,6 @@ import type {
   SavedPaymentChargeQuote,
   WebhookResult,
   PaymentProvider,
-  ResolveUserCallback,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { assertBillingEvent } from "../../billing/types/index.js";
@@ -22,48 +21,14 @@ import { requireStableKey } from "../../shared/idempotency.js";
 
 export interface MockPaymentProviderOptions {
   eventSink: BillingEventSink;
-  resolveUser?: ResolveUserCallback;
-}
-
-function mockIdentityInput(
-  providerEventType: string,
-  data: Record<string, unknown>,
-  metadata: Record<string, string>,
-) {
-  const customer =
-    typeof data.customer === "object" && data.customer !== null
-      ? (data.customer as Record<string, unknown>)
-      : {};
-  const customerId = String(data.customer_id ?? customer.customer_id ?? "").trim() || null;
-  const emailValue = customer.email;
-  return {
-    provider: "mock",
-    providerEventType,
-    normalizedEventType: providerEventType,
-    customerId,
-    email:
-      typeof emailValue === "string" && emailValue.trim() ? emailValue.trim().toLowerCase() : null,
-    metadata,
-    successful:
-      providerEventType === "payment.succeeded" ||
-      providerEventType === "subscription.active" ||
-      providerEventType === "subscription.renewed",
-    checkoutKind: providerEventType.startsWith("subscription.")
-      ? ("subscription" as const)
-      : metadata.credits
-        ? ("credit_topup" as const)
-        : null,
-  };
 }
 
 export class MockPaymentProvider implements PaymentProvider {
   readonly provider = "mock" as const;
   private readonly sink: BillingEventSink;
-  private readonly resolveUser?: ResolveUserCallback;
 
   constructor(options: MockPaymentProviderOptions) {
     this.sink = options.eventSink;
-    this.resolveUser = options.resolveUser;
   }
 
   async createCheckoutSession(
@@ -160,35 +125,7 @@ export class MockPaymentProvider implements PaymentProvider {
 
     const event: unknown = { ...payload, provider: this.provider };
     assertBillingEvent(event);
-    let userId: string | null = event.userId ?? null;
-
-    if (!userId && this.resolveUser) {
-      const metadata = Object.fromEntries(
-        Object.entries(event.metadata ?? {}).map(([key, value]) => {
-          if (typeof value !== "string") {
-            throw new TypeError(`mock billing event metadata.${key} must be a string`);
-          }
-          return [key, value];
-        }),
-      );
-      userId = await this.resolveUser(
-        mockIdentityInput(
-          event.eventType,
-          {
-            customer_id: event.customer?.providerCustomerId,
-            customer: event.customer
-              ? {
-                  customer_id: event.customer.providerCustomerId,
-                  email: event.customer.email,
-                }
-              : undefined,
-          },
-          metadata,
-        ),
-      );
-    }
-
-    await this.sink.ingestBillingEvent({ ...event, ...(userId ? { userId } : {}) });
+    await this.sink.ingestBillingEvent(event);
     return {
       received: true,
       retryable: false,

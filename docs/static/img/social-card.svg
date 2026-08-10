@@ -2,5 +2,5 @@
   <rect width="1200" height="630" fill="#0f3460"/>
   <image href="logo.svg" x="520" y="110" width="160" height="160"/>
   <text x="600" y="400" text-anchor="middle" font-family="Helvetica Neue, Arial, sans-serif" font-size="96" font-weight="700" fill="#ffffff">bursar</text>
-  <text x="600" y="470" text-anchor="middle" font-family="Helvetica Neue, Arial, sans-serif" font-size="36" fill="#a9dafb">Declarative Credit Calculation Engine for AI SaaS</text>
+  <text x="600" y="470" text-anchor="middle" font-family="Helvetica Neue, Arial, sans-serif" font-size="36" fill="#a9dafb">Open-source AI credits, usage metering &amp; billing</text>
 </svg>

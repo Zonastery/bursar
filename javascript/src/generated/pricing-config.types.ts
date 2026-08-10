@@ -113,25 +113,18 @@ export type Charge1 =
   | VolumeCharge
   | ExpressionCharge
   | SumCharge;
-export type Unit1 = "credit";
-export type Scale = 6;
-export type Rounding1 = "half_up";
 export type Priority = number;
 export type Expiry =
-  | NeverExpiry
-  | AfterGrantExpiry
-  | EndOfWindowExpiry
-  | FixedExpiry
-  | SubscriptionEndExpiry;
+  NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry;
 export type Type8 = "never";
 export type Type9 = "after_grant";
-export type Unit2 = "day" | "week" | "month" | "year";
+export type Unit1 = "day" | "week" | "month" | "year";
 export type Count = number;
 export type Timezone = string;
 export type Type10 = "end_of_window";
 export type Window = CalendarWindow | PlanAssignmentWindow;
 export type Type11 = "calendar";
-export type Unit3 = "day" | "week" | "month" | "year";
+export type Unit2 = "day" | "week" | "month" | "year";
 export type Count1 = number;
 export type Timezone1 = string;
 export type Type12 = "plan_assignment";
@@ -152,8 +145,7 @@ export type Recipient = "subject" | "referrer";
 export type Amount2 = string;
 export type Bucket = string;
 export type Expiry1 =
-  | (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry)
-  | null;
+  (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry) | null;
 export type StartsAt = string | null;
 export type EndsAt = string | null;
 export type Regions = string[];
@@ -195,7 +187,7 @@ export type Amount3 = string;
 export type Priority1 = number;
 export type Window1 = CalendarWindow | RollingWindow | PlanAssignmentWindow;
 export type Type21 = "rolling";
-export type Unit4 = "second" | "minute" | "hour" | "day" | "week";
+export type Unit3 = "second" | "minute" | "hour" | "day" | "week";
 export type Count2 = number;
 export type Operation = string;
 export type Measure4 = string;
@@ -232,11 +224,7 @@ export type Amount4 = string;
 export type Bucket1 = string;
 export type Renewal = "replace_previous" | "accumulate";
 export type Expiry2 =
-  | NeverExpiry
-  | AfterGrantExpiry
-  | EndOfWindowExpiry
-  | FixedExpiry
-  | SubscriptionEndExpiry;
+  NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry;
 export type DisplayName2 = string;
 export type Description2 = string | null;
 export type SortOrder1 = number;
@@ -247,8 +235,7 @@ export type Maximum1 = number;
 export type Default4 = number;
 export type Bucket2 = string;
 export type Expiry3 =
-  | (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry)
-  | null;
+  (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry) | null;
 export type LotBehavior = "separate_lots" | "merge_and_refresh";
 export type Effective = "immediate" | "renewal";
 export type Proration = "prorated" | "none";
@@ -410,20 +397,11 @@ export interface ChargeUnmatched {
  * Credit buckets, spending policies, grants, and optional display conversion.
  */
 export interface CreditsConfig {
-  accounting?: CreditAccounting;
   buckets?: Buckets;
   default_bucket?: DefaultBucket;
   policies?: Policies;
   grant_programs?: GrantPrograms;
   display?: CreditDisplay | null;
-}
-/**
- * Fixed v1 accounting convention. It may be omitted; canonical output includes the defaults.
- */
-export interface CreditAccounting {
-  unit?: Unit1;
-  scale?: Scale;
-  rounding?: Rounding1;
 }
 export interface Buckets {
   [k: string]: BucketDefinition;
@@ -441,7 +419,7 @@ export interface AfterGrantExpiry {
   timezone?: Timezone;
 }
 export interface BillingInterval {
-  unit: Unit2;
+  unit: Unit1;
   count?: Count;
 }
 export interface EndOfWindowExpiry {
@@ -450,7 +428,7 @@ export interface EndOfWindowExpiry {
 }
 export interface CalendarWindow {
   type: Type11;
-  unit: Unit3;
+  unit: Unit2;
   count?: Count1;
   timezone?: Timezone1;
 }
@@ -589,7 +567,7 @@ export interface RollingWindow {
   duration: Duration;
 }
 export interface Duration {
-  unit: Unit4;
+  unit: Unit3;
   count: Count2;
 }
 export interface Quotas {

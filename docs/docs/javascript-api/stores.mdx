@@ -19,6 +19,7 @@ import { PostgresStore } from "@zonastery/bursar";
 const store = new PostgresStore({
   postgres: databaseUrl,
   tenantId,
+  providerEnvironment: "test",
   connectionTimeoutMs: 10_000,
   statementTimeoutMs: 30_000,
   onPoolError: (error) => console.error("Bursar pool error", error),
@@ -28,11 +29,12 @@ const store = new PostgresStore({
 Connects through `pg` and runs every mutation as a canonical SQL function
 (RPC). The `tenantId` option scopes every transaction to one tenant.
 
-| Option            | Type                | Meaning                                                        |
-| ----------------- | ------------------- | -------------------------------------------------------------- |
-| `postgres`        | `string \| pg.Pool` | Connection string for an owned pool, or an application pool    |
-| `tenantId`        | `string`            | Required tenant UUID scoping every transaction                 |
-| `poolConstructor` | `PoolConstructor`   | Optional constructor for testing or custom `pg` initialization |
+| Option                | Type                            | Meaning                                                        |
+| --------------------- | ------------------------------- | -------------------------------------------------------------- |
+| `postgres`            | `string \| pg.Pool`             | Connection string for an owned pool, or an application pool    |
+| `tenantId`            | `string`                        | Required tenant UUID scoping every transaction                 |
+| `providerEnvironment` | `"live" \| "test" \| "sandbox"` | Required financial provider namespace                          |
+| `poolConstructor`     | `PoolConstructor`               | Optional constructor for testing or custom `pg` initialization |
 
 The store owns a pool it creates from a `postgres` connection string: call `await store.close()`
 to drain it. A supplied pool is borrowed and is never ended by the store.
@@ -64,15 +66,17 @@ import { PostgresBillingStore } from "@zonastery/bursar";
 const billingStore = new PostgresBillingStore({
   postgres: databaseUrl,
   tenantId,
+  providerEnvironment: "test",
 });
 ```
 
-It uses the same object shape: `postgres` (a `pg.Pool` or connection string)
-plus `tenantId`.
+It uses the same object shape: `postgres` (a `pg.Pool` or connection string),
+`tenantId`, and required `providerEnvironment`.
 It wraps all billing repositories (offer, topup, customer, subscription,
 event, payment, refund, invoice, dispute, config) behind one interface and is
-passed as `billingStore:` to `new Bursar({...})` to enable the billing and
-commerce capabilities.
+passed as `billingStore:` to `new Bursar({...})` to enable billing. Commerce
+additionally requires `commerceOptions:` with the provider environment and
+factories.
 
 `PostgresBillingStoreOptions` accepts the same reliability controls listed
 above plus `billingPayloadBackend`.
@@ -110,7 +114,7 @@ before constructing any store:
 
 ```bash title="Terminal"
 pip install "bursar[postgres]"
-DATABASE_URL=postgres://... bursar migrate
+BURSAR_MIGRATION_DATABASE_URL=postgres://... bursar migrate
 ```
 
 See [CLI](/docs/cli) for `tenant`, `config`, and validation subcommands, and

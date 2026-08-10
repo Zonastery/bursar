@@ -21,7 +21,8 @@ engine = PricingEngine.from_dict(config_dict)
 `from_dict` accepts a canonical config document and returns an engine, or
 raises `ConfigError`. Unknown fields, undeclared measures or dimensions,
 invalid matcher types, and unsafe cross-references are rejected at
-construction. Fixed credit accounting and plan rank have authoring defaults.
+construction. Credit accounting is a fixed Bursar convention rather than a
+configuration field; plan rank has an authoring default.
 
 The engine is safe to construct from a config you already validated with
 [`load_config_from_dict`](/docs/python-api#package-layout).

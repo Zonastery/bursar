@@ -52,7 +52,8 @@ export interface BillingEvent {
   eventId: string;
   eventType: BillingEventType;
   occurredAt: string;
-  userId?: string | null;
+  /** Financial subject affected by this provider event. */
+  accountId?: string | null;
   customer?: BillingCustomerInfo | null;
   subscription?: BillingSubscriptionInfo | null;
   invoice?: BillingInvoiceInfo | null;
@@ -178,7 +179,7 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
       "eventId",
       "eventType",
       "occurredAt",
-      "userId",
+      "accountId",
       "customer",
       "subscription",
       "invoice",
@@ -194,7 +195,7 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   const event = record as unknown as BillingEvent;
   requireNonEmptyString(event.provider, "billing event provider");
   requireNonEmptyString(event.eventId, "billing event id");
-  requireOptionalNonEmptyString(event.userId, "billing event userId");
+  requireOptionalNonEmptyString(event.accountId, "billing event accountId");
   requireOptionalNonEmptyString(event.billingEventId, "billing event billingEventId");
   if (event.metadata !== null && event.metadata !== undefined) {
     requireObject(event.metadata, "billing event metadata");
@@ -355,7 +356,7 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   }
 }
 
-export type BillingEventHandler = (event: BillingEvent, userId: string) => Promise<void>;
+export type BillingEventHandler = (event: BillingEvent, accountId: string) => Promise<void>;
 
 export interface BillingEventResult {
   handled: boolean;

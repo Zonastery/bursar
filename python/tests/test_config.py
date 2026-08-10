@@ -17,6 +17,7 @@ from bursar.config.types import CreditLinePolicy
 def base_config() -> dict:
     return {
         "version": 1,
+        "catalog": {"default_plan": "pro"},
         "pricing": {
             "operations": {
                 "completion": {
@@ -69,7 +70,6 @@ def base_config() -> dict:
             },
         },
         "credits": {
-            "accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"},
             "buckets": {
                 "gifted": {
                     "priority": 10,
@@ -168,22 +168,41 @@ def test_accepts_typed_catalog() -> None:
     assert config.plans["pro"].evolution.default_rollout == "immediate"
 
 
-def test_fixed_accounting_and_plan_rank_have_authoring_defaults() -> None:
+def test_plans_require_an_explicit_signup_default() -> None:
     data = base_config()
-    data["credits"].pop("accounting")
+    data.pop("catalog")
+
+    with pytest.raises(ConfigError, match="catalog.default_plan is required"):
+        load_config_from_dict(data)
+
+
+def test_plan_rank_has_an_authoring_default() -> None:
+    data = base_config()
     data["plans"]["pro"].pop("rank")
 
     config = load_config_from_dict(data)
 
-    assert config.credits.accounting.unit == "credit"
-    assert config.credits.accounting.scale == 6
     assert config.plans["pro"].rank == 0
+
+
+def test_fixed_accounting_is_not_user_configurable() -> None:
+    data = base_config()
+    data["credits"]["accounting"] = {"unit": "credit", "scale": 6, "rounding": "half_up"}
+
+    with pytest.raises(ConfigError, match="accounting"):
+        load_config_from_dict(data)
 
 
 def test_canonicalizes_credit_decimals_to_six_places() -> None:
     canonical = canonical_bursar_config_dict(base_config())
     assert canonical["credits"]["policies"]["invoice"]["limit"] == "500.000000"
     assert canonical["plans"]["pro"]["credit_allowance"]["amount"] == "10.000000"
+
+
+def test_canonicalizer_accepts_an_already_validated_config() -> None:
+    parsed = load_config_from_dict(base_config())
+
+    assert canonical_bursar_config_dict(parsed) == canonical_bursar_config_dict(base_config())
 
 
 def test_rate_cards_may_be_partial_for_unused_operations() -> None:

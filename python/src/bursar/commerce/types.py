@@ -20,11 +20,12 @@ from bursar.providers.types import (
     ChangePlanPreview,
     PaymentMethodInfo,
     PaymentProvider,
-    ResolveUserCallback,
+    ProviderEnvironment,
     WebhookResult,
 )
 from bursar.shared.idempotency import StableKey
 from bursar.shared.logger import Logger
+from bursar.shared.numbers import NonNegativeSafeInteger, PositiveSafeInteger, SafeInteger
 
 CommerceCheckoutKind = Literal["subscription", "credit_pack"]
 CommerceCheckoutStatus = Literal["pending", "succeeded", "failed", "expired"]
@@ -45,8 +46,8 @@ class _CommerceModel(BaseModel):
 
 class CommerceProviderFactoryContext(_CommerceModel):
     tenant_id: str | None = None
+    provider_environment: ProviderEnvironment
     event_sink: SkipValidation[BillingEventSink]
-    identity_resolver: ResolveUserCallback | None = None
 
 
 CommerceProviderFactory = Callable[
@@ -71,13 +72,11 @@ class PreferencePatch(_CommerceModel):
     invoice_reminders: bool | None = None
 
 
-class CommerceOptions(_CommerceModel):
-    tenant_id: NonEmptyString | None = None
+class _CommerceOptionsBase(_CommerceModel):
     providers: dict[str, CommerceProviderFactory] = Field(min_length=1)
     default_provider: NonEmptyString | None = None
-    checkout_intent_ttl_ms: int = Field(default=24 * 60 * 60 * 1_000, strict=True, gt=0)
+    checkout_intent_ttl_ms: PositiveSafeInteger = 24 * 60 * 60 * 1_000
     preference_defaults: PreferencePatch = Field(default_factory=PreferencePatch)
-    identity_resolver: ResolveUserCallback | None = None
     logger: SkipValidation[Logger] | None = None
 
     @field_validator("providers")
@@ -91,17 +90,26 @@ class CommerceOptions(_CommerceModel):
         return providers
 
 
+class CommerceOptions(_CommerceOptionsBase):
+    provider_environment: ProviderEnvironment
+    tenant_id: NonEmptyString | None = None
+
+
+class CommerceRuntimeOptions(_CommerceOptionsBase):
+    """Commerce options whose tenant and provider environment come from the runtime."""
+
+
 class CreateCheckoutInput(_CommerceModel):
     subject_id: NonEmptyString
+    account_id: NonEmptyString
     offer_key: NonEmptyString
     return_url: NonEmptyString
     cancel_url: NonEmptyString
     operation_key: StableKey
-    account_id: NonEmptyString | None = None
     email: NonEmptyString | None = None
     provider: NonEmptyString | None = None
     type: CommerceCheckoutKind | None = None
-    quantity: int | None = Field(default=None, strict=True)
+    quantity: PositiveSafeInteger | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("metadata")
@@ -161,7 +169,7 @@ class CancelSubscriptionResult(_CommerceModel):
 
 class CancelAllSubscriptionsResult(_CommerceModel):
     account_id: str
-    canceled_count: int
+    canceled_count: NonNegativeSafeInteger
     subscriptions: list[CancelSubscriptionResult]
 
 
@@ -221,8 +229,8 @@ class BillingDocumentInvoiceRef(_CommerceModel):
     provider: str
     provider_document_id: str
     status: str | None = None
-    amount_paid_minor: int | None = None
-    amount_due_minor: int | None = None
+    amount_paid_minor: NonNegativeSafeInteger | None = None
+    amount_due_minor: NonNegativeSafeInteger | None = None
     currency: str | None = None
     period_start: str | None = None
     period_end: str | None = None
@@ -281,7 +289,7 @@ class CreditSpendSource(_CommerceModel):
     type: Literal["allowance", "bucket"]
     key: str
     label: str
-    priority: int
+    priority: SafeInteger
 
 
 class AccountCreditDisplay(_CommerceModel):

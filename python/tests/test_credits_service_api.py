@@ -43,7 +43,6 @@ CONFIG = {
         },
     },
     "credits": {
-        "accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"},
         "buckets": {"default": {"priority": 1, "expiry": {"type": "never"}}},
         "default_bucket": "default",
     },
@@ -59,8 +58,22 @@ def test_service_options_reject_unsafe_financial_and_concurrency_values() -> Non
         CreditsServiceOptions(max_concurrent=0)
     with pytest.raises(ValueError, match="overdraft_floor"):
         CreditsServiceOptions(overdraft_floor=Decimal("Infinity"))
+    with pytest.raises(ValueError, match="overdraft_floor"):
+        CreditsServiceOptions(overdraft_floor=cast(Any, -0.1))
+    with pytest.raises(ValueError, match="overdraft_floor"):
+        CreditsServiceOptions(overdraft_floor=cast(Any, False))
     with pytest.raises(ValueError, match="thresholds"):
         LowBalanceConfig(thresholds=[Decimal("-0.01")])
+    with pytest.raises(ValueError, match="threshold"):
+        LowBalanceConfig(thresholds=cast(Any, [0.1]))
+
+    options = CreditsServiceOptions(
+        overdraft_floor="-10.25",
+        low_balance=LowBalanceConfig(thresholds=[10, "2.5"]),
+    )
+    assert options.overdraft_floor == Decimal("-10.25")
+    assert options.low_balance is not None
+    assert options.low_balance.thresholds == [Decimal("10"), Decimal("2.5")]
 
 
 def test_catalog_is_installed_only_after_publication_succeeds() -> None:
@@ -128,7 +141,7 @@ def test_boolean_amount_is_not_treated_as_one_credit() -> None:
     store = SimpleNamespace(add_credits=MagicMock())
     credits = _service(store)
 
-    with pytest.raises(ValueError, match="Decimal or integer"):
+    with pytest.raises(ValueError, match="Decimal, integer, or decimal string"):
         credits.add_credits("user-1", True, idempotency_key="invalid:boolean")
 
     store.add_credits.assert_not_called()

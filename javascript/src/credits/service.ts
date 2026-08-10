@@ -7,7 +7,7 @@ import {
   StoreError,
 } from "../errors.js";
 import type { PricingEngine } from "../engine.js";
-import type { CatalogRollout } from "../config.js";
+import type { BursarConfigData, CatalogRollout } from "../config.js";
 import type {
   AddCreditsResult,
   AggregateStats,
@@ -55,7 +55,8 @@ import type { UsageMetrics } from "../metrics.js";
 import { raiseDeductError } from "./service-errors.js";
 import { LowBalanceMonitor } from "./low-balance-monitor.js";
 import { CreditQueries } from "./queries.js";
-import { CatalogRuntime, toDecimal } from "./catalog-runtime.js";
+import { CatalogRuntime } from "./catalog-runtime.js";
+import { toDecimal } from "./amount.js";
 import { CreditLeaseWorkflow } from "./lease-workflow.js";
 import { requireStableKey } from "../shared/idempotency.js";
 import type {
@@ -68,6 +69,7 @@ import type {
   DeductFlatJobOptions,
   DeductOptions,
   DeductTeamOptions,
+  ExactAmount,
   GrantSubscriptionCycleOptions,
   MetricsOrAmount,
   PolicyPreset,
@@ -88,6 +90,7 @@ export type {
   DeductFlatJobOptions,
   DeductOptions,
   DeductTeamOptions,
+  ExactAmount,
   GrantSubscriptionCycleOptions,
   LowBalanceConfig,
   PolicyPreset,
@@ -106,7 +109,7 @@ const DEFAULT_LEASE_TTL_SECONDS = 600;
 
 const POLICY_PRESETS = new Set<PolicyPreset>(["strict_prepaid", "overdraft"]);
 
-function positiveAmount(value: Decimal | number, operation: string): Decimal {
+function positiveAmount(value: ExactAmount, operation: string): Decimal {
   const amount = toDecimal(value);
   if (!amount.isFinite() || !amount.gt(0)) {
     throw new RangeError(`${operation} amount must be finite and greater than zero`);
@@ -380,26 +383,20 @@ export class CreditsService {
    * unhandled promise rejection.
    */
   async publishAndActivateCatalog(
-    config: Record<string, unknown>,
+    config: BursarConfigData,
     label?: string | null,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
+    rollout?: CatalogRollout | null,
   ): Promise<string> {
     return this.catalogRuntime.publishAndActivate(config, label, rollout);
   }
 
   /** Publish a validated, inactive catalog draft. */
-  async publishCatalogDraft(
-    config: Record<string, unknown>,
-    label?: string | null,
-  ): Promise<string> {
+  async publishCatalogDraft(config: BursarConfigData, label?: string | null): Promise<string> {
     return this.catalogRuntime.publishDraft(config, label);
   }
 
   /** Activate an existing catalog version and reload the local engine. */
-  async activateCatalogRevision(
-    version: number,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<string> {
+  async activateCatalogRevision(version: number, rollout?: CatalogRollout | null): Promise<string> {
     return this.catalogRuntime.activateRevision(version, rollout);
   }
 
@@ -466,7 +463,7 @@ export class CreditsService {
   /** Add credits to a user's account. */
   async addCredits(
     userId: string,
-    amount: Decimal | number,
+    amount: ExactAmount,
     options: AddCreditsOptions,
   ): Promise<AddCreditsResult> {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);
@@ -498,7 +495,7 @@ export class CreditsService {
    */
   async deductCredits(
     userId: string,
-    amount: Decimal | number,
+    amount: ExactAmount,
     options: DeductCreditsOptions,
   ): Promise<AddCreditsResult> {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);
@@ -560,7 +557,7 @@ export class CreditsService {
    */
   async grantSubscriptionCycle(
     userId: string,
-    amount: Decimal | number,
+    amount: ExactAmount,
     options: GrantSubscriptionCycleOptions,
   ): Promise<AddCreditsResult> {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);

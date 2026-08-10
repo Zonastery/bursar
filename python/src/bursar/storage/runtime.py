@@ -16,12 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validat
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.service_types import BillingServiceOptions
 from bursar.bursar import Bursar
-from bursar.commerce.types import CommerceOptions
+from bursar.commerce.types import CommerceOptions, CommerceRuntimeOptions
 from bursar.credits.events import CreditEventEmitter
 from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.types import UsageAnalyticsStore
 from bursar.errors import CatalogNotLoadedError, ConfigError, StoreClosedError, is_retryable_bursar_error
+from bursar.providers.types import ProviderEnvironment
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
 from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, PostgresPool, create_pool
 from bursar.storage.adapters.clickhouse import (
@@ -77,13 +78,14 @@ class _RuntimeModel(BaseModel):
 class BursarRuntimeBursarOptions(_RuntimeModel):
     credits_options: CreditsServiceOptions | None = None
     billing_options: BillingServiceOptions | None = None
-    commerce_options: CommerceOptions | None = None
+    commerce_options: CommerceRuntimeOptions | None = None
     emitter: SkipValidation[CreditEventEmitter] | None = None
 
 
 class BursarRuntimeOptions(_RuntimeModel):
     postgres: str | SkipValidation[PostgresPool]
     tenant_id: UUID
+    provider_environment: ProviderEnvironment
     tenant_slug: str | None = None
     postgres_options: PostgresConnectionOptions = Field(default_factory=PostgresConnectionOptions)
     s3: SkipValidation[BillingPayloadArchive] | S3BillingArchiveOptions | None = None
@@ -106,6 +108,11 @@ class BursarRuntimeOptions(_RuntimeModel):
         if isinstance(self.outbox, bool) and self.outbox is not False:
             msg = "outbox must be OutboxWorkerOptions, False, or None"
             raise ValueError(msg)
+        credits_options = self.bursar.credits_options
+        if credits_options is not None and (
+            credits_options.analytics is not None or credits_options.usage_store is not None
+        ):
+            raise ValueError("configure usage analytics through BursarRuntimeOptions.clickhouse")
         return self
 
 
@@ -210,10 +217,12 @@ class BursarRuntime:
             tenant_id=options.tenant_id,
             pool=pool,
             usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
+            provider_environment=options.provider_environment,
             postgres_options=options.postgres_options,
         )
         self.billing_store = PostgresBillingStore(
             tenant_id=options.tenant_id,
+            provider_environment=options.provider_environment,
             pool=pool,
             billing_payload_backend="s3" if self.s3 is not None else "postgres",
             postgres_options=options.postgres_options,
@@ -226,9 +235,18 @@ class BursarRuntime:
                 ),
             }
         )
-        commerce_options = options.bursar.commerce_options
-        if commerce_options is not None:
-            commerce_options = commerce_options.model_copy(update={"tenant_id": str(options.tenant_id)})
+        runtime_commerce_options = options.bursar.commerce_options
+        commerce_options = (
+            CommerceOptions.model_validate(
+                {
+                    **runtime_commerce_options.model_dump(),
+                    "tenant_id": str(options.tenant_id),
+                    "provider_environment": options.provider_environment,
+                }
+            )
+            if runtime_commerce_options is not None
+            else None
+        )
         self.bursar = Bursar(
             credit_store=self.credit_store,
             billing_store=self.billing_store,
@@ -242,6 +260,7 @@ class BursarRuntime:
             pool,
             tenant_id=options.tenant_id,
             access_role="bursar_operator",
+            provider_environment=options.provider_environment,
             usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
             billing_payload_backend="s3" if self.s3 is not None else "postgres",
             postgres_options=options.postgres_options,

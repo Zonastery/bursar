@@ -397,7 +397,7 @@ class AutoRechargeService:
                     metadata={
                         "auto_recharge_attempt_id": attempt.id,
                         "purpose": "credit_topup",
-                        "userId": user_id,
+                        "bursar_account_id": user_id,
                     },
                 )
             )

@@ -36,6 +36,7 @@ Pydantic defines the Python contract and generates the published JSON Schema. Ty
 The validation boundary also enforces these accounting rules:
 
 - Exact decimal values use strings instead of binary floating-point numbers
+- Every integer stays within JavaScript's exact safe-integer range
 - Offer prices use integer minor units with an explicit currency
 - Matcher operators agree with their declared dimension types
 - Expressions reference only measures declared by their operation
@@ -87,7 +88,7 @@ Use the [CLI reference](../cli.mdx) for exact `config validate`, `set`, `get`, `
 
 ## Revision policy controls rollout
 
-Plans define when an activated revision reaches assigned accounts. `immediate` applies the new revision at activation, `next_renewal` waits for the next subscription renewal, and `pinned` keeps the assigned revision until an explicit migration.
+Plans define when an activated revision reaches assigned accounts. `immediate` applies the new revision at activation, `next_renewal` waits for the next subscription renewal, and `new_assignments_only` leaves existing assignments on their current revision until an explicit migration.
 
 Subscription-backed plans default to `next_renewal`; other plans default to `immediate`. Declare the policy explicitly when a rollout delay changes customer-visible pricing or access.
 

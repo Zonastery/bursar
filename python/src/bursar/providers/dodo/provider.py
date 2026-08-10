@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 from bursar.bursar import BillingEventSink
 from bursar.errors import ProviderResponseError
-from bursar.providers._shared import optional_provider_string
 from bursar.providers.dodo.event_mapper import dodo_billing_event_id, handle_dodo_billing_event
 from bursar.providers.types import (
     ChangePlanLineItem,
@@ -27,8 +26,6 @@ from bursar.providers.types import (
     PreviewChangePlanParams,
     ProviderLogger,
     ProviderUrlResult,
-    ResolveIdentityInput,
-    ResolveUserCallback,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
@@ -39,36 +36,15 @@ from bursar.providers.types import (
     normalize_provider_logger,
 )
 from bursar.shared.idempotency import require_stable_key
+from bursar.shared.numbers import MAX_SAFE_INTEGER
 
 if TYPE_CHECKING:
     from dodopayments import AsyncDodoPayments
 
 logger = logging.getLogger(__name__)
 
-_NORMALIZED_EVENT_TYPES = {
-    "subscription.active": "subscription.created",
-    "subscription.renewed": "subscription.renewed",
-    "subscription.cancelled": "subscription.canceled",
-    "subscription.expired": "subscription.expired",
-    "subscription.failed": "subscription.updated",
-    "subscription.on_hold": "subscription.updated",
-    "subscription.updated": "subscription.updated",
-    "subscription.plan_changed": "subscription.plan_changed",
-    "payment.succeeded": "payment.succeeded",
-    "payment.failed": "payment.failed",
-    "refund.succeeded": "refund.created",
-    "refund.failed": "refund.failed",
-    "dispute.opened": "dispute.created",
-    "dispute.challenged": "dispute.created",
-    "dispute.won": "dispute.closed",
-    "dispute.lost": "dispute.closed",
-    "dispute.accepted": "dispute.closed",
-    "dispute.cancelled": "dispute.closed",
-    "dispute.expired": "dispute.closed",
-}
-
 _BURSAR_METADATA_KEYS = {
-    "userId",
+    "bursar_account_id",
     "plan_slug",
     "billing_interval",
     "credits",
@@ -119,7 +95,8 @@ def _require_provider_int(
         parsed = int(value)
     else:
         raise ProviderResponseError("dodo", operation, details={"field": field})
-    if parsed < minimum or (maximum is not None and parsed > maximum):
+    upper_bound = MAX_SAFE_INTEGER if maximum is None else min(maximum, MAX_SAFE_INTEGER)
+    if parsed < minimum or parsed > upper_bound:
         raise ProviderResponseError("dodo", operation, details={"field": field})
     return parsed
 
@@ -150,7 +127,6 @@ class DodoProvider:
         webhook_key: str,
         event_sink: BillingEventSink,
         setup_product_id: str | None = None,
-        resolve_user: ResolveUserCallback | None = None,
         logger: ProviderLogger | None = None,
     ) -> None:
         if not webhook_key.strip():
@@ -159,20 +135,21 @@ class DodoProvider:
         self._webhook_key = webhook_key
         self._setup_product_id = setup_product_id
         self._sink = event_sink
-        self._resolve_user = resolve_user
         self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
+        if not params.account_id:
+            raise ValueError("Authentication required for checkout")
         client = self._get_client()
         quantity = params.quantity if params.quantity is not None else 1
+        metadata = {**(params.metadata or {}), "bursar_account_id": params.account_id}
         session_kwargs: dict[str, Any] = {
             "product_cart": [{"product_id": params.product_id, "quantity": quantity}],
             "return_url": params.return_url,
+            "metadata": metadata,
         }
         if params.cancel_url:
             session_kwargs["cancel_url"] = params.cancel_url
-        if params.metadata:
-            session_kwargs["metadata"] = params.metadata
         if params.customer_id:
             session_kwargs["customer"] = {"customer_id": params.customer_id}
         elif params.email:
@@ -220,47 +197,13 @@ class DodoProvider:
 
         metadata = _normalize_metadata(data_dict.get("metadata"))
 
-        user_id: str | None = metadata.get("userId")
-        if not user_id and self._resolve_user is not None and event_type != "payment.failed":
-            customer = data_dict.get("customer")
-            if customer is not None and not isinstance(customer, dict):
-                raise ValueError("Dodo customer must be an object")
-            customer_dict = customer or {}
-            customer_id = optional_provider_string(
-                data_dict.get("customer_id"),
-                "Dodo customer_id",
-            ) or optional_provider_string(
-                customer_dict.get("customer_id"),
-                "Dodo customer.customer_id",
-            )
-            email_value = optional_provider_string(customer_dict.get("email"), "Dodo customer.email")
-            email = email_value.lower() if email_value else None
-            provider_event_type = str(event_type)
-            user_id = await self._resolve_user(
-                ResolveIdentityInput(
-                    provider=self.provider,
-                    provider_event_type=provider_event_type,
-                    normalized_event_type=_NORMALIZED_EVENT_TYPES.get(provider_event_type),
-                    customer_id=customer_id,
-                    email=email,
-                    metadata=metadata,
-                    successful=provider_event_type
-                    in {"payment.succeeded", "subscription.active", "subscription.renewed"},
-                    checkout_kind=(
-                        "subscription"
-                        if provider_event_type.startswith("subscription.")
-                        else "credit_topup"
-                        if metadata.get("credits")
-                        else None
-                    ),
-                )
-            )
+        account_id: str | None = metadata.get("bursar_account_id")
 
         await handle_dodo_billing_event(
             event_type=str(event_type),
             data=data_dict,
             event_timestamp=event.timestamp,
-            user_id=user_id,
+            account_id=account_id,
             metadata=metadata,
             sink=self._sink,
             logger=self._logger,

@@ -68,6 +68,9 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
+    -- bursar_runtime owns tenant RPCs and may never be assumed by a host
+    -- principal. Only the migration owner receives SET permission so it can
+    -- transfer and maintain Bursar-owned objects.
     IF EXISTS (
         SELECT 1
         FROM pg_auth_members AS membership
@@ -75,19 +78,76 @@ BEGIN
           ON granted_role.oid = membership.roleid
         JOIN pg_roles AS member_role
           ON member_role.oid = membership.member
-        WHERE granted_role.rolname IN (
-            'bursar_runtime',
-            'bursar_client',
-            'bursar_operator'
-        )
+        WHERE granted_role.rolname = 'bursar_runtime'
           AND member_role.rolname <> v_migration_role
     ) THEN
-        RAISE EXCEPTION 'a Bursar role has an unexpected member'
+        RAISE EXCEPTION 'bursar_runtime has an unauthorized member'
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- Host login principals may assume exactly one caller role. Membership is
+    -- SET-only so every transaction has to opt into Bursar's narrow RPC ACL;
+    -- unsafe PostgreSQL attributes remain a hard deployment failure.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_auth_members AS membership
+        JOIN pg_roles AS granted_role
+          ON granted_role.oid = membership.roleid
+        JOIN pg_roles AS member_role
+          ON member_role.oid = membership.member
+        WHERE granted_role.rolname IN ('bursar_client', 'bursar_operator')
+          AND member_role.rolname <> v_migration_role
+          AND (
+              NOT member_role.rolcanlogin
+              OR member_role.rolsuper
+              OR member_role.rolcreatedb
+              OR member_role.rolcreaterole
+              OR member_role.rolreplication
+              OR member_role.rolbypassrls
+              OR membership.admin_option
+              OR membership.inherit_option
+              OR NOT membership.set_option
+          )
+    ) THEN
+        RAISE EXCEPTION 'a Bursar caller principal or membership is unsafe'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT membership.member
+        FROM pg_auth_members AS membership
+        JOIN pg_roles AS granted_role
+          ON granted_role.oid = membership.roleid
+        JOIN pg_roles AS member_role
+          ON member_role.oid = membership.member
+        WHERE granted_role.rolname IN ('bursar_client', 'bursar_operator')
+          AND member_role.rolname <> v_migration_role
+        GROUP BY membership.member
+        HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'a Bursar caller principal has conflicting roles'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_auth_members AS membership
+        JOIN pg_roles AS granted_role
+          ON granted_role.oid = membership.roleid
+        JOIN pg_roles AS member_role
+          ON member_role.oid = membership.member
+        JOIN pg_roles AS migration_role
+          ON migration_role.rolname = v_migration_role
+        WHERE granted_role.rolname IN ('bursar_client', 'bursar_operator')
+          AND member_role.rolname <> v_migration_role
+          AND pg_has_role(member_role.oid, migration_role.oid, 'MEMBER')
+    ) THEN
+        RAISE EXCEPTION 'a Bursar caller principal can assume the migration owner'
             USING ERRCODE = '55000';
     END IF;
 
     -- Object ownership transfer requires SET permission on the destination
-    -- role. The migration connection may SET the two caller roles explicitly,
+    -- role. The migration connection may SET the caller roles explicitly,
     -- so one trusted deployment DSN remains a complete default setup without
     -- leaking operator authority into ordinary transactions.
     EXECUTE format(
@@ -585,8 +645,7 @@ AS $$
 DECLARE
     v_id uuid;
 BEGIN
-    IF p_tenant_id IS NULL
-       OR NOT bursar.is_bounded_text(p_slug, 100)
+    IF NOT bursar.is_bounded_text(p_slug, 100)
        OR lower(btrim(p_slug))
           !~ '^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$'
        OR (
@@ -599,10 +658,15 @@ BEGIN
     END IF;
 
     INSERT INTO bursar.tenants AS existing(id, slug, display_name)
-    VALUES (p_tenant_id, lower(btrim(p_slug)), p_display_name)
+    VALUES (
+        COALESCE(p_tenant_id, bursar.uuid_v7()),
+        lower(btrim(p_slug)),
+        p_display_name
+    )
     ON CONFLICT (slug) DO UPDATE
     SET display_name = EXCLUDED.display_name
-    WHERE existing.id = EXCLUDED.id
+    WHERE p_tenant_id IS NULL
+       OR existing.id = EXCLUDED.id
     RETURNING id INTO v_id;
 
     IF v_id IS NULL THEN

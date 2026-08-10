@@ -290,7 +290,11 @@ async def test_unknown_event_type_does_not_call_sink(sink):
 
 @pytest.mark.asyncio
 async def test_passes_metadata_through(sink):
-    metadata = {"userId": "user_1", "plan_slug": "monk", "billing_interval": "month"}
+    metadata = {
+        "bursar_account_id": "user_1",
+        "plan_slug": "monk",
+        "billing_interval": "month",
+    }
     await map_dodo_event("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", metadata, sink)
     call = sink.ingest_billing_event.call_args
     assert call is not None
@@ -441,15 +445,19 @@ async def test_rejects_expired_without_subscription_id(sink):
 
 
 @pytest.mark.asyncio
-async def test_skips_subscription_active_without_user_id(sink):
+async def test_ingests_subscription_active_without_account_for_persisted_reference_resolution(sink):
     await map_dodo_event("subscription.active", DODO_SUBSCRIPTION_ACTIVE, None, {}, sink)
-    assert sink.ingest_billing_event.call_count == 0
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == BillingEventType.subscription_created
+    assert event.account_id is None
 
 
 @pytest.mark.asyncio
-async def test_skips_subscription_renewed_without_user_id(sink):
+async def test_ingests_subscription_renewed_without_account_for_persisted_reference_resolution(sink):
     await map_dodo_event("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, None, {}, sink)
-    assert sink.ingest_billing_event.call_count == 0
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == BillingEventType.subscription_renewed
+    assert event.account_id is None
 
 
 @pytest.mark.asyncio

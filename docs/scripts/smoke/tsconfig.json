@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "baseUrl": "../../../javascript",
+    "paths": {
+      "stripe": ["node_modules/stripe"]
+    },
+    "typeRoots": ["../../../javascript/node_modules/@types"],
+    "ignoreDeprecations": "6.0"
+  },
+  "include": ["typescript-onboarding.ts"]
+}

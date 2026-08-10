@@ -12,11 +12,7 @@ import type {
 import { BillingEventType } from "./types/index.js";
 import { BillingFinancialEventHandlers } from "./financial-event-handlers.js";
 import { StoreError } from "../errors.js";
-import type {
-  BillingProvisioningPort,
-  BillingServiceOptions,
-  ResolveUser,
-} from "./service-types.js";
+import type { BillingProvisioningPort, BillingServiceOptions } from "./service-types.js";
 
 interface OfferCacheValue {
   offer: BillingOfferResult | null;
@@ -30,7 +26,6 @@ interface OfferContext {
 
 export class BillingEventHandlers {
   private readonly provisioning: BillingProvisioningPort | null;
-  private readonly resolveUser: ResolveUser | null;
   private readonly autoSelectEntitlementSource: boolean;
   private readonly pastDueGracePeriodMs: number;
   private readonly terminalPlanKey: string | null;
@@ -48,7 +43,6 @@ export class BillingEventHandlers {
     options?: BillingServiceOptions,
   ) {
     this.provisioning = options?.provisioning ?? null;
-    this.resolveUser = options?.resolveUser ?? null;
     this.autoSelectEntitlementSource = options?.autoSelectEntitlementSource ?? true;
     this.pastDueGracePeriodMs = options?.pastDueGracePeriodMs ?? 7 * 24 * 60 * 60 * 1000;
     if (!Number.isFinite(this.pastDueGracePeriodMs) || this.pastDueGracePeriodMs < 0) {
@@ -73,7 +67,7 @@ export class BillingEventHandlers {
       store,
       this.logger,
       this.pastDueGracePeriodMs,
-      (event) => this.resolveUserId(event),
+      (event) => this.resolveAccountId(event),
       (event) => this.handleSubscriptionRenewed(event),
       (event, status) => this.updateCheckoutIntentFromEvent(event, status),
       (event) => this.getExistingSubscription(event),
@@ -132,30 +126,19 @@ export class BillingEventHandlers {
   }
 
   /**
-   * Resolve userId from the event, mutating event.userId so that
+   * Resolve accountId from the event, mutating event.accountId so that
    * routeEvent's blanket fireEventCallback can read it. Each ingestBillingEvent
    * call creates a fresh event object, so mutation is safe.
    */
-  private async resolveUserId(event: BillingEvent): Promise<string | null> {
-    if (event.userId) return event.userId;
+  private async resolveAccountId(event: BillingEvent): Promise<string | null> {
+    if (event.accountId) return event.accountId;
     if (event.customer?.providerCustomerId) {
       const uid = await this.store.getBillingCustomer(
         event.provider,
         event.customer.providerCustomerId,
       );
       if (uid) {
-        event.userId = uid;
-        return uid;
-      }
-    }
-    if (this.resolveUser && event.customer?.providerCustomerId) {
-      const uid = this.resolveUser(
-        event.provider,
-        event.customer.providerCustomerId,
-        event.customer.email ?? null,
-      );
-      if (uid) {
-        event.userId = uid;
+        event.accountId = uid;
         return uid;
       }
     }
@@ -165,7 +148,7 @@ export class BillingEventHandlers {
         event.subscription.providerSubscriptionId,
       );
       if (existing?.userId) {
-        event.userId = existing.userId;
+        event.accountId = existing.userId;
         return existing.userId;
       }
     }
@@ -177,7 +160,7 @@ export class BillingEventHandlers {
     if (providerPaymentId) {
       const payment = await this.store.getBillingPayment(event.provider, providerPaymentId);
       if (typeof payment?.userId === "string") {
-        event.userId = payment.userId;
+        event.accountId = payment.userId;
         return payment.userId;
       }
     }
@@ -202,7 +185,7 @@ export class BillingEventHandlers {
       customerId: event.customer?.providerCustomerId,
     });
     if (event.customer?.providerCustomerId) {
-      const uid = await this.resolveUserId(event);
+      const uid = await this.resolveAccountId(event);
       if (uid) {
         await this.store.upsertBillingCustomer(
           event.provider,
@@ -221,7 +204,7 @@ export class BillingEventHandlers {
       customerId: event.customer?.providerCustomerId,
     });
     if (event.customer?.providerCustomerId) {
-      const uid = await this.resolveUserId(event);
+      const uid = await this.resolveAccountId(event);
       if (uid && this.provisioning) {
         await this.revokeSubscription(uid);
       }
@@ -233,10 +216,10 @@ export class BillingEventHandlers {
     this.logger.info("[BillingService] handleCheckoutCompleted", {
       provider: event.provider,
       eventId: event.eventId,
-      hasUserId: Boolean(event.userId),
+      hasAccountId: Boolean(event.accountId),
     });
     if (event.customer?.providerCustomerId) {
-      const uid = await this.resolveUserId(event);
+      const uid = await this.resolveAccountId(event);
       if (uid) {
         await this.store.upsertBillingCustomer(
           event.provider,
@@ -376,13 +359,13 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
+    const uid = await this.resolveAccountId(event);
     this.logger.info("[BillingService] handleSubscriptionCreated", {
       eventId: event.eventId,
       provider: event.provider,
-      hasUserId: Boolean(uid),
+      hasAccountId: Boolean(uid),
     });
-    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (event.customer?.providerCustomerId) {
       await this.store.upsertBillingCustomer(
         event.provider,
@@ -476,8 +459,8 @@ export class BillingEventHandlers {
       eventId: event.eventId,
       subId: event.subscription?.providerSubscriptionId,
     });
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -505,8 +488,8 @@ export class BillingEventHandlers {
       provider: event.provider,
       eventId: event.eventId,
     });
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -528,8 +511,8 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionRenewed(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -553,8 +536,8 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionPlanChanged(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -605,8 +588,8 @@ export class BillingEventHandlers {
   }
 
   private async handleCancellationScheduled(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -620,8 +603,8 @@ export class BillingEventHandlers {
   }
 
   private async handleCancellationUnscheduled(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -639,8 +622,8 @@ export class BillingEventHandlers {
       provider: event.provider,
       eventId: event.eventId,
     });
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -675,8 +658,8 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionExpired(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -693,8 +676,8 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionPaused(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -711,8 +694,8 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionResumed(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (!uid) return { handled: false, error: "user_not_found" };
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
@@ -733,7 +716,7 @@ export class BillingEventHandlers {
 
   private async handleTrialWillEnd(event: BillingEvent): Promise<BillingEventResult> {
     // Resolve userId so routeEvent's blanket fireEventCallback has a useful value.
-    await this.resolveUserId(event);
+    await this.resolveAccountId(event);
     return { handled: true, action: "trial_will_end_notified" };
   }
 

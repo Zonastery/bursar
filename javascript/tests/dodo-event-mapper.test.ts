@@ -410,7 +410,11 @@ describe("event type routing", () => {
 
   it("passes metadata through to the sink event", async () => {
     const sink = makeSink();
-    const metadata = { userId: "user_1", plan_slug: "monk", billing_interval: "month" };
+    const metadata = {
+      bursar_account_id: "user_1",
+      plan_slug: "monk",
+      billing_interval: "month",
+    };
     await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", metadata, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(expect.objectContaining({ metadata }));
   });
@@ -554,16 +558,20 @@ describe("edge cases", () => {
     expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
-  it("skips subscription.active when userId is missing (logs error)", async () => {
+  it("ingests subscription.active without an account for persisted-reference resolution", async () => {
     const sink = makeSink();
     await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, null, {}, sink);
-    expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
+    const event = sink.ingestBillingEvent.mock.calls[0]?.[0];
+    expect(event).toMatchObject({ eventType: "subscription.created" });
+    expect(event).not.toHaveProperty("accountId");
   });
 
-  it("skips subscription.renewed when userId is missing (logs error)", async () => {
+  it("ingests subscription.renewed without an account for persisted-reference resolution", async () => {
     const sink = makeSink();
     await mapDodoEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, null, {}, sink);
-    expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
+    const event = sink.ingestBillingEvent.mock.calls[0]?.[0];
+    expect(event).toMatchObject({ eventType: "subscription.renewed" });
+    expect(event).not.toHaveProperty("accountId");
   });
 
   it("normalizes cadence fields (yearly interval)", async () => {

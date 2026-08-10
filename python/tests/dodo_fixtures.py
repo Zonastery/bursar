@@ -20,7 +20,7 @@ def dodo_event_id(event_type: str, object_id: str) -> str:
 async def map_dodo_event(
     event_type: str,
     data: dict[str, Any],
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     sink: BillingEventSink,
 ) -> None:
@@ -28,7 +28,7 @@ async def map_dodo_event(
         event_type=event_type,
         data=data,
         event_timestamp=DODO_ISO_DATE,
-        user_id=user_id,
+        account_id=account_id,
         metadata=metadata,
         sink=sink,
     )

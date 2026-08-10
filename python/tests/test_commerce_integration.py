@@ -114,6 +114,7 @@ class IntegrationMockProvider(MockPaymentProvider):
 
 CONFIG: dict[str, Any] = {
     "version": 1,
+    "catalog": {"default_plan": "starter"},
     "pricing": {
         "operations": {
             "completion": {
@@ -136,7 +137,6 @@ CONFIG: dict[str, Any] = {
         },
     },
     "credits": {
-        "accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"},
         "buckets": {"general": {"priority": 10}},
         "default_bucket": "general",
         "policies": {"prepaid": {"type": "prepaid"}},
@@ -222,14 +222,14 @@ def _now() -> str:
 
 
 def _bursar(pg_database_url: str, pg_store: object) -> tuple[Bursar, PostgresBillingStore, IntegrationMockProvider]:
-    billing_store = PostgresBillingStore(pg_database_url, tenant_id=TEST_TENANT_ID)
+    billing_store = PostgresBillingStore(pg_database_url, tenant_id=TEST_TENANT_ID, provider_environment="test")
     provider = IntegrationMockProvider(event_sink=None)  # type: ignore[arg-type]
     bursar = Bursar(
         credit_store=pg_store,  # type: ignore[arg-type]
         billing_store=billing_store,
-        commerce_options=CommerceOptions(providers={"stripe": lambda context: provider}),
+        commerce_options=CommerceOptions(provider_environment="test", providers={"stripe": lambda context: provider}),
     )
-    bursar.credits.publish_and_activate_catalog(CONFIG)
+    bursar.catalog.publish_and_activate(CONFIG)
     return bursar, billing_store, provider
 
 
@@ -263,7 +263,7 @@ async def test_commerce_checkout_persists_intent_and_topup_payment_grants_credit
                 event_id="evt_topup_paid",
                 event_type=BillingEventType.payment_succeeded,
                 occurred_at=_now(),
-                user_id=USER_ID,
+                account_id=USER_ID,
                 payment=BillingPaymentInfo(
                     provider_payment_id="pay_topup_1",
                     amount_minor=500,
@@ -299,7 +299,7 @@ async def test_commerce_subscription_plan_change_portal_and_cancel_flow(
                 event_id="evt_customer_created",
                 event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
-                user_id=USER_ID,
+                account_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id="mock-customer-1", email="buyer@example.com"),
             )
         )
@@ -309,7 +309,7 @@ async def test_commerce_subscription_plan_change_portal_and_cancel_flow(
                 event_id="evt_subscription_active",
                 event_type=BillingEventType.subscription_created,
                 occurred_at=_now(),
-                user_id=USER_ID,
+                account_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id="mock-customer-1"),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="mock-subscription-1",
@@ -363,7 +363,7 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
                     event_id=f"evt_auto_customer_{customer_id}",
                     event_type=BillingEventType.customer_created,
                     occurred_at=_now(),
-                    user_id=user_id,
+                    account_id=user_id,
                     customer=BillingCustomerInfo(provider_customer_id=customer_id, email=email),
                 )
             )

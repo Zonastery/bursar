@@ -29,6 +29,7 @@ import type {
   CheckoutIntentUpdate,
 } from "./contracts.js";
 import type Decimal from "decimal.js";
+import type { ProviderEnvironment } from "../providers/environment.js";
 
 /**
  * Abstract billing store — provider-agnostic persistence layer for
@@ -37,6 +38,9 @@ import type Decimal from "decimal.js";
  * Mirrors Python bursar/billing/store.py.
  */
 export abstract class BillingStore {
+  /** Exposed by environment-partitioned stores so composition can reject drift. */
+  readonly providerEnvironment?: ProviderEnvironment;
+
   abstract createOrGetCheckoutIntent(input: CheckoutIntentCreate): Promise<CheckoutIntent>;
 
   abstract updateCheckoutIntent(id: string, update: CheckoutIntentUpdate): Promise<void>;

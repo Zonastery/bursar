@@ -3,7 +3,8 @@ import { retryBursarOperation } from "../retry.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEventType } from "./events.js";
 import { LowBalanceMonitor } from "./low-balance-monitor.js";
-import { isAmount, CatalogRuntime } from "./catalog-runtime.js";
+import { CatalogRuntime } from "./catalog-runtime.js";
+import { isAmount, rejectNativeCreditAmount } from "./amount.js";
 import { raiseLeaseError } from "./service-errors.js";
 import { requireStableKey, scopedStableKey } from "../shared/idempotency.js";
 import type {
@@ -110,6 +111,7 @@ export class CreditLeaseWorkflow {
     metricsOrAmount: MetricsOrAmount,
     options: ReserveOptions,
   ): Promise<LeaseSuccess> {
+    rejectNativeCreditAmount(metricsOrAmount);
     const leaseIdempotencyKey = requireStableKey(options?.idempotencyKey);
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] reserve", {
@@ -189,6 +191,7 @@ export class CreditLeaseWorkflow {
     metricsOrAmount: MetricsOrAmount,
     options?: SettleOptions,
   ): Promise<DeductionResult> {
+    rejectNativeCreditAmount(metricsOrAmount);
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] settle", { leaseId });
     const idempotencyKey =
@@ -308,6 +311,7 @@ export class CreditLeaseWorkflow {
     metricsOrAmount: MetricsOrAmount,
     options?: CanAffordOptions,
   ): Promise<CanAffordResult> {
+    rejectNativeCreditAmount(metricsOrAmount);
     await this.maybeLazyExpire(userId);
     const feature = options?.feature ?? null;
     const { amount: worstCase } = await this.costOf(metricsOrAmount, userId);

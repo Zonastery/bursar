@@ -401,30 +401,12 @@ class CommerceService:
         self.credits = credits
         self.options = options
         self.logger = normalize_logger(options.logger)
-        identity_resolver = None
-        configured_identity_resolver = options.identity_resolver
-        if configured_identity_resolver is not None:
-
-            async def resolve_identity(identity):
-                account_id = await configured_identity_resolver(identity)
-                if account_id is not None and not account_id.strip():
-                    raise ValueError("identity resolver account_id must not be empty")
-                if account_id and identity.customer_id:
-                    self.billing.upsert_customer(
-                        identity.provider,
-                        identity.customer_id,
-                        account_id,
-                        identity.email,
-                    )
-                return account_id
-
-            identity_resolver = resolve_identity
         self._providers = CommerceProviderRegistry(
             options,
             CommerceProviderFactoryContext(
                 tenant_id=options.tenant_id,
+                provider_environment=options.provider_environment,
                 event_sink=event_sink,
-                identity_resolver=identity_resolver,
             ),
         )
         self.auto_recharge = CommerceAutoRecharge(self)
@@ -514,8 +496,8 @@ class CommerceService:
             checkout_type=input.type,
         )
         quantity = self._quantity(offer, input.quantity)
-        blocking = self.billing.get_blocking_subscription(input.account_id) if input.account_id else None
-        customer = self.billing.get_customer_by_user_id(input.account_id) if input.account_id else None
+        blocking = self.billing.get_blocking_subscription(input.account_id)
+        customer = self.billing.get_customer_by_user_id(input.account_id)
         if isinstance(offer, SubscriptionOffer) and blocking is not None:
             raise ActiveSubscriptionError("The account already has a blocking subscription")
         provider = await self._providers.select(
@@ -527,17 +509,12 @@ class CommerceService:
         if reference is None:
             raise UnknownOfferError("Offer has no reference for the selected provider")
 
-        provider_customer = (
-            self.billing.get_customer_by_user_id(
-                input.account_id,
-                provider.provider,
-            )
-            if input.account_id
-            else None
+        provider_customer = self.billing.get_customer_by_user_id(
+            input.account_id,
+            provider.provider,
         )
         metadata = dict(input.metadata)
-        if input.account_id:
-            metadata["userId"] = input.account_id
+        metadata["bursar_account_id"] = input.account_id
         if isinstance(offer, SubscriptionOffer):
             metadata["plan_slug"] = offer.plan
             metadata["billing_interval"] = offer.billing_interval.unit
@@ -548,6 +525,7 @@ class CommerceService:
             checkout_kind = "credit_topup"
 
         digest_value = {
+            "accountId": input.account_id,
             "checkoutKind": "subscription" if checkout_kind == "subscription" else "topup",
             "offerKey": offer_key,
             "provider": provider.provider,
@@ -601,7 +579,7 @@ class CommerceService:
         try:
             session = await provider.create_checkout_session(
                 CheckoutParams(
-                    user_id=input.account_id,
+                    account_id=input.account_id,
                     customer_id=(provider_customer.provider_customer_id if provider_customer else None),
                     email=input.email,
                     product_id=_external_id(reference),
@@ -700,7 +678,7 @@ class CommerceService:
                 event_id=f"cancel_{account_id}_{operation_key}",
                 event_type=BillingEventType.subscription_cancellation_scheduled,
                 occurred_at=datetime.now(UTC).isoformat(),
-                user_id=account_id,
+                account_id=account_id,
                 customer=BillingCustomerInfo(provider_customer_id=subscription.provider_customer_id),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=subscription.provider_subscription_id,
@@ -740,7 +718,7 @@ class CommerceService:
                 event_id=f"reactivate_{account_id}_{operation_key}",
                 event_type=BillingEventType.subscription_cancellation_unscheduled,
                 occurred_at=datetime.now(UTC).isoformat(),
-                user_id=account_id,
+                account_id=account_id,
                 customer=BillingCustomerInfo(provider_customer_id=subscription.provider_customer_id),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=subscription.provider_subscription_id,
@@ -781,7 +759,7 @@ class CommerceService:
                         event_id=f"cancel_all_{account_id}_{key}",
                         event_type=BillingEventType.subscription_cancellation_scheduled,
                         occurred_at=datetime.now(UTC).isoformat(),
-                        user_id=account_id,
+                        account_id=account_id,
                         customer=BillingCustomerInfo(provider_customer_id=subscription.provider_customer_id),
                         subscription=BillingSubscriptionInfo(
                             provider_subscription_id=subscription.provider_subscription_id,
@@ -1114,7 +1092,7 @@ class CommerceService:
                         "proration_billing_mode": proration,
                         "on_payment_failure": context["policy"].payment_failure,
                         "metadata": {
-                            "userId": account_id,
+                            "bursar_account_id": account_id,
                             "plan_slug": offer.plan,
                             "billing_interval": context["target_interval"],
                         },

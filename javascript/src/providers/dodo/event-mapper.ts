@@ -218,7 +218,7 @@ function subscriptionStatus(
 
 export async function handleDodoBillingEvent(
   payload: DodoWebhookPayload,
-  userId: string | null,
+  accountId: string | null,
   metadata: Record<string, string>,
   sink: BillingEventSink,
   logger?: ProviderLogger | null,
@@ -234,7 +234,7 @@ export async function handleDodoBillingEvent(
       provider: "dodo" as const,
       eventId: dodoBillingEventId(payload),
       occurredAt: requireDate(payload.timestamp, "Dodo webhook timestamp"),
-      ...(userId ? { userId } : {}),
+      ...(accountId ? { accountId } : {}),
       ...(customerInfo.providerCustomerId ? { customer: customerInfo } : {}),
       ...(Object.keys(metadata).length ? { metadata } : {}),
     };
@@ -242,10 +242,6 @@ export async function handleDodoBillingEvent(
 
   switch (type) {
     case "subscription.active": {
-      if (!userId) {
-        log.error("Dodo subscription event: no userId", { event: type });
-        return;
-      }
       const subId = subscriptionId(data);
 
       const refs = subscriptionRefs(data, metadata);
@@ -253,7 +249,7 @@ export async function handleDodoBillingEvent(
         subscriptionId: subId,
         productId: productId(data),
         planSlug: metadata.plan_slug,
-        hasUserId: Boolean(userId),
+        hasAccountId: Boolean(accountId),
         refs,
       });
       await callBillingEventSink(sink, {
@@ -274,10 +270,6 @@ export async function handleDodoBillingEvent(
     }
 
     case "subscription.renewed": {
-      if (!userId) {
-        log.error("Dodo subscription event: no userId", { event: type });
-        return;
-      }
       const subId = subscriptionId(data);
 
       await callBillingEventSink(sink, {
@@ -406,7 +398,7 @@ export async function handleDodoBillingEvent(
       await callBillingEventSink(sink, {
         ...baseEvent(),
         eventType: "payment.succeeded",
-        ...(userId ? { userId } : {}),
+        ...(accountId ? { accountId } : {}),
         ...(subscriptionId
           ? {
               subscription: {
@@ -435,7 +427,7 @@ export async function handleDodoBillingEvent(
       await callBillingEventSink(sink, {
         ...baseEvent(),
         eventType: "payment.failed",
-        ...(userId ? { userId } : {}),
+        ...(accountId ? { accountId } : {}),
         subscription: subId ? { providerSubscriptionId: subId } : undefined,
         payment: {
           providerPaymentId: paymentId,

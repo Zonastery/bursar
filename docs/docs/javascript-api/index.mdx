@@ -9,7 +9,7 @@ description: Use the TypeScript SDK through the Bursar facade, credits service, 
 The package is ESM-only and requires Node.js 22 or newer.
 
 ```bash
-npm install @zonastery/bursar
+npm install @zonastery/bursar pg
 ```
 
 ## Constructing the facade
@@ -17,15 +17,12 @@ npm install @zonastery/bursar
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore({ postgres: databaseUrl, tenantId });
-const bursar = new Bursar({
-  creditStore: store,
-  billingStore: undefined,
-  creditsOptions: undefined,
-  billingOptions: undefined,
-  commerceOptions: undefined,
-  emitter: undefined,
+const store = new PostgresStore({
+  postgres: databaseUrl,
+  tenantId,
+  providerEnvironment: "test",
 });
+const bursar = new Bursar({ creditStore: store });
 ```
 
 - `creditStore` is the only required option. `PostgresStore` is the bundled
@@ -35,7 +32,9 @@ const bursar = new Bursar({
   capabilities (`ingestBillingEvent`, checkouts, subscriptions, auto-recharge).
 - `emitter` receives credit lifecycle events (`CreditEventEmitter`).
 
-Every facade method returns a `Promise`; all monetary amounts are `Decimal`.
+Every facade method returns a `Promise`. Exact monetary inputs accept
+`Decimal | string` and reject native JavaScript numbers; returned and stored
+amounts are `Decimal`.
 
 ## Error and retry contract
 
@@ -94,7 +93,7 @@ Install the Python CLI once and run:
 
 ```bash title="Terminal"
 pip install "bursar[postgres]"
-DATABASE_URL=postgres://... bursar migrate
+BURSAR_MIGRATION_DATABASE_URL=postgres://... bursar migrate
 ```
 
 ## Where to go next

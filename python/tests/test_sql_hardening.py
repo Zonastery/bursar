@@ -16,6 +16,7 @@ from bursar.metrics import UsageMetrics
 def config() -> dict:
     return {
         "version": 1,
+        "catalog": {"default_plan": "pro"},
         "pricing": {
             "operations": {
                 "completion": {
@@ -58,11 +59,6 @@ def config() -> dict:
             },
         },
         "credits": {
-            "accounting": {
-                "unit": "credit",
-                "scale": 6,
-                "rounding": "half_up",
-            },
             "buckets": {
                 "purchased": {
                     "priority": 10,
@@ -114,11 +110,7 @@ def test_catalog_config_is_the_canonical_public_document() -> None:
     stored = canonical_bursar_config_dict(config())
 
     assert stored["plans"]["pro"]["rate_card"] == "pro"
-    assert stored["credits"]["accounting"] == {
-        "unit": "credit",
-        "scale": 6,
-        "rounding": "half_up",
-    }
+    assert "accounting" not in stored["credits"]
 
 
 def test_usage_metrics_require_an_operation() -> None:

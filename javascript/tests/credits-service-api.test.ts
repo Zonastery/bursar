@@ -38,22 +38,22 @@ describe("CreditsService public amount validation", () => {
   it.each([
     [
       "addCredits",
-      (credits: CreditsService) => credits.addCredits("user-1", -1, { idempotencyKey: "add-1" }),
+      (credits: CreditsService) => credits.addCredits("user-1", "-1", { idempotencyKey: "add-1" }),
     ],
     [
       "deductCredits",
       (credits: CreditsService) =>
-        credits.deductCredits("user-1", -1, { idempotencyKey: "deduct-1" }),
+        credits.deductCredits("user-1", "-1", { idempotencyKey: "deduct-1" }),
     ],
     [
       "grantSubscriptionCycle",
       (credits: CreditsService) =>
-        credits.grantSubscriptionCycle("user-1", 0, { idempotencyKey: "cycle-1" }),
+        credits.grantSubscriptionCycle("user-1", "0", { idempotencyKey: "cycle-1" }),
     ],
     [
       "refundCredits",
       (credits: CreditsService) =>
-        credits.refundCredits("entry-1", { amount: 0, idempotencyKey: "refund-1" }),
+        credits.refundCredits("entry-1", { amount: "0", idempotencyKey: "refund-1" }),
     ],
   ])("rejects invalid %s amounts before calling the store", async (_name, invoke) => {
     const addCredits = vi.fn();
@@ -84,7 +84,7 @@ describe("CreditsService public amount validation", () => {
 
     await expect(
       credits.addCredits("user-1", true as never, { idempotencyKey: "add-boolean" }),
-    ).rejects.toThrow(/Decimal or number/);
+    ).rejects.toThrow(/Decimal or decimal string/);
     expect(addCredits).not.toHaveBeenCalled();
   });
 
@@ -92,9 +92,39 @@ describe("CreditsService public amount validation", () => {
     const addCredits = vi.fn();
     const credits = service({ addCredits });
 
-    await expect(credits.addCredits("user-1", 1, undefined as never)).rejects.toThrow(
+    await expect(credits.addCredits("user-1", "1", undefined as never)).rejects.toThrow(
       /idempotencyKey/,
     );
+    expect(addCredits).not.toHaveBeenCalled();
+  });
+
+  it("rejects native numbers instead of silently rounding monetary input", async () => {
+    const addCredits = vi.fn();
+    const credits = service({ addCredits });
+
+    await expect(
+      credits.addCredits("user-1", 0.1 as never, { idempotencyKey: "add-number" }),
+    ).rejects.toThrow(/Decimal or decimal string/);
+    expect(addCredits).not.toHaveBeenCalled();
+  });
+
+  it("rejects native-number lease estimates before querying account state", async () => {
+    const getUserPlan = vi.fn();
+    const credits = service({ getUserPlan });
+
+    await expect(
+      credits.reserve("user-1", 0.1 as never, { idempotencyKey: "reserve-number" }),
+    ).rejects.toThrow(/Decimal or decimal string/);
+    expect(getUserPlan).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed decimal strings before calling the store", async () => {
+    const addCredits = vi.fn();
+    const credits = service({ addCredits });
+
+    await expect(
+      credits.addCredits("user-1", "ten credits", { idempotencyKey: "add-malformed" }),
+    ).rejects.toThrow(/valid decimal string/);
     expect(addCredits).not.toHaveBeenCalled();
   });
 });
@@ -118,7 +148,7 @@ describe("grantSubscriptionCycle replay", () => {
       setUserPlan,
     });
 
-    await credits.grantSubscriptionCycle("user-1", 10, {
+    await credits.grantSubscriptionCycle("user-1", "10", {
       planKey: "pro",
       idempotencyKey: "invoice-1",
     });
@@ -134,7 +164,7 @@ describe("grantSubscriptionCycle replay", () => {
       setUserPlan,
     });
 
-    await credits.grantSubscriptionCycle("user-1", 10, {
+    await credits.grantSubscriptionCycle("user-1", "10", {
       planKey: "pro",
       idempotencyKey: "invoice-1",
     });

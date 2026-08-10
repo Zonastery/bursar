@@ -123,7 +123,7 @@ A charge computes the credit cost for the event:
 | `expression` | An arbitrary formula over the operation's measures                   | `{ type: expression, formula: input_tokens * 0.005 + output_tokens * 0.015 }`                             |
 | `sum`        | Sum of sub-charges (each a charge)                                   | The `completion` rule above                                                                               |
 
-`per_unit` with `unit_size: 1000000` is how per-million-token rates stay
+`per_unit` with `unit_size: "1000000"` is how per-million-token rates stay
 readable: the rate is what one million tokens cost. `graduated` tiers must
 end with exactly one open-ended tier, in strictly increasing order; `package`
 defaults to rounding up. Graduated and volume tiers differ: graduated applies

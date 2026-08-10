@@ -1,12 +1,11 @@
 import type { BillingEventSink } from "../../billing/contracts.js";
-import type { ProviderLogger, ResolveUserCallback, WebhookResult } from "../types.js";
+import type { ProviderLogger, WebhookResult } from "../types.js";
 import type { DodoWebhookPayload } from "./client-contract.js";
 import { DodoWebhookProcessor } from "./provider.js";
 
 export interface DodoWebhookBridgeOptions {
   /** Resolve the current Bursar billing sink lazily for serverless runtimes. */
   getEventSink: () => BillingEventSink | Promise<BillingEventSink>;
-  resolveUser?: ResolveUserCallback;
   logger?: ProviderLogger | null;
 }
 
@@ -28,7 +27,6 @@ export function createDodoWebhookBridge(
   };
   const processor = new DodoWebhookProcessor({
     eventSink: lazySink,
-    resolveUser: options.resolveUser,
     logger: options.logger,
   });
   return (payload) => processor.handle(payload);

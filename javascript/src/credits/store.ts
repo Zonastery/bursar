@@ -48,7 +48,8 @@ import type {
   TopUserRow,
   LedgerEntry,
 } from "./types/index.js";
-import type { CatalogRollout } from "../config.js";
+import type { BursarConfigData, CatalogRollout } from "../config.js";
+import type { ProviderEnvironment } from "../providers/environment.js";
 import type {
   AddCreditsOptions,
   DeductTeamOptions,
@@ -98,6 +99,8 @@ export interface SettleLeaseOptions extends OperationUsageOptions {
  *    throws {@link CapabilityNotSupportedError} instead of forcing a stub.
  */
 export abstract class CreditStore {
+  /** Optional provider namespace exposed by environment-aware stores. */
+  readonly providerEnvironment?: ProviderEnvironment;
   constructor() {}
 
   abstract getBalance(userId: string): Promise<BalanceResult>;
@@ -196,21 +199,18 @@ export abstract class CreditStore {
 
   abstract getActiveCatalog(): Promise<CatalogRevision | null>;
   abstract publishAndActivateCatalog(
-    config: Record<string, unknown>,
+    config: BursarConfigData,
     label?: string | null,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
+    rollout?: CatalogRollout | null,
   ): Promise<string>;
-  abstract publishCatalogDraft(
-    config: Record<string, unknown>,
-    label?: string | null,
-  ): Promise<string>;
+  abstract publishCatalogDraft(config: BursarConfigData, label?: string | null): Promise<string>;
 
   // Catalog revision history and activation.
   abstract getCatalogHistory(): Promise<CatalogRevisionSummary[]>;
   abstract getCatalogRevision(version: number): Promise<CatalogRevision | null>;
   abstract activateCatalogRevision(
     version: number,
-    rollout?: CatalogRollout | Record<string, unknown> | null,
+    rollout?: CatalogRollout | null,
   ): Promise<string>;
 
   abstract getUserPlan(userId: string): Promise<GetUserPlanResult>;

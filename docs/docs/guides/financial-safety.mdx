@@ -42,11 +42,13 @@ same request replays the original entry — the result is returned with
   <TabItem value="python" label="Python">
 
 ```python
+from decimal import Decimal
+
 first = bursar.credits.add_credits(
-    user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
+    user_id, Decimal("100"), entry_type="purchase", idempotency_key="checkout:42"
 )
 replay = bursar.credits.add_credits(
-    user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
+    user_id, Decimal("100"), entry_type="purchase", idempotency_key="checkout:42"
 )
 assert first.entry_id == replay.entry_id and replay.idempotent
 ```
@@ -55,11 +57,11 @@ assert first.entry_id == replay.entry_id and replay.idempotent
   <TabItem value="ts" label="TypeScript">
 
 ```ts
-const first = await bursar.credits.addCredits(userId, 100, {
+const first = await bursar.credits.addCredits(userId, "100", {
   type: "purchase",
   idempotencyKey: "checkout:42",
 });
-const replay = await bursar.credits.addCredits(userId, 100, {
+const replay = await bursar.credits.addCredits(userId, "100", {
   type: "purchase",
   idempotencyKey: "checkout:42",
 });
@@ -182,10 +184,14 @@ id — so the audit trail always shows which charge a refund reverses.
   <TabItem value="python" label="Python">
 
 ```python
-charge = bursar.credits.deduct_credits(user_id, 10, idempotency_key="operation:42")
+charge = bursar.credits.deduct_credits(
+    user_id,
+    Decimal("10"),
+    idempotency_key="operation:42",
+)
 refund = bursar.credits.refund_credits(
     charge.entry_id,
-    amount=5,
+    amount=Decimal("5"),
     idempotency_key="refund:operation:42:partial",
 )
 print(refund.amount, refund.new_balance)
@@ -195,11 +201,11 @@ print(refund.amount, refund.new_balance)
   <TabItem value="ts" label="TypeScript">
 
 ```ts
-const charge = await bursar.credits.deductCredits(userId, 10, {
+const charge = await bursar.credits.deductCredits(userId, "10", {
   idempotencyKey: "operation:42",
 });
 const refund = await bursar.credits.refundCredits(charge.entryId, {
-  amount: 5,
+  amount: "5",
   idempotencyKey: "refund:operation:42:partial",
 });
 console.log(refund.amount, refund.newBalance);

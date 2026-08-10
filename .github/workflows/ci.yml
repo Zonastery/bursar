@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 # Cancel superseded PR/branch runs, but never cancel a release tag: stopping a
-# publish midway can leave the PyPI and npm registries out of sync.
+# publish midway can leave the PyPI, npm, and GitHub releases out of sync.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -117,7 +117,7 @@ jobs:
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
-          bunx --no-install vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
+          bunx --no-install vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1
           bunx --no-install vitest --config vitest.providers.config.ts run --coverage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.node-version == '22'
@@ -247,8 +247,8 @@ jobs:
 
   # ── Release ───────────────────────────────────────────────────────────────
   # Validate the complete release before either registry is touched. Publishing
-  # is ordered PyPI -> npm and both steps are safe to rerun, so an npm outage can
-  # be recovered without changing the immutable release tag.
+  # is ordered PyPI -> npm -> GitHub Release -> Context7 and every step is safe
+  # to rerun, so an outage can be recovered without changing the immutable tag.
 
   release-preflight:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -345,3 +345,31 @@ jobs:
           else
             npm publish --access public --provenance
           fi
+
+  release-github:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $RELEASE_TAG already exists; skipping"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "Bursar $RELEASE_TAG"
+          fi
+
+  refresh-context7:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-github]
+    uses: ./.github/workflows/context7-refresh.yml
+    secrets: inherit

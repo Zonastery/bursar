@@ -189,9 +189,9 @@ export class StripeProvider implements PaymentProvider {
     this.logger.info("[StripeProvider] createCheckoutSession", {
       productId: params.productId,
       type: params.type,
-      hasUserId: Boolean(params.userId),
+      hasAccountId: Boolean(params.accountId),
     });
-    if (!params.userId) throw new TypeError("Authentication required for checkout");
+    if (!params.accountId) throw new TypeError("Financial account is required for checkout");
     const stripe = this.getStripe();
 
     let customerId = params.customerId;
@@ -199,7 +199,7 @@ export class StripeProvider implements PaymentProvider {
       const customer = await stripe.customers.create(
         {
           ...(params.email ? { email: params.email } : {}),
-          metadata: { userId: params.userId },
+          metadata: { bursar_account_id: params.accountId },
         },
         requestOptions(scopedStableKey(idempotencyKey, "customer")),
       );
@@ -212,12 +212,20 @@ export class StripeProvider implements PaymentProvider {
       line_items: [{ price: params.productId, quantity: params.quantity ?? 1 }],
       success_url: params.returnUrl,
       cancel_url: params.cancelUrl,
-      client_reference_id: params.userId,
+      client_reference_id: params.accountId,
       automatic_tax: { enabled: true },
-      metadata: params.metadata,
+      metadata: { ...params.metadata, bursar_account_id: params.accountId },
       ...(params.type === "subscription"
-        ? { subscription_data: { metadata: { userId: params.userId, ...params.metadata } } }
-        : { payment_intent_data: { metadata: { userId: params.userId, ...params.metadata } } }),
+        ? {
+            subscription_data: {
+              metadata: { ...params.metadata, bursar_account_id: params.accountId },
+            },
+          }
+        : {
+            payment_intent_data: {
+              metadata: { ...params.metadata, bursar_account_id: params.accountId },
+            },
+          }),
     };
     const session = await stripe.checkout.sessions.create(
       sessionOpts,

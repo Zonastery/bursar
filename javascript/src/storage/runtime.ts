@@ -14,6 +14,10 @@ import { PostgresStore } from "../credits/postgres/store.js";
 import type { CreditsServiceOptions } from "../credits/service.js";
 import type { CreditEventEmitter } from "../credits/events.js";
 import type { CommerceOptions } from "../commerce/types.js";
+import {
+  normalizeProviderEnvironment,
+  type ProviderEnvironment,
+} from "../providers/environment.js";
 import type { UsageAnalyticsStore, UsageChargeStore } from "../credits/types/index.js";
 import {
   normalizeTenantId,
@@ -37,24 +41,26 @@ import { PostgresStorageRepository } from "./postgres-repository.js";
 
 /** Facade configuration accepted by the composed Node.js runtime. */
 export interface BursarRuntimeBursarOptions {
-  creditsOptions?: Omit<CreditsServiceOptions, "analytics"> | null;
-  billingOptions?: BillingServiceOptions | null;
-  commerceOptions?: CommerceOptions | null;
-  emitter?: CreditEventEmitter | null;
+  creditsOptions?: Omit<CreditsServiceOptions, "analytics" | "usageStore">;
+  billingOptions?: Omit<BillingServiceOptions, "provisioning">;
+  commerceOptions?: Omit<CommerceOptions, "tenantId" | "providerEnvironment">;
+  emitter?: CreditEventEmitter;
 }
 
 export interface BursarRuntimeOptions {
   postgres: string | PostgresPool;
+  /** Explicit financial namespace shared by persistence and provider factories. */
+  providerEnvironment: ProviderEnvironment;
   /** Applied to SDK-owned pools and per-transaction statement deadlines. */
-  postgresOptions?: PostgresConnectionOptions;
+  postgresOptions?: Omit<PostgresConnectionOptions, "providerEnvironment">;
   tenantId: string;
   /**
    * Optional provisioned tenant slug. When supplied, startup verifies that it
    * resolves to `tenantId` before any worker or catalog lifecycle begins.
    */
   tenantSlug?: string;
-  s3?: BillingPayloadArchive | S3BillingArchiveOptions | null;
-  clickhouse?: (UsageEventSink & UsageAnalyticsStore) | ClickHouseUsageStoreOptions | null;
+  s3?: BillingPayloadArchive | S3BillingArchiveOptions;
+  clickhouse?: (UsageEventSink & UsageAnalyticsStore) | ClickHouseUsageStoreOptions;
   /**
    * Background delivery configuration. Set false only when another process
    * consumes Bursar's outbox.
@@ -83,9 +89,10 @@ const runtimeStartOptionsSchema = z
     maxAttempts: z.number().finite().int().min(1).max(Number.MAX_SAFE_INTEGER).default(1),
     retryDelayMs: z.number().finite().min(0).max(5_000).default(250),
     shouldRetry: z
-      .custom<
-        (error: unknown) => boolean
-      >((value) => typeof value === "function", "shouldRetry must be a function")
+      .custom<(error: unknown) => boolean>(
+        (value) => typeof value === "function",
+        "shouldRetry must be a function",
+      )
       .optional(),
     maxElapsedMs: z.number().finite().min(0).max(2_147_483_647).optional(),
     signal: z
@@ -127,6 +134,7 @@ export class BursarRuntime {
   private readonly query: QueryFn;
   private readonly tenantId: string;
   private readonly tenantSlug: string | null;
+  readonly providerEnvironment: ProviderEnvironment;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
   private started = false;
@@ -171,8 +179,34 @@ export class BursarRuntime {
     this.pool = pool;
     this.ownsPool = ownsPool;
     this.tenantId = normalizeTenantId(options.tenantId);
+    this.providerEnvironment = normalizeProviderEnvironment(options.providerEnvironment);
     this.tenantSlug =
       options.tenantSlug === undefined ? null : normalizeTenantSlug(options.tenantSlug);
+    for (const optionName of ["bursar", "s3", "clickhouse"] as const) {
+      if (options[optionName] === null) {
+        throw new TypeError(`${optionName} must not be null`);
+      }
+    }
+    const bursarOptions = options.bursar ?? {};
+    if (bursarOptions.creditsOptions === null) {
+      throw new TypeError("bursar.creditsOptions must not be null");
+    }
+    if (
+      bursarOptions.creditsOptions &&
+      ("analytics" in bursarOptions.creditsOptions || "usageStore" in bursarOptions.creditsOptions)
+    ) {
+      throw new TypeError("BursarRuntime owns creditsOptions.analytics and usageStore");
+    }
+    if (bursarOptions.commerceOptions === null) {
+      throw new TypeError("bursar.commerceOptions must not be null");
+    }
+    if (
+      bursarOptions.commerceOptions &&
+      ("tenantId" in bursarOptions.commerceOptions ||
+        "providerEnvironment" in bursarOptions.commerceOptions)
+    ) {
+      throw new TypeError("BursarRuntime owns commerceOptions.tenantId and providerEnvironment");
+    }
     if (
       options.clickhouse &&
       !("writeUsage" in options.clickhouse) &&
@@ -195,19 +229,21 @@ export class BursarRuntime {
       postgres: pool,
       tenantId: this.tenantId,
       ...(options.postgresOptions ?? {}),
+      providerEnvironment: this.providerEnvironment,
       usageBackend: this.clickhouse ? "clickhouse" : "postgres",
     });
     this.billingStore = new PostgresBillingStore({
       postgres: pool,
       tenantId: this.tenantId,
       ...(options.postgresOptions ?? {}),
+      providerEnvironment: this.providerEnvironment,
       billingPayloadBackend: this.s3 ? "s3" : "postgres",
     });
-    const bursarOptions = options.bursar ?? {};
     const commerceOptions = bursarOptions.commerceOptions
       ? {
           ...bursarOptions.commerceOptions,
           tenantId: this.tenantId,
+          providerEnvironment: this.providerEnvironment,
         }
       : undefined;
     this.bursar = new Bursar({
@@ -228,6 +264,7 @@ export class BursarRuntime {
     this.postgres = new PostgresClient(pool, {
       ...(options.postgresOptions ?? {}),
       tenantId: this.tenantId,
+      providerEnvironment: this.providerEnvironment,
       accessRole: "bursar_operator",
       usageBackend: this.clickhouse ? "clickhouse" : "postgres",
       billingPayloadBackend: this.s3 ? "s3" : "postgres",

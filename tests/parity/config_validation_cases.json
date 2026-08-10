@@ -5,6 +5,9 @@
       "expect": "accept",
       "config": {
         "version": 1,
+        "catalog": {
+          "default_plan": "free"
+        },
         "pricing": {
           "operations": {
             "completion": {
@@ -66,11 +69,6 @@
           }
         },
         "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          },
           "buckets": {
             "gifted": {
               "priority": 10,
@@ -125,13 +123,7 @@
       "name": "missing_version_rejected",
       "expect": "reject",
       "config": {
-        "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          }
-        }
+        "credits": {}
       }
     },
     {
@@ -140,13 +132,7 @@
       "config": {
         "version": 1,
         "usage": {},
-        "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          }
-        }
+        "credits": {}
       }
     },
     {
@@ -155,11 +141,6 @@
       "config": {
         "version": 1,
         "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          },
           "buckets": {
             "gifted": {
               "priority": 10
@@ -177,13 +158,10 @@
       "expect": "reject",
       "config": {
         "version": 1,
-        "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          }
+        "catalog": {
+          "default_plan": "pro"
         },
+        "credits": {},
         "plans": {
           "pro": {
             "display_name": "Pro",
@@ -201,11 +179,6 @@
       "config": {
         "version": 1,
         "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          },
           "buckets": {
             "gifted": {
               "priority": 10,
@@ -256,13 +229,7 @@
             }
           }
         },
-        "credits": {
-          "accounting": {
-            "unit": "credit",
-            "scale": 6,
-            "rounding": "half_up"
-          }
-        }
+        "credits": {}
       }
     },
     {
@@ -270,6 +237,9 @@
       "expect": "accept",
       "config": {
         "version": 1,
+        "catalog": {
+          "default_plan": "free"
+        },
         "credits": {},
         "plans": {
           "free": {
@@ -298,6 +268,9 @@
       "expect": "reject",
       "config": {
         "version": 1,
+        "catalog": {
+          "default_plan": "pro"
+        },
         "credits": {},
         "plans": {
           "pro": {
@@ -312,6 +285,9 @@
       "expect": "reject",
       "config": {
         "version": 1,
+        "catalog": {
+          "default_plan": "pro"
+        },
         "credits": {},
         "entitlements": {
           "features": {
@@ -434,6 +410,9 @@
       "expect": "reject",
       "config": {
         "version": 1,
+        "catalog": {
+          "default_plan": "pro"
+        },
         "credits": {},
         "plans": {
           "pro": {
@@ -539,6 +518,9 @@
       "expect": "reject",
       "config": {
         "version": 1,
+        "catalog": {
+          "default_plan": "pro"
+        },
         "pricing": {
           "operations": {
             "completion": {
@@ -641,6 +623,122 @@
                   "bucket": "promotional"
                 }
               ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "unsafe_offer_minor_units_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "buckets": {
+            "purchased": {
+              "priority": 10
+            }
+          },
+          "default_bucket": "purchased"
+        },
+        "commerce": {
+          "providers": {
+            "stripe": {
+              "type": "stripe"
+            }
+          },
+          "offers": {
+            "pack": {
+              "type": "topup",
+              "display_name": "Pack",
+              "price": {
+                "amount_minor": 9007199254740992,
+                "currency": "USD"
+              },
+              "providers": {
+                "stripe": {
+                  "type": "stripe_price",
+                  "price_id": "price_pack"
+                }
+              },
+              "credits_per_unit": "1000",
+              "bucket": "purchased"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "unsafe_auto_recharge_minor_units_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "buckets": {
+            "purchased": {
+              "priority": 10
+            }
+          },
+          "default_bucket": "purchased"
+        },
+        "commerce": {
+          "providers": {
+            "stripe": {
+              "type": "stripe"
+            }
+          },
+          "offers": {
+            "pack": {
+              "type": "topup",
+              "display_name": "Pack",
+              "price": {
+                "amount_minor": 500,
+                "currency": "USD"
+              },
+              "providers": {
+                "stripe": {
+                  "type": "stripe_price",
+                  "price_id": "price_pack"
+                }
+              },
+              "credits_per_unit": "1000",
+              "quantity": {
+                "minimum": 1,
+                "maximum": 3,
+                "default": 1
+              },
+              "bucket": "purchased"
+            }
+          },
+          "auto_recharge": {
+            "eligible_topups": [
+              "pack"
+            ],
+            "balance_below": {
+              "minimum": "100",
+              "maximum": "500",
+              "default": "200"
+            },
+            "rearm_above": "600",
+            "quantity": {
+              "minimum": 1,
+              "maximum": 3,
+              "default": 1
+            },
+            "limits": {
+              "max_purchases": 3,
+              "window": {
+                "type": "rolling",
+                "duration": {
+                  "unit": "day",
+                  "count": 30
+                }
+              },
+              "max_charge_minor": 9007199254740992,
+              "cooldown": {
+                "unit": "hour",
+                "count": 1
+              }
             }
           }
         }

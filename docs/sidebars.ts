@@ -51,6 +51,7 @@ const sidebars: SidebarsConfig = {
               "Protect monetary operations, manage the credit lifecycle, and connect subscriptions and payments.",
           },
           items: [
+            "guides/ai-saas-credits",
             "guides/financial-safety",
             "guides/credit-lifecycle",
             "guides/subscription-integration",

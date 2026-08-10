@@ -196,7 +196,7 @@ def _invoice_tax_minor(invoice: Any) -> int:
 async def _handle_checkout_event(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -218,7 +218,7 @@ async def _handle_checkout_event(
         {"expand": list(STRIPE_CHECKOUT_EXPAND)},
     )
     metadata = {**event_metadata, **_metadata(_value(session, "metadata"))}
-    uid = user_id or _value(session, "client_reference_id") or metadata.get("userId")
+    uid = account_id or _value(session, "client_reference_id") or metadata.get("bursar_account_id")
     customer = _customer_info(session)
     subscription_id = _expandable_id(_value(session, "subscription"))
 
@@ -233,7 +233,7 @@ async def _handle_checkout_event(
                 event_id=event_id,
                 event_type=BillingEventType.payment_failed,
                 occurred_at=occurred_at,
-                user_id=uid,
+                account_id=uid,
                 customer=customer,
                 subscription=subscription,
                 payment=_checkout_payment_info(session, expanded, "failed"),
@@ -253,7 +253,7 @@ async def _handle_checkout_event(
                 event_id=event_id,
                 event_type=BillingEventType.checkout_completed,
                 occurred_at=occurred_at,
-                user_id=uid,
+                account_id=uid,
                 customer=customer,
                 subscription=_subscription_info(sub, refs),
                 metadata=metadata,
@@ -268,7 +268,7 @@ async def _handle_checkout_event(
             event_id=event_id,
             event_type=BillingEventType.payment_succeeded,
             occurred_at=occurred_at,
-            user_id=uid,
+            account_id=uid,
             customer=customer,
             payment=_checkout_payment_info(session, expanded, "succeeded"),
             metadata=metadata,
@@ -279,7 +279,7 @@ async def _handle_checkout_event(
 async def _handle_checkout_expired(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -295,7 +295,7 @@ async def _handle_checkout_expired(
             event_id=event_id,
             event_type=BillingEventType.checkout_expired,
             occurred_at=occurred_at,
-            user_id=user_id or _value(data, "client_reference_id") or metadata.get("userId"),
+            account_id=account_id or _value(data, "client_reference_id") or metadata.get("bursar_account_id"),
             customer=_customer_info(data),
             metadata=metadata,
         ),
@@ -305,7 +305,7 @@ async def _handle_checkout_expired(
 async def _handle_subscription_updated(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -330,7 +330,7 @@ async def _handle_subscription_updated(
             event_id=event_id,
             event_type=event_type,
             occurred_at=occurred_at,
-            user_id=user_id or metadata.get("userId"),
+            account_id=account_id or metadata.get("bursar_account_id"),
             customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
             subscription=_subscription_info(data),
             metadata=metadata,
@@ -341,7 +341,7 @@ async def _handle_subscription_updated(
 async def _handle_subscription_deleted(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -364,7 +364,7 @@ async def _handle_subscription_deleted(
             event_id=event_id,
             event_type=BillingEventType.subscription_canceled,
             occurred_at=occurred_at,
-            user_id=user_id or metadata.get("userId"),
+            account_id=account_id or metadata.get("bursar_account_id"),
             customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
             subscription=subscription,
             metadata=metadata,
@@ -375,7 +375,7 @@ async def _handle_subscription_deleted(
 async def _handle_invoice_paid(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -399,7 +399,9 @@ async def _handle_invoice_paid(
             event_id=event_id,
             event_type=BillingEventType.invoice_paid,
             occurred_at=occurred_at,
-            user_id=user_id or metadata.get("userId") or _metadata(_value(sub, "metadata")).get("userId"),
+            account_id=account_id
+            or metadata.get("bursar_account_id")
+            or _metadata(_value(sub, "metadata")).get("bursar_account_id"),
             customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
             subscription=_subscription_info(sub).model_copy(
                 update={"period_start": period_start, "period_end": period_end}
@@ -421,7 +423,7 @@ async def _handle_invoice_paid(
 async def _handle_invoice_payment_failed(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -445,7 +447,9 @@ async def _handle_invoice_payment_failed(
             event_id=event_id,
             event_type=BillingEventType.payment_failed,
             occurred_at=occurred_at,
-            user_id=user_id or metadata.get("userId") or _metadata(_value(sub, "metadata")).get("userId"),
+            account_id=account_id
+            or metadata.get("bursar_account_id")
+            or _metadata(_value(sub, "metadata")).get("bursar_account_id"),
             customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
             subscription=_subscription_info(sub),
             payment=BillingPaymentInfo(
@@ -465,7 +469,7 @@ async def _handle_invoice_payment_failed(
 async def _handle_payment_intent_event(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -487,7 +491,7 @@ async def _handle_payment_intent_event(
             event_id=event_id,
             event_type=billing_event_type,
             occurred_at=occurred_at,
-            user_id=user_id or metadata.get("userId"),
+            account_id=account_id or metadata.get("bursar_account_id"),
             payment=BillingPaymentInfo(
                 provider_payment_id=require_provider_string(_value(data, "id"), "Stripe payment intent.id"),
                 amount_minor=require_minor_units(_value(data, "amount"), "Stripe payment intent.amount"),
@@ -508,7 +512,7 @@ async def _handle_payment_intent_event(
 async def _handle_refund_event(
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -536,7 +540,7 @@ async def _handle_refund_event(
             event_id=event_id,
             event_type=billing_event_type,
             occurred_at=occurred_at,
-            user_id=user_id or metadata.get("userId"),
+            account_id=account_id or metadata.get("bursar_account_id"),
             refund=BillingRefundInfo(
                 provider_refund_id=require_provider_string(_value(data, "id"), "Stripe refund.id"),
                 provider_payment_id=require_provider_string(
@@ -592,7 +596,7 @@ async def handle_stripe_billing_event(
     event_type: str,
     event_id: str,
     data: Any,
-    user_id: str | None,
+    account_id: str | None,
     metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: StripeClient,
@@ -611,7 +615,7 @@ async def handle_stripe_billing_event(
         return
 
     try:
-        await handler(event_id, data, user_id, metadata, sink, stripe, logger, occurred_at)
+        await handler(event_id, data, account_id, metadata, sink, stripe, logger, occurred_at)
     except Exception as exc:
         logger.error(
             "Stripe webhook processing failed",

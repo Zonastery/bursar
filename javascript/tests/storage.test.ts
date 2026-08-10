@@ -6,10 +6,17 @@ import { S3BillingArchive } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
 import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
-import { createBursarRuntime } from "../src/storage/runtime.js";
+import {
+  createBursarRuntime as createRuntime,
+  type BursarRuntimeOptions,
+} from "../src/storage/runtime.js";
 import { CatalogNotLoadedError, StoreClosedError } from "../src/errors.js";
 
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
+function createBursarRuntime(options: Omit<BursarRuntimeOptions, "providerEnvironment">) {
+  return createRuntime({ ...options, providerEnvironment: "test" });
+}
 
 const s3Mock = vi.hoisted(() => ({
   send: vi.fn(),
@@ -479,6 +486,34 @@ describe("ClickHouseUsageStore", () => {
 });
 
 describe("BursarRuntime", () => {
+  it("fails closed when the provider environment is not explicit", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      createRuntime({ postgres: pool, tenantId: TEST_TENANT_ID } as never),
+    ).rejects.toThrow(/providerEnvironment/);
+  });
+
+  it("rejects nested options owned by the composition root", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      createBursarRuntime({
+        postgres: pool,
+        tenantId: TEST_TENANT_ID,
+        bursar: { creditsOptions: { analytics: {} } } as never,
+      }),
+    ).rejects.toThrow(/owns creditsOptions/);
+  });
+
   it("retries a catalog that has not been published yet", async () => {
     const pool: PostgresPool = {
       query: vi.fn().mockResolvedValue({ rows: [] }),

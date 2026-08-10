@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "@docusaurus/Link";
+import Head from "@docusaurus/Head";
 import Layout from "@theme/Layout";
 import CodeBlock from "@theme/CodeBlock";
 import Heading from "@theme/Heading";
@@ -38,8 +39,12 @@ const capabilities = [
 
 const pythonExample = `from bursar import Bursar, PostgresStore
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
-bursar = Bursar.create(credit_store=store)
+store = PostgresStore(
+    database_url,
+    tenant_id=tenant_id,
+    provider_environment="test",
+)
+bursar = Bursar(credit_store=store)
 
 charge = bursar.credits.deduct(
     account_id,
@@ -52,6 +57,7 @@ const typescriptExample = `import { Bursar, PostgresStore } from "@zonastery/bur
 const store = new PostgresStore({
   postgres: process.env.DATABASE_URL!,
   tenantId,
+  providerEnvironment: "test",
 });
 const bursar = new Bursar({ creditStore: store });
 
@@ -114,18 +120,21 @@ function SystemDiagram(): ReactNode {
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="Usage metering and billing infrastructure"
-      description="Bursar adds exact usage metering, prepaid credits, plans, and billing to AI products through Python and TypeScript SDKs."
+      title="Open-source AI credits and usage billing"
+      description="Bursar is a PostgreSQL-native credit ledger, usage metering, and reserve-settle billing system for AI SaaS, with Python and TypeScript SDKs."
     >
+      <Head>
+        <title>Bursar — Open-source AI credits and usage billing</title>
+      </Head>
       <main>
         <header className={styles.hero}>
           <div className={`container ${styles.heroGrid}`}>
             <div className={styles.heroCopy}>
               <p className={styles.eyebrow}>
-                Open-source billing infrastructure
+                PostgreSQL-native Python and TypeScript SDKs
               </p>
               <Heading as="h1">
-                Meter usage. Protect spend. Bill with confidence.
+                Open-source credits and usage billing for AI SaaS
               </Heading>
               <p className={styles.lead}>
                 Bursar gives AI products one exact ledger for usage pricing,
@@ -227,7 +236,7 @@ export default function Home(): ReactNode {
               <div className={styles.sdkPanel}>
                 <div className={styles.sdkPanelHeader}>
                   <strong>Python</strong>
-                  <code>pip install bursar[postgres]</code>
+                  <code>python -m pip install "bursar[postgres]"</code>
                 </div>
                 <CodeBlock language="python">{pythonExample}</CodeBlock>
                 <Link to="/docs/python-api">Browse the Python API</Link>
@@ -235,7 +244,7 @@ export default function Home(): ReactNode {
               <div className={styles.sdkPanel}>
                 <div className={styles.sdkPanelHeader}>
                   <strong>TypeScript</strong>
-                  <code>npm install @zonastery/bursar</code>
+                  <code>npm install @zonastery/bursar pg</code>
                 </div>
                 <CodeBlock language="typescript">{typescriptExample}</CodeBlock>
                 <Link to="/docs/javascript-api">Browse the TypeScript API</Link>

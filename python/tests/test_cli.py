@@ -35,7 +35,7 @@ def test_load_config_file_supports_json_yaml_and_stdin(tmp_path: Path, monkeypat
     yaml_path.write_text("version: 1\ncredits:\n  accounting:\n    unit: credit\n    scale: 6\n    rounding: half_up\n")
     assert cli._load_config_file(str(yaml_path))["version"] == 1
 
-    monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"version": 1}'))
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO("version: 1\n"))
     assert cli._load_config_file("-")["version"] == 1
 
 
@@ -65,6 +65,24 @@ def test_load_config_file_rejects_unsupported_extensions(
 
     assert exc.value.code == 1
     assert "Unsupported config file format" in capsys.readouterr().err
+
+
+def test_config_validate_json_covers_file_and_parse_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "missing.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["config", "validate", str(missing), "--json"])
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["valid"] is False
+    assert payload["errors"][0]["type"] == "invalid_config"
+    assert "Config file not found" in payload["errors"][0]["msg"]
 
 
 def test_parser_requires_a_command_and_config_subcommand() -> None:
@@ -105,66 +123,59 @@ def test_parser_exposes_bounded_due_plan_change_worker() -> None:
     assert args.limit == 250
 
 
-def test_migrate_accepts_ordered_post_migration_sql_files(
+def test_migrate_requires_the_explicit_migration_dsn_and_ignores_dotenv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    first = tmp_path / "first.sql"
-    second = tmp_path / "second.sql"
-    first.write_text("SELECT 1;\n")
-    second.write_text("SELECT 2;\n")
-    calls: list[tuple[str, list[tuple[str, str]]]] = []
+    migration_url = "postgresql://migration.example.test/bursar"
+    (tmp_path / ".env").write_text(f"BURSAR_MIGRATION_DATABASE_URL={migration_url}\n")
+    calls: list[str] = []
 
-    def run_migrations(
-        database_url: str,
-        *,
-        post_migration_sql: list[tuple[str, str]],
-    ) -> None:
-        calls.append((database_url, post_migration_sql))
+    def run_migrations(database_url: str) -> None:
+        calls.append(database_url)
 
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example.test/bursar")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://runtime.example.test/bursar")
+    monkeypatch.delenv("BURSAR_MIGRATION_DATABASE_URL", raising=False)
     monkeypatch.setattr(cli, "_require_extra", lambda _extra: None)
     monkeypatch.setattr("bursar.credits.postgres.store.run_migrations", run_migrations)
 
-    args = Namespace(post_migrate_sql=[str(first), str(second)])
-    cli._cmd_migrate(args)
+    with pytest.raises(SystemExit) as missing_dsn:
+        cli.main(["migrate"])
+    assert missing_dsn.value.code == 1
+    assert calls == []
+    assert "BURSAR_MIGRATION_DATABASE_URL is required" in capsys.readouterr().err
 
-    assert calls == [
-        (
-            "postgresql://example.test/bursar",
-            [(str(first), "SELECT 1;\n"), (str(second), "SELECT 2;\n")],
-        )
-    ]
+    monkeypatch.setenv("BURSAR_MIGRATION_DATABASE_URL", migration_url)
+    cli.main(["migrate"])
+    assert calls == [migration_url]
     assert capsys.readouterr().out == "Migrations applied successfully.\n"
 
 
-@pytest.mark.parametrize("contents", [None, " \n"])
-def test_migrate_rejects_unreadable_or_empty_post_migration_sql(
-    tmp_path: Path,
-    contents: str | None,
+def test_migrate_has_no_unledgered_host_sql_option() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["migrate", "--post-migrate-sql", "host.sql"])
+
+
+def test_database_backed_commands_require_an_explicit_provider_environment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path = tmp_path / "host.sql"
-    if contents is not None:
-        path.write_text(contents)
-    called = False
+    monkeypatch.delenv("BURSAR_PROVIDER_ENVIRONMENT", raising=False)
+    with pytest.raises(SystemExit) as missing:
+        cli._provider_environment_from_env()
+    assert missing.value.code == 1
+    assert "live, test, sandbox" in capsys.readouterr().err
 
-    def run_migrations(*_args: object, **_kwargs: object) -> None:
-        nonlocal called
-        called = True
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "production")
+    with pytest.raises(SystemExit) as invalid:
+        cli._provider_environment_from_env()
+    assert invalid.value.code == 1
+    assert "live, test, sandbox" in capsys.readouterr().err
 
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example.test/bursar")
-    monkeypatch.setattr(cli, "_require_extra", lambda _extra: None)
-    monkeypatch.setattr("bursar.credits.postgres.store.run_migrations", run_migrations)
-
-    with pytest.raises(SystemExit) as exc:
-        cli._cmd_migrate(Namespace(post_migrate_sql=[str(path)]))
-
-    assert exc.value.code == 1
-    assert not called
-    assert str(path) in capsys.readouterr().err
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "test")
+    assert cli._provider_environment_from_env() == "test"
 
 
 def test_retry_store_operation_retries_only_transient_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,14 +219,17 @@ def test_tenant_bootstrap_owns_provisioning_and_config_sequence(
     calls: list[tuple[str, object]] = []
 
     monkeypatch.setenv("BURSAR_TENANT_ID", str(tenant_id))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://runtime.example.test/bursar")
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "test")
     monkeypatch.setattr(cli, "_validated_config", lambda filepath: config)
 
     def provision_tenant(
         *,
-        tenant_id: UUID,
+        tenant_id: UUID | None,
         slug: str,
         display_name: str | None,
     ) -> UUID:
+        assert tenant_id is not None
         calls.append(
             (
                 "tenant",
@@ -284,3 +298,32 @@ def test_tenant_bootstrap_requires_a_stable_tenant_id(
 
     assert exc.value.code == 1
     assert "BURSAR_TENANT_ID or --id is required" in capsys.readouterr().err
+
+
+def test_tenant_bootstrap_resolves_runtime_target_before_provisioning(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tenant_id = "00000000-0000-4000-8000-000000000001"
+    monkeypatch.setenv("DATABASE_URL", "postgresql://runtime.example.test/bursar")
+    monkeypatch.delenv("BURSAR_PROVIDER_ENVIRONMENT", raising=False)
+    monkeypatch.setattr(cli, "_validated_config", lambda filepath: {"version": 1})
+    monkeypatch.setattr(
+        cli,
+        "_provision_tenant",
+        lambda **kwargs: pytest.fail("tenant must not be provisioned"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli._cmd_tenant_bootstrap(
+            Namespace(
+                file="pricing.yaml",
+                id=tenant_id,
+                slug="acme",
+                display_name=None,
+                label=None,
+            )
+        )
+
+    assert exc.value.code == 1
+    assert "BURSAR_PROVIDER_ENVIRONMENT" in capsys.readouterr().err

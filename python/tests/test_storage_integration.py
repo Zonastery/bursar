@@ -95,6 +95,7 @@ def _seed_storage_rows(pg_database_url: str) -> tuple[str, str]:
             "SELECT set_config('bursar.tenant_id', %s, true)",
             (TEST_TENANT_ID,),
         )
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
         cursor.execute(
             """
             WITH subject AS (
@@ -139,7 +140,7 @@ def _seed_storage_rows(pg_database_url: str) -> tuple[str, str]:
                 %s::jsonb
             )
             """,
-            (Json({"userId": str(subject_id), "kind": "invoice.paid"}),),
+            (Json({"accountId": str(subject_id), "kind": "invoice.paid"}),),
         )
         _claim_status, billing_event_id, billing_claim_token = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         cursor.execute(
@@ -203,7 +204,8 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
         assert billing_payload.event_type == "invoice.paid"
         assert billing_payload.envelope is not None
         assert billing_payload.envelope["kind"] == "invoice.paid"
-        assert isinstance(billing_payload.envelope["userId"], str)
+        assert isinstance(billing_payload.envelope["accountId"], str)
+        assert "userId" not in billing_payload.envelope
 
         assert repository.archive_billing_event_payload(
             billing_event_id,
@@ -243,6 +245,7 @@ def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
         BursarRuntimeOptions(
             postgres=pg_database_url,
             tenant_id=UUID(TEST_TENANT_ID),
+            provider_environment="test",
             clickhouse=clickhouse,
             s3=archive,
             outbox=OutboxWorkerOptions(batch_size=10, poll_interval_ms=60_000),
@@ -284,6 +287,7 @@ def test_bursar_runtime_start_health_and_no_worker_flush(
         BursarRuntimeOptions(
             postgres=pg_database_url,
             tenant_id=UUID(TEST_TENANT_ID),
+            provider_environment="test",
             clickhouse=clickhouse,
             outbox=False,
         )
@@ -375,6 +379,7 @@ def test_s3_billing_mode_keeps_envelope_only_in_outbox(
 ) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
         cursor.execute("SELECT set_config('bursar.billing_payload_backend', 's3', true)")
         cursor.execute(
             """
@@ -415,6 +420,7 @@ def test_s3_runtime_archives_received_outbox_payload(
     billing_store = PostgresBillingStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
         billing_payload_backend="s3",
     )
     archive = RecordingBillingArchive()
@@ -422,6 +428,7 @@ def test_s3_runtime_archives_received_outbox_payload(
         BursarRuntimeOptions(
             postgres=pg_database_url,
             tenant_id=UUID(TEST_TENANT_ID),
+            provider_environment="test",
             s3=archive,
             outbox=OutboxWorkerOptions(batch_size=10, poll_interval_ms=60_000),
         )

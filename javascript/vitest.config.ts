@@ -18,17 +18,16 @@ export default defineConfig({
     //   - billing-integration wraps every local pool creation in `try/finally`
     //   - PostgresStore.close() now awaits `poolPromise` before checking `pool`
     //   - All integration files use `max: 1` or `max: 3` — never the pg default
-    //   - `fileParallelism: false` + `singleFork: true` is a single process
+    //   - `fileParallelism: false` + `maxWorkers: 1` is a single process
     fileParallelism: false,
     pool: "forks",
-    poolOptions: {
-      forks: {
-        singleFork: true,
-      },
-    },
+    maxWorkers: 1,
+    // config-parity.test.ts imports a fixture from config.test.ts; keep each
+    // test file's module graph isolated so the fixture file is still
+    // collected as a test suite when Vitest loads it separately.
+    isolate: true,
     coverage: {
       provider: "v8",
-      all: true,
       include: ["src/**/*.ts"],
       // Pure re-export barrels and type-only files (no runtime logic to test).
       // Provider adapters have a separate focused coverage gate because their
@@ -47,12 +46,14 @@ export default defineConfig({
       // higher. Ratchet these up as coverage improves — never lower without a
       // documented reason.
       // Branch coverage is dominated by the billing lifecycle handlers;
-      // re-ratchet as high-value handler scenarios are added.
+      // Vitest 4's V8 remapper changed branch accounting, so the post-upgrade
+      // Keep the post-upgrade 71.11% baseline from regressing while leaving a
+      // small allowance for Node/V8 remapper differences across the matrix.
       thresholds: {
-        statements: 77,
-        branches: 72,
-        functions: 78,
-        lines: 77,
+        statements: 81,
+        branches: 71,
+        functions: 88,
+        lines: 83,
       },
     },
   },

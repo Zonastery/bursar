@@ -4,9 +4,11 @@ import { CatalogRuntime } from "../src/credits/catalog-runtime.js";
 import { PricingEngine } from "../src/engine.js";
 import type { CreditStore } from "../src/credits/store.js";
 import { noopLogger } from "../src/shared/logger.js";
+import type { BursarConfigData } from "../src/config.js";
 
 const CONFIG = {
   version: 1,
+  catalog: { default_plan: "captured_plan" },
   pricing: {
     operations: {
       completion: {
@@ -40,7 +42,6 @@ const CONFIG = {
     },
   },
   credits: {
-    accounting: { unit: "credit", scale: 6, rounding: "half_up" },
     buckets: { default: { priority: 1, expiry: { type: "never" } } },
     default_bucket: "default",
   },
@@ -52,7 +53,7 @@ const CONFIG = {
       allowed_operations: ["completion"],
     },
   },
-};
+} satisfies BursarConfigData;
 
 describe("CatalogRuntime lease pricing", () => {
   it("installs a published catalog only after persistence succeeds", async () => {

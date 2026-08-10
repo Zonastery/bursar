@@ -9,7 +9,11 @@ pytestmark = [pytest.mark.integration]
 
 
 def test_config_catalog_is_available_after_migrations(pg_database_url: str) -> None:
-    store = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
+    store = PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
+    )
     # The catalog is intentionally private to Bursar's server-side store API;
     # this call proves the security-definer RPC path remains usable.
     active_pricing = store.get_active_catalog()

@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "v
 import pg from "pg";
 import { Bursar } from "../src/bursar.js";
 import { PostgresBillingStore } from "../src/billing/index.js";
+import type { BursarConfigData } from "../src/config.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import type {
   ChangePlanParams,
@@ -34,6 +35,7 @@ const SUBSCRIPTION_ID = "sub_commerce_1";
 
 const CONFIG = {
   version: 1,
+  catalog: { default_plan: "starter" },
   pricing: {
     operations: {
       completion: {
@@ -56,7 +58,6 @@ const CONFIG = {
     },
   },
   credits: {
-    accounting: { unit: "credit", scale: 6, rounding: "half_up" },
     buckets: {
       general: { priority: 10 },
     },
@@ -148,7 +149,7 @@ const CONFIG = {
       },
     },
   },
-};
+} satisfies BursarConfigData;
 
 class IntegrationProvider implements PaymentProvider {
   readonly provider = "stripe";
@@ -245,12 +246,21 @@ async function makeBursar(
   pool: pg.Pool,
   provider = new IntegrationProvider(),
 ): Promise<{ bursar: Bursar; billingStore: PostgresBillingStore; provider: IntegrationProvider }> {
-  const creditStore = new PostgresStore({ postgres: pool, tenantId: TEST_TENANT_ID });
-  const billingStore = new PostgresBillingStore({ postgres: pool, tenantId: TEST_TENANT_ID });
+  const creditStore = new PostgresStore({
+    postgres: pool,
+    tenantId: TEST_TENANT_ID,
+    providerEnvironment: "test",
+  });
+  const billingStore = new PostgresBillingStore({
+    postgres: pool,
+    tenantId: TEST_TENANT_ID,
+    providerEnvironment: "test",
+  });
   const bursar = new Bursar({
     creditStore,
     billingStore,
     commerceOptions: {
+      providerEnvironment: "test",
       providers: {
         stripe: () => provider,
       },
@@ -302,7 +312,7 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
       eventId: "evt_commerce_topup_paid",
       eventType: "payment.succeeded",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       payment: {
         providerPaymentId: "pay_commerce_topup_1",
         amountMinor: 500,
@@ -330,7 +340,7 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
       eventId: "evt_commerce_customer_created",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: CUSTOMER_ID, email: "buyer@example.com" },
     });
     await bursar.ingestBillingEvent({
@@ -338,7 +348,7 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
       eventId: "evt_commerce_subscription_active",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: CUSTOMER_ID },
       subscription: {
         providerSubscriptionId: SUBSCRIPTION_ID,
@@ -398,7 +408,7 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
       eventId: "evt_auto_customer",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      accountId: USER_ID,
       customer: { providerCustomerId: CUSTOMER_ID, email: "buyer@example.com" },
     });
 
@@ -424,7 +434,7 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
       eventId: "evt_auto_customer_2",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID2,
+      accountId: USER_ID2,
       customer: { providerCustomerId: CUSTOMER_ID2, email: "buyer2@example.com" },
     });
     provider.charges.splice(0, provider.charges.length, {
@@ -459,7 +469,7 @@ describe.runIf(DATABASE_URL)("Commerce integration", () => {
       eventId: "evt_auto_customer_3",
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID3,
+      accountId: USER_ID3,
       customer: { providerCustomerId: CUSTOMER_ID3, email: "buyer3@example.com" },
     });
     provider.charges.splice(0, provider.charges.length, {

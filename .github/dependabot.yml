@@ -1,0 +1,15 @@
+# Keep both published SDKs and the workflows that release them current.
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/javascript"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "uv"
+    directory: "/python"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

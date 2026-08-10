@@ -16,11 +16,13 @@ are consumed highest-priority-first.
 ## Balances and adjustments
 
 ```python
+from decimal import Decimal
+
 grant = bursar.credits.add_credits(
-    user_id, 100, entry_type="purchase", idempotency_key="purchase:1"
+    user_id, Decimal("100"), entry_type="purchase", idempotency_key="purchase:1"
 )
 charge = bursar.credits.deduct_credits(
-    user_id, 5, idempotency_key="operation:1"
+    user_id, Decimal("5"), idempotency_key="operation:1"
 )
 refund = bursar.credits.refund_credits(
     charge.entry_id, reason="clawback", idempotency_key="refund:operation:1"
@@ -42,14 +44,14 @@ through to the store, so administrative deductions are replay-safe too.
 The high-volume path, however, is `deduct(metrics, idempotency_key)` — see
 below.
 
-| Method                | Parameters                                                                                                                                     | Returns                |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `add_credits`         | `user_id: str`, `amount: Decimal \| int`, `idempotency_key: str`, `entry_type="adjustment"`, `metadata=None`, `expires_at=None`, `bucket=None` | `AddCreditsResult`     |
-| `deduct_credits`      | `user_id: str`, `amount: Decimal \| int`, `*, entry_type="adjustment"`, `bucket`, `metadata`, `idempotency_key`                                | `AddCreditsResult`     |
-| `refund_credits`      | `entry_id: str`, `amount=None`, `reason`, `metadata`, `idempotency_key`                                                                        | `RefundResult`         |
-| `get_balance`         | `user_id: str`                                                                                                                                 | `BalanceResult`        |
-| `get_available`       | `user_id: str`                                                                                                                                 | `AvailableResult`      |
-| `get_bucket_balances` | `user_id: str`                                                                                                                                 | `BucketBalancesResult` |
+| Method                | Parameters                                                                                                                                            | Returns                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `add_credits`         | `user_id: str`, `amount: Decimal \| int \| str`, `idempotency_key: str`, `entry_type="adjustment"`, `metadata=None`, `expires_at=None`, `bucket=None` | `AddCreditsResult`     |
+| `deduct_credits`      | `user_id: str`, `amount: Decimal \| int \| str`, `*, entry_type="adjustment"`, `bucket`, `metadata`, `idempotency_key`                                | `AddCreditsResult`     |
+| `refund_credits`      | `entry_id: str`, `amount=None`, `reason`, `metadata`, `idempotency_key`                                                                               | `RefundResult`         |
+| `get_balance`         | `user_id: str`                                                                                                                                        | `BalanceResult`        |
+| `get_available`       | `user_id: str`                                                                                                                                        | `AvailableResult`      |
+| `get_bucket_balances` | `user_id: str`                                                                                                                                        | `BucketBalancesResult` |
 
 ## Metered charging
 
@@ -75,15 +77,16 @@ result = bursar.credits.deduct(
 quotas can block the charge. `feature` additionally requires a plan feature.
 `deduct_flat_job` and `grant_subscription_cycle` are specialized siblings for
 flat-rate jobs and billing-cycle grants. `revoke_credits_by_entry_type`
-reverses every deduction of a given entry type (e.g. claw back a whole batch),
-and `sweep_expired_credits(dry_run=False)` expires eligible credit lots.
+removes all remaining lots sourced by one matching ledger operation; it is a
+broad cohort operation, not a single-transaction refund.
+`sweep_expired_credits(dry_run=False)` expires eligible credit lots.
 
-| Method                         | Parameters                                                                                          | Returns           |
-| ------------------------------ | --------------------------------------------------------------------------------------------------- | ----------------- |
-| `deduct`                       | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key: str`, `metadata=None`, `*, feature=None` | `DeductionResult` |
-| `deduct_flat_job`              | `user_id: str`, `job_name: str`, `idempotency_key: str`, `metadata=None`, `feature=None`            | `DeductionResult` |
-| `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str`                                                                   | `dict[str, Any]`  |
-| `sweep_expired_credits`        | `dry_run=False`                                                                                     | `SweepResult`     |
+| Method                         | Parameters                                                                                          | Returns               |
+| ------------------------------ | --------------------------------------------------------------------------------------------------- | --------------------- |
+| `deduct`                       | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key: str`, `metadata=None`, `*, feature=None` | `DeductionResult`     |
+| `deduct_flat_job`              | `user_id: str`, `job_name: str`, `idempotency_key: str`, `metadata=None`, `feature=None`            | `DeductionResult`     |
+| `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str`                                                                   | `RevokeCreditsResult` |
+| `sweep_expired_credits`        | `dry_run=False`                                                                                     | `SweepResult`         |
 
 ## AI and batch usage accounting
 

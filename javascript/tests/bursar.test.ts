@@ -46,6 +46,16 @@ describe("Bursar facade", () => {
     );
   });
 
+  it("validates account lifecycle identity before catalog access", async () => {
+    const catalog = { getConfig: vi.fn() };
+    const accounts = new AccountService({} as never, catalog as never);
+
+    await expect(
+      accounts.onAccountCreated({ accountId: " ", eventKey: "signup:1" }),
+    ).rejects.toThrow(/accountId/);
+    expect(catalog.getConfig).not.toHaveBeenCalled();
+  });
+
   it("owns one credit service and exposes catalog operations", async () => {
     const active = { version: 3 };
     const getActiveCatalog = vi.fn().mockResolvedValue(active);
@@ -60,12 +70,45 @@ describe("Bursar facade", () => {
     expect(applyDuePlanChanges).toHaveBeenCalledWith(25);
   });
 
+  it("rejects billing and commerce options that cannot be applied", () => {
+    const creditStore = {} as CreditStore;
+
+    expect(() => new Bursar({ creditStore, billingOptions: {} } as never)).toThrow(
+      /require billingStore/,
+    );
+    expect(
+      () =>
+        new Bursar({
+          creditStore,
+          commerceOptions: { providerEnvironment: "test", providers: {} },
+        } as never),
+    ).toThrow(/require billingStore/);
+  });
+
   it("configures billing with the facade-owned credit provisioning capability", () => {
     const billingStore = {} as BillingStore;
     const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore });
 
     expect(bursar.billing).not.toBeNull();
     expect(bursar.billing?.hasProvisioning).toBe(true);
+  });
+
+  it("rejects mismatched credit and billing provider environments", () => {
+    const creditStore = {
+      providerEnvironment: "live",
+    } as unknown as CreditStore;
+    const billingStore = {
+      providerEnvironment: "test",
+    } as unknown as BillingStore;
+
+    expect(
+      () =>
+        new Bursar({
+          creditStore,
+          billingStore,
+          commerceOptions: { providerEnvironment: "test", providers: {} },
+        }),
+    ).toThrow(/must match/);
   });
 
   it("routes provider events through the facade-owned billing service", async () => {
@@ -108,7 +151,7 @@ describe("Bursar facade", () => {
       {
         getConfig: vi.fn().mockResolvedValue({
           catalog: {},
-          plans: {},
+          plans: { free: { rank: 0 } },
           credits: { grantPrograms: {} },
         }),
       } as never,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NotFoundError } from "dodopayments";
 import type Stripe from "stripe";
+import { ProviderResponseError } from "../src/errors.js";
 import { callBillingEventSink } from "../src/providers/_shared.js";
 import type { BillingEventSink } from "../src/billing/contracts.js";
 import type { DodoClient } from "../src/providers/dodo/client-contract.js";
@@ -114,22 +115,35 @@ describe("payment provider adapter contracts", () => {
     });
     await expect(
       provider.createCheckoutSession({
+        accountId: "user-1",
         productId: "prod_1",
         type: "credit_pack",
         returnUrl: "https://return",
         cancelUrl: "https://cancel",
         quantity: 2,
-        metadata: {},
+        metadata: { bursar_account_id: "untrusted" },
         idempotencyKey: "idem_1",
       }),
     ).resolves.toEqual({ url: "https://checkout.test", providerSessionId: "sess_1" });
+    await expect(
+      provider.createCheckoutSession({
+        accountId: "user-1",
+        productId: "prod_1",
+        type: "credit_pack",
+        returnUrl: "https://return",
+        cancelUrl: "https://cancel",
+        quantity: Number.MAX_SAFE_INTEGER + 1,
+        metadata: {},
+        idempotencyKey: "unsafe_quantity",
+      }),
+    ).rejects.toBeInstanceOf(ProviderResponseError);
     expect(calls[0]).toEqual([
       {
         product_cart: [{ product_id: "prod_1", quantity: 2 }],
         customer: undefined,
         return_url: "https://return",
         cancel_url: "https://cancel",
-        metadata: {},
+        metadata: { bursar_account_id: "user-1" },
       },
       { idempotencyKey: "idem_1" },
     ]);
@@ -238,7 +252,7 @@ describe("payment provider adapter contracts", () => {
     });
     await expect(
       provider.createCheckoutSession({
-        userId: "u1",
+        accountId: "u1",
         productId: "price_1",
         type: "subscription",
         returnUrl: "https://ok",
@@ -252,8 +266,13 @@ describe("payment provider adapter contracts", () => {
       providerSessionId: "cs_1",
     });
     expect(customerCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1:customer" });
+    expect(customerCalls[0]?.[0]).toMatchObject({
+      metadata: { bursar_account_id: "u1" },
+    });
     expect(checkoutCalls[0]?.[0]).toMatchObject({
       line_items: [{ price: "price_1", quantity: 1 }],
+      metadata: { bursar_account_id: "u1" },
+      subscription_data: { metadata: { bursar_account_id: "u1" } },
     });
     expect(checkoutCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1" });
     await expect(
@@ -268,7 +287,7 @@ describe("payment provider adapter contracts", () => {
     const longKeyPrefix = "operation:" + "x".repeat(244);
     for (const suffix of ["a", "b"]) {
       await provider.createCheckoutSession({
-        userId: "u1",
+        accountId: "u1",
         productId: "price_1",
         type: "subscription",
         returnUrl: "https://ok",
@@ -464,6 +483,7 @@ describe("payment provider adapter contracts", () => {
     const provider = new MockPaymentProvider({ eventSink: sink });
     await expect(
       provider.createCheckoutSession({
+        accountId: "user-1",
         productId: "product-1",
         type: "credit_pack",
         returnUrl: "https://return",

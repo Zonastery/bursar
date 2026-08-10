@@ -20,6 +20,25 @@ CLI_TENANT_ID = "00000000-0000-4000-8000-000000000101"
 def _write_config(path: Path, *, display_name: str) -> None:
     config = deepcopy(CONFIG)
     config["plans"]["pro"]["display_name"] = display_name
+    config["commerce"] = {
+        "providers": {"stripe": {"type": "stripe"}},
+        "offers": {
+            "cli_topup": {
+                "type": "topup",
+                "display_name": "CLI top-up",
+                "price": {"amount_minor": 100, "currency": "USD"},
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_cli_test",
+                    }
+                },
+                "credits_per_unit": "100",
+                "bucket": "purchased",
+                "quantity": {"minimum": 1, "maximum": 10, "default": 1},
+            }
+        },
+    }
     path.write_text(json.dumps(config))
 
 
@@ -30,25 +49,22 @@ def test_cli_manages_tenants_migrations_and_config_versions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", pg_database_url)
+    monkeypatch.setenv("BURSAR_MIGRATION_DATABASE_URL", pg_database_url)
+    monkeypatch.setenv("BURSAR_OPERATOR_DATABASE_URL", pg_database_url)
     monkeypatch.setenv("BURSAR_TENANT_ID", CLI_TENANT_ID)
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "test")
 
-    marker_sql = tmp_path / "marker.sql"
-    marker_sql.write_text(
-        """
-        CREATE TABLE IF NOT EXISTS public.bursar_cli_migrate_marker (
-            id integer PRIMARY KEY,
-            note text NOT NULL
-        );
-        INSERT INTO public.bursar_cli_migrate_marker(id, note)
-        VALUES (1, 'post-migrate')
-        ON CONFLICT (id) DO UPDATE SET note = EXCLUDED.note;
-        """
-    )
-    cli.main(["migrate", "--post-migrate-sql", str(marker_sql)])
+    cli.main(["migrate"])
     assert "Migrations applied successfully." in capsys.readouterr().out
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        cursor.execute("SELECT note FROM public.bursar_cli_migrate_marker WHERE id = 1")
-        assert cursor.fetchone() == ("post-migrate",)
+        cursor.execute("SELECT count(*) FROM bursar.schema_migrations")
+        row = cursor.fetchone()
+        assert row is not None and row[0] > 0
+
+    cli.main(["tenant", "create", "generated-cli-tenant"])
+    generated_tenant_id = capsys.readouterr().out.strip()
+    cli.main(["tenant", "create", "generated-cli-tenant"])
+    assert capsys.readouterr().out.strip() == generated_tenant_id
 
     cli.main(["tenant", "create", "cli-tenant", "--id", CLI_TENANT_ID, "--display-name", "CLI Tenant"])
     assert capsys.readouterr().out.strip() == CLI_TENANT_ID
@@ -87,6 +103,12 @@ def test_cli_manages_tenants_migrations_and_config_versions(
     active = json.loads(capsys.readouterr().out)
     assert active["version"] == 1
     assert active["config"]["plans"]["pro"]["display_name"] == "Pro"
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT DISTINCT provider_environment FROM bursar.catalog_provider_refs WHERE tenant_id = %s",
+            (CLI_TENANT_ID,),
+        )
+        assert cursor.fetchall() == [("test",)]
 
     cli.main(["config", "set", str(second_config), "--label", "updated"])
     assert capsys.readouterr().out == "Bursar config set successfully.\n"

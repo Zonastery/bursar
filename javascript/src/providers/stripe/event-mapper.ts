@@ -189,7 +189,7 @@ export async function handleStripeWebhook(
           expand: [...STRIPE_CHECKOUT_EXPAND],
         });
         const metadata = checkoutMetadata(session);
-        const userId = session.client_reference_id ?? metadata.userId;
+        const accountId = session.client_reference_id ?? metadata.bursar_account_id;
         const customer = checkoutCustomer(session);
 
         if (failed) {
@@ -203,7 +203,7 @@ export async function handleStripeWebhook(
             eventId: event.id,
             eventType: "payment.failed",
             occurredAt,
-            userId,
+            accountId,
             customer,
             subscription,
             payment: checkoutPaymentInfo(session, expandedSession, "failed"),
@@ -221,7 +221,7 @@ export async function handleStripeWebhook(
             eventId: event.id,
             eventType: "checkout.completed",
             occurredAt,
-            userId,
+            accountId,
             customer,
             subscription: subscriptionInfo(
               subscription,
@@ -235,7 +235,7 @@ export async function handleStripeWebhook(
             eventId: event.id,
             eventType: "payment.succeeded",
             occurredAt,
-            userId,
+            accountId,
             customer,
             payment: checkoutPaymentInfo(session, expandedSession, "succeeded"),
             metadata,
@@ -252,7 +252,7 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType: "checkout.expired",
           occurredAt,
-          userId: session.client_reference_id ?? metadata.userId,
+          accountId: session.client_reference_id ?? metadata.bursar_account_id,
           customer: checkoutCustomer(session),
           metadata,
         });
@@ -273,7 +273,7 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType,
           occurredAt,
-          userId: subscription.metadata?.userId,
+          accountId: subscription.metadata?.bursar_account_id,
           customer: {
             providerCustomerId: customerId(subscription.customer),
           },
@@ -290,7 +290,7 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType: "subscription.canceled",
           occurredAt,
-          userId: subscription.metadata?.userId,
+          accountId: subscription.metadata?.bursar_account_id,
           customer: {
             providerCustomerId: customerId(subscription.customer),
           },
@@ -327,7 +327,7 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType: succeeded ? "payment.succeeded" : "payment.failed",
           occurredAt,
-          userId: metadata.userId,
+          accountId: metadata.bursar_account_id,
           payment,
           metadata,
         });
@@ -352,7 +352,7 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType: "invoice.paid",
           occurredAt,
-          userId: metadata.userId ?? subscription.metadata?.userId,
+          accountId: metadata.bursar_account_id ?? subscription.metadata?.bursar_account_id,
           customer: {
             providerCustomerId: customerId(invoice.customer),
           },
@@ -389,7 +389,7 @@ export async function handleStripeWebhook(
           eventId: event.id,
           eventType: "payment.failed",
           occurredAt,
-          userId: metadata.userId ?? subscription.metadata?.userId,
+          accountId: metadata.bursar_account_id ?? subscription.metadata?.bursar_account_id,
           customer: {
             providerCustomerId: customerId(invoice.customer),
           },
@@ -429,7 +429,7 @@ export async function handleStripeWebhook(
                 ? "refund.updated"
                 : "refund.created",
           occurredAt,
-          userId: refund.metadata?.userId,
+          accountId: refund.metadata?.bursar_account_id,
           refund: {
             providerRefundId: refund.id,
             providerPaymentId: requireProviderString(
