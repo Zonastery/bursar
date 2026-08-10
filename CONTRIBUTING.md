@@ -155,8 +155,8 @@ Releases are tag-triggered. Both packages are published from the same tag via
 
 ```bash
 # tag and push (version must match python/pyproject.toml and javascript/package.json)
-git tag v2.0.1
-git push origin v2.0.1
+git tag v2.0.2
+git push origin v2.0.2
 ```
 
 On a `v*` tag, CI runs the full matrix, then two separate publish jobs run under

@@ -6,7 +6,52 @@ page after the Python and TypeScript packages are published successfully.
 
 ## [Unreleased]
 
-See the [comparison with 2.0.1](https://github.com/Zonastery/bursar/compare/v2.0.1...HEAD).
+See the [comparison with 2.0.2](https://github.com/Zonastery/bursar/compare/v2.0.2...HEAD).
+
+## [2.0.2] - 2026-08-10
+
+### Added
+
+- Stabilized the application-facing `Bursar` facade and explicit credit,
+  billing, catalog, account, and commerce capability contracts across the
+  Python and TypeScript SDKs.
+- Added caller-stable idempotency helpers, exact decimal credit inputs, and
+  explicit provider-environment types for replay-safe financial operations.
+- Added AI SaaS onboarding guides, package smoke examples, agent-readable
+  documentation, and improved repository discovery metadata.
+
+### Changed
+
+- Centralized configuration loading and aligned the Python and TypeScript
+  configuration, pricing, commerce, provider, storage, and persistence
+  contracts.
+- Made six-decimal, half-up credit accounting an SDK invariant instead of a
+  configurable catalog field.
+- Consolidated the PostgreSQL baseline and clarified tenant, catalog, billing,
+  and storage lifecycle responsibilities.
+- Narrowed package-root exports while retaining detailed contracts in focused
+  subpackages.
+
+### Fixed
+
+- Aligned the Google ADK integration with the public credit capability.
+- Corrected provider event identity mapping, retry/idempotency behavior,
+  catalog plan resolution, and storage worker coordination.
+- Strengthened cross-SDK parity, package smoke, browser-entry, migration
+  manifest, and CI quality checks.
+
+### Security
+
+- Provider-backed operations now fail closed unless their environment is
+  explicitly configured.
+- Hardened PostgreSQL caller-role membership validation and tenant creation
+  while preserving host-owned extension privileges.
+
+### Upgrade note
+
+- v2.0.2 ships a consolidated greenfield SQL baseline. Existing v2.0.1
+  `bursar.schema_migrations` ledgers are intentionally not supported in place;
+  recreate the Bursar schema or database before deploying this release.
 
 ## [2.0.1] - 2026-08-08
 
@@ -41,5 +86,6 @@ See the [comparison with 2.0.1](https://github.com/Zonastery/bursar/compare/v2.0
 - [0.0.2](https://github.com/Zonastery/bursar/compare/v0.0.1...v0.0.2)
 - [0.0.1](https://github.com/Zonastery/bursar/releases/tag/v0.0.1)
 
+[2.0.2]: https://github.com/Zonastery/bursar/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/Zonastery/bursar/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Zonastery/bursar/compare/v1.0.1...v2.0.0

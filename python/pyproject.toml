@@ -1,6 +1,6 @@
 [project]
 name = "bursar"
-version = "2.0.1"
+version = "2.0.2"
 description = "Open-source PostgreSQL credit ledger, usage metering, and billing SDK for AI SaaS"
 readme = "README.md"
 license = "AGPL-3.0-only"
