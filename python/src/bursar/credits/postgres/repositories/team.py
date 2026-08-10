@@ -37,12 +37,14 @@ class TeamRepository:
         self,
         owner_subject_id: str,
         name: str,
+        idempotency_key: str,
         initial_balance: str,
     ) -> CreateTeamRow:
         """Create a new team with an initial credit balance.
 
         Args:
             name: The team name.
+            idempotency_key: Caller-owned replay key for the creation request.
             initial_balance: The initial credit balance as a string (Decimal-safe).
 
         Returns:
@@ -51,8 +53,12 @@ class TeamRepository:
         validate_non_empty(name, "name")
         validate_amount(initial_balance, "initial_balance")
         validate_non_empty(owner_subject_id, "owner_subject_id")
+        validate_non_empty(idempotency_key, "idempotency_key")
         row = require_mapping_row(
-            self._callproc("create_team", [owner_subject_id, name, initial_balance]),
+            self._callproc(
+                "create_team",
+                [owner_subject_id, name, idempotency_key, initial_balance],
+            ),
             "TeamRepository.create_team",
         )
         return validate_row(CreateTeamRow, row, "TeamRepository.create_team", indeterminate=True)

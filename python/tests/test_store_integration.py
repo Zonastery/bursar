@@ -25,6 +25,8 @@ from tests.conftest import TEST_TENANT_ID
 pytestmark = [pytest.mark.integration]
 USER_ID = "00000000-0000-0000-0000-000000000901"
 REPLAY_USER_ID = "00000000-0000-0000-0000-000000000911"
+TEAM_REPLAY_OWNER_ID = "00000000-0000-0000-0000-000000000921"
+TEAM_CONCURRENT_OWNER_ID = "00000000-0000-0000-0000-000000000922"
 
 CONFIG = {
     "version": 1,
@@ -224,6 +226,81 @@ def _active_lease_snapshot(
     assert row is not None
     balance, active_count, reserved_total = row
     return balance, active_count, reserved_total
+
+
+def _team_creation_snapshot(
+    pg_database_url: str,
+    idempotency_key: str,
+) -> dict[str, object]:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                team.id::text AS team_id,
+                team.name,
+                account.id::text AS account_id,
+                account.balance,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_teams AS matching_team
+                    WHERE matching_team.tenant_id = %s
+                      AND matching_team.creation_idempotency_key = %s
+                ) AS team_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_team_members AS member
+                    WHERE member.team_id = team.id
+                ) AS member_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_ledger_entries AS entry
+                    WHERE entry.account_id = account.id
+                      AND entry.kind = 'grant'
+                      AND entry.operation = 'team_initial_grant'
+                ) AS initial_grant_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.subjects AS subject
+                    WHERE subject.tenant_id = %s
+                ) AS tenant_subject_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_teams AS tenant_team
+                    WHERE tenant_team.tenant_id = %s
+                ) AS tenant_team_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_accounts AS team_account
+                    WHERE team_account.tenant_id = %s
+                      AND team_account.account_kind = 'team'
+                ) AS tenant_team_account_count,
+                (
+                    SELECT count(*)::int
+                    FROM bursar.credit_ledger_entries AS tenant_entry
+                    WHERE tenant_entry.tenant_id = %s
+                ) AS tenant_ledger_count
+            FROM bursar.credit_teams AS team
+            JOIN bursar.credit_accounts AS account
+              ON account.subject_id = team.subject_id
+             AND account.account_kind = 'team'
+            WHERE team.tenant_id = %s
+              AND team.creation_idempotency_key = %s
+            """,
+            [
+                TEST_TENANT_ID,
+                idempotency_key,
+                TEST_TENANT_ID,
+                TEST_TENANT_ID,
+                TEST_TENANT_ID,
+                TEST_TENANT_ID,
+                TEST_TENANT_ID,
+                idempotency_key,
+            ],
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        assert cursor.description is not None
+        return dict(zip((column.name for column in cursor.description), row, strict=True))
 
 
 def test_catalog_shape_validator_rejects_removed_nested_fields(
@@ -1025,12 +1102,100 @@ def test_expire_leases_is_exposed_by_python_store(store: PostgresStore) -> None:
 
 
 def test_remove_team_member_is_exposed_by_python_store(store: PostgresStore) -> None:
-    team = store.create_team(USER_ID, "SDK team")
+    team = store.create_team(USER_ID, "SDK team", idempotency_key="team:create:sdk")
     store.add_team_member(team.team_id, REPLAY_USER_ID)
 
     assert store.remove_team_member(team.team_id, REPLAY_USER_ID) is True
     assert store.remove_team_member(team.team_id, REPLAY_USER_ID) is False
     assert store.remove_team_member(team.team_id, USER_ID) is False
+
+
+def test_team_creation_replay_posts_one_initial_grant(store: PostgresStore) -> None:
+    CreditsService(store=store).publish_and_activate_catalog(CONFIG)
+    idempotency_key = "team:create:replay"
+
+    first = store.create_team(
+        TEAM_REPLAY_OWNER_ID,
+        "Replay-safe team",
+        Decimal("9.000"),
+        idempotency_key=idempotency_key,
+    )
+    replay = store.create_team(
+        TEAM_REPLAY_OWNER_ID,
+        "Replay-safe team",
+        Decimal("9"),
+        idempotency_key=idempotency_key,
+    )
+
+    assert first.idempotent is False
+    assert replay.model_copy(update={"idempotent": False}) == first
+    assert replay.idempotent is True
+    assert _team_creation_snapshot(store.database_url, idempotency_key) | {} == {
+        **_team_creation_snapshot(store.database_url, idempotency_key),
+        "team_id": first.team_id,
+        "name": "Replay-safe team",
+        "balance": Decimal("9.000000"),
+        "team_count": 1,
+        "member_count": 1,
+        "initial_grant_count": 1,
+    }
+
+
+def test_team_creation_conflicts_have_no_persistent_side_effects(store: PostgresStore) -> None:
+    CreditsService(store=store).publish_and_activate_catalog(CONFIG)
+    idempotency_key = "team:create:conflict"
+    store.create_team(
+        TEAM_REPLAY_OWNER_ID,
+        "Conflict-safe team",
+        Decimal("7"),
+        idempotency_key=idempotency_key,
+    )
+    before = _team_creation_snapshot(store.database_url, idempotency_key)
+
+    with pytest.raises(StoreError, match="^idempotency_conflict$"):
+        store.create_team(
+            TEAM_REPLAY_OWNER_ID,
+            "Changed team",
+            Decimal("7"),
+            idempotency_key=idempotency_key,
+        )
+    with pytest.raises(StoreError, match="^idempotency_conflict$"):
+        store.create_team(
+            TEAM_REPLAY_OWNER_ID,
+            "Conflict-safe team",
+            Decimal("8"),
+            idempotency_key=idempotency_key,
+        )
+
+    assert _team_creation_snapshot(store.database_url, idempotency_key) == before
+
+
+def test_concurrent_team_creation_returns_one_logical_team(store: PostgresStore) -> None:
+    CreditsService(store=store).publish_and_activate_catalog(CONFIG)
+    idempotency_key = "team:create:concurrent"
+    worker_count = 12
+
+    results = _run_with_concurrent_stores(
+        store.database_url,
+        worker_count,
+        lambda worker_store, _worker_index: worker_store.create_team(
+            TEAM_CONCURRENT_OWNER_ID,
+            "Concurrent team",
+            Decimal("5"),
+            idempotency_key=idempotency_key,
+        ),
+    )
+
+    assert len({result.team_id for result in results}) == 1
+    assert sum(not result.idempotent for result in results) == 1
+    assert sum(result.idempotent for result in results) == worker_count - 1
+    snapshot = _team_creation_snapshot(store.database_url, idempotency_key)
+    assert snapshot["team_id"] == results[0].team_id
+    assert snapshot["name"] == "Concurrent team"
+    assert snapshot["balance"] == Decimal("5.000000")
+    assert snapshot["team_count"] == 1
+    assert snapshot["member_count"] == 1
+    assert snapshot["initial_grant_count"] == 1
 
 
 def test_plan_policies_persist_as_typed_references(

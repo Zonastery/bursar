@@ -177,7 +177,7 @@ export type {
 } from "./credits/types/index.js";
 
 // Store options
-export type { CreateLeaseOptions, SettleLeaseOptions } from "./credits/store.js";
+export type { CreateLeaseOptions, CreateTeamOptions, SettleLeaseOptions } from "./credits/store.js";
 export type {
   AddCreditsOptions,
   BeginBilledOperationOptions,

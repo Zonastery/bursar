@@ -1460,6 +1460,8 @@ class PostgresStore(CreditStore):
         owner_subject_id: str,
         name: str,
         initial_balance: Decimal = Decimal(0),
+        *,
+        idempotency_key: str,
     ) -> CreateTeamResult:
         """Create a new team with an initial credit balance.
 
@@ -1467,6 +1469,7 @@ class PostgresStore(CreditStore):
             owner_subject_id: Subject that owns the team.
             name: The team name.
             initial_balance: The initial credit balance (default 0).
+            idempotency_key: Caller-owned replay key for this creation request.
 
         Returns:
             CreateTeamResult with team_id and name.
@@ -1474,12 +1477,19 @@ class PostgresStore(CreditStore):
         Raises:
             StoreError: If the RPC returns no result.
         """
-        result = self._team_repo.create_team(owner_subject_id, name, str(_dec(initial_balance)))
+        effective_idempotency_key = require_stable_key(idempotency_key)
+        result = self._team_repo.create_team(
+            owner_subject_id,
+            name,
+            effective_idempotency_key,
+            str(_dec(initial_balance)),
+        )
         if result.error_code is not None:
             raise StoreError(result.error_code)
         return CreateTeamResult(
             team_id=_require_text(result.team_id, "create_team"),
             name=_require_text(result.name, "create_team"),
+            idempotent=result.idempotent,
         )
 
     def get_team_balance(self, team_id: str) -> TeamBalanceResult | None:

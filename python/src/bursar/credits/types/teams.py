@@ -37,6 +37,7 @@ class TeamMember(BaseModel):
 class CreateTeamResult(BaseModel):
     team_id: str
     name: str
+    idempotent: bool
 
 
 class AddTeamMemberResult(BaseModel):

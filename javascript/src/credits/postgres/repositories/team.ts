@@ -22,6 +22,7 @@ const CreateTeamRowSchema = z
     name: z.string().min(1).nullable(),
     team_subject_id: postgresUuid.nullable(),
     account_id: postgresUuid.nullable(),
+    idempotent: z.boolean(),
     error_code: z.string().min(1).nullable(),
   })
   .strict()
@@ -37,6 +38,12 @@ const CreateTeamRowSchema = z
       context.addIssue({
         code: "custom",
         message: "failed team creation cannot expose identity fields",
+      });
+    }
+    if (row.error_code !== null && row.idempotent) {
+      context.addIssue({
+        code: "custom",
+        message: "failed team creation cannot be idempotent",
       });
     }
   });
@@ -124,9 +131,15 @@ export class TeamRepository {
   async createTeam(
     ownerSubjectId: string,
     name: string,
+    idempotencyKey: string,
     initialBalance: string,
   ): Promise<CreateTeamRow> {
-    const rows = await this.callproc("create_team", [ownerSubjectId, name, initialBalance]);
+    const rows = await this.callproc("create_team", [
+      ownerSubjectId,
+      name,
+      idempotencyKey,
+      initialBalance,
+    ]);
     return safeParse(
       CreateTeamRowSchema,
       requireRow(rows, "TeamRepository.createTeam"),

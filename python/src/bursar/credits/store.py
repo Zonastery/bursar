@@ -682,6 +682,8 @@ class CreditStore(ABC):
         owner_subject_id: str,
         name: str,
         initial_balance: Decimal = Decimal(0),
+        *,
+        idempotency_key: str,
     ) -> CreateTeamResult:
         """Create a team with a shared credit balance pool.
 
@@ -689,6 +691,7 @@ class CreditStore(ABC):
             owner_subject_id: Subject that owns the team.
             name: Human-readable team name.
             initial_balance: Starting credit balance.
+            idempotency_key: Caller-owned replay key for this creation request.
 
         Returns:
             ``CreateTeamResult`` with the new team id.

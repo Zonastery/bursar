@@ -1226,7 +1226,12 @@ DECLARE
 BEGIN
     SELECT team_id
     INTO v_team
-    FROM bursar.create_team(v_owner, 'Membership history team', 10);
+    FROM bursar.create_team(
+        v_owner,
+        'Membership history team',
+        'team:create:membership-history',
+        10
+    );
 
     IF v_team IS NULL
        OR NOT bursar.set_team_member(v_team, v_member, 'member', 3)

@@ -6,6 +6,7 @@ import {
   FeatureNotEntitledError,
   OperationNotAllowedError,
   QuotaExceededError,
+  StoreError,
 } from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import type { BursarConfigData } from "../src/config.js";
@@ -17,6 +18,8 @@ import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers
 const DATABASE_URL = inject("DATABASE_URL");
 const USER_ID = "00000000-0000-0000-0000-000000000902";
 const REPLAY_USER_ID = "00000000-0000-0000-0000-000000000912";
+const TEAM_REPLAY_OWNER_ID = "00000000-0000-0000-0000-000000000922";
+const TEAM_CONCURRENT_OWNER_ID = "00000000-0000-0000-0000-000000000923";
 
 const CONFIG = {
   version: 1,
@@ -251,6 +254,77 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     return row;
   }
 
+  async function teamCreationSnapshot(idempotencyKey: string) {
+    const result = await pool.query<{
+      team_id: string;
+      name: string;
+      account_id: string;
+      balance: string;
+      team_count: number;
+      member_count: number;
+      initial_grant_count: number;
+      tenant_subject_count: number;
+      tenant_team_count: number;
+      tenant_team_account_count: number;
+      tenant_ledger_count: number;
+    }>(
+      `SELECT
+         team.id::text AS team_id,
+         team.name,
+         account.id::text AS account_id,
+         account.balance::text AS balance,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_teams AS matching_team
+           WHERE matching_team.tenant_id = $1::uuid
+             AND matching_team.creation_idempotency_key = $2
+         ) AS team_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_team_members AS member
+           WHERE member.team_id = team.id
+         ) AS member_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_ledger_entries AS entry
+           WHERE entry.account_id = account.id
+             AND entry.kind = 'grant'
+             AND entry.operation = 'team_initial_grant'
+         ) AS initial_grant_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.subjects AS subject
+           WHERE subject.tenant_id = $1::uuid
+         ) AS tenant_subject_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_teams AS tenant_team
+           WHERE tenant_team.tenant_id = $1::uuid
+         ) AS tenant_team_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_accounts AS team_account
+           WHERE team_account.tenant_id = $1::uuid
+             AND team_account.account_kind = 'team'
+         ) AS tenant_team_account_count,
+         (
+           SELECT count(*)::int
+           FROM bursar.credit_ledger_entries AS tenant_entry
+           WHERE tenant_entry.tenant_id = $1::uuid
+         ) AS tenant_ledger_count
+       FROM bursar.credit_teams AS team
+       JOIN bursar.credit_accounts AS account
+         ON account.subject_id = team.subject_id
+        AND account.account_kind = 'team'
+       WHERE team.tenant_id = $1::uuid
+         AND team.creation_idempotency_key = $2`,
+      [TEST_TENANT_ID, idempotencyKey],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error(`missing team for ${idempotencyKey}`);
+    return row;
+  }
+
   beforeAll(async () => {
     await applyMigrations(pool);
     await truncateBursarTables(pool);
@@ -473,7 +547,11 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect(aggregate.totalCreditsConsumed.toString()).toBe("17");
     expect(aggregate.activeUsers).toBe(2);
 
-    const team = await store.createTeam(USER_ID, "SDK integration team", new Decimal(10));
+    const team = await store.createTeam(USER_ID, "SDK integration team", {
+      idempotencyKey: "team:create:sdk-integration",
+      initialBalance: new Decimal(10),
+    });
+    expect(team.idempotent).toBe(false);
     await store.addTeamMember(team.teamId, REPLAY_USER_ID, "member", new Decimal(3));
     const firstTeamCharge = await store.deductTeam(team.teamId, REPLAY_USER_ID, new Decimal(2), {
       idempotencyKey: "team-charge-1",
@@ -693,5 +771,89 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     const headroomAvailability = await store.getAvailable(headroomUser);
     expect(headroomAvailability.available.toString()).toBe("1");
     expect(headroomAvailability.reserved.toString()).toBe("4");
+  }, 60_000);
+
+  it("replays team creation as one team, account, membership, and initial grant", async () => {
+    await new CreditsService(store).publishAndActivateCatalog(CONFIG);
+    const idempotencyKey = "team:create:replay";
+
+    const first = await store.createTeam(TEAM_REPLAY_OWNER_ID, "Replay-safe team", {
+      idempotencyKey,
+      initialBalance: new Decimal("9.000"),
+    });
+    const replay = await store.createTeam(TEAM_REPLAY_OWNER_ID, "Replay-safe team", {
+      idempotencyKey,
+      initialBalance: new Decimal("9"),
+    });
+
+    expect(first.idempotent).toBe(false);
+    expect(replay).toEqual({ ...first, idempotent: true });
+    await expect(teamCreationSnapshot(idempotencyKey)).resolves.toMatchObject({
+      team_id: first.teamId,
+      name: "Replay-safe team",
+      balance: "9.000000",
+      team_count: 1,
+      member_count: 1,
+      initial_grant_count: 1,
+    });
+  });
+
+  it("rejects changed team-creation replays without persistent side effects", async () => {
+    await new CreditsService(store).publishAndActivateCatalog(CONFIG);
+    const idempotencyKey = "team:create:conflict";
+    await store.createTeam(TEAM_REPLAY_OWNER_ID, "Conflict-safe team", {
+      idempotencyKey,
+      initialBalance: new Decimal(7),
+    });
+    const before = await teamCreationSnapshot(idempotencyKey);
+
+    const changedName = store.createTeam(TEAM_REPLAY_OWNER_ID, "Changed team", {
+      idempotencyKey,
+      initialBalance: new Decimal(7),
+    });
+    await expect(changedName).rejects.toBeInstanceOf(StoreError);
+    await expect(changedName).rejects.toThrow("idempotency_conflict");
+
+    const changedBalance = store.createTeam(TEAM_REPLAY_OWNER_ID, "Conflict-safe team", {
+      idempotencyKey,
+      initialBalance: new Decimal(8),
+    });
+    await expect(changedBalance).rejects.toBeInstanceOf(StoreError);
+    await expect(changedBalance).rejects.toThrow("idempotency_conflict");
+
+    expect(await teamCreationSnapshot(idempotencyKey)).toEqual(before);
+  });
+
+  it("creates one logical team under concurrent same-key requests", async () => {
+    await new CreditsService(store).publishAndActivateCatalog(CONFIG);
+    const idempotencyKey = "team:create:concurrent";
+    const workerCount = 12;
+    let waiting = 0;
+    let releaseStart = () => {};
+    const start = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+
+    const results = await runWithConcurrentStores(workerCount, async (workerStore) => {
+      waiting += 1;
+      if (waiting === workerCount) releaseStart();
+      await start;
+      return workerStore.createTeam(TEAM_CONCURRENT_OWNER_ID, "Concurrent team", {
+        idempotencyKey,
+        initialBalance: new Decimal(5),
+      });
+    });
+
+    expect(new Set(results.map((result) => result.teamId))).toHaveLength(1);
+    expect(results.filter((result) => !result.idempotent)).toHaveLength(1);
+    expect(results.filter((result) => result.idempotent)).toHaveLength(workerCount - 1);
+    await expect(teamCreationSnapshot(idempotencyKey)).resolves.toMatchObject({
+      team_id: results[0]?.teamId,
+      name: "Concurrent team",
+      balance: "5.000000",
+      team_count: 1,
+      member_count: 1,
+      initial_grant_count: 1,
+    });
   }, 60_000);
 });

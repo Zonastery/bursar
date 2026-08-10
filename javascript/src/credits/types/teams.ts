@@ -32,6 +32,7 @@ export interface TeamBalanceResult {
 export interface CreateTeamResult {
   teamId: string;
   name: string;
+  idempotent: boolean;
 }
 
 /** Result of adding a team member. */

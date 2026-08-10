@@ -69,7 +69,7 @@ import type {
   RefundCreditsOptions,
 } from "../service-types.js";
 import { CreditStore } from "../store.js";
-import type { CreateLeaseOptions, SettleLeaseOptions } from "../store.js";
+import type { CreateLeaseOptions, CreateTeamOptions, SettleLeaseOptions } from "../store.js";
 import { BalanceRepository } from "./repositories/balance.js";
 import { DeductionRepository } from "./repositories/deduction.js";
 import { LeaseRepository } from "./repositories/lease.js";
@@ -1005,13 +1005,21 @@ export class PostgresStore extends CreditStore {
   async createTeam(
     ownerSubjectId: string,
     name: string,
-    initialBalance: Decimal = ZERO,
+    options: CreateTeamOptions,
   ): Promise<CreateTeamResult> {
-    const row = await this.teamRepo.createTeam(ownerSubjectId, name, decParam(initialBalance));
+    const idempotencyKey = requireStableKey(options?.idempotencyKey);
+    const initialBalance = options?.initialBalance ?? ZERO;
+    const row = await this.teamRepo.createTeam(
+      ownerSubjectId,
+      name,
+      idempotencyKey,
+      decParam(initialBalance),
+    );
     if (row.error_code !== null) throw new StoreError(row.error_code);
     return {
       teamId: requireText(row.team_id, "create_team"),
       name: requireText(row.name, "create_team"),
+      idempotent: row.idempotent,
     };
   }
 

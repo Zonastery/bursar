@@ -507,6 +507,7 @@ class CreateTeamRow(BaseModel):
     name: str | None
     team_subject_id: UUID | None
     account_id: UUID | None
+    idempotent: bool
     error_code: str | None
 
     @model_validator(mode="after")
@@ -516,6 +517,8 @@ class CreateTeamRow(BaseModel):
             raise ValueError("successful team creation requires identity fields")
         if self.error_code is not None and any(value is not None for value in identity):
             raise ValueError("failed team creation cannot expose identity fields")
+        if self.error_code is not None and self.idempotent:
+            raise ValueError("failed team creation cannot be idempotent")
         return self
 
 

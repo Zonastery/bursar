@@ -80,6 +80,16 @@ export interface CreateLeaseOptions extends OperationUsageOptions {
   metadata?: CreditMetadata | null;
 }
 
+/** Options for replay-safe team creation. */
+export interface CreateTeamOptions {
+  /**
+   * Caller-owned operation key. Reusing it with the same request returns the
+   * original team; changing the owner, name, or balance is rejected.
+   */
+  idempotencyKey: string;
+  initialBalance?: Decimal;
+}
+
 /** Options for charging the actual cost against a lease. */
 export interface SettleLeaseOptions extends OperationUsageOptions {
   idempotencyKey?: string;
@@ -332,7 +342,7 @@ export abstract class CreditStore {
   async createTeam(
     _ownerSubjectId: string,
     _name: string,
-    _initialBalance?: Decimal,
+    _options: CreateTeamOptions,
   ): Promise<CreateTeamResult> {
     throw new CapabilityNotSupportedError("createTeam is not supported by this store");
   }
