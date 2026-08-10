@@ -286,7 +286,7 @@ jobs:
           /tmp/bursar-python-consumer/bin/python -c 'import bursar; assert bursar.Bursar and bursar.PricingEngine'
           wheel=$(find /tmp/bursar-wheel -name '*.whl' -print -quit)
           /tmp/bursar-python-consumer/bin/pip install "${wheel}[postgres,s3,opentelemetry]"
-          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "031_outbox_recovery.sql").is_file()'
+          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "032_team_creation_idempotency.sql").is_file()'
           /tmp/bursar-python-consumer/bin/bursar migrate
           /tmp/bursar-python-consumer/bin/bursar tenant bootstrap package-smoke \
             .github/package-smoke/pricing.json \
