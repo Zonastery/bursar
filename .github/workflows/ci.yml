@@ -247,8 +247,9 @@ jobs:
 
   # ── Release ───────────────────────────────────────────────────────────────
   # Validate the complete release before either registry is touched. Publishing
-  # is ordered PyPI -> npm -> GitHub Release -> Context7 and every step is safe
-  # to rerun, so an outage can be recovered without changing the immutable tag.
+  # is ordered PyPI -> npm -> GitHub Release and every step is safe to rerun, so
+  # an outage can be recovered without changing the immutable tag. Context7 is
+  # refreshed afterward on a best-effort basis and cannot fail the release.
 
   release-preflight:
     if: startsWith(github.ref, 'refs/tags/v')
