@@ -404,6 +404,7 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=FakePool(),
             tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
             provider_environment="test",
         )
@@ -419,11 +420,35 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     pool.closeall.assert_not_called()
 
 
+def test_runtime_requires_a_separate_operator_connection() -> None:
+    pool = FakePool()
+    with pytest.raises(ValueError, match="postgres and operator_postgres must use distinct connections"):
+        create_bursar_runtime(
+            BursarRuntimeOptions(
+                postgres=pool,
+                operator_postgres=pool,
+                tenant_id=UUID(TENANT_ID),
+                provider_environment="test",
+            )
+        )
+
+    with pytest.raises(ValueError, match="operator_postgres connection string must not be empty"):
+        create_bursar_runtime(
+            BursarRuntimeOptions(
+                postgres=pool,
+                operator_postgres="   ",
+                tenant_id=UUID(TENANT_ID),
+                provider_environment="test",
+            )
+        )
+
+
 def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
     pool = FakePool()
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=FakePool(),
             tenant_id=UUID(TENANT_ID),
             provider_environment="test",
         )
@@ -447,7 +472,12 @@ def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
 def test_runtime_loads_catalog_by_default() -> None:
     pool = FakePool()
     runtime = create_bursar_runtime(
-        BursarRuntimeOptions(postgres=pool, tenant_id=UUID(TENANT_ID), provider_environment="test")
+        BursarRuntimeOptions(
+            postgres=pool,
+            operator_postgres=FakePool(),
+            tenant_id=UUID(TENANT_ID),
+            provider_environment="test",
+        )
     )
     runtime.bursar.load_catalog = Mock()
 
@@ -462,6 +492,7 @@ def test_runtime_verifies_normalized_tenant_slug() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=FakePool(),
             tenant_id=UUID(TENANT_ID),
             provider_environment="test",
             tenant_slug=" Zonastery ",
@@ -483,6 +514,7 @@ def test_runtime_rejects_tenant_slug_mismatch() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=FakePool(),
             tenant_id=UUID(TENANT_ID),
             provider_environment="test",
             tenant_slug="zonastery",
@@ -508,6 +540,7 @@ def test_runtime_routes_analytics_through_clickhouse_without_changing_store() ->
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=FakePool(),
             tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
             provider_environment="test",
             clickhouse=ClickHouseUsageStoreOptions(
@@ -552,6 +585,7 @@ def test_runtime_routes_usage_history_through_clickhouse() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=FakePool(),
             tenant_id=UUID(TENANT_ID),
             provider_environment="test",
             clickhouse=ClickHouseUsageStoreOptions(

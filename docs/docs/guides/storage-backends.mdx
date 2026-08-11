@@ -157,7 +157,8 @@ encryption and checksum fields are available through `putObject` /
 remain host-owned.
 
 The runtime composition root wires the Postgres stores, the optional
-adapters, and the outbox worker onto one connection pool:
+adapters, and the outbox worker onto separate tenant and operator connection
+pools:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
@@ -168,6 +169,7 @@ from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, crea
 runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=database_url,
+        operator_postgres=operator_database_url,
         tenant_id=tenant_id,
         provider_environment="test",
         clickhouse=clickhouse_options,
@@ -186,6 +188,7 @@ import { createBursarRuntime } from "@zonastery/bursar/node";
 
 const runtime = await createBursarRuntime({
   postgres: databaseUrl,
+  operatorPostgres: operatorDatabaseUrl,
   tenantId,
   providerEnvironment: "test",
   clickhouse: clickhouseOptions,

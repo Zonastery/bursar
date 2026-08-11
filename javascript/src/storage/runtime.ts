@@ -57,7 +57,10 @@ export interface BursarRuntimeBursarOptions {
 }
 
 export interface BursarRuntimeOptions {
+  /** Tenant-scoped caller with SET-only membership in bursar_client. */
   postgres: string | PostgresPool;
+  /** Cross-tenant caller with SET-only membership in bursar_operator. */
+  operatorPostgres: string | PostgresPool;
   /** Explicit financial namespace shared by persistence and provider factories. */
   providerEnvironment: ProviderEnvironment;
   /** Applied to SDK-owned pools and per-transaction statement deadlines. */
@@ -170,7 +173,7 @@ class UsageWriteBatcher {
  * Node composition root for Bursar's stores and optional data infrastructure.
  *
  * Without S3 or ClickHouse it constructs the same PostgreSQL-only Bursar and
- * no outbox polling loop. All components share one PostgreSQL pool.
+ * no outbox polling loop. Tenant and operator work always use distinct pools.
  */
 export class BursarRuntime {
   readonly bursar: Bursar;
@@ -184,7 +187,9 @@ export class BursarRuntime {
   readonly s3: BillingPayloadArchive | null;
 
   private readonly pool: PostgresPool;
+  private readonly operatorPool: PostgresPool;
   private readonly ownsPool: boolean;
+  private readonly ownsOperatorPool: boolean;
   private readonly postgres: PostgresClient;
   private readonly query: QueryFn;
   private readonly tenantId: string;
@@ -199,31 +204,52 @@ export class BursarRuntime {
 
   /** Construct a runtime while keeping pool ownership inside the SDK. */
   static async create(options: BursarRuntimeOptions): Promise<BursarRuntime> {
-    if (typeof options.postgres !== "string") {
-      return new BursarRuntime(options.postgres, false, options);
+    if (options.operatorPostgres === undefined || options.operatorPostgres === null) {
+      throw new TypeError("operatorPostgres is required");
     }
-    if (!options.postgres.trim()) {
+    if (typeof options.postgres === "string" && !options.postgres.trim()) {
       throw new TypeError("postgres connection string must not be empty");
     }
-    let pg: typeof import("pg");
-    try {
-      pg = await import("pg");
-    } catch (cause) {
-      throw new BursarImportError("pg is required for the Bursar runtime: npm install pg", {
-        cause,
-      });
+    if (typeof options.operatorPostgres === "string" && !options.operatorPostgres.trim()) {
+      throw new TypeError("operatorPostgres connection string must not be empty");
     }
-    const pool = new pg.Pool(
-      postgresPoolConfig(options.postgres, options.postgresOptions),
-    ) as PostgresPool;
-    try {
-      return new BursarRuntime(pool, true, options);
-    } catch (error) {
+    if (options.postgres === options.operatorPostgres) {
+      throw new TypeError("postgres and operatorPostgres must use distinct connections");
+    }
+
+    let pg: typeof import("pg") | undefined;
+    if (typeof options.postgres === "string" || typeof options.operatorPostgres === "string") {
       try {
-        await pool.end();
-      } catch {
-        // Preserve the composition error; no runtime exists to report cleanup.
+        pg = await import("pg");
+      } catch (cause) {
+        throw new BursarImportError("pg is required for the Bursar runtime: npm install pg", {
+          cause,
+        });
       }
+    }
+    const ownsPool = typeof options.postgres === "string";
+    const ownsOperatorPool = typeof options.operatorPostgres === "string";
+    let pool: PostgresPool | undefined;
+    let operatorPool: PostgresPool | undefined;
+    try {
+      pool =
+        typeof options.postgres === "string"
+          ? (new pg!.Pool(
+              postgresPoolConfig(options.postgres, options.postgresOptions),
+            ) as PostgresPool)
+          : options.postgres;
+      operatorPool =
+        typeof options.operatorPostgres === "string"
+          ? (new pg!.Pool(
+              postgresPoolConfig(options.operatorPostgres, options.postgresOptions),
+            ) as PostgresPool)
+          : options.operatorPostgres;
+      return new BursarRuntime(pool, ownsPool, operatorPool, ownsOperatorPool, options);
+    } catch (error) {
+      await Promise.allSettled([
+        ...(ownsPool && pool ? [pool.end()] : []),
+        ...(ownsOperatorPool && operatorPool ? [operatorPool.end()] : []),
+      ]);
       throw error;
     }
   }
@@ -231,10 +257,14 @@ export class BursarRuntime {
   private constructor(
     pool: PostgresPool,
     ownsPool: boolean,
-    options: Omit<BursarRuntimeOptions, "postgres">,
+    operatorPool: PostgresPool,
+    ownsOperatorPool: boolean,
+    options: BursarRuntimeOptions,
   ) {
     this.pool = pool;
+    this.operatorPool = operatorPool;
     this.ownsPool = ownsPool;
+    this.ownsOperatorPool = ownsOperatorPool;
     this.tenantId = normalizeTenantId(options.tenantId);
     this.providerEnvironment = normalizeProviderEnvironment(options.providerEnvironment);
     this.tenantSlug =
@@ -319,7 +349,7 @@ export class BursarRuntime {
       },
     });
 
-    this.postgres = new PostgresClient(pool, {
+    this.postgres = new PostgresClient(operatorPool, {
       ...(options.postgresOptions ?? {}),
       tenantId: this.tenantId,
       providerEnvironment: this.providerEnvironment,
@@ -500,6 +530,13 @@ export class BursarRuntime {
     if (this.ownsPool) {
       try {
         await this.pool.end();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (this.ownsOperatorPool) {
+      try {
+        await this.operatorPool.end();
       } catch (error) {
         failures.push(error);
       }

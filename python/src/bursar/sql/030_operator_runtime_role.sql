@@ -156,23 +156,23 @@ GRANT SELECT, INSERT, UPDATE ON TABLE bursar.tenants
 TO bursar_operator_runtime;
 GRANT SELECT, UPDATE, DELETE ON TABLE bursar.event_outbox
 TO bursar_operator_runtime;
-GRANT SELECT, DELETE ON TABLE bursar.credit_usage_charges
+GRANT SELECT, UPDATE, DELETE ON TABLE bursar.credit_usage_charges
 TO bursar_operator_runtime;
 GRANT SELECT ON TABLE bursar.credit_accounts
 TO bursar_operator_runtime;
-GRANT SELECT, DELETE ON TABLE bursar.usage_charge_payloads
+GRANT SELECT, UPDATE, DELETE ON TABLE bursar.usage_charge_payloads
 TO bursar_operator_runtime;
 GRANT SELECT, UPDATE ON TABLE bursar.billing_events
 TO bursar_operator_runtime;
-GRANT SELECT, DELETE ON TABLE bursar.billing_event_payloads
+GRANT SELECT, UPDATE, DELETE ON TABLE bursar.billing_event_payloads
 TO bursar_operator_runtime;
-GRANT SELECT, DELETE ON TABLE bursar.quota_events
+GRANT SELECT, UPDATE, DELETE ON TABLE bursar.quota_events
 TO bursar_operator_runtime;
-GRANT SELECT, DELETE ON TABLE bursar.quota_usage_events
+GRANT SELECT, UPDATE, DELETE ON TABLE bursar.quota_usage_events
 TO bursar_operator_runtime;
 GRANT SELECT, UPDATE ON TABLE bursar.credit_leases
 TO bursar_operator_runtime;
-GRANT SELECT, DELETE ON TABLE bursar.usage_daily_rollups
+GRANT SELECT, UPDATE, DELETE ON TABLE bursar.usage_daily_rollups
 TO bursar_operator_runtime;
 -- Operator-owned SECURITY DEFINER RPCs re-evaluate ordinary CHECK, trigger,
 -- validation, and calculation helpers when they mutate real rows.  Mirror the
@@ -250,8 +250,14 @@ BEGIN
         'storage_settings',
         'tenants',
         'event_outbox',
+        'credit_usage_charges',
+        'usage_charge_payloads',
         'billing_events',
-        'credit_leases'
+        'billing_event_payloads',
+        'quota_events',
+        'quota_usage_events',
+        'credit_leases',
+        'usage_daily_rollups'
     ]::name[]
     LOOP
         EXECUTE format(
@@ -287,8 +293,9 @@ BEGIN
 END
 $$;
 
--- pg_partman is SECURITY INVOKER.  Its private definer owns only Bursar's two
--- partition sets and can read/update only pg_partman's configuration rows.
+-- pg_partman is SECURITY INVOKER. Its private definer owns only Bursar's two
+-- partition sets and can read/update/delete only pg_partman's configuration
+-- rows.
 -- The role is NOLOGIN and is never granted to a host principal.
 GRANT USAGE, CREATE ON SCHEMA bursar
 TO bursar_partition_runtime;
@@ -296,9 +303,9 @@ GRANT USAGE ON SCHEMA partman
 TO bursar_partition_runtime;
 GRANT SELECT ON TABLE bursar.storage_settings
 TO bursar_partition_runtime;
-GRANT SELECT, UPDATE ON TABLE partman.part_config
+GRANT SELECT, UPDATE, DELETE ON TABLE partman.part_config
 TO bursar_partition_runtime;
-GRANT SELECT, UPDATE ON TABLE partman.part_config_sub
+GRANT SELECT, UPDATE, DELETE ON TABLE partman.part_config_sub
 TO bursar_partition_runtime;
 -- pg_partman's SECURITY INVOKER entry points call other extension helpers.
 -- Grant the installed extension's complete function closure to this NOLOGIN
@@ -355,8 +362,9 @@ BEGIN
 END
 $$;
 
--- pg_partman children deliberately do not inherit parent privileges.  Wrap
--- the existing migration-owned hardener so future children receive only the
+-- pg_partman children deliberately do not inherit parent privileges. Wrap the
+-- existing migration-owned hardener so operator retention receives only
+-- SELECT/UPDATE/DELETE, while the private partition owner receives only the
 -- SELECT capability needed for the maintenance default-partition probe.
 ALTER FUNCTION bursar.secure_tenant_partition(regclass)
 RENAME TO secure_tenant_partition_base;
@@ -376,7 +384,9 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_partition name;
-    v_policy name;
+    v_select_policy name;
+    v_update_policy name;
+    v_delete_policy name;
     v_partition_policy name;
 BEGIN
     PERFORM bursar.secure_tenant_partition_base(p_partition);
@@ -395,21 +405,62 @@ BEGIN
     END IF;
 
     EXECUTE format(
-        'GRANT SELECT ON TABLE %s TO bursar_operator_runtime',
+        'GRANT SELECT, UPDATE, DELETE ON TABLE %s '
+        'TO bursar_operator_runtime',
         p_partition
     );
 
-    v_policy := left('operator_runtime_select_' || v_partition, 63);
+    v_select_policy := left(
+        'operator_runtime_select_' || v_partition,
+        63
+    );
     IF NOT EXISTS (
         SELECT 1
         FROM pg_policy
         WHERE polrelid = p_partition
-          AND polname = v_policy
+          AND polname = v_select_policy
     ) THEN
         EXECUTE format(
             'CREATE POLICY %I ON %s '
             'FOR SELECT TO bursar_operator_runtime USING (TRUE)',
-            v_policy,
+            v_select_policy,
+            p_partition
+        );
+    END IF;
+
+    v_update_policy := left(
+        'operator_runtime_update_' || v_partition,
+        63
+    );
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policy
+        WHERE polrelid = p_partition
+          AND polname = v_update_policy
+    ) THEN
+        EXECUTE format(
+            'CREATE POLICY %I ON %s '
+            'FOR UPDATE TO bursar_operator_runtime '
+            'USING (TRUE) WITH CHECK (TRUE)',
+            v_update_policy,
+            p_partition
+        );
+    END IF;
+
+    v_delete_policy := left(
+        'operator_runtime_delete_' || v_partition,
+        63
+    );
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policy
+        WHERE polrelid = p_partition
+          AND polname = v_delete_policy
+    ) THEN
+        EXECUTE format(
+            'CREATE POLICY %I ON %s '
+            'FOR DELETE TO bursar_operator_runtime USING (TRUE)',
+            v_delete_policy,
             p_partition
         );
     END IF;

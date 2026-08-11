@@ -129,11 +129,13 @@ async function seedDeadLetters(pool: pg.Pool): Promise<string[]> {
 
 describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
   let pool: pg.Pool;
+  let operatorPool: pg.Pool;
   let postgres: PostgresClient;
   let repository: PostgresStorageRepository;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
+    operatorPool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     await applyMigrations(pool);
     await truncateBursarTables(pool);
     postgres = new PostgresClient(pool, {
@@ -150,6 +152,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
 
   afterAll(async () => {
     await postgres?.close();
+    await operatorPool?.end();
     await pool?.end();
   });
 
@@ -310,6 +313,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     };
     const runtime = await createBursarRuntime({
       postgres: pool,
+      operatorPostgres: operatorPool,
       tenantId: TEST_TENANT_ID,
       providerEnvironment: "test",
       clickhouse,

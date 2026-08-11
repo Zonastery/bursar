@@ -95,6 +95,7 @@ from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=os.environ["DATABASE_URL"],
+        operator_postgres=os.environ["BURSAR_OPERATOR_DATABASE_URL"],
         tenant_id=os.environ["BURSAR_TENANT_ID"],
         provider_environment="test",
     )

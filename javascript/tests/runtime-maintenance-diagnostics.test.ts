@@ -231,6 +231,7 @@ describe("Bursar runtime diagnostics", () => {
     };
     const runtime = await createBursarRuntime({
       postgres: pool,
+      operatorPostgres: new Proxy(pool, {}),
       tenantId: TENANT_ID,
       providerEnvironment: "test",
       clickhouse: {
@@ -305,6 +306,7 @@ describe("Bursar runtime diagnostics", () => {
     };
     const runtime = await createBursarRuntime({
       postgres: pool,
+      operatorPostgres: new Proxy(pool, {}),
       tenantId: TENANT_ID,
       providerEnvironment: "test",
     });

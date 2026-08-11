@@ -294,6 +294,7 @@ def test_runtime_validates_projection_schema_before_startup_completes() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=_Pool(),
+            operator_postgres=_Pool(),
             tenant_id=TENANT_ID,
             provider_environment="test",
             clickhouse=clickhouse,
@@ -369,6 +370,7 @@ def test_runtime_owns_facades_and_adapts_options_object_stats(monkeypatch: Any) 
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=_Pool(),
             tenant_id=TENANT_ID,
             provider_environment="test",
         )

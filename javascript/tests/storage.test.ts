@@ -14,8 +14,17 @@ import { CatalogNotLoadedError, StoreClosedError } from "../src/errors.js";
 
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
-function createBursarRuntime(options: Omit<BursarRuntimeOptions, "providerEnvironment">) {
-  return createRuntime({ ...options, providerEnvironment: "test" });
+type RuntimeTestOptions = Omit<BursarRuntimeOptions, "providerEnvironment" | "operatorPostgres"> & {
+  operatorPostgres?: BursarRuntimeOptions["operatorPostgres"];
+};
+
+function createBursarRuntime(options: RuntimeTestOptions) {
+  const operatorPostgres =
+    options.operatorPostgres ??
+    (typeof options.postgres === "string"
+      ? "postgresql://operator@localhost/bursar"
+      : new Proxy(options.postgres, {}));
+  return createRuntime({ ...options, operatorPostgres, providerEnvironment: "test" });
 }
 
 const s3Mock = vi.hoisted(() => ({
@@ -511,7 +520,11 @@ describe("BursarRuntime", () => {
     };
 
     await expect(
-      createRuntime({ postgres: pool, tenantId: TEST_TENANT_ID } as never),
+      createRuntime({
+        postgres: pool,
+        operatorPostgres: new Proxy(pool, {}),
+        tenantId: TEST_TENANT_ID,
+      } as never),
     ).rejects.toThrow(/providerEnvironment/);
   });
 
@@ -522,6 +535,13 @@ describe("BursarRuntime", () => {
       end: vi.fn().mockResolvedValue(undefined),
     };
 
+    await expect(
+      createRuntime({
+        postgres: pool,
+        tenantId: TEST_TENANT_ID,
+        providerEnvironment: "test",
+      } as never),
+    ).rejects.toThrow("operatorPostgres is required");
     await expect(
       createBursarRuntime({
         postgres: pool,
@@ -643,6 +663,29 @@ describe("BursarRuntime", () => {
     await expect(
       createBursarRuntime({ postgres: "   ", tenantId: TEST_TENANT_ID }),
     ).rejects.toThrow(TypeError);
+  });
+
+  it("requires a separate operator connection", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      createBursarRuntime({
+        postgres: pool,
+        operatorPostgres: pool,
+        tenantId: TEST_TENANT_ID,
+      }),
+    ).rejects.toThrow("postgres and operatorPostgres must use distinct connections");
+    await expect(
+      createBursarRuntime({
+        postgres: pool,
+        operatorPostgres: "   ",
+        tenantId: TEST_TENANT_ID,
+      }),
+    ).rejects.toThrow("operatorPostgres connection string must not be empty");
   });
 
   it("verifies and normalizes a configured tenant slug during startup", async () => {

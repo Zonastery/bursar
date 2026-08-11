@@ -60,6 +60,7 @@ OPERATOR_FUNCTIONS = (
 OPERATOR_TABLE_PRIVILEGES = {
     ("billing_event_payloads", "DELETE"),
     ("billing_event_payloads", "SELECT"),
+    ("billing_event_payloads", "UPDATE"),
     ("billing_events", "SELECT"),
     ("billing_events", "UPDATE"),
     ("catalog_plan_quotas", "SELECT"),
@@ -68,13 +69,16 @@ OPERATOR_TABLE_PRIVILEGES = {
     ("credit_leases", "UPDATE"),
     ("credit_usage_charges", "DELETE"),
     ("credit_usage_charges", "SELECT"),
+    ("credit_usage_charges", "UPDATE"),
     ("event_outbox", "DELETE"),
     ("event_outbox", "SELECT"),
     ("event_outbox", "UPDATE"),
     ("quota_events", "DELETE"),
     ("quota_events", "SELECT"),
+    ("quota_events", "UPDATE"),
     ("quota_usage_events", "DELETE"),
     ("quota_usage_events", "SELECT"),
+    ("quota_usage_events", "UPDATE"),
     ("storage_settings", "SELECT"),
     ("storage_settings", "UPDATE"),
     ("tenants", "INSERT"),
@@ -82,8 +86,10 @@ OPERATOR_TABLE_PRIVILEGES = {
     ("tenants", "UPDATE"),
     ("usage_charge_payloads", "DELETE"),
     ("usage_charge_payloads", "SELECT"),
+    ("usage_charge_payloads", "UPDATE"),
     ("usage_daily_rollups", "DELETE"),
     ("usage_daily_rollups", "SELECT"),
+    ("usage_daily_rollups", "UPDATE"),
 }
 OPERATOR_RLS_COMMANDS = {
     (table_name, {"SELECT": "r", "INSERT": "a", "UPDATE": "w", "DELETE": "d"}[privilege])
@@ -132,7 +138,7 @@ def cli_database_urls() -> Iterator[CliDatabaseUrls]:
                 # SUPERUSER exists only for the external extension bootstrap
                 # below and is removed before the fixture yields. The Bursar
                 # migration itself keeps only CREATEROLE, the minimum needed
-                # by migrations 029 and 033 to provision their NOLOGIN owners.
+                # by migrations 029 and 030 to provision their NOLOGIN owners.
                 cursor.execute(
                     sql.SQL(
                         "CREATE ROLE {} LOGIN PASSWORD %s SUPERUSER "
@@ -894,8 +900,10 @@ def test_cli_manages_tenants_migrations_and_config_versions(
             (PARTITION_OWNER_ROLE,),
         )
         assert cursor.fetchall() == [
+            ("part_config", "DELETE"),
             ("part_config", "SELECT"),
             ("part_config", "UPDATE"),
+            ("part_config_sub", "DELETE"),
             ("part_config_sub", "SELECT"),
             ("part_config_sub", "UPDATE"),
         ]
@@ -1286,7 +1294,12 @@ def test_cli_manages_tenants_migrations_and_config_versions(
                 pg_get_userbyid(table_info.relowner),
                 table_info.relrowsecurity,
                 table_info.relforcerowsecurity,
-                array_agg(role_info.rolname ORDER BY role_info.rolname)
+                array_agg(DISTINCT role_info.rolname ORDER BY role_info.rolname),
+                has_table_privilege(
+                    'bursar_operator_runtime',
+                    table_info.oid,
+                    'SELECT, UPDATE, DELETE'
+                )
             FROM pg_class AS table_info
             JOIN pg_namespace AS namespace_info
               ON namespace_info.oid = table_info.relnamespace
@@ -1306,6 +1319,7 @@ def test_cli_manages_tenants_migrations_and_config_versions(
             True,
             True,
             [OPERATOR_OWNER_ROLE, PARTITION_OWNER_ROLE, "bursar_runtime"],
+            True,
         )
 
     first_config = tmp_path / "pricing-v1.json"

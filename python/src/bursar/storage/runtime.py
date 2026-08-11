@@ -102,6 +102,7 @@ class BursarRuntimeBursarOptions(_RuntimeModel):
 
 class BursarRuntimeOptions(_RuntimeModel):
     postgres: str | SkipValidation[PostgresPool]
+    operator_postgres: str | SkipValidation[PostgresPool]
     tenant_id: UUID
     provider_environment: ProviderEnvironment
     tenant_slug: str | None = None
@@ -231,21 +232,50 @@ class BursarRuntime:
 
     def __init__(self, options: BursarRuntimeOptions) -> None:
         """Construct a runtime while keeping pool ownership inside the SDK."""
-        if isinstance(options.postgres, str):
-            if not options.postgres.strip():
-                msg = "postgres connection string must not be empty"
-                raise ValueError(msg)
-            pool: PostgresPool = create_pool(
-                options.postgres,
-                postgres_options=options.postgres_options,
-            )
-            owns_pool = True
-        else:
-            pool = options.postgres
-            owns_pool = False
+        if isinstance(options.postgres, str) and not options.postgres.strip():
+            msg = "postgres connection string must not be empty"
+            raise ValueError(msg)
+        if isinstance(options.operator_postgres, str) and not options.operator_postgres.strip():
+            msg = "operator_postgres connection string must not be empty"
+            raise ValueError(msg)
+        if options.postgres is options.operator_postgres or (
+            isinstance(options.postgres, str)
+            and isinstance(options.operator_postgres, str)
+            and options.postgres == options.operator_postgres
+        ):
+            msg = "postgres and operator_postgres must use distinct connections"
+            raise ValueError(msg)
 
+        pool: PostgresPool | None = None
+        operator_pool: PostgresPool | None = None
+        owns_pool = False
+        owns_operator_pool = False
         try:
-            self._initialize(pool, owns_pool, options)
+            if isinstance(options.postgres, str):
+                pool = create_pool(
+                    options.postgres,
+                    postgres_options=options.postgres_options,
+                )
+                owns_pool = True
+            else:
+                pool = options.postgres
+
+            if isinstance(options.operator_postgres, str):
+                operator_pool = create_pool(
+                    options.operator_postgres,
+                    postgres_options=options.postgres_options,
+                )
+                owns_operator_pool = True
+            else:
+                operator_pool = options.operator_postgres
+
+            self._initialize(
+                pool,
+                owns_pool,
+                operator_pool,
+                owns_operator_pool,
+                options,
+            )
         except BaseException:
             # Release any partially-composed adapters without closing a pool
             # supplied by the caller.
@@ -255,19 +285,26 @@ class BursarRuntime:
                 if callable(close):
                     with suppress(BaseException):
                         close()
-            if owns_pool:
+            if owns_pool and pool is not None:
                 with suppress(BaseException):
                     pool.closeall()
+            if owns_operator_pool and operator_pool is not None:
+                with suppress(BaseException):
+                    operator_pool.closeall()
             raise
 
     def _initialize(
         self,
         pool: PostgresPool,
         owns_pool: bool,
+        operator_pool: PostgresPool,
+        owns_operator_pool: bool,
         options: BursarRuntimeOptions,
     ) -> None:
         self._pool = pool
+        self._operator_pool = operator_pool
         self._owns_pool = owns_pool
+        self._owns_operator_pool = owns_operator_pool
         self.clickhouse: UsageAnalyticsSink | None
         if options.clickhouse is None:
             self.clickhouse = None
@@ -337,7 +374,7 @@ class BursarRuntime:
         )
 
         self._postgres = PostgresClient.from_pool(
-            pool,
+            operator_pool,
             tenant_id=options.tenant_id,
             access_role="bursar_operator",
             provider_environment=options.provider_environment,
@@ -501,6 +538,8 @@ class BursarRuntime:
             resources.extend((self.credit_store.close, self.billing_store.close, self._postgres.close))
             if self._owns_pool:
                 resources.append(self._pool.closeall)
+            if self._owns_operator_pool:
+                resources.append(self._operator_pool.closeall)
 
             for close_resource in resources:
                 try:

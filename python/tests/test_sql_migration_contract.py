@@ -184,7 +184,40 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
                 'bursar_operator'
             )
               AND member_role.rolname <> current_user
+              AND (
+                  granted_role.rolname = 'bursar_runtime'
+                  OR NOT member_role.rolcanlogin
+                  OR member_role.rolsuper
+                  OR member_role.rolcreatedb
+                  OR member_role.rolcreaterole
+                  OR member_role.rolreplication
+                  OR member_role.rolbypassrls
+                  OR membership.admin_option
+                  OR membership.inherit_option
+                  OR NOT membership.set_option
+                  OR pg_has_role(
+                      member_role.oid,
+                      current_user::regrole::oid,
+                      'MEMBER'
+                  )
+              )
             ORDER BY 1, 2
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
+            SELECT member_role.rolname
+            FROM pg_auth_members AS membership
+            JOIN pg_roles AS granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_roles AS member_role
+              ON member_role.oid = membership.member
+            WHERE granted_role.rolname IN ('bursar_client', 'bursar_operator')
+              AND member_role.rolname <> current_user
+            GROUP BY member_role.rolname
+            HAVING count(*) > 1
             """
         )
         assert cursor.fetchall() == []

@@ -237,23 +237,28 @@ def test_transport_failures_without_driver_codes_are_classified(
 
 def test_runtime_close_attempts_every_resource_and_replays_failure() -> None:
     pool = FakePool(FakeConnection(FakeCursor()))
+    operator_pool = FakePool(FakeConnection(FakeCursor()))
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            operator_postgres=operator_pool,
             tenant_id=UUID(TENANT_ID),
             provider_environment="test",
         )
     )
     runtime._owns_pool = True
+    runtime._owns_operator_pool = True
     credit_failure = RuntimeError("credit close failed")
     runtime.credit_store.close = Mock(side_effect=credit_failure)
     runtime.billing_store.close = Mock()
     pool.closeall = Mock()
+    operator_pool.closeall = Mock()
 
     with pytest.raises(RuntimeError, match="credit close failed") as first:
         runtime.close()
     runtime.billing_store.close.assert_called_once()
     pool.closeall.assert_called_once()
+    operator_pool.closeall.assert_called_once()
 
     with pytest.raises(RuntimeError) as second:
         runtime.close()

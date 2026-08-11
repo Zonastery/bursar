@@ -35,6 +35,13 @@ from tests.conftest import TEST_TENANT_ID
 pytestmark = [pytest.mark.integration]
 
 
+def _operator_database_url(database_url: str) -> str:
+    # These repository tests use the disposable migration principal for both
+    # pools; caller-role routing is exercised by test_cli_integration.py.
+    separator = "&" if "?" in database_url else "?"
+    return f"{database_url}{separator}application_name=bursar-operator-test"
+
+
 class RecordingUsageSink:
     def __init__(self) -> None:
         self.initialized = False
@@ -244,6 +251,7 @@ def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pg_database_url,
+            operator_postgres=_operator_database_url(pg_database_url),
             tenant_id=UUID(TEST_TENANT_ID),
             provider_environment="test",
             clickhouse=clickhouse,
@@ -286,6 +294,7 @@ def test_bursar_runtime_start_health_and_no_worker_flush(
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pg_database_url,
+            operator_postgres=_operator_database_url(pg_database_url),
             tenant_id=UUID(TEST_TENANT_ID),
             provider_environment="test",
             clickhouse=clickhouse,
@@ -427,6 +436,7 @@ def test_s3_runtime_archives_received_outbox_payload(
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pg_database_url,
+            operator_postgres=_operator_database_url(pg_database_url),
             tenant_id=UUID(TEST_TENANT_ID),
             provider_environment="test",
             s3=archive,

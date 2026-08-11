@@ -216,6 +216,7 @@ import { createBursarRuntime } from "@zonastery/bursar/node";
 
 const runtime = await createBursarRuntime({
   postgres: process.env.DATABASE_URL!,
+  operatorPostgres: process.env.BURSAR_OPERATOR_DATABASE_URL!,
   tenantId: process.env.BURSAR_TENANT_ID!,
   providerEnvironment: "test",
 });
