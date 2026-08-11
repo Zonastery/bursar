@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	bursar "github.com/Zonastery/bursar/v2"
+	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
 const ProviderName = "mock"

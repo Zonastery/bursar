@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	bursar "github.com/Zonastery/bursar/v2"
-	"github.com/Zonastery/bursar/v2/providers/internal/normalize"
+	bursar "github.com/Zonastery/bursar/golang/v2"
+	"github.com/Zonastery/bursar/golang/v2/providers/internal/normalize"
 	"github.com/shopspring/decimal"
 	stripego "github.com/stripe/stripe-go/v84"
 )
@@ -447,14 +447,14 @@ func (p *Provider) ChargeSavedPaymentMethod(ctx context.Context, params bursar.S
 	metadata := cloneMetadata(params.Metadata)
 	metadata["price_id"] = strings.TrimSpace(params.ProductID)
 	intentParams := &stripego.PaymentIntentCreateParams{
-		Amount:         stripego.Int64(amount),
-		Confirm:        stripego.Bool(true),
-		Currency:       stripego.String(string(price.Currency)),
-		Customer:       stripego.String(strings.TrimSpace(params.CustomerID)),
-		Metadata:       metadata,
-		OffSession:     stripego.Bool(true),
-		PaymentMethod:  stripego.String(strings.TrimSpace(params.PaymentMethodID)),
-		ReturnURL:      optionalString(params.ReturnURL),
+		Amount:        stripego.Int64(amount),
+		Confirm:       stripego.Bool(true),
+		Currency:      stripego.String(string(price.Currency)),
+		Customer:      stripego.String(strings.TrimSpace(params.CustomerID)),
+		Metadata:      metadata,
+		OffSession:    stripego.Bool(true),
+		PaymentMethod: stripego.String(strings.TrimSpace(params.PaymentMethodID)),
+		ReturnURL:     optionalString(params.ReturnURL),
 	}
 	intentParams.SetIdempotencyKey(strings.TrimSpace(params.IdempotencyKey))
 	intent, err := p.client.V1PaymentIntents.Create(ctx, intentParams)

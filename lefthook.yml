@@ -86,11 +86,11 @@ pre-push:
       glob: "src/**/*.ts"
       run: bun run knip
     go-vet:
-      root: "."
+      root: "golang/"
       glob: "{*.go,**/*.go,go.mod,go.sum}"
       run: go vet ./...
     go-test:
-      root: "."
+      root: "golang/"
       glob: "{*.go,**/*.go,go.mod,go.sum}"
       run: go test -race ./...
     erd-docs:

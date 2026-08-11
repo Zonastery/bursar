@@ -54,7 +54,7 @@ def test_generated_json_schema_is_current() -> None:
     outputs = [
         repository / "docs" / "pricing-config.schema.json",
         repository / "javascript" / "src" / "generated" / "pricing-config.schema.json",
-        repository / "internal" / "config" / "pricing-config.schema.json",
+        repository / "golang" / "internal" / "config" / "pricing-config.schema.json",
     ]
     for output in outputs:
         assert json.loads(output.read_text(encoding="utf-8")) == expected

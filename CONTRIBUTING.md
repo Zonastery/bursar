@@ -7,7 +7,7 @@ behaviorally in sync:
   expression engine, PostgreSQL-backed store).
 - `javascript/` — the `@zonastery/bursar` package on npm (TypeScript mirror using
   `decimal.js`).
-- repository root — the `github.com/Zonastery/bursar/v2` Go module (Go mirror
+- `golang/` — the `github.com/Zonastery/bursar/golang/v2` Go package (Go mirror
   using `shopspring/decimal`).
 - `tests/parity/expression_cases.json` (repo root) — a shared fixture loaded by
   **all** SDK test suites so a cross-SDK divergence fails CI.
@@ -39,15 +39,16 @@ bun ci                        # Bun 1.3.14; installs the committed bun.lock
 The published SDK remains ESM for Node.js 22 or newer. Bun manages development
 dependencies and scripts; consumers do not need Bun.
 
-### Go (repository root)
+### Go (`golang/`)
 
 ```bash
+cd golang
 go mod download
 go test ./...
 ```
 
 The Go SDK supports Go 1.25 and 1.26. It is a versioned source module; use
-`github.com/Zonastery/bursar/v2` from applications. It deliberately provides no
+`github.com/Zonastery/bursar/golang/v2` from applications. It deliberately provides no
 CLI or schema migration command: use the Python `bursar` CLI for the shared SQL
 baseline and tenant administration.
 
@@ -93,6 +94,7 @@ bun run typecheck             # typecheck
 ### Go
 
 ```bash
+cd golang
 go test -race ./...
 go vet ./...
 ```
@@ -130,7 +132,8 @@ bun run typecheck
 - **Static analysis**: `go vet`.
 
 ```bash
-gofmt -w $(git ls-files '*.go')
+cd golang
+gofmt -w $(rg --files -g '*.go')
 go vet ./...
 ```
 
@@ -199,9 +202,10 @@ a **protected `release` GitHub environment**:
 - `release-npm` — Bun installs and builds the SDK, then
   `npm publish --access public --provenance` publishes it via npm OIDC.
 
-The Go module path is `github.com/Zonastery/bursar/v2`, so its `/v2` semantic
-import suffix is verified against the shared release tag before either registry
-is touched. No separate Go registry or release CLI is needed.
+The Go SDK lives in `golang/` as the nested module
+`github.com/Zonastery/bursar/golang/v2`. Its `/v2` semantic import suffix is
+verified against the shared release version before either registry is touched.
+No separate Go registry or release CLI is needed.
 
 Splitting the jobs means a failure in one registry does not leave the other
 half-published, and the `release` environment lets maintainers require approval

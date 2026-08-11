@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	bursar "github.com/Zonastery/bursar/v2"
-	"github.com/Zonastery/bursar/v2/providers/internal/normalize"
+	bursar "github.com/Zonastery/bursar/golang/v2"
+	"github.com/Zonastery/bursar/golang/v2/providers/internal/normalize"
 	dodopayments "github.com/dodopayments/dodopayments-go"
 	"github.com/dodopayments/dodopayments-go/option"
 	"github.com/dodopayments/dodopayments-go/shared"

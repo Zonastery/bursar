@@ -6,7 +6,7 @@
 [![PyPI downloads](https://img.shields.io/pypi/dm/bursar.svg)](https://pypi.org/project/bursar/)
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
-[![Go Reference](https://pkg.go.dev/badge/github.com/Zonastery/bursar/v2.svg)](https://pkg.go.dev/github.com/Zonastery/bursar/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Zonastery/bursar/golang/v2.svg)](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2)
 [![License](https://img.shields.io/github/license/Zonastery/bursar.svg)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
 
 <p align="center">
@@ -58,7 +58,7 @@ Go applications use the same Python-owned migration CLI and install the
 versioned SDK module separately:
 
 ```bash
-go get github.com/Zonastery/bursar/v2
+go get github.com/Zonastery/bursar/golang/v2
 ```
 
 Create a tenant, then build the facade:
@@ -132,7 +132,7 @@ import (
 	"log"
 	"os"
 
-	bursar "github.com/Zonastery/bursar/v2"
+	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
 func main() {
@@ -199,7 +199,7 @@ The full documentation — concepts, guides, CLI, and API references — is at
 
 - [Python package](python/README.md) — `bursar` on PyPI
 - [TypeScript and JavaScript package](javascript/README.md) — `@zonastery/bursar` on npm
-- [Go package](docs/docs/go-api/index.mdx) — `github.com/Zonastery/bursar/v2` on pkg.go.dev
+- [Go package](docs/docs/go-api/index.mdx) — `github.com/Zonastery/bursar/golang/v2` on pkg.go.dev
 - [Build a prepaid credit system for AI SaaS](https://zonastery.github.io/bursar/docs/guides/ai-saas-credits)
 - [Changelog](CHANGELOG.md)
 - [Citation metadata](CITATION.cff)

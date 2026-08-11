@@ -83,7 +83,7 @@ test-js:                             ## JS tests (mock + postgres via DATABASE_U
 	cd javascript && bun run test
 
 test-go:                             ## Go tests (mock + postgres via DATABASE_URL/testcontainers)
-	go test -race ./...
+	cd golang && go test -race ./...
 
 go-format:                           ## Verify Go source is gofmt-formatted
 	files="$$(git ls-files '*.go')"
@@ -92,4 +92,4 @@ go-format:                           ## Verify Go source is gofmt-formatted
 	fi
 
 go-vet:                              ## Run Go's standard static analysis
-	go vet ./...
+	cd golang && go vet ./...

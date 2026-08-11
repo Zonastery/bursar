@@ -190,7 +190,9 @@ type billingStoreWithoutLifecycle struct {
 	completed   int
 }
 
-func (s *billingStoreWithoutLifecycle) ProviderEnvironment() ProviderEnvironment { return s.environment }
+func (s *billingStoreWithoutLifecycle) ProviderEnvironment() ProviderEnvironment {
+	return s.environment
+}
 
 func (*billingStoreWithoutLifecycle) ClaimBillingEvent(context.Context, BillingEvent, map[string]any) (BillingEventClaim, error) {
 	return BillingEventClaim{State: BillingEventClaimed, ClaimToken: "claim-token"}, nil

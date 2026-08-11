@@ -41,7 +41,7 @@ const structuredData = {
       sameAs: [
         "https://pypi.org/project/bursar/",
         "https://www.npmjs.com/package/@zonastery/bursar",
-        "https://pkg.go.dev/github.com/Zonastery/bursar/v2",
+        "https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2",
       ],
     },
   ],
@@ -334,7 +334,7 @@ const config: Config = {
             },
             {
               label: "Go",
-              href: "https://pkg.go.dev/github.com/Zonastery/bursar/v2",
+              href: "https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2",
             },
             { label: "Agent skill", to: "/docs/agent-skills" },
           ],

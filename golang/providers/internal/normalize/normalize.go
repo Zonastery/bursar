@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	bursar "github.com/Zonastery/bursar/v2"
+	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
 // Event builds a normalized event from a provider-authenticated payload. The

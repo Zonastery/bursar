@@ -80,7 +80,7 @@ Go applications install the versioned module. The Python package still owns
 the migration CLI, so every SDK uses the same ordered SQL baseline:
 
 ```bash title="Terminal"
-go get github.com/Zonastery/bursar/v2
+go get github.com/Zonastery/bursar/golang/v2
 ```
 
 `bursar migrate` applies the ordered SQL baseline and records each file checksum. Re-running the command is a no-op. The command fails if an applied migration file has changed.
@@ -199,7 +199,7 @@ import (
 	"log"
 	"os"
 
-	bursar "github.com/Zonastery/bursar/v2"
+	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
 func main() {

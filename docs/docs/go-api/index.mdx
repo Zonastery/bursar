@@ -9,7 +9,7 @@ description: Use Bursar from Go with exact decimal amounts, context-aware operat
 Install the versioned Go module:
 
 ```bash
-go get github.com/Zonastery/bursar/v2
+go get github.com/Zonastery/bursar/golang/v2
 ```
 
 The Go SDK is an idiomatic mirror of Bursar's Python and TypeScript contracts.
@@ -31,7 +31,7 @@ import (
 	"log"
 	"os"
 
-	bursar "github.com/Zonastery/bursar/v2"
+	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
 func main() {
@@ -74,7 +74,7 @@ package main
 import (
 	"fmt"
 
-	bursar "github.com/Zonastery/bursar/v2"
+	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
 func main() {
@@ -114,5 +114,5 @@ router without a Next.js-style adapter.
 
 Follow the [quickstart](../quickstart.mdx) for the shared migration and tenant
 setup, then use the generated Go API on
-[pkg.go.dev](https://pkg.go.dev/github.com/Zonastery/bursar/v2) for the exact
+[pkg.go.dev](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2) for the exact
 facade, store, billing, and commerce signatures.
