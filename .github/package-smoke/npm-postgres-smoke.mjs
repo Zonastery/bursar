@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { CreditsService, PostgresStore } from "@zonastery/bursar";
+import { PostgresStore } from "@zonastery/bursar";
 import { Decimal } from "decimal.js";
 
 const tenantId = "00000000-0000-4000-8000-000000000201";
@@ -12,18 +12,17 @@ const store = new PostgresStore({
 });
 
 try {
-  const service = new CreditsService(store);
-  assert.equal((await service.getActiveCatalog())?.version, 1);
-  const first = await service.addCredits(subjectId, new Decimal(11), {
+  assert.equal((await store.getActiveCatalog())?.version, 1);
+  const first = await store.addCredits(subjectId, new Decimal(11), {
     type: "purchase",
     idempotencyKey: "package-smoke:npm:grant",
   });
-  const replay = await service.addCredits(subjectId, new Decimal(11), {
+  const replay = await store.addCredits(subjectId, new Decimal(11), {
     type: "purchase",
     idempotencyKey: "package-smoke:npm:grant",
   });
   assert.equal(replay.entryId, first.entryId);
-  assert.equal((await service.getBalance(subjectId)).balance.toString(), "11");
+  assert.equal((await store.getBalance(subjectId)).balance.toString(), "11");
 } finally {
   await store.close();
 }

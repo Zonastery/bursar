@@ -12,7 +12,7 @@ endif
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: help test test-python test-js test-pg-build test-pg-up test-pg-down test-integration
+.PHONY: help test test-python test-js test-go go-format go-vet test-pg-build test-pg-up test-pg-down test-integration
 .DEFAULT_GOAL := help
 
 TEST_PG_NAME ?= bursar-test-pg
@@ -38,7 +38,7 @@ install-hooks:                       ## Install lefthook git hooks (requires Bun
 		exit 1; \
 	fi
 
-test: test-integration               ## All tests (Python + JS, incl. real-Postgres integration)
+test: test-integration               ## All tests (Python + JS + Go, incl. real-Postgres integration)
 
 test-pg-build:                      ## Build PostgreSQL with Bursar's required extensions
 	docker build -t $(TEST_PG_IMAGE) $(TEST_PG_BUILD_CONTEXT)
@@ -61,12 +61,13 @@ test-pg-up: test-pg-build           ## Start an isolated Postgres database for i
 test-pg-down:                       ## Stop and remove the isolated Postgres test database
 	docker rm -f $(TEST_PG_NAME) >/dev/null 2>&1 || true
 
-test-integration:                  ## Run Python and JS tests against an isolated Postgres database
+test-integration:                  ## Run Python, JS, and Go tests against an isolated Postgres database
 	set -euo pipefail
 	$(MAKE) test-pg-up
 	trap '$(MAKE) test-pg-down' EXIT
 	BURSAR_ALLOW_DATABASE_RESET=1 DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-python
 	BURSAR_ALLOW_DATABASE_RESET=1 DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-js
+	BURSAR_ALLOW_DATABASE_RESET=1 DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-go
 
 # Both suites resolve a real Postgres via DATABASE_URL (CI's service
 # container / an already-running instance) or, failing that, via
@@ -80,3 +81,15 @@ test-python:                         ## Python tests (mock + postgres via DATABA
 
 test-js:                             ## JS tests (mock + postgres via DATABASE_URL/testcontainers)
 	cd javascript && bun run test
+
+test-go:                             ## Go tests (mock + postgres via DATABASE_URL/testcontainers)
+	go test -race ./...
+
+go-format:                           ## Verify Go source is gofmt-formatted
+	files="$$(git ls-files '*.go')"
+	if [ -n "$$files" ]; then
+	  test -z "$$(gofmt -l $$files)"
+	fi
+
+go-vet:                              ## Run Go's standard static analysis
+	go vet ./...

@@ -1,14 +1,16 @@
 # Contributing
 
-bursar is a **monorepo** with two independently published SDKs that must stay
+bursar is a **monorepo** with three SDKs that must stay
 behaviorally in sync:
 
 - `python/` — the `bursar` package on PyPI (Pydantic models, `ast`-based safe
   expression engine, PostgreSQL-backed store).
 - `javascript/` — the `@zonastery/bursar` package on npm (TypeScript mirror using
   `decimal.js`).
+- repository root — the `github.com/Zonastery/bursar/v2` Go module (Go mirror
+  using `shopspring/decimal`).
 - `tests/parity/expression_cases.json` (repo root) — a shared fixture loaded by
-  **both** SDK test suites so a cross-SDK divergence fails CI.
+  **all** SDK test suites so a cross-SDK divergence fails CI.
 - `docs/` — the Docusaurus + Sphinx/TypeDoc documentation site.
 
 The SQL migrations bundled in `python/src/bursar/sql/*.sql` are the single source
@@ -36,6 +38,18 @@ bun ci                        # Bun 1.3.14; installs the committed bun.lock
 
 The published SDK remains ESM for Node.js 22 or newer. Bun manages development
 dependencies and scripts; consumers do not need Bun.
+
+### Go (repository root)
+
+```bash
+go mod download
+go test ./...
+```
+
+The Go SDK supports Go 1.25 and 1.26. It is a versioned source module; use
+`github.com/Zonastery/bursar/v2` from applications. It deliberately provides no
+CLI or schema migration command: use the Python `bursar` CLI for the shared SQL
+baseline and tenant administration.
 
 ## Running Tests
 
@@ -76,6 +90,13 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar bun run test
 bun run typecheck             # typecheck
 ```
 
+### Go
+
+```bash
+go test -race ./...
+go vet ./...
+```
+
 ## Code Style
 
 ### Python
@@ -103,16 +124,27 @@ bun run lint
 bun run typecheck
 ```
 
+### Go
+
+- **Formatter**: `gofmt`.
+- **Static analysis**: `go vet`.
+
+```bash
+gofmt -w $(git ls-files '*.go')
+go vet ./...
+```
+
 ### Git hooks (lefthook)
 
-`lefthook.yml` (repo root) wires both SDKs:
+`lefthook.yml` (repo root) wires all SDKs:
 
-- **pre-commit** — check-only `ruff`, Prettier, ESLint, and SQLFluff runs on
+- **pre-commit** — check-only `ruff`, Prettier, ESLint, `gofmt`, and SQLFluff runs on
   staged files, plus trailing-whitespace and merge-conflict-marker checks.
   Failed checks print the corresponding fix command so changes stay explicit
   and reviewable before they are re-staged.
-- **pre-push** (parallel) — `pyright` + `pytest` for Python and
-  `tsc --noEmit` + `vitest run` + `knip` for JavaScript.
+- **pre-push** (parallel) — `pyright` + `pytest` for Python,
+  `tsc --noEmit` + `vitest run` + `knip` for JavaScript, and
+  `go vet` + `go test -race` for Go.
 
 Hooks are convenience only and are bypassable (`--no-verify`); **CI is the
 authoritative gate.** Install them with `lefthook install`.
@@ -121,14 +153,14 @@ authoritative gate.** Install them with `lefthook install`.
 
 1. Branch from `main`.
 2. Make changes with descriptive commits (conventional-changelog style).
-3. **Keep the two SDKs in sync.** Any behavior change to one SDK must be
-   mirrored in the other, and any new/changed expression or pricing behavior
+3. **Keep all SDKs in sync.** Any behavior change to one SDK must be
+   mirrored in the others, and any new/changed expression or pricing behavior
    must have a matching case in `tests/parity/expression_cases.json` that passes
-   in both. Do not introduce a divergence.
+   in every SDK. Do not introduce a divergence.
 4. Ensure all tests pass and there are no new type errors.
 5. Open a PR against `main`.
-6. CI runs lint → typecheck → test (Python 3.12–3.13, Node 22/24, both
-   against PostgreSQL 17 + pg_partman 5 + pg_jsonschema 0.3) and the
+6. CI runs lint → typecheck → test (Python 3.12–3.13, Node 22/24, Go 1.25–1.26,
+   all against PostgreSQL 16/17 + pg_partman 5 + pg_jsonschema 0.3) and the
    cross-SDK parity gate.
 
 ## Adding Storage Backends (Python)
@@ -150,8 +182,9 @@ Implement the `CreditStore` ABC in `python/src/bursar/credits/`:
 
 ## Releasing
 
-Releases are tag-triggered. Both packages are published from the same tag via
-**OIDC trusted publishing** (no long-lived tokens):
+Releases are tag-triggered. The Python and npm packages are published from the
+same tag via **OIDC trusted publishing** (no long-lived tokens); the Go module
+is distributed directly from that immutable source tag:
 
 ```bash
 # tag and push (version must match python/pyproject.toml and javascript/package.json)
@@ -165,6 +198,10 @@ a **protected `release` GitHub environment**:
 - `release-pypi` — `uv build && uv publish` to PyPI via OIDC.
 - `release-npm` — Bun installs and builds the SDK, then
   `npm publish --access public --provenance` publishes it via npm OIDC.
+
+The Go module path is `github.com/Zonastery/bursar/v2`, so its `/v2` semantic
+import suffix is verified against the shared release tag before either registry
+is touched. No separate Go registry or release CLI is needed.
 
 Splitting the jobs means a failure in one registry does not leave the other
 half-published, and the `release` environment lets maintainers require approval

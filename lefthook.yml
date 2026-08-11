@@ -39,6 +39,17 @@ pre-commit:
       run: |
         bunx --no-install eslint {staged_files} \
           || { echo "↳ run: bunx --no-install eslint --fix <files>  (then review & re-stage)" >&2; exit 1; }
+    go-format:
+      root: "."
+      glob: "**/*.go"
+      run: |
+        unformatted="$(gofmt -l {staged_files})"
+        if [ -n "$unformatted" ]; then
+          echo "Go source is not gofmt-formatted:" >&2
+          echo "$unformatted" >&2
+          echo "↳ run: gofmt -w <files>  (then review & re-stage)" >&2
+          exit 1
+        fi
     trailing-whitespace:
       run: git diff --cached --name-only --diff-filter=ACM | xargs -r git --no-pager diff --check --cached --
     merge-conflicts:
@@ -74,6 +85,14 @@ pre-push:
       root: "javascript/"
       glob: "src/**/*.ts"
       run: bun run knip
+    go-vet:
+      root: "."
+      glob: "{*.go,**/*.go,go.mod,go.sum}"
+      run: go vet ./...
+    go-test:
+      root: "."
+      glob: "{*.go,**/*.go,go.mod,go.sum}"
+      run: go test -race ./...
     erd-docs:
       root: "."
       glob: "{python/src/bursar/sql/*.sql,docs/scripts/generate_erd_docs.sh,docs/package.json,docs/package-lock.json}"

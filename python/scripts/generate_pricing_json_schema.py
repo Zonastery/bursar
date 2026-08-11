@@ -12,6 +12,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _ROOT.parent
 OUTPUT = _REPO_ROOT / "docs" / "pricing-config.schema.json"
 JAVASCRIPT_OUTPUT = _REPO_ROOT / "javascript" / "src" / "generated" / "pricing-config.schema.json"
+GO_OUTPUT = _REPO_ROOT / "internal" / "config" / "pricing-config.schema.json"
 SQL_OUTPUT = _ROOT / "src" / "bursar" / "sql" / "001_schema_and_types.sql"
 SQL_SCHEMA_BEGIN = "-- BEGIN GENERATED CATALOG SHAPE SCHEMA"
 SQL_SCHEMA_END = "-- END GENERATED CATALOG SHAPE SCHEMA"
@@ -83,6 +84,8 @@ def main() -> None:
     OUTPUT.write_text(rendered, encoding="utf-8")
     JAVASCRIPT_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     JAVASCRIPT_OUTPUT.write_text(rendered, encoding="utf-8")
+    GO_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    GO_OUTPUT.write_text(rendered, encoding="utf-8")
     replace_sql_shape_schema(schema)
     print(f"Wrote {OUTPUT}")
 

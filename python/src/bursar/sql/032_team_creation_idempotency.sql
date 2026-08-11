@@ -16,7 +16,8 @@ ADD COLUMN creation_request_digest bytea;
 ALTER TABLE bursar.credit_teams DISABLE ROW LEVEL SECURITY;
 
 UPDATE bursar.credit_teams
-SET creation_idempotency_key = 'legacy:' || id::text,
+SET
+    creation_idempotency_key = 'legacy:' || id::text,
     creation_request_digest = extensions.digest(
         convert_to(
             jsonb_build_object('legacy_team_id', id::text)::text,

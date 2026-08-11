@@ -5,6 +5,7 @@ import {
   type S3ArchiveClient,
   type S3PutObjectOptions,
 } from "@zonastery/bursar/node";
+import { PROVIDER_ENVIRONMENTS, noopLogger } from "@zonastery/bursar/providers";
 
 const client: S3ArchiveClient = {
   async send(_command: unknown) {
@@ -20,3 +21,5 @@ new S3BillingArchive({ bucket: "billing-archive", client, putObject });
 void Bursar;
 void PricingEngine;
 void BursarRuntime;
+void PROVIDER_ENVIRONMENTS;
+void noopLogger;

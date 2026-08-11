@@ -133,6 +133,12 @@ const sidebars: SidebarsConfig = {
             },
           ],
         },
+        {
+          type: "category",
+          label: "Go API",
+          link: { type: "doc", id: "go-api/index" },
+          items: [],
+        },
       ],
     },
   ],

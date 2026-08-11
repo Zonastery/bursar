@@ -1,0 +1,118 @@
+---
+title: Go API
+sidebar_label: Go API
+description: Use Bursar from Go with exact decimal amounts, context-aware operations, and the shared PostgreSQL contract.
+---
+
+# Go API
+
+Install the versioned Go module:
+
+```bash
+go get github.com/Zonastery/bursar/v2
+```
+
+The Go SDK is an idiomatic mirror of Bursar's Python and TypeScript contracts.
+Its public operations accept `context.Context` first and return `(T, error)`.
+It does not include a migration or administrative CLI: use the Python `bursar`
+CLI to apply the shared PostgreSQL baseline and create tenants.
+
+## Construct the facade
+
+Create one tenant-bound store, then attach it to the facade. `TenantID` is a
+required UUID-formatted string; the constructor validates it before opening a
+database connection.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	bursar "github.com/Zonastery/bursar/v2"
+)
+
+func main() {
+	ctx := context.Background()
+
+	store, err := bursar.NewPostgresStore(ctx, os.Getenv("DATABASE_URL"), bursar.PostgresStoreOptions{
+		TenantID:            os.Getenv("BURSAR_TENANT_ID"),
+		ProviderEnvironment: bursar.ProviderEnvironmentTest,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
+
+	sdk, err := bursar.New(bursar.Options{CreditStore: store})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := sdk.LoadCatalog(ctx); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+The SDK has no migration or administrative CLI. Before this code runs, apply
+the shared SQL baseline and create the tenant with the Python CLI as shown in
+the [quickstart](../quickstart.mdx).
+
+## Exact amounts
+
+All credits and prices use `bursar.Amount`, an alias of
+[`shopspring/decimal`](https://pkg.go.dev/github.com/shopspring/decimal)'s
+exact decimal type. Do not pass `float64` values through application billing
+paths. Parse external input as a canonical base-10 string and preserve the
+result as an amount:
+
+```go
+package main
+
+import (
+	"fmt"
+
+	bursar "github.com/Zonastery/bursar/v2"
+)
+
+func main() {
+	amount, err := bursar.NewAmount("25.125")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(bursar.QuantizeMoney(amount).StringFixed(bursar.MoneyDecimalPlaces)) // 25.125000
+}
+```
+
+`QuantizeMoney` applies Bursar's six-decimal, half-up accounting rule. Use
+`MustAmount` only for static program constants or tests; parse runtime values
+with `NewAmount` so invalid input returns an error.
+
+## Errors
+
+SDK failures are typed `*bursar.BursarError` values. Use Go's normal
+`errors.As`/`errors.Is` flow or `bursar.AsBursarError`; the stable error code,
+category, retryability, and indeterminate-write flag let HTTP or RPC adapters
+make safe decisions without inspecting a message string.
+
+```go
+if classified, ok := bursar.AsBursarError(err); ok && classified.Retryable {
+	// Retry mutations only with the original idempotency key.
+}
+```
+
+## PostgreSQL and providers
+
+The SDK uses Bursar's existing PostgreSQL RPC contract and binds a tenant to
+each database transaction. It intentionally does not ship SQL migrations or
+framework-specific web handlers. Provider integrations consume raw webhook
+bytes and headers, so applications can use standard `net/http` or their own
+router without a Next.js-style adapter.
+
+Follow the [quickstart](../quickstart.mdx) for the shared migration and tenant
+setup, then use the generated Go API on
+[pkg.go.dev](https://pkg.go.dev/github.com/Zonastery/bursar/v2) for the exact
+facade, store, billing, and commerce signatures.

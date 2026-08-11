@@ -6,6 +6,7 @@
 [![PyPI downloads](https://img.shields.io/pypi/dm/bursar.svg)](https://pypi.org/project/bursar/)
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Zonastery/bursar/v2.svg)](https://pkg.go.dev/github.com/Zonastery/bursar/v2)
 [![License](https://img.shields.io/github/license/Zonastery/bursar.svg)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
 
 <p align="center">
@@ -20,8 +21,8 @@
 Bursar is Zonastery's open-source credit-ledger and billing SDK for AI SaaS
 platforms. It meters usage, prices operations, manages balances, and bills
 customers from one canonical PostgreSQL schema and one versioned configuration
-document. The Python and TypeScript SDKs share both, so they produce identical
-accounting and identical bills.
+document. The Python, TypeScript, and Go SDKs share both, so they produce
+identical accounting and identical bills.
 
 ## Highlights
 
@@ -35,13 +36,13 @@ accounting and identical bills.
   idempotency keys, expiry, and strict-prepaid or overdraft policies.
 - **Safe expressions** — an AST-based evaluator with a strict allowlist: no
   `eval`, no arbitrary code execution.
-- **Identical behavior in Python and JavaScript** — same config, same
+- **Identical behavior in Python, JavaScript, and Go** — same config, same
   rounding, same results.
 
 ## Quick start
 
-Requirements: Python 3.12 or 3.13, or Node.js 22+, PostgreSQL 16+, pg_partman 5.x,
-and pg_jsonschema 0.3+ available to the database migration role.
+Requirements: Python 3.12 or 3.13, Node.js 22+, or Go 1.25+; PostgreSQL 16+,
+pg_partman 5.x, and pg_jsonschema 0.3+ available to the database migration role.
 
 ```bash
 python -m pip install "bursar[postgres]"
@@ -52,6 +53,13 @@ bursar migrate
 `bursar migrate` applies the ordered SQL baseline and records checksums, so it
 is safe to re-run. Run it as a dedicated migration principal, not with the
 application's runtime credentials.
+
+Go applications use the same Python-owned migration CLI and install the
+versioned SDK module separately:
+
+```bash
+go get github.com/Zonastery/bursar/v2
+```
 
 Create a tenant, then build the facade:
 
@@ -116,6 +124,38 @@ const charged = await bursar.credits.deductCredits(userId, "25", {
 const entry = await bursar.credits.getLedgerEntry(userId, charged.entryId);
 ```
 
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	bursar "github.com/Zonastery/bursar/v2"
+)
+
+func main() {
+	ctx := context.Background()
+	store, err := bursar.NewPostgresStore(ctx, os.Getenv("DATABASE_URL"), bursar.PostgresStoreOptions{
+		TenantID:            os.Getenv("BURSAR_TENANT_ID"),
+		ProviderEnvironment: bursar.ProviderEnvironmentTest,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
+
+	sdk, err := bursar.New(bursar.Options{CreditStore: store})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := sdk.LoadCatalog(ctx); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
 Pricing is one strict, versioned document. Publish and activate it through the
 facade:
 
@@ -159,6 +199,7 @@ The full documentation — concepts, guides, CLI, and API references — is at
 
 - [Python package](python/README.md) — `bursar` on PyPI
 - [TypeScript and JavaScript package](javascript/README.md) — `@zonastery/bursar` on npm
+- [Go package](docs/docs/go-api/index.mdx) — `github.com/Zonastery/bursar/v2` on pkg.go.dev
 - [Build a prepaid credit system for AI SaaS](https://zonastery.github.io/bursar/docs/guides/ai-saas-credits)
 - [Changelog](CHANGELOG.md)
 - [Citation metadata](CITATION.cff)

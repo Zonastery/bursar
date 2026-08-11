@@ -17,9 +17,11 @@ The baseline requires PostgreSQL 16+, pg_partman 5.x, and pg_jsonschema 0.3+.
 Both server extension packages must be available before migration; the
 migration installs them when absent in the expected `partman` and `extensions`
 schemas and fails loudly when their contracts are unavailable. Bursar does not
-rewrite ambient ACLs for either potentially shared extension schema. Runtime
-roles receive no `partman` schema access and reach pg_partman only through
-locked-search-path Bursar operator wrappers. `pg_cron`, S3, and ClickHouse
+rewrite ambient ACLs for either potentially shared extension schema. Host
+runtime roles receive no `partman` schema access. A dedicated NOLOGIN
+`bursar_partition_runtime` owns only Bursar's payload partitions and private
+pg_partman boundary; `bursar_operator_runtime` owns the caller-facing operator
+wrappers without inheriting that DDL authority. `pg_cron`, S3, and ClickHouse
 remain optional.
 
 ## File boundaries

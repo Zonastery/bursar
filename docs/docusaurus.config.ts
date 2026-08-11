@@ -7,7 +7,7 @@ const siteUrl = "https://zonastery.github.io/bursar/";
 const siteTitle = "Bursar AI Credits";
 const corpusTitle = "Bursar — Open-source AI credits and usage billing";
 const siteDescription =
-  "PostgreSQL-native usage metering, prepaid credits, plans, and reserve-settle billing for AI SaaS, available as Python and TypeScript SDKs.";
+  "PostgreSQL-native usage metering, prepaid credits, plans, and reserve-settle billing for AI SaaS, available as Python, TypeScript, and Go SDKs.";
 
 const structuredData = {
   "@context": "https://schema.org",
@@ -30,12 +30,18 @@ const structuredData = {
       url: siteUrl,
       codeRepository: repositoryUrl,
       license: `${repositoryUrl}/blob/main/LICENSE`,
-      programmingLanguage: ["Python", "TypeScript", "SQL"],
-      runtimePlatform: ["Python 3.12–3.13", "Node.js 22+", "PostgreSQL 16+"],
+      programmingLanguage: ["Python", "TypeScript", "Go", "SQL"],
+      runtimePlatform: [
+        "Python 3.12–3.13",
+        "Node.js 22+",
+        "Go 1.25+",
+        "PostgreSQL 16+",
+      ],
       isAccessibleForFree: true,
       sameAs: [
         "https://pypi.org/project/bursar/",
         "https://www.npmjs.com/package/@zonastery/bursar",
+        "https://pkg.go.dev/github.com/Zonastery/bursar/v2",
       ],
     },
   ],
@@ -132,6 +138,7 @@ const config: Config = {
           "cli.mdx",
           "python-api/**/*.mdx",
           "javascript-api/**/*.mdx",
+          "go-api/**/*.mdx",
         ],
         includeUnmatchedLast: false,
         rootContent:
@@ -206,7 +213,7 @@ const config: Config = {
       {
         name: "keywords",
         content:
-          "AI SaaS billing, AI credits, usage-based billing, usage metering, prepaid credits, credit ledger, LLM billing, PostgreSQL, Python SDK, TypeScript SDK",
+          "AI SaaS billing, AI credits, usage-based billing, usage metering, prepaid credits, credit ledger, LLM billing, PostgreSQL, Python SDK, TypeScript SDK, Go SDK",
       },
       { name: "twitter:card", content: "summary_large_image" },
       { property: "og:type", content: "website" },
@@ -260,6 +267,7 @@ const config: Config = {
           items: [
             { label: "Python", to: "/docs/python-api" },
             { label: "TypeScript", to: "/docs/javascript-api" },
+            { label: "Go", to: "/docs/go-api" },
             { label: "Command-line interface", to: "/docs/cli" },
             { label: "Database schema", to: "/docs/concepts/database-schema" },
           ],
@@ -295,6 +303,7 @@ const config: Config = {
           items: [
             { label: "Python API", to: "/docs/python-api" },
             { label: "TypeScript API", to: "/docs/javascript-api" },
+            { label: "Go API", to: "/docs/go-api" },
             { label: "CLI", to: "/docs/cli" },
             { label: "Database schema", to: "/docs/concepts/database-schema" },
           ],
@@ -323,6 +332,10 @@ const config: Config = {
               label: "npm",
               href: "https://www.npmjs.com/package/@zonastery/bursar",
             },
+            {
+              label: "Go",
+              href: "https://pkg.go.dev/github.com/Zonastery/bursar/v2",
+            },
             { label: "Agent skill", to: "/docs/agent-skills" },
           ],
         },
@@ -332,7 +345,7 @@ const config: Config = {
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
-      additionalLanguages: ["python", "bash", "json", "yaml", "sql"],
+      additionalLanguages: ["go", "python", "bash", "json", "yaml", "sql"],
     },
   } satisfies Preset.ThemeConfig,
 };

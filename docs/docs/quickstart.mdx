@@ -25,6 +25,7 @@ Prepare these dependencies before continuing:
 - A PostgreSQL migration-owner connection and permission to create two
   least-privilege login roles
 - Node.js 22 or newer if you will use the TypeScript example
+- Go 1.25 or newer if you will use the Go example
 
 :::caution Use a development database
 
@@ -73,6 +74,13 @@ TypeScript applications also install the Node.js package:
 
 ```bash title="Terminal"
 npm install @zonastery/bursar pg
+```
+
+Go applications install the versioned module. The Python package still owns
+the migration CLI, so every SDK uses the same ordered SQL baseline:
+
+```bash title="Terminal"
+go get github.com/Zonastery/bursar/v2
 ```
 
 `bursar migrate` applies the ordered SQL baseline and records each file checksum. Re-running the command is a no-op. The command fails if an applied migration file has changed.
@@ -181,6 +189,42 @@ const bursar = new Bursar({ creditStore: store });
 ```
 
   </TabItem>
+  <TabItem value="go" label="Go">
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	bursar "github.com/Zonastery/bursar/v2"
+)
+
+func main() {
+	ctx := context.Background()
+
+	store, err := bursar.NewPostgresStore(ctx, os.Getenv("DATABASE_URL"), bursar.PostgresStoreOptions{
+		TenantID:            os.Getenv("BURSAR_TENANT_ID"),
+		ProviderEnvironment: bursar.ProviderEnvironmentTest,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
+
+	sdk, err := bursar.New(bursar.Options{CreditStore: store})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := sdk.LoadCatalog(ctx); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+  </TabItem>
 </Tabs>
 
 Keep the store tenant-bound for its full lifetime. Never set a session-scoped tenant value on a shared connection pool.
@@ -223,6 +267,28 @@ const grant = await bursar.credits.addCredits(accountId, "100.000000", {
   idempotencyKey: "purchase:quickstart:11111111",
 });
 console.log(grant.entryId, grant.newBalance);
+```
+
+  </TabItem>
+  <TabItem value="go" label="Go">
+
+```go
+accountID := "11111111-1111-4111-8111-111111111111"
+if _, err := sdk.Accounts.OnAccountCreated(ctx, bursar.AccountCreatedInput{
+	AccountID: accountID,
+	EventKey:  "signup:11111111",
+}); err != nil {
+	log.Fatal(err)
+}
+
+grant, err := sdk.Credits.AddCredits(ctx, accountID, bursar.MustAmount("100.000000"), bursar.AddCreditsOptions{
+	Type:           "purchase",
+	IdempotencyKey: "purchase:quickstart:11111111",
+})
+if err != nil {
+	log.Fatal(err)
+}
+log.Println(grant.EntryID, grant.NewBalance)
 ```
 
   </TabItem>
@@ -269,6 +335,36 @@ console.log(charge.amount, charge.balanceAfter, charge.entryId);
 ```
 
   </TabItem>
+  <TabItem value="go" label="Go">
+
+```go
+engine, err := sdk.Catalog.Engine()
+if err != nil {
+	log.Fatal(err)
+}
+quote, err := engine.Calculate(bursar.UsageMetrics{
+	Operation:  "completion",
+	Measures:   map[string]bursar.Amount{"input_tokens": bursar.MustAmount("800")},
+	Dimensions: map[string]any{"model": "example-model"},
+})
+if err != nil {
+	log.Fatal(err)
+}
+charge, err := sdk.Credits.Deduct(ctx, accountID, quote.Total, bursar.DeductWithAllowanceOptions{
+	Operation:      "completion",
+	IdempotencyKey: "request:quickstart:0195",
+	OperationUsageOptions: bursar.OperationUsageOptions{
+		Measures:   map[string]bursar.Amount{"input_tokens": bursar.MustAmount("800")},
+		Dimensions: map[string]any{"model": "example-model"},
+	},
+})
+if err != nil {
+	log.Fatal(err)
+}
+log.Println(charge.Amount, charge.EntryID)
+```
+
+  </TabItem>
 </Tabs>
 
 Call `deduct` again with the same idempotency key and payload. Bursar returns the original result without adding another ledger entry. Reusing the key with a different payload returns a conflict.
@@ -299,6 +395,25 @@ const page = await bursar.credits.listLedgerEntries(accountId, { limit: 10 });
 console.log(balance.balance);
 for (const entry of page.items) {
   console.log(entry.entryType, entry.amount, entry.balanceAfter);
+}
+```
+
+  </TabItem>
+  <TabItem value="go" label="Go">
+
+```go
+balance, err := sdk.Credits.GetBalance(ctx, accountID)
+if err != nil {
+	log.Fatal(err)
+}
+page, err := sdk.Credits.ListLedgerEntries(ctx, accountID, bursar.ListLedgerEntriesOptions{Limit: 10})
+if err != nil {
+	log.Fatal(err)
+}
+
+log.Println(balance.Balance)
+for _, entry := range page.Items {
+	log.Println(entry.EntryType, entry.Amount)
 }
 ```
 

@@ -7,6 +7,10 @@ on:
         "docs/**",
         "python/**",
         "javascript/**",
+        "**/*.go",
+        "go.mod",
+        "go.sum",
+        "internal/config/**",
         "samples/**",
         ".github/workflows/docs.yml",
       ]

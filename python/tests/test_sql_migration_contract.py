@@ -41,6 +41,16 @@ def test_checkout_rpc_owner_transfer_uses_a_transaction_scoped_schema_grant() ->
     assert migration_sql.count("GRANT CREATE ON SCHEMA bursar TO bursar_runtime;") == 1
 
 
+def test_operator_function_comments_precede_ownership_transfer() -> None:
+    migration_sql = (SQL_DIR / "033_operator_runtime_role.sql").read_text(encoding="utf-8")
+
+    comment_offset = migration_sql.index("COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(")
+    owner_offset = migration_sql.index("'bursar.run_storage_partition_maintenance(text,timestamptz)'")
+    transfer_offset = migration_sql.index("'ALTER FUNCTION %s OWNER TO bursar_operator_runtime'")
+
+    assert comment_offset < owner_offset < transfer_offset
+
+
 def test_migration_ledger_exactly_matches_the_greenfield_baseline(
     pg_database_url: str,
 ) -> None:
@@ -67,8 +77,15 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
     # signature rather than requiring the intentionally dropped predecessor.
     checkout_signature_v1 = "bursar.create_checkout_intent(uuid,text,text,text,bytea,timestamptz,text,text,text)"
     checkout_signature_v2 = "bursar.create_checkout_intent(uuid,text,text,text,text,bytea,timestamptz,text,text,text)"
+    team_signature_v1 = "bursar.create_team(uuid,text,numeric)"
+    team_signature_v2 = "bursar.create_team(uuid,text,text,numeric)"
     client_signatures = sorted(
-        checkout_signature_v2 if signature == checkout_signature_v1 else signature for signature in client_signatures
+        checkout_signature_v2
+        if signature == checkout_signature_v1
+        else team_signature_v2
+        if signature == team_signature_v1
+        else signature
+        for signature in client_signatures
     )
     assert client_signatures
 

@@ -1183,6 +1183,7 @@ def test_team_creation_conflicts_have_no_persistent_side_effects(store: Postgres
     assert _team_creation_snapshot(store.database_url, idempotency_key) == before
 
 
+@pytest.mark.concurrency
 def test_concurrent_team_creation_returns_one_logical_team(store: PostgresStore) -> None:
     CreditsService(store=store).publish_and_activate_catalog(CONFIG)
     idempotency_key = "team:create:concurrent"

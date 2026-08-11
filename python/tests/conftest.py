@@ -162,6 +162,10 @@ def pg_database_url(migrated_pg_database_url: str) -> Iterator[str]:
     """Yield a clean real-Postgres database for one integration test."""
     _reset_bursar_database(migrated_pg_database_url)
     with psycopg2.connect(migrated_pg_database_url) as connection, connection.cursor() as cursor:
+        # Exercise the same least-privilege operator boundary used by
+        # deployment tooling. The migration login has SET-only membership and
+        # intentionally receives no direct EXECUTE grant on operator RPCs.
+        cursor.execute("SET LOCAL ROLE bursar_operator")
         cursor.execute(
             "SELECT bursar.create_tenant(%s, %s, %s)",
             (TEST_TENANT_ID, TEST_TENANT_SLUG, "Bursar tests"),

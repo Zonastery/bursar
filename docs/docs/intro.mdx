@@ -11,7 +11,7 @@ keywords:
 
 # What Bursar manages
 
-Bursar is an open-source usage metering, credit ledger, and billing library for AI products. It prices operations, enforces account policy, and records each monetary change in PostgreSQL through matching Python and TypeScript software development kits (SDKs).
+Bursar is an open-source usage metering, credit ledger, and billing library for AI products. It prices operations, enforces account policy, and records each monetary change in PostgreSQL through matching Python, TypeScript, and Go software development kits (SDKs).
 
 ## The boundary Bursar owns
 
@@ -49,7 +49,7 @@ Bursar concentrates the rules that are difficult to maintain across application 
 - **Replay-safe writes**: stable idempotency keys prevent retries and webhook redelivery from posting a second mutation
 - **Atomic admission**: plans, entitlements, quotas, allowances, balance floors, and lease capacity are checked in the transaction that admits work
 - **Tenant isolation**: mandatory tenant identifiers, composite foreign keys, and forced row-level security keep tenant data separate
-- **Cross-SDK parity**: Python and TypeScript share configuration fixtures, SQL migrations, expression cases, error categories, and rounding behavior
+- **Cross-SDK parity**: Python, TypeScript, and Go share configuration fixtures, SQL migrations, expression cases, error categories, and rounding behavior
 
 Read [Financial safety](./guides/financial-safety.mdx) before integrating any path that moves money or admits long-running work.
 
@@ -64,7 +64,7 @@ Use Bursar when your product needs one or more of these controls:
 - Plans with allowances, entitlements, quotas, and spend caps
 - Reservations for work whose final cost is unknown at admission
 - Replay-safe subscription, top-up, refund, and auto-recharge workflows
-- An auditable account ledger shared across Python and TypeScript services
+- An auditable account ledger shared across Python, TypeScript, and Go services
 
 ## Supported platforms
 
@@ -72,6 +72,7 @@ Use Bursar when your product needs one or more of these controls:
 | ------------------------------------- | ---------------------- | ----------------------------------------- |
 | Python SDK and command-line interface | Python 3.12 and 3.13   | `bursar`                                  |
 | TypeScript SDK                        | Node.js 22 or newer    | `@zonastery/bursar`                       |
+| Go SDK                                | Go 1.25 or newer       | `github.com/Zonastery/bursar/v2`          |
 | Database                              | PostgreSQL 16 or newer | `pg_partman` 5.x and `pg_jsonschema` 0.3+ |
 
 The current documentation tracks Bursar 2.x. Docusaurus version snapshots will be added only when a future major release changes user-facing behavior.
@@ -81,4 +82,4 @@ The current documentation tracks Bursar 2.x. Docusaurus version snapshots will b
 - Follow [Create your first metered charge](./quickstart.mdx) to install the schema and post one usage charge
 - Run the [executable tutorials](/docs/tutorials) to learn each workflow against an isolated PostgreSQL environment
 - Follow the [concept reading path](./concepts/index.mdx) to understand the architecture, credit accounting, pricing, access, and billing models
-- Open the [Python API](./python-api/index.mdx) or [TypeScript API](./javascript-api/index.mdx) for exact call signatures
+- Open the [Python API](./python-api/index.mdx), [TypeScript API](./javascript-api/index.mdx), or [Go API](./go-api/index.mdx) for exact call signatures
