@@ -296,6 +296,12 @@ BEGIN
               'run_storage_partition_maintenance',
               'run_storage_maintenance',
               'maybe_run_storage_maintenance',
+              'renew_tenant_outbox_claim',
+              'complete_tenant_outbox_event',
+              'fail_tenant_outbox_event',
+              'get_outbox_stats',
+              'list_outbox_dead_letters',
+              'requeue_outbox_dead_letter',
               'resolve_active_tenant_for_trigger',
               'create_tenant'
           )
@@ -335,7 +341,7 @@ DECLARE
         'bursar.refund_credit_by_entry(uuid,numeric,text,text,jsonb)',
         'bursar.revoke_subject_credits_by_operation(uuid,text)',
         'bursar.deduct_team(uuid,uuid,numeric,text,text,jsonb)',
-        'bursar.create_team(uuid,text,numeric)',
+        'bursar.create_team(uuid,text,text,numeric)',
         'bursar.set_team_member(uuid,uuid,text,numeric)',
         'bursar.remove_team_member(uuid,uuid)',
         'bursar.list_team_members(uuid)',
@@ -367,7 +373,7 @@ DECLARE
         'bursar.upsert_billing_preferences(uuid,boolean,boolean,boolean,boolean,boolean)',
         'bursar.upsert_billing_invoice(uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz,jsonb,timestamptz)',
         'bursar.upsert_billing_dispute(text,text,uuid,text,text,jsonb,timestamptz)',
-        'bursar.create_checkout_intent(uuid,text,text,text,bytea,timestamptz,text,text,text)',
+        'bursar.create_checkout_intent(uuid,text,text,text,text,bytea,timestamptz,text,text,text)',
         'bursar.advance_checkout_intent(uuid,text,text,text)',
         'bursar.set_subject_plan(uuid,text,timestamptz)',
         'bursar.unassign_plan(uuid,text)',
@@ -738,6 +744,27 @@ TO bursar_operator;
 GRANT EXECUTE ON FUNCTION bursar.set_tenant_status(uuid, text)
 TO bursar_operator;
 GRANT EXECUTE ON FUNCTION bursar.resolve_active_tenant_for_trigger(text)
+TO bursar_operator;
+GRANT EXECUTE
+ON FUNCTION bursar.renew_tenant_outbox_claim(uuid, bigint, uuid, integer)
+TO bursar_operator;
+GRANT EXECUTE
+ON FUNCTION bursar.complete_tenant_outbox_event(uuid, bigint, uuid)
+TO bursar_operator;
+GRANT EXECUTE
+ON FUNCTION bursar.fail_tenant_outbox_event(
+    uuid, bigint, uuid, text, integer, integer
+)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.get_outbox_stats(uuid)
+TO bursar_operator;
+GRANT EXECUTE
+ON FUNCTION bursar.list_outbox_dead_letters(
+    uuid, timestamptz, bigint, integer
+)
+TO bursar_operator;
+GRANT EXECUTE
+ON FUNCTION bursar.requeue_outbox_dead_letter(uuid, bigint)
 TO bursar_operator;
 
 COMMENT ON TABLE bursar.tenants IS

@@ -206,6 +206,27 @@ CREATE INDEX event_outbox_delivered_retention_idx
 ON bursar.event_outbox (delivered_at, id)
 WHERE status = 'delivered';
 
+CREATE INDEX event_outbox_tenant_claimable_idx
+ON bursar.event_outbox (
+    tenant_id,
+    (
+        CASE status
+            WHEN 'pending' THEN available_at
+            WHEN 'processing' THEN claim_expires_at
+        END
+    ),
+    created_at,
+    id
+)
+WHERE status IN ('pending', 'processing');
+
+CREATE INDEX event_outbox_tenant_status_idx
+ON bursar.event_outbox (tenant_id, status);
+
+CREATE INDEX event_outbox_tenant_dead_letter_idx
+ON bursar.event_outbox (tenant_id, created_at, id)
+WHERE status = 'dead_letter';
+
 CREATE INDEX credit_usage_charges_ledger_entry_idx
 ON bursar.credit_usage_charges (ledger_entry_id)
 WHERE ledger_entry_id IS NOT null;

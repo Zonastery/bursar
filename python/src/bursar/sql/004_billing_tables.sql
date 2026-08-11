@@ -578,6 +578,9 @@ CREATE TABLE bursar.billing_checkout_intents (
     product_key text NOT NULL CHECK (bursar.is_nonempty_text(product_key)),
     region text CHECK (region IS NULL OR region ~ '^[A-Z]{2,3}$'),
     catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions (id),
+    operation_key text NOT NULL
+    CONSTRAINT billing_checkout_intents_operation_key_check
+    CHECK (bursar.is_nonempty_bounded_text(operation_key, 255)),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     status text NOT NULL DEFAULT 'open'
     CHECK (status IN ('open', 'completed', 'failed', 'expired')),
@@ -592,15 +595,13 @@ CREATE TABLE bursar.billing_checkout_intents (
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT billing_checkout_intents_operation_key_unique
     UNIQUE (
         tenant_id,
         subject_id,
         provider,
         provider_environment,
-        checkout_kind,
-        product_key,
-        catalog_revision_id,
-        request_digest
+        operation_key
     ),
     CHECK (expires_at > created_at)
 );

@@ -27,22 +27,29 @@ def test_migration_files_are_contiguous_and_self_contained() -> None:
         assert content.endswith("\n"), path
 
 
-def test_checkout_rpc_owner_transfer_uses_a_transaction_scoped_schema_grant() -> None:
-    migration_sql = (SQL_DIR / "030_checkout_operation_idempotency.sql").read_text(encoding="utf-8")
+def test_greenfield_idempotency_contracts_are_defined_at_their_origins() -> None:
+    checkout_table_sql = (SQL_DIR / "004_billing_tables.sql").read_text(encoding="utf-8")
+    checkout_rpc_sql = (SQL_DIR / "023_billing_document_rpc.sql").read_text(encoding="utf-8")
+    team_table_sql = (SQL_DIR / "003_financial_policy_tables.sql").read_text(encoding="utf-8")
+    team_rpc_sql = (SQL_DIR / "018_team_rpc.sql").read_text(encoding="utf-8")
+    outbox_index_sql = (SQL_DIR / "007_indexes.sql").read_text(encoding="utf-8")
+    outbox_rpc_sql = (SQL_DIR / "028_storage_lifecycle_rpc.sql").read_text(encoding="utf-8")
 
-    grant_offset = migration_sql.index("GRANT CREATE ON SCHEMA bursar TO bursar_runtime;")
-    owner_offset = migration_sql.index(
-        "OWNER TO bursar_runtime;",
-        migration_sql.index("ALTER FUNCTION bursar.create_checkout_intent("),
-    )
-    revoke_offset = migration_sql.index("REVOKE CREATE ON SCHEMA bursar FROM bursar_runtime;")
-
-    assert grant_offset < owner_offset < revoke_offset
-    assert migration_sql.count("GRANT CREATE ON SCHEMA bursar TO bursar_runtime;") == 1
+    assert "operation_key text NOT NULL" in checkout_table_sql
+    assert "UNIQUE (\n        tenant_id,\n        subject_id,\n        provider," in checkout_table_sql
+    assert "p_operation_key text" in checkout_rpc_sql
+    assert "operation_key = intent.operation_key" in checkout_rpc_sql
+    assert "creation_idempotency_key text NOT NULL" in team_table_sql
+    assert "creation_request_digest bytea NOT NULL" in team_table_sql
+    assert "ON CONFLICT (tenant_id, creation_idempotency_key)" in team_rpc_sql
+    assert "'idempotency_conflict'::text" in team_rpc_sql
+    assert "event_outbox_tenant_claimable_idx" in outbox_index_sql
+    assert "CREATE FUNCTION bursar.renew_tenant_outbox_claim(" in outbox_rpc_sql
+    assert "CREATE FUNCTION bursar.requeue_outbox_dead_letter(" in outbox_rpc_sql
 
 
 def test_operator_function_comments_precede_ownership_transfer() -> None:
-    migration_sql = (SQL_DIR / "033_operator_runtime_role.sql").read_text(encoding="utf-8")
+    migration_sql = (SQL_DIR / "030_operator_runtime_role.sql").read_text(encoding="utf-8")
 
     comment_offset = migration_sql.index("COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(")
     owner_offset = migration_sql.index("'bursar.run_storage_partition_maintenance(text,timestamptz)'")
@@ -72,21 +79,6 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
     )
     assert client_block is not None
     client_signatures = sorted(set(re.findall(r"'(bursar\.[^']+\([^']*\))'", client_block.group(1))))
-    # Migration 030 replaces the checkout RPC after the baseline security
-    # migration has transferred function ownership. Verify the current
-    # signature rather than requiring the intentionally dropped predecessor.
-    checkout_signature_v1 = "bursar.create_checkout_intent(uuid,text,text,text,bytea,timestamptz,text,text,text)"
-    checkout_signature_v2 = "bursar.create_checkout_intent(uuid,text,text,text,text,bytea,timestamptz,text,text,text)"
-    team_signature_v1 = "bursar.create_team(uuid,text,numeric)"
-    team_signature_v2 = "bursar.create_team(uuid,text,text,numeric)"
-    client_signatures = sorted(
-        checkout_signature_v2
-        if signature == checkout_signature_v1
-        else team_signature_v2
-        if signature == team_signature_v1
-        else signature
-        for signature in client_signatures
-    )
     assert client_signatures
 
     operator_signatures = (
@@ -97,6 +89,12 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
         ),
         "bursar.claim_outbox_events(integer,integer,text[])",
         "bursar.claim_outbox_events(uuid,integer,integer,text[])",
+        "bursar.renew_tenant_outbox_claim(uuid,bigint,uuid,integer)",
+        "bursar.complete_tenant_outbox_event(uuid,bigint,uuid)",
+        "bursar.fail_tenant_outbox_event(uuid,bigint,uuid,text,integer,integer)",
+        "bursar.get_outbox_stats(uuid)",
+        "bursar.list_outbox_dead_letters(uuid,timestamptz,bigint,integer)",
+        "bursar.requeue_outbox_dead_letter(uuid,bigint)",
         "bursar.export_usage_charge(uuid)",
         "bursar.export_billing_event_payload(uuid)",
         "bursar.complete_outbox_event(bigint,uuid)",

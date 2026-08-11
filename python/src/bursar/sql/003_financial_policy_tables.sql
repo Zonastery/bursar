@@ -863,8 +863,16 @@ CREATE TABLE bursar.credit_teams (
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    creation_idempotency_key text NOT NULL
+    CONSTRAINT credit_teams_creation_idempotency_key_check
+    CHECK (bursar.is_nonempty_bounded_text(creation_idempotency_key, 255)),
+    creation_request_digest bytea NOT NULL
+    CONSTRAINT credit_teams_creation_request_digest_check
+    CHECK (octet_length(creation_request_digest) = 32),
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (tenant_id, subject_id)
+    UNIQUE (tenant_id, subject_id),
+    CONSTRAINT credit_teams_creation_idempotency_key_unique
+    UNIQUE (tenant_id, creation_idempotency_key)
 );
 
 CREATE TABLE bursar.credit_team_members (

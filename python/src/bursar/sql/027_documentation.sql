@@ -199,6 +199,7 @@ COMMENT ON FUNCTION bursar.create_checkout_intent(
     text,
     text,
     text,
+    text,
     bytea,
     timestamptz,
     text,
@@ -206,6 +207,9 @@ COMMENT ON FUNCTION bursar.create_checkout_intent(
     text
 )
 IS
-'Create or replay an idempotent checkout pinned to an available catalog '
-'product, provider environment, and region; terminal attempts require a '
-'new request digest.';
+'Create or replay one checkout intent bound to the caller operation key and '
+'immutable request digest before any provider side effect.';
+COMMENT ON FUNCTION bursar.advance_checkout_intent(uuid, text, text, text)
+IS 'Advance an open checkout intent and reject data attachment to terminal intents.';
+COMMENT ON FUNCTION bursar.create_team(uuid, text, text, numeric)
+IS 'Create or return one team bound to a tenant-scoped idempotency key and immutable request digest.';

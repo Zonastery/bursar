@@ -333,6 +333,7 @@ END $$;
 CREATE FUNCTION bursar.create_checkout_intent(
     p_subject_id uuid,
     p_provider text,
+    p_operation_key text,
     p_checkout_kind text,
     p_product_key text,
     p_request_digest bytea,
@@ -342,16 +343,20 @@ CREATE FUNCTION bursar.create_checkout_intent(
     p_region text DEFAULT NULL
 )
 RETURNS uuid
-LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-DECLARE v_id uuid;
- v_revision uuid;
- v_environment text:=bursar.current_provider_environment();
- v_availability jsonb;
- v_object_type text;
-
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_id uuid;
+    v_revision uuid;
+    v_environment text := bursar.current_provider_environment();
+    v_availability jsonb;
+    v_object_type text;
 BEGIN
     IF p_subject_id IS NULL
        OR NOT bursar.is_nonempty_text(p_provider)
+       OR NOT bursar.is_nonempty_bounded_text(p_operation_key, 255)
        OR p_checkout_kind IS NULL
        OR p_checkout_kind NOT IN ('subscription', 'credit_topup')
        OR NOT bursar.is_nonempty_text(p_product_key)
@@ -373,7 +378,7 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'invalid checkout intent'
-            USING ERRCODE='22023';
+            USING ERRCODE = '22023';
     END IF;
 
     INSERT INTO bursar.subjects(id)
@@ -385,12 +390,14 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    SELECT id INTO v_revision
+    SELECT id
+    INTO v_revision
     FROM bursar.catalog_revisions
-    WHERE status='active';
+    WHERE status = 'active';
 
     IF v_revision IS NULL THEN
-        RAISE EXCEPTION 'active catalog missing' USING ERRCODE='23503';
+        RAISE EXCEPTION 'active catalog missing'
+            USING ERRCODE = '23503';
     END IF;
 
     v_object_type := CASE p_checkout_kind
@@ -424,7 +431,7 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'checkout product is not available from provider'
-            USING ERRCODE='22023';
+            USING ERRCODE = '22023';
     END IF;
 
     IF (
@@ -444,55 +451,54 @@ BEGIN
     )
     THEN
         RAISE EXCEPTION 'checkout product is outside its availability'
-            USING ERRCODE='22023';
+            USING ERRCODE = '22023';
     END IF;
 
     INSERT INTO bursar.billing_checkout_intents AS intent(
-        subject_id,provider,provider_environment,checkout_kind,product_key,
-        region,catalog_revision_id,request_digest,expires_at,provider_session_id,
+        subject_id,
+        provider,
+        provider_environment,
+        operation_key,
+        checkout_kind,
+        product_key,
+        region,
+        catalog_revision_id,
+        request_digest,
+        expires_at,
+        provider_session_id,
         checkout_url
     )
     VALUES (
-        p_subject_id,p_provider,v_environment,p_checkout_kind,p_product_key,
-        upper(p_region),v_revision,p_request_digest,p_expires_at,p_provider_session_id,
+        p_subject_id,
+        p_provider,
+        v_environment,
+        p_operation_key,
+        p_checkout_kind,
+        p_product_key,
+        upper(p_region),
+        v_revision,
+        p_request_digest,
+        p_expires_at,
+        p_provider_session_id,
         p_checkout_url
     )
     ON CONFLICT (
-        tenant_id,subject_id,provider,provider_environment,checkout_kind,product_key,
-        catalog_revision_id,request_digest
+        tenant_id,
+        subject_id,
+        provider,
+        provider_environment,
+        operation_key
     )
     DO UPDATE SET
-        -- A caller may deliberately expire an abandoned checkout before its
-        -- natural expiry. Reopen it without a provider session so the next
-        -- request creates a fresh provider session. Completed and failed
-        -- intents remain terminal, preserving webhook idempotency.
-        status = CASE
-            WHEN intent.status = 'open'
-                 AND intent.expires_at <= now() THEN 'open'
-            WHEN intent.status = 'expired' THEN 'open'
-            ELSE intent.status
-        END,
-        expires_at = CASE
-            WHEN intent.status = 'open' AND intent.expires_at <= now() THEN EXCLUDED.expires_at
-            WHEN intent.status = 'expired' THEN EXCLUDED.expires_at
-            ELSE intent.expires_at
-        END,
-        provider_session_id = CASE
-            WHEN intent.status = 'open' AND intent.expires_at <= now() THEN NULL
-            WHEN intent.status = 'expired' THEN NULL
-            ELSE intent.provider_session_id
-        END,
-        checkout_url = CASE
-            WHEN intent.status = 'open' AND intent.expires_at <= now() THEN NULL
-            WHEN intent.status = 'expired' THEN NULL
-            ELSE intent.checkout_url
-        END,
-        updated_at=now()
+        -- Return the existing row without reopening a terminal operation or
+        -- rewriting its request. The SDK compares request_digest before any
+        -- provider side effect.
+        operation_key = intent.operation_key
     RETURNING id INTO v_id;
 
     RETURN v_id;
-
-END $$;
+END
+$$;
 
 CREATE FUNCTION bursar.advance_checkout_intent(
     p_intent_id uuid,
@@ -536,8 +542,12 @@ BEGIN
     END IF;
 
     IF v_intent.status <> 'open'
-       AND p_status IS NOT NULL
-       AND p_status <> v_intent.status
+       AND (
+           p_status IS NULL
+           OR p_status <> v_intent.status
+           OR p_provider_session_id IS NOT NULL
+           OR p_checkout_url IS NOT NULL
+       )
     THEN
         RETURN false;
     END IF;
