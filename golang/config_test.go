@@ -8,7 +8,7 @@ import (
 )
 
 func TestConfigValidationParityFixture(t *testing.T) {
-	contents, err := os.ReadFile("tests/parity/config_validation_cases.json")
+	contents, err := os.ReadFile("../tests/parity/config_validation_cases.json")
 	if err != nil {
 		t.Fatalf("read shared validation fixture: %v", err)
 	}

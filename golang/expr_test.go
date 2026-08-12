@@ -8,7 +8,7 @@ import (
 )
 
 func TestExpressionParityFixture(t *testing.T) {
-	contents, err := os.ReadFile("tests/parity/expression_cases.json")
+	contents, err := os.ReadFile("../tests/parity/expression_cases.json")
 	if err != nil {
 		t.Fatalf("read shared parity fixture: %v", err)
 	}
