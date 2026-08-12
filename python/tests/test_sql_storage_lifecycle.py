@@ -45,36 +45,45 @@ def _create_managed_partition(
     partition_at: datetime,
 ) -> ManagedPartition:
     """Create a test partition and apply Bursar's production hardening hook."""
-    cursor.execute(
-        """
-        SELECT partman.create_partition_time(
-            %s,
-            ARRAY[%s::timestamptz]
-        )
-        """,
-        (parent_table, partition_at),
-    )
-    cursor.execute(
-        """
-        SELECT
-            partition_schema,
-            partition_table,
-            bursar.secure_tenant_partition(
-                format(
-                    '%%I.%%I',
-                    partition_schema,
-                    partition_table
-                )::regclass
+    # Migration 030 hardened partitions for the private partition owner:
+    # hardening functions are SECURITY DEFINER owned by bursar_partition_runtime
+    # and require ownership of the child table, which pg_partman grants to the
+    # role that creates it.  Create under that role exactly like real partman
+    # maintenance does.
+    cursor.execute("SET ROLE bursar_partition_runtime")
+    try:
+        cursor.execute(
+            """
+            SELECT partman.create_partition_time(
+                %s,
+                ARRAY[%s::timestamptz]
             )
-        FROM partman.show_partition_name(
-            %s,
-            %s::timestamptz::text
+            """,
+            (parent_table, partition_at),
         )
-        WHERE table_exists
-        """,
-        (parent_table, partition_at),
-    )
-    row = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT
+                partition_schema,
+                partition_table,
+                bursar.secure_tenant_partition(
+                    format(
+                        '%%I.%%I',
+                        partition_schema,
+                        partition_table
+                    )::regclass
+                )
+            FROM partman.show_partition_name(
+                %s,
+                %s::timestamptz::text
+            )
+            WHERE table_exists
+            """,
+            (parent_table, partition_at),
+        )
+        row = cursor.fetchone()
+    finally:
+        cursor.execute("RESET ROLE")
     assert row is not None
     return str(row[0]), str(row[1])
 

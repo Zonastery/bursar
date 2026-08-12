@@ -199,6 +199,32 @@ BEGIN
 END
 $$;
 
+-- The partition runtime owns every payload partition (see ownership transfer
+-- below) and executes the internal DDL maintenance, so plan-time CHECK
+-- constraint evaluation on partition children runs as this role.  Mirror the
+-- runtime-owner dependency closure so RI and partition maintenance cannot fail
+-- with a permission error only in production.
+DO $$
+DECLARE
+    v_function record;
+BEGIN
+    FOR v_function IN
+        SELECT function_info.oid::regprocedure AS function_name
+        FROM pg_proc AS function_info
+        JOIN pg_namespace AS namespace_info
+          ON namespace_info.oid = function_info.pronamespace
+        WHERE namespace_info.nspname = 'bursar'
+          AND NOT function_info.prosecdef
+        ORDER BY function_info.oid
+    LOOP
+        EXECUTE format(
+            'GRANT EXECUTE ON FUNCTION %s TO bursar_partition_runtime',
+            v_function.function_name
+        );
+    END LOOP;
+END
+$$;
+
 GRANT EXECUTE
 ON FUNCTION extensions.digest(bytea, text)
 TO bursar_operator_runtime;
