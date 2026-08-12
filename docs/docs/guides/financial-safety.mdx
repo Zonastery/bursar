@@ -150,6 +150,7 @@ unknown:
 outcome = bursar.credits.run_billed(
     user_id,
     RunBilledOptions(
+        operation_key="job:42",
         estimate=estimate_metrics,
         do_work=run_completion,
     ),
@@ -161,6 +162,7 @@ outcome = bursar.credits.run_billed(
 
 ```ts
 const outcome = await bursar.credits.runBilled(userId, {
+  operationKey: "job:42",
   estimate: estimateMetrics,
   doWork: runCompletion,
 });

@@ -94,10 +94,11 @@ full flow end to end.
 ## Subscriptions
 
 `BillingSubscriptionStatus` covers the provider lifecycle: `incomplete`,
-`trialing`, `active`, `past_due`, `canceled`, `unpaid`, `paused`, and `expired`.
-A `past_due` subscription enters a grace period; when the grace end passes,
-the subscription is revoked (`expire_past_due_grace_periods` sweeps expired
-periods) and `grace_expired_at` is recorded.
+`incomplete_expired`, `trialing`, `active`, `past_due`, `canceled`, `unpaid`,
+`paused`, and `expired`. A `past_due` subscription enters a grace period;
+when the grace end passes, the subscription is revoked
+(`expire_past_due_grace_periods` sweeps expired periods) and
+`grace_expired_at` is recorded.
 
 Subscriptions drive entitlement: activation events assign the offer's plan
 through a provisioning port (`set_user_plan`), and cancellation moves the

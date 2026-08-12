@@ -382,7 +382,7 @@ page = bursar.credits.list_ledger_entries(account_id, limit=10)
 
 print(balance.balance)
 for entry in page.items:
-    print(entry.entry_type, entry.amount, entry.balance_after)
+    print(entry.entry_type, entry.amount, entry.created_at)
 ```
 
   </TabItem>
@@ -394,7 +394,7 @@ const page = await bursar.credits.listLedgerEntries(accountId, { limit: 10 });
 
 console.log(balance.balance);
 for (const entry of page.items) {
-  console.log(entry.entryType, entry.amount, entry.balanceAfter);
+  console.log(entry.entryType, entry.amount, entry.createdAt);
 }
 ```
 

@@ -317,8 +317,8 @@ while (true) {
 </Tabs>
 
 `list_usage_charges` is the same loop against metered usage — each row shows
-the operation, the measures, the `charged` amount, and how much the allowance
-covered. Filter by entry type or date range in either call; offset pagination
-is not supported.
+the operation, the `requested` and `charged` amounts, and how much the
+allowance covered (`allowance_requested`, `allowance_covered`). Filter by
+entry type or date range in either call; offset pagination is not supported.
 
 After these operations, `get_balance` and the ledger must agree: the balance equals the sum of its entries.

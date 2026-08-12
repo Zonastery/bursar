@@ -267,6 +267,18 @@ def _find_pg() -> str:
     return str(Path(pg_ctl).parent)
 
 
+def _pg_env() -> dict[str, str]:
+    """Environment for Postgres subprocesses.
+
+    macOS Postgres refuses to start the postmaster without a valid locale
+    (``FATAL: postmaster became multithreaded during startup``), so force a
+    valid ``LC_ALL`` for the spawned cluster.
+    """
+    env = os.environ.copy()
+    env.setdefault("LC_ALL", "C")
+    return env
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
@@ -295,6 +307,7 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         [os.path.join(pg_bin, "initdb"), "-D", pgdata, "-E", "UTF8", "--no-locale"],
         check=True,
         capture_output=True,
+        env=_pg_env(),
     )
 
     with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
@@ -308,6 +321,7 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         [pg_ctl, "start", "-w", "-D", pgdata, "-l", os.path.join(pgdata, "log")],
         check=True,
         capture_output=True,
+        env=_pg_env(),
     )
 
     subprocess.run(
@@ -321,6 +335,7 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         ],
         check=True,
         capture_output=True,
+        env=_pg_env(),
     )
 
     migration_dsn = f"host=localhost port={port} dbname=bursar_demo user={user}"
@@ -367,6 +382,7 @@ def cleanup(pgdata: str) -> None:
         [os.path.join(pg_bin, "pg_ctl"), "stop", "-D", pgdata],
         capture_output=True,
         check=False,
+        env=_pg_env(),
     )
     shutil.rmtree(pgdata, ignore_errors=True)
     print("Cleaned up.")

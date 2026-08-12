@@ -56,8 +56,11 @@ balance — `DeductionResult.allowance_consumed` tells you the split.
 ## Usage charges
 
 Each metered charge writes one compact `credit_usage_charges` row: operation,
-measures, model, `requested`, `charged`, `allowance_requested`,
-`allowance_covered`, and the pricing snapshot. The `charged + allowance_covered
+`requested`, `charged`, `allowance_requested`, `allowance_covered`, and the
+catalog revision, plan, and rate card in effect. The measures, model,
+dimensions, and the full pricing snapshot live in the joined
+`usage_charge_payloads` row — payload storage is separate so the charged
+amount never bloats with reconciliation receipts. The `charged + allowance_covered
 = requested` check is part of the schema. Zero-cost usage is still recorded,
 so quotas and analytics cannot be bypassed by a free rate.
 
@@ -70,6 +73,8 @@ so quotas and analytics cannot be bypassed by a free rate.
 | `credit_lots`              | Each positive entry as a spendable lot with bucket, priority, expiry |
 | `credit_lot_allocations`   | Which lots a debit consumed, in priority order                       |
 | `credit_leases`            | Temporary holds and policy snapshots for admission control           |
+| `credit_usage_charges`     | Metered charges: operation, amounts, allowance split, rate card      |
+| `usage_charge_payloads`    | Measures, model, dimensions, and pricing snapshot per charge         |
 | `account_plan_assignments` | Current plan per account, pinned to a catalog revision               |
 
 ## The three money invariants

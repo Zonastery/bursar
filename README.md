@@ -27,8 +27,9 @@ identical accounting and identical bills.
 ## Highlights
 
 - **Canonical accounting** — `credit_accounts.balance` is the only stored
-  balance and `credit_ledger_entries` the only monetary history; there are no
-  projected transaction or bucket-balance tables.
+  account balance and `credit_ledger_entries` the only monetary history;
+  per-bucket-lot spend counters in `credit_lots` are the only derived
+  projection, so there are no projected transaction or bucket-balance tables.
 - **Declarative configuration** — operations, rate cards, plans, allowances,
   and billing live in one strict, versioned document, published through the
   SDK and readable by billing and auto-recharge.
