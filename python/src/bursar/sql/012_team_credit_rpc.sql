@@ -1,5 +1,16 @@
--- Team-account posting and allowance RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 012_team_credit_rpc.sql
+-- Purpose: Post team and trusted account credit mutations.
+-- Depends on: Team/accounting schema through 007_indexes.sql,
+--   008_catalog_rpc.sql, and 009_credit_account_rpc.sql.
+-- Security: SECURITY DEFINER RPCs remain tenant-scoped; team debits lock the team
+--   before membership and account state, and direct account posting is trusted-only.
+
+-- Post team and trusted account credit mutations.
+
+-- Lock the tenant team before membership and its team account, enforce the
+-- member spend cap, and hash the exact numeric request for stable replay. The
+-- resulting debit and attribution row commit together; divergent retries return
+-- idempotency_conflict without consuming team credit.
 
 CREATE FUNCTION bursar.deduct_team(
     p_team_id uuid,
@@ -29,9 +40,12 @@ DECLARE
     v_spent numeric;
     v_digest bytea;
 BEGIN
+    p_amount := round(p_amount, 6);
+
     IF p_team_id IS NULL
        OR p_subject_id IS NULL
-       OR NOT bursar.is_finite_numeric(p_amount)
+       OR p_amount IS NULL
+       OR NOT bursar.is_credit_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
@@ -111,8 +125,8 @@ BEGIN
                 v_existing.ledger_entry_id,
                 p_team_id,
                 v_existing.subject_id,
-                v_existing.amount,
-                ledger.balance_after,
+                v_existing.amount::numeric,
+                ledger.balance_after::numeric,
                 true,
                 NULL::text
             FROM bursar.credit_ledger_entries AS ledger
@@ -228,6 +242,12 @@ BEGIN
 END
 $$;
 
+-- 2. Trusted account posting
+
+-- Post exact credit directly to a tenant-visible account under its row lock.
+-- This SECURITY DEFINER helper accepts an account identifier and is therefore a
+-- trusted internal boundary: it hashes caller input, opens mutation context only
+-- transaction-locally, and atomically updates ledger, lots, and source allocations.
 CREATE FUNCTION bursar.post_credit_account(
     p_account_id uuid,
     p_kind bursar.ledger_entry_kind,
@@ -264,9 +284,12 @@ DECLARE v_old bursar.credit_ledger_entries;
  v_source_take numeric;
 
 BEGIN
+ p_amount := round(p_amount, 6);
+
  IF p_account_id IS NULL
     OR p_kind IS NULL
-    OR NOT bursar.is_finite_numeric(p_amount)
+    OR p_amount IS NULL
+    OR NOT bursar.is_credit_numeric(p_amount)
     OR p_amount=0
     OR NOT bursar.is_nonempty_text(p_idempotency_key)
     OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
@@ -324,7 +347,7 @@ BEGIN
  SELECT * INTO v_old FROM bursar.credit_ledger_entries WHERE account_id=p_account_id AND idempotency_key=p_idempotency_key;
 
  IF FOUND THEN IF v_old.request_digest<>v_digest THEN RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'idempotency_conflict';
- ELSE RETURN QUERY SELECT v_old.id,v_old.balance_after,true,NULL::text;
+ ELSE RETURN QUERY SELECT v_old.id,v_old.balance_after::numeric,true,NULL::text;
  END IF;
  RETURN;
  END IF;
@@ -333,6 +356,12 @@ BEGIN
  IF v_available < -p_amount OR v_balance+p_amount<0 THEN RETURN QUERY SELECT NULL::uuid,v_balance,false,'insufficient_credits';
  RETURN;
  END IF;
+ END IF;
+
+ IF NOT bursar.is_credit_numeric(v_balance + p_amount) THEN
+     RETURN QUERY
+     SELECT NULL::uuid, v_balance, false, 'balance_out_of_range';
+     RETURN;
  END IF;
 
  PERFORM set_config('bursar.mutation_context','internal',true);
@@ -483,41 +512,5 @@ BEGIN
     END IF;
 
  RETURN QUERY SELECT v_entry,v_balance,false,NULL::text;
-
-END $$;
-
-CREATE FUNCTION bursar.consume_allowance(
-    p_subject_id uuid,
-    p_allowance_key text,
-    p_window_start timestamptz,
-    p_window_end timestamptz,
-    p_amount numeric
-)
-RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-DECLARE v_account uuid;
-
-BEGIN
- IF p_subject_id IS NULL
-    OR NOT bursar.is_nonempty_text(p_allowance_key)
-    OR NOT bursar.is_bounded_text(p_allowance_key, 255)
-    OR NOT bursar.is_finite_numeric(p_amount)
-    OR p_amount<0
-    OR p_window_start IS NULL
-    OR p_window_end IS NULL
-    OR p_window_end<=p_window_start
- THEN RETURN false;
- END IF;
-
- v_account:=bursar.account_for_subject(p_subject_id);
-
- UPDATE bursar.allowance_windows AS aw
- SET consumed=aw.consumed+p_amount
- WHERE aw.account_id=v_account
-   AND aw.allowance_key=p_allowance_key
-   AND aw.window_start=p_window_start
-   AND aw.window_end=p_window_end
-   AND aw.consumed+aw.reserved+p_amount<=aw.allowance;
-
- RETURN FOUND;
 
 END $$;

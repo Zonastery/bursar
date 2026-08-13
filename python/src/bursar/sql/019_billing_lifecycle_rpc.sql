@@ -1,5 +1,13 @@
--- Billing event, grant, and refund RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 019_billing_lifecycle_rpc.sql
+-- Purpose: Define provider-event leasing, entitlement conflict, credit, and refund RPCs.
+-- Depends on: Billing events, subscriptions, grants, refunds, and credit ledger RPCs.
+-- Security: SECURITY DEFINER workflows bind provider records to the current tenant
+--   and provider environment, fencing retries with claim tokens and idempotency keys.
+
+-- === Provider event lease lifecycle ===
+
+-- Claim or replay one provider event by tenant, environment, provider, event ID,
+-- and immutable envelope digest; expired claims may be safely reacquired.
 
 CREATE FUNCTION bursar.claim_billing_event(
     p_provider text,
@@ -25,8 +33,9 @@ DECLARE
     v_received_at timestamptz := now();
 
 BEGIN
-    IF p_provider IS NULL OR p_provider='' OR p_event_id IS NULL OR p_event_id=''
-       OR p_event_type IS NULL OR p_event_type=''
+    IF NOT bursar.is_nonempty_bounded_text(p_provider, 100)
+       OR NOT bursar.is_nonempty_bounded_text(p_event_id, 255)
+       OR NOT bursar.is_nonempty_bounded_text(p_event_type, 255)
        OR p_lease_seconds IS NULL
        OR p_lease_seconds<1 OR p_lease_seconds>3600
        OR p_attempt_limit IS NULL
@@ -39,9 +48,6 @@ BEGIN
     END IF;
 
     IF NOT bursar.is_bounded_json_object(v_envelope, 1048576)
-       OR NOT bursar.is_bounded_text(p_provider, 100)
-       OR NOT bursar.is_bounded_text(p_event_id, 255)
-       OR NOT bursar.is_bounded_text(p_event_type, 255)
     THEN
         RETURN QUERY SELECT 'invalid_request',NULL::uuid,NULL::uuid;
         RETURN;
@@ -163,6 +169,7 @@ BEGIN
 
 END $$;
 
+-- Complete exactly the event lease identified by its current claim token.
 CREATE FUNCTION bursar.complete_billing_event(
     p_provider text,
     p_event_id text,
@@ -174,6 +181,9 @@ LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
     SET status='completed',claim_token=NULL,claim_expires_at=NULL,
         completed_at=now()
     WHERE provider=p_provider
+      AND bursar.is_nonempty_bounded_text(p_provider, 100)
+      AND bursar.is_nonempty_bounded_text(p_event_id, 255)
+      AND p_claim_token IS NOT NULL
       AND provider_environment=bursar.current_provider_environment()
       AND provider_event_id=p_event_id
       AND status='processing'
@@ -182,6 +192,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
     RETURNING true
 $$;
 
+-- Release a claimed provider event into retryable failed state with bounded detail.
 CREATE FUNCTION bursar.fail_billing_event(
     p_provider text,
     p_event_id text,
@@ -196,6 +207,8 @@ BEGIN
     IF p_provider IS NULL
        OR p_event_id IS NULL
        OR p_claim_token IS NULL
+       OR NOT bursar.is_nonempty_bounded_text(p_provider, 100)
+       OR NOT bursar.is_nonempty_bounded_text(p_event_id, 255)
        OR (p_error IS NOT NULL
        AND NOT bursar.is_nonempty_bounded_text(p_error, 8192)
        )
@@ -220,6 +233,83 @@ BEGIN
 END
 $$;
 
+-- Bind a received provider event to the subject it causally affected. Lock the
+-- subject before the event so attribution and one-time pseudonymization cannot
+-- pass each other and leave a late-attributed envelope containing subject data.
+-- This helper is intentionally not granted to application roles.
+CREATE FUNCTION bursar.attribute_billing_event_subject(
+    p_event_id uuid,
+    p_subject_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_pseudonymized boolean;
+BEGIN
+    IF p_event_id IS NULL OR p_subject_id IS NULL THEN
+        RETURN false;
+    END IF;
+
+    SELECT subject.pseudonymized_at IS NOT NULL
+    INTO v_pseudonymized
+    FROM bursar.subjects AS subject
+    WHERE subject.id = p_subject_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM 1
+    FROM bursar.billing_events AS event
+    WHERE event.id = p_event_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    UPDATE bursar.billing_events AS event
+    SET subject_id = p_subject_id
+    WHERE event.id = p_event_id
+      AND (
+          event.subject_id IS NULL
+          OR event.subject_id = p_subject_id
+      );
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'billing event subject conflict'
+            USING ERRCODE = '23505';
+    END IF;
+
+    IF v_pseudonymized THEN
+        UPDATE bursar.billing_event_payloads AS payload
+        SET envelope = jsonb_build_object('pseudonymized', true)
+        FROM bursar.billing_events AS event
+        WHERE event.id = p_event_id
+          AND payload.event_id = event.id
+          AND payload.received_at = event.payload_received_at;
+
+        UPDATE bursar.event_outbox AS outbox
+        SET payload = jsonb_set(
+            outbox.payload,
+            '{envelope}',
+            jsonb_build_object('pseudonymized', true),
+            true
+        )
+        WHERE outbox.aggregate_type = 'billing_event'
+          AND outbox.aggregate_id = p_event_id
+          AND outbox.topic = 'billing.webhook_received';
+    END IF;
+
+    RETURN true;
+END
+$$;
+
+-- === Entitlement conflict resolution ===
+
+-- Idempotently record a duplicate current-subscription conflict without mutating
+-- either provider subscription into a state that was not observed.
 CREATE FUNCTION bursar.record_subscription_conflict(
     p_subject_id uuid,
     p_provider text,
@@ -236,14 +326,51 @@ DECLARE
     v_billing_event_id uuid;
     v_environment text := bursar.current_provider_environment();
     v_existing bursar.billing_subscription_conflicts;
+    v_subject_pseudonymized boolean := false;
+    v_metadata jsonb;
 BEGIN
-    IF NOT bursar.is_nonempty_text(p_provider)
-       OR NOT bursar.is_nonempty_text(p_duplicate_provider_subscription_id)
+    IF NOT bursar.is_nonempty_bounded_text(p_provider, 100)
+       OR NOT bursar.is_nonempty_bounded_text(
+           p_duplicate_provider_subscription_id,
+           255
+       )
+       OR (
+           p_existing_provider_subscription_id IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_existing_provider_subscription_id,
+               255
+           )
+       )
+       OR (
+           p_provider_event_id IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_provider_event_id,
+               255
+           )
+       )
        OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
     THEN
         RAISE EXCEPTION 'invalid subscription conflict'
             USING ERRCODE = '22023';
     END IF;
+
+    IF p_subject_id IS NOT NULL THEN
+        SELECT subject.pseudonymized_at IS NOT NULL
+        INTO v_subject_pseudonymized
+        FROM bursar.subjects AS subject
+        WHERE subject.id = p_subject_id
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'conflict subject missing'
+                USING ERRCODE = '23503';
+        END IF;
+    END IF;
+
+    v_metadata := CASE
+        WHEN v_subject_pseudonymized THEN '{}'::jsonb
+        ELSE p_metadata
+    END;
 
     IF p_existing_provider_subscription_id IS NOT NULL THEN
         SELECT subscription.id
@@ -276,6 +403,16 @@ BEGIN
             RAISE EXCEPTION 'billing event missing for conflict'
                 USING ERRCODE = '23503';
         END IF;
+
+        IF p_subject_id IS NOT NULL
+           AND NOT bursar.attribute_billing_event_subject(
+               v_billing_event_id,
+               p_subject_id
+           )
+        THEN
+            RAISE EXCEPTION 'billing event missing for conflict'
+                USING ERRCODE = '23503';
+        END IF;
     END IF;
 
     INSERT INTO bursar.billing_subscription_conflicts(
@@ -294,7 +431,7 @@ BEGIN
         p_duplicate_provider_subscription_id,
         v_existing_subscription_id,
         v_billing_event_id,
-        p_metadata
+        v_metadata
     )
     ON CONFLICT (
         tenant_id,
@@ -316,10 +453,14 @@ BEGIN
         IF NOT FOUND
            OR ROW(
                v_existing.subject_id,
-               v_existing.existing_subscription_id
+               v_existing.existing_subscription_id,
+               v_existing.billing_event_id,
+               v_existing.metadata
            ) IS DISTINCT FROM ROW(
                p_subject_id,
-               v_existing_subscription_id
+               v_existing_subscription_id,
+               v_billing_event_id,
+               v_metadata
            )
         THEN
             RAISE EXCEPTION 'subscription conflict identity mismatch'
@@ -332,6 +473,8 @@ BEGIN
     RETURN v_id;
 END $$;
 
+-- Select one tenant-owned subscription as the subject's entitlement source while
+-- preserving the single-current-source invariant.
 CREATE FUNCTION bursar.select_entitlement_source(
     p_subject_id uuid,
     p_subscription_id uuid
@@ -400,6 +543,10 @@ BEGIN
 
 END $$;
 
+-- === Credit grants and refunds ===
+
+-- Post one billing grant into its subject account using caller-supplied ledger
+-- idempotency, then persist the resulting linkage for later grant-ID replay.
 CREATE FUNCTION bursar.grant_billing_credit(
     p_grant_id uuid,
     p_idempotency_key text
@@ -426,12 +573,15 @@ DECLARE
     v_new_lot uuid;
     v_target_lot uuid;
     v_lot_amount numeric;
+    v_grant_amount numeric;
     v_account uuid;
     v_cycle_renewal text;
     v_prior_lot record;
 
 BEGIN
-    IF NOT bursar.is_nonempty_text(p_idempotency_key) THEN
+    IF p_grant_id IS NULL
+       OR NOT bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
+    THEN
         RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'invalid_request';
 
         RETURN;
@@ -519,9 +669,22 @@ BEGIN
         g.subject_id,g.catalog_revision_id,v_expiry_policy,now(),v_subscription
     );
 
+    v_grant_amount := round(g.configured_credits * g.quantity, 6);
+
+    IF NOT bursar.is_credit_numeric(v_grant_amount)
+       OR v_grant_amount <= 0
+    THEN
+        RETURN QUERY
+        SELECT NULL::uuid,NULL::numeric,false,'invalid_grant_amount';
+        RETURN;
+    END IF;
+
     SELECT * INTO v_result
     FROM bursar.post_credit(
-        g.subject_id,v_kind,g.configured_credits*g.quantity,'billing_grant',
+        g.subject_id,
+        v_kind,
+        v_grant_amount,
+        'billing_grant',
         p_idempotency_key,jsonb_build_object('grant_id',p_grant_id),
         v_bucket,g.catalog_revision_id,v_expires_at,NULL
     );
@@ -625,6 +788,8 @@ BEGIN
 
 END $$;
 
+-- Reverse a bounded amount of a prior billing grant with refund-scoped
+-- idempotency, source-lot clawback, and explicit debt for consumed credits.
 CREATE FUNCTION bursar.post_billing_refund(
     p_refund_id uuid,
     p_grant_id uuid,
@@ -654,8 +819,7 @@ DECLARE
 BEGIN
     IF p_refund_id IS NULL
        OR p_grant_id IS NULL
-       OR p_amount_minor IS NULL
-       OR p_amount_minor <= 0
+       OR NOT bursar.is_positive_safe_integer(p_amount_minor)
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
     THEN

@@ -23,12 +23,14 @@ type BillingCustomerRecord struct {
 // identifier used only after the account-scoped store lookup succeeds.
 type CommerceSubscription struct {
 	ID                     string
+	CatalogRevisionID      string
 	Provider               string
 	ProviderSubscriptionID string
 	AccountID              string
 	ProviderCustomerID     string
 	OfferID                string
 	OfferKey               string
+	PlanID                 string
 	PlanKey                string
 	Status                 string
 	Interval               string
@@ -40,6 +42,8 @@ type CommerceSubscription struct {
 	EndedAt                *time.Time
 	CancelAtPeriodEnd      bool
 	GraceEndsAt            *time.Time
+	GraceExpiredAt         *time.Time
+	ProviderUpdatedAt      time.Time
 	Metadata               map[string]any
 }
 
@@ -49,12 +53,14 @@ type BillingOffer struct {
 	ID          string
 	Provider    string
 	OfferKey    string
+	PlanID      string
 	PlanKey     string
 	ProductID   string
 	PriceID     string
 	LookupKey   string
 	Interval    string
 	IntervalCnt int
+	Grant       *BillingGrantResult
 }
 
 // BillingSubscriptionChange records a provider-backed plan transition. A

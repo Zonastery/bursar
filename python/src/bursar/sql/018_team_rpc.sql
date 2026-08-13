@@ -1,5 +1,13 @@
--- Team membership and balance RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 018_team_rpc.sql
+-- Purpose: Define tenant-scoped team creation, membership, and balance RPCs.
+-- Depends on: Team, subject, account, ledger, and idempotency tables through 017.
+-- Security: SECURITY DEFINER entry points require tenant context and preserve
+--   owner/member and spend-cap invariants inside one transaction.
+
+-- Define tenant-scoped team creation, membership, and balance RPCs.
+
+-- Create or replay one team from a tenant-scoped immutable request, provision
+-- its owner membership and account, and optionally post the initial credit.
 
 CREATE FUNCTION bursar.create_team(
     p_owner_subject_id uuid,
@@ -28,14 +36,18 @@ DECLARE
     v_request_digest bytea;
     v_stored_digest bytea;
     v_post record;
+    v_pseudonymized_at timestamptz;
 BEGIN
+    p_initial_credits := round(p_initial_credits, 6);
+
     IF p_owner_subject_id IS NULL
        OR NOT bursar.is_nonempty_bounded_text(
            trim(COALESCE(p_name, '')),
            200
        )
        OR NOT bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
-       OR NOT bursar.is_finite_numeric(p_initial_credits)
+       OR p_initial_credits IS NULL
+       OR NOT bursar.is_credit_numeric(p_initial_credits)
        OR p_initial_credits < 0
     THEN
         RETURN QUERY SELECT
@@ -150,10 +162,16 @@ BEGIN
     VALUES (p_owner_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
-    -- Close the race with concurrent pseudonymization after the preflight
-    -- check. No children exist yet, so the winning request can cleanly release
-    -- its claimed team and candidate subject before returning.
-    IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
+    -- Serialize the final owner check with pseudonymization. Merely re-reading
+    -- the flag leaves a gap before membership insertion in which erasure can
+    -- commit and a new relationship can then be created.
+    SELECT subject.pseudonymized_at
+    INTO v_pseudonymized_at
+    FROM bursar.subjects AS subject
+    WHERE subject.id = p_owner_subject_id
+    FOR UPDATE;
+
+    IF v_pseudonymized_at IS NOT NULL THEN
         DELETE FROM bursar.credit_teams
         WHERE id = v_team;
 
@@ -189,7 +207,8 @@ BEGIN
         );
 
         IF v_post.error_code IS NOT NULL THEN
-            RAISE EXCEPTION 'team initial grant failed: %', v_post.error_code;
+            RAISE EXCEPTION 'team initial grant failed: %', v_post.error_code
+                USING ERRCODE = '23514';
         END IF;
     END IF;
 
@@ -203,6 +222,10 @@ BEGIN
 END
 $$;
 
+-- Membership lifecycle
+
+-- Add, reactivate, or update one member while preserving tenant identity and
+-- historical join time, validating spend caps, and retaining one active owner.
 CREATE FUNCTION bursar.set_team_member(
     p_team_id uuid,
     p_subject_id uuid,
@@ -214,7 +237,13 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE
     v_existing_role text;
     v_existing_left_at timestamptz;
+    v_pseudonymized_at timestamptz;
 BEGIN
+    p_spend_cap := CASE
+        WHEN p_spend_cap IS NULL THEN NULL
+        ELSE round(p_spend_cap, 6)
+    END;
+
     IF p_team_id IS NULL
        OR p_subject_id IS NULL
        OR p_role IS NULL
@@ -222,7 +251,7 @@ BEGIN
        OR (
            p_spend_cap IS NOT NULL
            AND (
-               NOT bursar.is_finite_numeric(p_spend_cap)
+               NOT bursar.is_credit_numeric(p_spend_cap)
                OR p_spend_cap < 0
            )
        )
@@ -246,7 +275,13 @@ BEGIN
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
-    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+    SELECT subject.pseudonymized_at
+    INTO v_pseudonymized_at
+    FROM bursar.subjects AS subject
+    WHERE subject.id = p_subject_id
+    FOR UPDATE;
+
+    IF v_pseudonymized_at IS NOT NULL THEN
         RETURN false;
     END IF;
 
@@ -287,6 +322,7 @@ BEGIN
 
 END $$;
 
+-- Deactivate an active membership except the last owner, retaining history and spend.
 CREATE FUNCTION bursar.remove_team_member(
     p_team_id uuid,
     p_subject_id uuid
@@ -340,6 +376,9 @@ BEGIN
 
 END $$;
 
+-- Team reads
+
+-- List the tenant-scoped membership roster with lifetime spend from team usage.
 CREATE FUNCTION bursar.list_team_members(
     p_team_id uuid
 )
@@ -357,7 +396,7 @@ AS $$
     SELECT
         member.subject_id,
         member.role,
-        member.spend_cap,
+        member.spend_cap::numeric,
         COALESCE(sum(team_usage.amount), 0)
     FROM bursar.credit_team_members AS member
     LEFT JOIN bursar.credit_team_usage_charges AS team_usage
@@ -373,6 +412,7 @@ AS $$
     ORDER BY member.created_at,member.subject_id
 $$;
 
+-- Read the team account balance and active membership count for one tenant.
 CREATE FUNCTION bursar.get_team_balance(
     p_team_id uuid
 )
@@ -390,7 +430,7 @@ AS $$
     SELECT
         team.id,
         team.name,
-        account.balance,
+        account.balance::numeric,
         count(member.subject_id)
     FROM bursar.credit_teams AS team
     JOIN bursar.credit_accounts AS account

@@ -29,6 +29,7 @@ type PostgresStoreOptions struct {
 	ApplicationName        string
 	AccessRole             PostgresAccessRole
 	OnPoolError            func(error)
+	Instrumentation        Instrumentation
 }
 
 // PostgresStore is the PostgreSQL implementation of CreditStore. Credit
@@ -119,6 +120,7 @@ func postgresStoreClientOptions(options PostgresStoreOptions) (PostgresClientOpt
 		MaxConnections:         options.MaxConnections,
 		ApplicationName:        options.ApplicationName,
 		OnPoolError:            options.OnPoolError,
+		Instrumentation:        options.Instrumentation,
 	}, tenantID, options.ProviderEnvironment, nil
 }
 
@@ -229,6 +231,8 @@ func textValue(value any) (string, bool) {
 			return "", false
 		}
 		return formatUUID(typed.Bytes), true
+	case [16]byte:
+		return formatUUID(typed), true
 	case fmt.Stringer:
 		return typed.String(), true
 	default:

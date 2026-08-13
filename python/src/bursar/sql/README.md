@@ -32,13 +32,43 @@ Files are organised by dependency and domain:
 2. tables and relational constraints
 3. trigger functions and trigger declarations
 4. indexes
-5. catalog, credit, policy/lease, team, billing, record, query, and plan RPCs
-6. privileges and RLS
-7. schema and public-RPC comments
+5. catalog, credit, policy/lease, team, billing, query, and plan RPCs
+6. baseline privileges and catalog documentation
+7. storage lifecycle and optional-export RPCs
+8. forced multitenancy security and isolated operator/partition ownership
 
 Keep a file executable on its own through `psycopg`/`psql`; do not use psql
 meta-commands such as `\\ir`. Keep functions in cohesive domain groups rather
 than creating one migration per function.
+
+## Authoring and documentation
+
+Every migration starts with one compact metadata block in this order:
+
+```sql
+-- Migration: NNN_descriptive_name.sql
+-- Purpose: State the database capability established by this file.
+-- Depends on: Name the earlier migrations or objects required here.
+-- Security: Summarise tenant, privilege, RLS, and execution boundaries.
+```
+
+The migration filename is exact. Long field values may wrap onto aligned
+`--   ...` continuation lines. Keep the four labels together at the start of
+the file so the dependency and security assumptions are visible before any
+executable SQL.
+
+Use short, searchable section headings for cohesive object groups. Add a
+contents list only when a long, multi-domain file is materially easier to
+navigate with one; a one-object file does not need one. Comment invariants and
+non-obvious locking, lifecycle, or privilege boundaries; do not require a
+syntax-restating comment for every definition. The migration contract test
+enforces only the metadata layout, leaving comment quality to review.
+
+Implementation comments live beside their definitions. Durable catalog
+documentation for schemas, tables, columns, and public RPCs is collected in
+`027_documentation.sql` when those objects already exist. Later definitions and
+ownership-sensitive functions attach their catalog comments in their owning
+migration. Keep both forms aligned with stable caller-visible behavior.
 
 `bursar.provision_subject_account_on_insert()` is an optional host-table
 trigger hook. Bursar never guesses or mutates an application-owned principal
@@ -101,9 +131,10 @@ regression tests enforce both rules.
 ## Change policy
 
 The baseline is still greenfield, so the numbered files may be reorganised
-until the schema is declared stable. Once deployed, migration files are
-immutable: formatting or logic changes must be appended as a new migration
-because the runner rejects checksum changes.
+until the schema is declared stable. Fold pre-production behavior into the
+owning definitions instead of appending compatibility migrations. Once deployed,
+migration files are immutable: formatting or logic changes must be appended as
+a new migration because the runner rejects checksum changes.
 
 ## Checks
 
@@ -111,7 +142,7 @@ From the Bursar package root:
 
 ```bash
 gmake test-integration
-uv run --with sqlfluff sqlfluff lint python/src/bursar/sql --dialect postgres
+uvx --from sqlfluff==4.2.2 sqlfluff lint python/src/bursar/sql --config .sqlfluff
 ```
 
 The SQL regression programs executed by `test_redesign_integration.py` and

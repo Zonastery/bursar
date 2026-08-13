@@ -3,6 +3,7 @@ package bursar
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -13,7 +14,11 @@ import (
 // not calculate or persist accounting locally: it delegates admission, quota,
 // allowance, idempotency, and ledger mutations to the configured store.
 type CreditsService struct {
-	store CreditStore
+	store           CreditStore
+	catalog         *CatalogService
+	instrumentation Instrumentation
+	analytics       UsageAnalyticsStore
+	usageStore      UsageChargeStore
 
 	policy          CreditPolicyPreset
 	overdraftFloor  Amount
@@ -72,8 +77,28 @@ func NewCreditsService(store CreditStore, options CreditsServiceOptions) (*Credi
 		nextPostDeductionID = 1
 		postDeductionHooks[nextPostDeductionID] = options.PostDeduction
 	}
+	catalog, err := NewCatalogService(store)
+	if err != nil {
+		return nil, err
+	}
+	instrumentation := options.Instrumentation
+	if isNilInstrumentation(instrumentation) {
+		instrumentation = DefaultInstrumentation()
+	}
+	analytics := options.Analytics
+	if isNilCreditsReadBackend(analytics) {
+		analytics = store
+	}
+	usageStore := options.UsageStore
+	if isNilCreditsReadBackend(usageStore) {
+		usageStore = store
+	}
 	return &CreditsService{
 		store:               store,
+		catalog:             catalog,
+		instrumentation:     instrumentation,
+		analytics:           analytics,
+		usageStore:          usageStore,
 		policy:              policy,
 		overdraftFloor:      overdraftFloor,
 		maxConcurrent:       options.MaxConcurrent,
@@ -84,6 +109,38 @@ func NewCreditsService(store CreditStore, options CreditsServiceOptions) (*Credi
 		postDeductionHooks:  postDeductionHooks,
 		nextPostDeductionID: nextPostDeductionID,
 	}, nil
+}
+
+// Optional read backends are commonly passed as pointers. Treat a typed nil
+// the same as an omitted interface so Go callers get the documented
+// PostgreSQL fallback rather than a delayed nil-receiver failure.
+func isNilCreditsReadBackend(backend any) bool {
+	if backend == nil {
+		return true
+	}
+	value := reflect.ValueOf(backend)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func (s *CreditsService) telemetry() Instrumentation {
+	if s == nil || isNilInstrumentation(s.instrumentation) {
+		return NoopInstrumentation{}
+	}
+	return s.instrumentation
+}
+
+// Catalog returns the catalog runtime used for revision-aware usage pricing.
+// Bursar exposes this same instance as its Catalog capability.
+func (s *CreditsService) Catalog() *CatalogService {
+	if s == nil {
+		return nil
+	}
+	return s.catalog
 }
 
 // Store exposes the durable store for integrations that need an advanced
@@ -148,25 +205,27 @@ func (s *CreditsService) GetAvailable(ctx context.Context, userID string) (Avail
 // AddCredits creates a positive idempotent grant and emits credits.added after
 // the store reports a committed result.
 func (s *CreditsService) AddCredits(ctx context.Context, userID string, amount Amount, options AddCreditsOptions) (AddCreditsResult, error) {
-	if s == nil || s.store == nil {
-		return AddCreditsResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	if _, err := requirePositiveAmount(amount, "add credits"); err != nil {
-		return AddCreditsResult{}, err
-	}
-	result, err := s.store.AddCredits(ctx, userID, QuantizeMoney(amount), options)
-	if err != nil {
-		return AddCreditsResult{}, err
-	}
-	emitCreditEvent(ctx, s.events, CreditEventAdded, userID, CreditMetadata{
-		"entry_id":    result.EntryID,
-		"amount":      result.Amount,
-		"new_balance": result.NewBalance,
-		"type":        options.Type,
-		"idempotent":  result.Idempotent,
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsGrant, nil, func(ctx context.Context) (AddCreditsResult, error) {
+		if s == nil || s.store == nil {
+			return AddCreditsResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		if _, err := requirePositiveAmount(amount, "add credits"); err != nil {
+			return AddCreditsResult{}, err
+		}
+		result, err := s.store.AddCredits(ctx, userID, QuantizeMoney(amount), options)
+		if err != nil {
+			return AddCreditsResult{}, err
+		}
+		emitCreditEvent(ctx, s.events, CreditEventAdded, userID, CreditMetadata{
+			"entry_id":    result.EntryID,
+			"amount":      result.Amount,
+			"new_balance": result.NewBalance,
+			"type":        options.Type,
+			"idempotent":  result.Idempotent,
+		})
+		s.rearmLowBalance(userID, result.NewBalance)
+		return result, nil
 	})
-	s.rearmLowBalance(userID, result.NewBalance)
-	return result, nil
 }
 
 // DeductCredits creates a raw administrative debit. Usage-based charging
@@ -198,40 +257,90 @@ func (s *CreditsService) DeductCredits(ctx context.Context, userID string, amoun
 // Deduct charges an exact, already-priced amount through the atomic allowance
 // and quota RPC. It returns typed credit-domain errors for business denials.
 func (s *CreditsService) Deduct(ctx context.Context, userID string, amount Amount, options DeductWithAllowanceOptions) (DeductionResult, error) {
-	if s == nil || s.store == nil {
-		return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	if _, err := requireNonNegativeAmount(amount, "deduct"); err != nil {
-		return DeductionResult{}, err
-	}
-	result, err := s.store.DeductWithAllowance(ctx, userID, QuantizeMoney(amount), options)
-	if err != nil {
-		return DeductionResult{}, err
-	}
-	if result.ErrorCode != "" {
-		emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{
-			"amount":  amount,
-			"error":   result.ErrorCode,
-			"feature": options.Feature,
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsDeduct, nil, func(ctx context.Context) (DeductionResult, error) {
+		if s == nil || s.store == nil {
+			return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		if _, err := requireNonNegativeAmount(amount, "deduct"); err != nil {
+			return DeductionResult{}, err
+		}
+		result, err := s.store.DeductWithAllowance(ctx, userID, QuantizeMoney(amount), options)
+		if err != nil {
+			return DeductionResult{}, err
+		}
+		if result.ErrorCode != "" {
+			emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{
+				"amount":  amount,
+				"error":   result.ErrorCode,
+				"feature": options.Feature,
+			})
+			return result, creditBusinessError("deduct", userID, result.ErrorCode)
+		}
+		if result.BalanceAfter == nil {
+			return result, NewStoreError("deduct succeeded without a committed balance", ErrorOptions{})
+		}
+		emitCreditEvent(ctx, s.events, CreditEventDeducted, userID, CreditMetadata{
+			"entry_id":           result.EntryID,
+			"usage_charge_id":    result.UsageChargeID,
+			"amount":             result.Amount,
+			"allowance_consumed": result.AllowanceConsumed,
+			"balance_after":      *result.BalanceAfter,
+			"model":              options.Model,
+			"idempotent":         result.Idempotent,
 		})
-		return result, creditBusinessError("deduct", userID, result.ErrorCode)
-	}
-	if result.BalanceAfter == nil {
-		return result, NewStoreError("deduct succeeded without a committed balance", ErrorOptions{})
-	}
-	emitCreditEvent(ctx, s.events, CreditEventDeducted, userID, CreditMetadata{
-		"entry_id":           result.EntryID,
-		"usage_charge_id":    result.UsageChargeID,
-		"amount":             result.Amount,
-		"allowance_consumed": result.AllowanceConsumed,
-		"balance_after":      *result.BalanceAfter,
-		"model":              options.Model,
-		"idempotent":         result.Idempotent,
+		if !result.Idempotent {
+			s.emitPostDeduction(ctx, userID, PostDeductionSourceDeduct, result)
+		}
+		return result, nil
 	})
-	if !result.Idempotent {
-		s.emitPostDeduction(ctx, userID, PostDeductionSourceDeduct, result)
-	}
-	return result, nil
+}
+
+// DeductUsage prices metrics with the subject's effective rate card and then
+// performs the same atomic allowance, entitlement, quota, receipt, and ledger
+// mutation as Deduct. Zero-cost usage still reaches PostgreSQL so free rates
+// cannot bypass authorization, quotas, or usage history.
+func (s *CreditsService) DeductUsage(ctx context.Context, userID string, metrics UsageMetrics, options PricedUsageOptions) (DeductionResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsDeduct, nil, func(ctx context.Context) (DeductionResult, error) {
+		if s == nil || s.catalog == nil {
+			return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		idempotencyKey, err := requireStableKey(options.IdempotencyKey, "deduct idempotency key")
+		if err != nil {
+			return DeductionResult{}, err
+		}
+		breakdown, err := s.catalog.CalculateForUser(ctx, userID, metrics)
+		if err != nil {
+			return DeductionResult{}, err
+		}
+		operationOptions := pricedOperationOptions(metrics, breakdown, idempotencyKey, options.Feature, options.Metadata)
+		result, err := s.Deduct(ctx, userID, breakdown.Total, DeductWithAllowanceOptions{
+			OperationUsageOptions: operationOptions,
+			IdempotencyKey:        idempotencyKey,
+			Operation:             metrics.Operation,
+			Metadata:              pricedMetadata(metrics, breakdown, idempotencyKey, options.Metadata),
+		})
+		if err != nil {
+			if result.ErrorCode == "quota_exceeded" {
+				s.emitQuotaEvents(ctx, userID, idempotencyKey)
+			}
+			return result, err
+		}
+		if !result.Idempotent {
+			s.emitQuotaEvents(ctx, userID, idempotencyKey)
+		}
+		return result, nil
+	})
+}
+
+// DeductFlatJob charges one configured named job with the canonical jobs=1
+// measure rather than making applications duplicate pricing metadata.
+func (s *CreditsService) DeductFlatJob(ctx context.Context, userID, jobName string, options PricedUsageOptions) (DeductionResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsDeduct, nil, func(ctx context.Context) (DeductionResult, error) {
+		return s.DeductUsage(ctx, userID, UsageMetrics{
+			Operation: jobName,
+			Measures:  map[string]Amount{"jobs": MustAmount("1")},
+		}, options)
+	})
 }
 
 func (s *CreditsService) resolvedLeaseOptions(options ReserveOptions) (CreateLeaseOptions, string, error) {
@@ -282,105 +391,176 @@ func (s *CreditsService) resolvedLeaseOptions(options ReserveOptions) (CreateLea
 
 // Reserve atomically admits work by acquiring a durable credit lease.
 func (s *CreditsService) Reserve(ctx context.Context, userID string, amount Amount, options ReserveOptions) (LeaseResult, error) {
-	if s == nil || s.store == nil {
-		return LeaseResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	if _, err := requireNonNegativeAmount(amount, "reserve"); err != nil {
-		return LeaseResult{}, err
-	}
-	storeOptions, operationType, err := s.resolvedLeaseOptions(options)
-	if err != nil {
-		return LeaseResult{}, err
-	}
-	result, err := s.store.CreateLease(ctx, userID, QuantizeMoney(amount), operationType, storeOptions)
-	if err != nil {
-		return LeaseResult{}, err
-	}
-	if result.ErrorCode != "" {
-		emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{
-			"error":          result.ErrorCode,
-			"amount":         amount,
-			"stage":          "reserve",
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsReserve, nil, func(ctx context.Context) (LeaseResult, error) {
+		if s == nil || s.store == nil {
+			return LeaseResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		if _, err := requireNonNegativeAmount(amount, "reserve"); err != nil {
+			return LeaseResult{}, err
+		}
+		storeOptions, operationType, err := s.resolvedLeaseOptions(options)
+		if err != nil {
+			return LeaseResult{}, err
+		}
+		result, err := s.store.CreateLease(ctx, userID, QuantizeMoney(amount), operationType, storeOptions)
+		if err != nil {
+			return LeaseResult{}, err
+		}
+		if result.ErrorCode != "" {
+			emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{
+				"error":          result.ErrorCode,
+				"amount":         amount,
+				"stage":          "reserve",
+				"operation_type": operationType,
+			})
+			return result, creditBusinessError("reserve", userID, result.ErrorCode)
+		}
+		if result.LeaseID == "" || result.Amount == nil || result.MinimumBalance == nil || result.ExpiresAt == nil {
+			return result, NewStoreError("reserve succeeded without a committed lease", ErrorOptions{})
+		}
+		emitCreditEvent(ctx, s.events, CreditEventReserved, userID, CreditMetadata{
+			"lease_id":       result.LeaseID,
+			"amount":         *result.Amount,
+			"available":      result.Available,
+			"billing_mode":   result.BillingMode,
 			"operation_type": operationType,
+			"expires_at":     *result.ExpiresAt,
 		})
-		return result, creditBusinessError("reserve", userID, result.ErrorCode)
-	}
-	if result.LeaseID == "" || result.Amount == nil || result.MinimumBalance == nil || result.ExpiresAt == nil {
-		return result, NewStoreError("reserve succeeded without a committed lease", ErrorOptions{})
-	}
-	emitCreditEvent(ctx, s.events, CreditEventReserved, userID, CreditMetadata{
-		"lease_id":       result.LeaseID,
-		"amount":         *result.Amount,
-		"available":      result.Available,
-		"billing_mode":   result.BillingMode,
-		"operation_type": operationType,
-		"expires_at":     *result.ExpiresAt,
+		return result, nil
 	})
-	return result, nil
+}
+
+// ReserveUsage prices metrics with the subject's current effective catalog
+// and atomically reserves that worst-case cost while persisting the measures
+// and dimensions used by admission and quota policy.
+func (s *CreditsService) ReserveUsage(ctx context.Context, userID string, metrics UsageMetrics, options ReserveOptions) (LeaseResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsReserve, nil, func(ctx context.Context) (LeaseResult, error) {
+		if s == nil || s.catalog == nil {
+			return LeaseResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		breakdown, err := s.catalog.CalculateForUser(ctx, userID, metrics)
+		if err != nil {
+			return LeaseResult{}, err
+		}
+		if strings.TrimSpace(options.OperationType) == "" {
+			options.OperationType = metrics.Operation
+		}
+		options.OperationUsageOptions = pricedOperationOptions(metrics, breakdown, options.IdempotencyKey, options.Feature, options.Metadata)
+		options.Metadata = pricedMetadata(metrics, breakdown, options.IdempotencyKey, options.Metadata)
+		result, err := s.Reserve(ctx, userID, breakdown.Total, options)
+		if err != nil {
+			if result.ErrorCode == "quota_exceeded" {
+				s.emitQuotaEvents(ctx, userID, options.IdempotencyKey)
+			}
+			return result, err
+		}
+		s.emitQuotaEvents(ctx, userID, options.IdempotencyKey)
+		return result, nil
+	})
 }
 
 // Settle finalizes a lease with its actual exact cost. A successful settlement
 // never releases the lease afterward, preserving replay safety after unknown
 // commit outcomes.
 func (s *CreditsService) Settle(ctx context.Context, userID, leaseID string, amount Amount, options SettleOptions) (DeductionResult, error) {
-	if s == nil || s.store == nil {
-		return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	if _, err := requireNonNegativeAmount(amount, "settle"); err != nil {
-		return DeductionResult{}, err
-	}
-	result, err := s.store.SettleLease(ctx, userID, leaseID, QuantizeMoney(amount), SettleLeaseOptions{
-		OperationUsageOptions: options.OperationUsageOptions,
-		IdempotencyKey:        options.IdempotencyKey,
-		Metadata:              options.Metadata,
-	})
-	if err != nil {
-		return DeductionResult{}, err
-	}
-	if result.ErrorCode != "" {
-		emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{
-			"error":    result.ErrorCode,
-			"amount":   amount,
-			"stage":    "settle",
-			"lease_id": leaseID,
-		})
-		if isLeaseExpiredCode(result.ErrorCode) {
-			emitCreditEvent(ctx, s.events, CreditEventLeaseExpired, userID, CreditMetadata{"lease_id": leaseID})
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsSettle, nil, func(ctx context.Context) (DeductionResult, error) {
+		if s == nil || s.store == nil {
+			return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 		}
-		return result, creditBusinessError("settle", userID, result.ErrorCode)
-	}
-	if result.BalanceAfter == nil {
-		return result, NewStoreError("settle succeeded without a committed balance", ErrorOptions{})
-	}
-	emitCreditEvent(ctx, s.events, CreditEventDeducted, userID, CreditMetadata{
-		"entry_id":           result.EntryID,
-		"usage_charge_id":    result.UsageChargeID,
-		"amount":             result.Amount,
-		"allowance_consumed": result.AllowanceConsumed,
-		"balance_after":      *result.BalanceAfter,
-		"model":              options.Model,
-		"lease_id":           leaseID,
-		"idempotent":         result.Idempotent,
+		if _, err := requireNonNegativeAmount(amount, "settle"); err != nil {
+			return DeductionResult{}, err
+		}
+		if strings.TrimSpace(options.IdempotencyKey) == "" {
+			options.IdempotencyKey = "lease:" + strings.TrimSpace(leaseID) + ":settle"
+		}
+		if _, err := requireStableKey(options.IdempotencyKey, "settle idempotency key"); err != nil {
+			return DeductionResult{}, err
+		}
+		result, err := s.store.SettleLease(ctx, userID, leaseID, QuantizeMoney(amount), SettleLeaseOptions{
+			OperationUsageOptions: options.OperationUsageOptions,
+			IdempotencyKey:        options.IdempotencyKey,
+			Metadata:              options.Metadata,
+		})
+		if err != nil {
+			return DeductionResult{}, err
+		}
+		if result.ErrorCode != "" {
+			emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{
+				"error":    result.ErrorCode,
+				"amount":   amount,
+				"stage":    "settle",
+				"lease_id": leaseID,
+			})
+			if isLeaseExpiredCode(result.ErrorCode) {
+				emitCreditEvent(ctx, s.events, CreditEventLeaseExpired, userID, CreditMetadata{"lease_id": leaseID})
+			}
+			return result, creditBusinessError("settle", userID, result.ErrorCode)
+		}
+		if result.BalanceAfter == nil {
+			return result, NewStoreError("settle succeeded without a committed balance", ErrorOptions{})
+		}
+		emitCreditEvent(ctx, s.events, CreditEventDeducted, userID, CreditMetadata{
+			"entry_id":           result.EntryID,
+			"usage_charge_id":    result.UsageChargeID,
+			"amount":             result.Amount,
+			"allowance_consumed": result.AllowanceConsumed,
+			"balance_after":      *result.BalanceAfter,
+			"model":              options.Model,
+			"lease_id":           leaseID,
+			"idempotent":         result.Idempotent,
+		})
+		if !result.Idempotent {
+			s.emitPostDeduction(ctx, userID, PostDeductionSourceSettle, result)
+		}
+		return result, nil
 	})
-	if !result.Idempotent {
-		s.emitPostDeduction(ctx, userID, PostDeductionSourceSettle, result)
-	}
-	return result, nil
+}
+
+// SettleUsage prices actual metrics using the immutable catalog and rate card
+// snapshot captured by the lease, then commits the full (unclamped) cost.
+func (s *CreditsService) SettleUsage(ctx context.Context, userID, leaseID string, metrics UsageMetrics, options SettleOptions) (DeductionResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsSettle, nil, func(ctx context.Context) (DeductionResult, error) {
+		if s == nil || s.catalog == nil {
+			return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		breakdown, err := s.catalog.CalculateForLease(ctx, userID, leaseID, metrics)
+		if err != nil {
+			return DeductionResult{}, err
+		}
+		if strings.TrimSpace(options.IdempotencyKey) == "" {
+			options.IdempotencyKey = "lease:" + strings.TrimSpace(leaseID) + ":settle"
+		}
+		options.OperationUsageOptions = pricedOperationOptions(metrics, breakdown, options.IdempotencyKey, options.Feature, options.Metadata)
+		options.Metadata = pricedMetadata(metrics, breakdown, options.IdempotencyKey, options.Metadata)
+		result, err := s.Settle(ctx, userID, leaseID, breakdown.Total, options)
+		if err != nil {
+			if result.ErrorCode == "quota_exceeded" {
+				s.emitQuotaEvents(ctx, userID, options.IdempotencyKey)
+			}
+			return result, err
+		}
+		if !result.Idempotent {
+			s.emitQuotaEvents(ctx, userID, options.IdempotencyKey)
+		}
+		return result, nil
+	})
 }
 
 // Release releases a failed/aborted operation's lease without a charge.
 func (s *CreditsService) Release(ctx context.Context, userID, leaseID string) (ReleaseResult, error) {
-	if s == nil || s.store == nil {
-		return ReleaseResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	result, err := s.store.ReleaseLease(ctx, userID, leaseID)
-	if err != nil {
-		return ReleaseResult{}, err
-	}
-	if result.Released {
-		emitCreditEvent(ctx, s.events, CreditEventReservationReleased, userID, CreditMetadata{"lease_id": leaseID, "reason": result.Reason})
-	}
-	return result, nil
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsRelease, nil, func(ctx context.Context) (ReleaseResult, error) {
+		if s == nil || s.store == nil {
+			return ReleaseResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		result, err := s.store.ReleaseLease(ctx, userID, leaseID)
+		if err != nil {
+			return ReleaseResult{}, err
+		}
+		if result.Released {
+			emitCreditEvent(ctx, s.events, CreditEventReservationReleased, userID, CreditMetadata{"lease_id": leaseID, "reason": result.Reason})
+		}
+		return result, nil
+	})
 }
 
 // Renew extends an active operation lease with the configured default TTL when
@@ -408,118 +588,141 @@ func (s *CreditsService) Renew(ctx context.Context, userID, leaseID string, ttl 
 // CanAfford is an advisory check for UI. It must never replace Reserve as the
 // concurrency-safe admission gate.
 func (s *CreditsService) CanAfford(ctx context.Context, userID string, worstCase Amount, options CanAffordOptions) (CanAffordResult, error) {
-	if s == nil || s.store == nil {
-		return CanAffordResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	if _, err := requireNonNegativeAmount(worstCase, "can afford"); err != nil {
-		return CanAffordResult{}, err
-	}
-	available, err := s.store.GetAvailable(ctx, userID)
-	if err != nil {
-		return CanAffordResult{}, err
-	}
-	mode := options.BillingMode
-	if mode == "" {
-		if s.policy == CreditPolicyOverdraft {
-			mode = BillingModeOverdraft
-		} else {
-			mode = BillingModeStrict
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsCanAfford, nil, func(ctx context.Context) (CanAffordResult, error) {
+		if s == nil || s.store == nil {
+			return CanAffordResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 		}
-	}
-	mode, err = requireBillingMode(mode)
-	if err != nil {
-		return CanAffordResult{}, err
-	}
-	floor := DecimalZero
-	if mode == BillingModeOverdraft {
-		floor = s.overdraftFloor
-	}
-	allowance, err := s.store.CheckAllowance(ctx, userID)
-	if err != nil {
-		return CanAffordResult{}, err
-	}
-	spendable := available.Available.Sub(floor)
-	if allowance != nil {
-		spendable = spendable.Add(allowance.AllowanceRemaining)
-	}
-	result := CanAffordResult{Affordable: spendable.GreaterThanOrEqual(worstCase), Spendable: spendable, WorstCase: QuantizeMoney(worstCase)}
-	if options.Feature != "" {
-		feature, err := s.store.CheckFeature(ctx, userID, options.Feature)
+		if _, err := requireNonNegativeAmount(worstCase, "can afford"); err != nil {
+			return CanAffordResult{}, err
+		}
+		available, err := s.store.GetAvailable(ctx, userID)
 		if err != nil {
 			return CanAffordResult{}, err
 		}
-		if !feature.HasFeature {
-			result.Affordable = false
-			result.Reason = "feature_not_entitled"
-			return result, nil
+		mode := options.BillingMode
+		if mode == "" {
+			if s.policy == CreditPolicyOverdraft {
+				mode = BillingModeOverdraft
+			} else {
+				mode = BillingModeStrict
+			}
 		}
-	}
-	if !result.Affordable {
-		result.Reason = "insufficient_credits"
-	}
-	return result, nil
+		mode, err = requireBillingMode(mode)
+		if err != nil {
+			return CanAffordResult{}, err
+		}
+		floor := DecimalZero
+		if mode == BillingModeOverdraft {
+			floor = s.overdraftFloor
+		}
+		allowance, err := s.store.CheckAllowance(ctx, userID)
+		if err != nil {
+			return CanAffordResult{}, err
+		}
+		spendable := available.Available.Sub(floor)
+		if allowance != nil {
+			spendable = spendable.Add(allowance.AllowanceRemaining)
+		}
+		result := CanAffordResult{Affordable: spendable.GreaterThanOrEqual(worstCase), Spendable: spendable, WorstCase: QuantizeMoney(worstCase)}
+		if options.Feature != "" {
+			feature, err := s.store.CheckFeature(ctx, userID, options.Feature)
+			if err != nil {
+				return CanAffordResult{}, err
+			}
+			if !feature.HasFeature {
+				result.Affordable = false
+				result.Reason = "feature_not_entitled"
+				return result, nil
+			}
+		}
+		if !result.Affordable {
+			result.Reason = "insufficient_credits"
+		}
+		return result, nil
+	})
+}
+
+// CanAffordUsage is the metric-priced advisory counterpart to ReserveUsage.
+// It is useful for UI hints but remains non-atomic and must not replace a
+// durable reservation for admission.
+func (s *CreditsService) CanAffordUsage(ctx context.Context, userID string, metrics UsageMetrics, options CanAffordOptions) (CanAffordResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsCanAfford, nil, func(ctx context.Context) (CanAffordResult, error) {
+		if s == nil || s.catalog == nil {
+			return CanAffordResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		breakdown, err := s.catalog.CalculateForUser(ctx, userID, metrics)
+		if err != nil {
+			return CanAffordResult{}, err
+		}
+		if strings.TrimSpace(options.OperationType) == "" {
+			options.OperationType = metrics.Operation
+		}
+		return s.CanAfford(ctx, userID, breakdown.Total, options)
+	})
 }
 
 // GrantSubscriptionCycle grants one provider cycle and optionally updates the
 // subject plan. The grant itself is idempotent; a replay only repairs a plan
 // assignment when it is missing/different and never double-grants credits.
 func (s *CreditsService) GrantSubscriptionCycle(ctx context.Context, userID string, amount Amount, options GrantSubscriptionCycleOptions) (AddCreditsResult, error) {
-	if s == nil || s.store == nil {
-		return AddCreditsResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	if _, err := requirePositiveAmount(amount, "subscription cycle grant"); err != nil {
-		return AddCreditsResult{}, err
-	}
-	if options.ExpiresAt != nil && options.TTLDays != 0 {
-		return AddCreditsResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "subscription cycle expiry and TTL days are mutually exclusive")
-	}
-	if options.TTLDays < 0 {
-		return AddCreditsResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "subscription cycle TTL days must be positive")
-	}
-	expiresAt := options.ExpiresAt
-	if options.TTLDays > 0 {
-		value := time.Now().UTC().Add(time.Duration(options.TTLDays) * 24 * time.Hour)
-		expiresAt = &value
-	}
-	bucket := options.Bucket
-	if bucket == "" {
-		bucket = "subscription"
-	}
-	result, err := s.store.AddCredits(ctx, userID, QuantizeMoney(amount), AddCreditsOptions{
-		Type:           "purchase",
-		Bucket:         bucket,
-		ExpiresAt:      expiresAt,
-		Metadata:       options.Metadata,
-		IdempotencyKey: options.IdempotencyKey,
-	})
-	if err != nil {
-		return AddCreditsResult{}, err
-	}
-	if options.PlanKey != "" {
-		assignPlan := !result.Idempotent
-		if result.Idempotent {
-			plan, planErr := s.store.GetUserPlan(ctx, userID)
-			if planErr != nil {
-				return AddCreditsResult{}, planErr
-			}
-			assignPlan = plan.PlanKey != options.PlanKey
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsGrantSubscriptionCycle, nil, func(ctx context.Context) (AddCreditsResult, error) {
+		if s == nil || s.store == nil {
+			return AddCreditsResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 		}
-		if assignPlan {
-			if _, err := s.SetUserPlan(ctx, userID, options.PlanKey, SetUserPlanOptions{}); err != nil {
-				return AddCreditsResult{}, err
+		if _, err := requirePositiveAmount(amount, "subscription cycle grant"); err != nil {
+			return AddCreditsResult{}, err
+		}
+		if options.ExpiresAt != nil && options.TTLDays != 0 {
+			return AddCreditsResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "subscription cycle expiry and TTL days are mutually exclusive")
+		}
+		if options.TTLDays < 0 {
+			return AddCreditsResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "subscription cycle TTL days must be positive")
+		}
+		expiresAt := options.ExpiresAt
+		if options.TTLDays > 0 {
+			value := time.Now().UTC().Add(time.Duration(options.TTLDays) * 24 * time.Hour)
+			expiresAt = &value
+		}
+		bucket := options.Bucket
+		if bucket == "" {
+			bucket = "subscription"
+		}
+		result, err := s.store.AddCredits(ctx, userID, QuantizeMoney(amount), AddCreditsOptions{
+			Type:           "purchase",
+			Bucket:         bucket,
+			ExpiresAt:      expiresAt,
+			Metadata:       options.Metadata,
+			IdempotencyKey: options.IdempotencyKey,
+		})
+		if err != nil {
+			return AddCreditsResult{}, err
+		}
+		if options.PlanKey != "" {
+			assignPlan := !result.Idempotent
+			if result.Idempotent {
+				plan, planErr := s.store.GetUserPlan(ctx, userID)
+				if planErr != nil {
+					return AddCreditsResult{}, planErr
+				}
+				assignPlan = plan.PlanKey != options.PlanKey
+			}
+			if assignPlan {
+				if _, err := s.SetUserPlan(ctx, userID, options.PlanKey, SetUserPlanOptions{}); err != nil {
+					return AddCreditsResult{}, err
+				}
 			}
 		}
-	}
-	emitCreditEvent(ctx, s.events, CreditEventCycleRenewed, userID, CreditMetadata{
-		"entry_id":        result.EntryID,
-		"amount":          result.Amount,
-		"new_balance":     result.NewBalance,
-		"bucket":          bucket,
-		"plan_key":        options.PlanKey,
-		"idempotency_key": options.IdempotencyKey,
-		"idempotent":      result.Idempotent,
+		emitCreditEvent(ctx, s.events, CreditEventCycleRenewed, userID, CreditMetadata{
+			"entry_id":        result.EntryID,
+			"amount":          result.Amount,
+			"new_balance":     result.NewBalance,
+			"bucket":          bucket,
+			"plan_key":        options.PlanKey,
+			"idempotency_key": options.IdempotencyKey,
+			"idempotent":      result.Idempotent,
+		})
+		return result, nil
 	})
-	return result, nil
 }
 
 // SetUserPlan delegates a plan assignment and emits the committed lifecycle
@@ -583,30 +786,32 @@ func (s *CreditsService) CheckAllowance(ctx context.Context, userID string) (*Al
 // RefundCredits posts a durable refund and emits only after a successful
 // committed outcome. Rejected refunds receive a typed credit-domain error.
 func (s *CreditsService) RefundCredits(ctx context.Context, entryID string, amount *Amount, reason string, metadata CreditMetadata, idempotencyKey string) (RefundResult, error) {
-	if s == nil || s.store == nil {
-		return RefundResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	result, err := s.store.RefundCredits(ctx, entryID, amount, reason, metadata, idempotencyKey)
-	if err != nil {
-		return RefundResult{}, err
-	}
-	if result.ErrorCode != "" {
-		if result.UserID != "" {
-			emitCreditEvent(ctx, s.events, CreditEventRefundFailed, result.UserID, CreditMetadata{"entry_id": entryID, "error": result.ErrorCode, "reason": reason})
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsRefund, nil, func(ctx context.Context) (RefundResult, error) {
+		if s == nil || s.store == nil {
+			return RefundResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 		}
-		return result, creditBusinessError("refund", result.UserID, result.ErrorCode)
-	}
-	if result.UserID == "" || result.RefundEntryID == "" || result.Amount == nil || result.NewBalance == nil {
-		return result, NewStoreError("refund succeeded without committed fields", ErrorOptions{})
-	}
-	emitCreditEvent(ctx, s.events, CreditEventRefunded, result.UserID, CreditMetadata{
-		"entry_id":        entryID,
-		"refund_entry_id": result.RefundEntryID,
-		"amount":          *result.Amount,
-		"new_balance":     *result.NewBalance,
-		"reason":          reason,
+		result, err := s.store.RefundCredits(ctx, entryID, amount, reason, metadata, idempotencyKey)
+		if err != nil {
+			return RefundResult{}, err
+		}
+		if result.ErrorCode != "" {
+			if result.UserID != "" {
+				emitCreditEvent(ctx, s.events, CreditEventRefundFailed, result.UserID, CreditMetadata{"entry_id": entryID, "error": result.ErrorCode, "reason": reason})
+			}
+			return result, creditBusinessError("refund", result.UserID, result.ErrorCode)
+		}
+		if result.UserID == "" || result.RefundEntryID == "" || result.Amount == nil || result.NewBalance == nil {
+			return result, NewStoreError("refund succeeded without committed fields", ErrorOptions{})
+		}
+		emitCreditEvent(ctx, s.events, CreditEventRefunded, result.UserID, CreditMetadata{
+			"entry_id":        entryID,
+			"refund_entry_id": result.RefundEntryID,
+			"amount":          *result.Amount,
+			"new_balance":     *result.NewBalance,
+			"reason":          reason,
+		})
+		return result, nil
 	})
-	return result, nil
 }
 
 // RevokeCreditsByEntryType removes remaining lots for a subscription or grant
@@ -738,65 +943,94 @@ func (s *CreditsService) ListQuotaEvents(ctx context.Context, userID string, opt
 
 // ExecuteGrantProgram runs a configured server-side grant event.
 func (s *CreditsService) ExecuteGrantProgram(ctx context.Context, request ExecuteGrantProgramRequest) ([]GrantProgramAwardResult, error) {
-	if s == nil || s.store == nil {
-		return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	return s.store.ExecuteGrantProgram(ctx, request)
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsGrantProgram, nil, func(ctx context.Context) ([]GrantProgramAwardResult, error) {
+		if s == nil || s.store == nil {
+			return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		return s.store.ExecuteGrantProgram(ctx, request)
+	})
 }
 
 // RecordUsage records a priced receipt without another account debit.
 func (s *CreditsService) RecordUsage(ctx context.Context, userID, operation string, requested Amount, options RecordUsageOptions) (UsageRecordResult, error) {
-	if s == nil || s.store == nil {
-		return UsageRecordResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	result, err := s.store.RecordUsage(ctx, userID, operation, requested, options)
-	if err != nil {
-		return UsageRecordResult{}, err
-	}
-	if result.ErrorCode != "" {
-		return result, creditBusinessError("record usage", userID, result.ErrorCode)
-	}
-	return result, nil
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsRecordUsage, nil, func(ctx context.Context) (UsageRecordResult, error) {
+		if s == nil || s.store == nil {
+			return UsageRecordResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		result, err := s.store.RecordUsage(ctx, userID, operation, requested, options)
+		if err != nil {
+			return UsageRecordResult{}, err
+		}
+		if result.ErrorCode != "" {
+			return result, creditBusinessError("record usage", userID, result.ErrorCode)
+		}
+		return result, nil
+	})
+}
+
+// RecordUsageMetrics prices and persists a usage receipt without debiting the
+// subject again. It is intended for externally billed usage while retaining
+// the same catalog snapshot and audit metadata as a normal Bursar charge.
+func (s *CreditsService) RecordUsageMetrics(ctx context.Context, userID string, metrics UsageMetrics, options PricedUsageRecordOptions) (UsageRecordResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsRecordUsage, nil, func(ctx context.Context) (UsageRecordResult, error) {
+		if s == nil || s.catalog == nil {
+			return UsageRecordResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		idempotencyKey, err := requireStableKey(options.IdempotencyKey, "record usage idempotency key")
+		if err != nil {
+			return UsageRecordResult{}, err
+		}
+		breakdown, err := s.catalog.CalculateForUser(ctx, userID, metrics)
+		if err != nil {
+			return UsageRecordResult{}, err
+		}
+		operationOptions := pricedOperationOptions(metrics, breakdown, idempotencyKey, "", options.Metadata)
+		return s.RecordUsage(ctx, userID, metrics.Operation, breakdown.Total, RecordUsageOptions{
+			OperationUsageOptions: operationOptions,
+			IdempotencyKey:        idempotencyKey,
+			Metadata:              pricedMetadata(metrics, breakdown, idempotencyKey, options.Metadata),
+		})
+	})
 }
 
 // SpendByUser returns tenant-scoped usage aggregates.
 func (s *CreditsService) SpendByUser(ctx context.Context, start, end time.Time) ([]SpendByUserRow, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.analytics == nil {
 		return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.SpendByUser(ctx, start, end)
+	return s.analytics.SpendByUser(ctx, start, end)
 }
 
 // SpendByModel returns tenant-scoped model aggregates.
 func (s *CreditsService) SpendByModel(ctx context.Context, start, end time.Time) ([]SpendByModelRow, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.analytics == nil {
 		return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.SpendByModel(ctx, start, end)
+	return s.analytics.SpendByModel(ctx, start, end)
 }
 
 // TopUsers returns the highest-spend users in a tenant range.
 func (s *CreditsService) TopUsers(ctx context.Context, limit int, start, end time.Time) ([]TopUserRow, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.analytics == nil {
 		return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.TopUsers(ctx, limit, start, end)
+	return s.analytics.TopUsers(ctx, limit, start, end)
 }
 
 // DailySpend returns daily tenant-spend aggregates.
 func (s *CreditsService) DailySpend(ctx context.Context, start, end time.Time) ([]DailySpendRow, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.analytics == nil {
 		return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.DailySpend(ctx, start, end)
+	return s.analytics.DailySpend(ctx, start, end)
 }
 
 // AggregateStats returns aggregate tenant usage statistics.
 func (s *CreditsService) AggregateStats(ctx context.Context, start, end time.Time) (AggregateStats, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.analytics == nil {
 		return AggregateStats{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.AggregateStats(ctx, start, end)
+	return s.analytics.AggregateStats(ctx, start, end)
 }
 
 // ListLedgerEntries returns a stable page of subject ledger entries.
@@ -817,10 +1051,10 @@ func (s *CreditsService) ListUsageEntries(ctx context.Context, userID string, op
 
 // ListUsageCharges returns canonical usage receipts.
 func (s *CreditsService) ListUsageCharges(ctx context.Context, userID string, options ListUsageChargesOptions) (UsageChargePage, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.usageStore == nil {
 		return UsageChargePage{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.ListUsageCharges(ctx, userID, options)
+	return s.usageStore.ListUsageCharges(ctx, userID, options)
 }
 
 // GetLedgerEntry returns one subject-owned ledger row.
@@ -873,22 +1107,59 @@ func (s *CreditsService) RemoveTeamMember(ctx context.Context, teamID, userID st
 
 // DeductTeam atomically charges a shared balance on behalf of a member.
 func (s *CreditsService) DeductTeam(ctx context.Context, teamID, userID string, amount Amount, options TeamDeductionOptions) (TeamDeductionResult, error) {
-	if s == nil || s.store == nil {
-		return TeamDeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	result, err := s.store.DeductTeam(ctx, teamID, userID, amount, options)
-	if err != nil {
-		return TeamDeductionResult{}, err
-	}
-	if result.ErrorCode != "" {
-		emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{"error": result.ErrorCode, "amount": amount, "team_id": teamID, "deduct_type": "team"})
-		return result, creditBusinessError("team deduct", userID, result.ErrorCode)
-	}
-	if result.TeamBalanceAfter == nil {
-		return result, NewStoreError("team deduct succeeded without a committed balance", ErrorOptions{})
-	}
-	emitCreditEvent(ctx, s.events, CreditEventDeducted, userID, CreditMetadata{"entry_id": result.EntryID, "amount": result.Amount, "team_balance_after": *result.TeamBalanceAfter, "team_id": teamID, "deduct_type": "team"})
-	return result, nil
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsDeductTeam, nil, func(ctx context.Context) (TeamDeductionResult, error) {
+		if s == nil || s.store == nil {
+			return TeamDeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		result, err := s.store.DeductTeam(ctx, teamID, userID, amount, options)
+		if err != nil {
+			return TeamDeductionResult{}, err
+		}
+		if result.ErrorCode != "" {
+			emitCreditEvent(ctx, s.events, CreditEventDeductFailed, userID, CreditMetadata{"error": result.ErrorCode, "amount": amount, "team_id": teamID, "deduct_type": "team"})
+			return result, creditBusinessError("team deduct", userID, result.ErrorCode)
+		}
+		if result.TeamBalanceAfter == nil {
+			return result, NewStoreError("team deduct succeeded without a committed balance", ErrorOptions{})
+		}
+		emitCreditEvent(ctx, s.events, CreditEventDeducted, userID, CreditMetadata{"entry_id": result.EntryID, "amount": result.Amount, "team_balance_after": *result.TeamBalanceAfter, "team_id": teamID, "deduct_type": "team"})
+		return result, nil
+	})
+}
+
+// DeductTeamUsage prices metrics using the member's effective plan and then
+// atomically charges the shared team pool. A zero-cost operation is a genuine
+// no-op for the team ledger but still returns the current durable balance.
+func (s *CreditsService) DeductTeamUsage(ctx context.Context, teamID, userID string, metrics UsageMetrics, options PricedTeamDeductionOptions) (TeamDeductionResult, error) {
+	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsDeductTeam, nil, func(ctx context.Context) (TeamDeductionResult, error) {
+		if s == nil || s.catalog == nil {
+			return TeamDeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+		}
+		idempotencyKey, err := requireStableKey(options.IdempotencyKey, "team deduction idempotency key")
+		if err != nil {
+			return TeamDeductionResult{}, err
+		}
+		breakdown, err := s.catalog.CalculateForUser(ctx, userID, metrics)
+		if err != nil {
+			return TeamDeductionResult{}, err
+		}
+		if breakdown.Total.IsZero() {
+			team, err := s.store.GetTeamBalance(ctx, teamID)
+			if err != nil {
+				return TeamDeductionResult{}, err
+			}
+			if team == nil {
+				return TeamDeductionResult{}, NewError("team was not found", ErrorOptions{Code: ErrorCodeCommerceResourceNotFound, Category: ErrorCategoryNotFound})
+			}
+			balance := team.Balance
+			return TeamDeductionResult{TeamID: teamID, UserID: userID, Amount: DecimalZero, TeamBalanceAfter: &balance}, nil
+		}
+		return s.DeductTeam(ctx, teamID, userID, breakdown.Total, TeamDeductionOptions{
+			IdempotencyKey: idempotencyKey,
+			Operation:      metrics.Operation,
+			Metadata:       pricedMetadata(metrics, breakdown, idempotencyKey, options.Metadata),
+		})
+	})
 }
 
 // BeginBilledOperation reserves a replay-safe lease for a complete application
@@ -1052,6 +1323,72 @@ func (s *CreditsService) RunBilled(ctx context.Context, userID string, options R
 		}
 	}
 	return RunBilledResult{}, err
+}
+
+func pricedOperationOptions(metrics UsageMetrics, _ CostBreakdown, _ string, feature string, _ CreditMetadata) OperationUsageOptions {
+	measures := make(map[string]Amount, len(metrics.Measures))
+	for key, value := range metrics.Measures {
+		measures[key] = value
+	}
+	dimensions := cloneAnyMap(metrics.Dimensions)
+	return OperationUsageOptions{
+		Feature:    feature,
+		Model:      metricDimensionString(metrics.Dimensions, "model"),
+		Region:     metricDimensionString(metrics.Dimensions, "region"),
+		Measures:   measures,
+		Dimensions: dimensions,
+	}
+}
+
+func pricedMetadata(metrics UsageMetrics, breakdown CostBreakdown, idempotencyKey string, caller CreditMetadata) CreditMetadata {
+	metadata := caller.Clone()
+	if metadata == nil {
+		metadata = make(CreditMetadata)
+	}
+	measures := make(map[string]string, len(metrics.Measures))
+	for key, value := range metrics.Measures {
+		measures[key] = value.String()
+	}
+	metadata["operation"] = metrics.Operation
+	metadata["measures"] = measures
+	metadata["dimensions"] = cloneAnyMap(metrics.Dimensions)
+	metadata["breakdown_total"] = breakdown.Total.String()
+	metadata["idempotency_key"] = idempotencyKey
+	return metadata
+}
+
+func metricDimensionString(dimensions map[string]any, key string) string {
+	value, ok := dimensions[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func (s *CreditsService) emitQuotaEvents(ctx context.Context, userID, idempotencyKey string) {
+	if s == nil || s.store == nil || strings.TrimSpace(idempotencyKey) == "" {
+		return
+	}
+	events, err := s.store.ListQuotaEvents(ctx, userID, ListQuotaEventsOptions{IdempotencyKey: idempotencyKey, Limit: 100})
+	if err != nil {
+		return
+	}
+	for _, event := range events {
+		data := CreditMetadata{
+			"quota_key":         event.QuotaKey,
+			"operation":         event.Operation,
+			"measure":           event.Measure,
+			"threshold_percent": event.ThresholdPercent,
+			"usage_charge_id":   event.UsageChargeID,
+			"idempotency_key":   event.IdempotencyKey,
+		}
+		switch event.EventType {
+		case "blocked":
+			emitCreditEvent(ctx, s.events, CreditEventQuotaBlocked, userID, data)
+		case "threshold":
+			emitCreditEvent(ctx, s.events, CreditEventQuotaThreshold, userID, data)
+		}
+	}
 }
 
 func scopedOperationKey(operationKey, suffix string) (string, error) {

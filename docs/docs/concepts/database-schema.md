@@ -118,13 +118,13 @@ erDiagram
         jsonb definition
     }
     catalog_credit_policies {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT policy_key "UK"
-        TEXT policy_type
-        NUMERIC20 credit_limit
-        JSONB definition
+        uuid tenant_id
+        uuid id "PK"
+        uuid catalog_revision_id
+        text policy_key
+        text policy_type
+        bursar credit_limit
+        jsonb definition
     }
     catalog_admission_policies {
         UUID tenant_id "FK"
@@ -151,25 +151,25 @@ erDiagram
         JSONB definition
     }
     catalog_plans {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT plan_key "UK"
-        TEXT display_name
-        TEXT description
-        TEXT rate_card "FK"
-        TEXT allowed_operations
-        TEXT credit_policy_key "FK"
-        TEXT admission_policy_key "FK"
-        TEXT default_rollout
-        NUMERIC20 credit_allowance_amount
-        INTEGER credit_allowance_priority
-        TEXT credit_allowance_bucket "FK"
-        TEXT credit_allowance_reset_unit
-        INTEGER credit_allowance_reset_count
-        TEXT credit_allowance_reset_anchor
-        TEXT credit_allowance_reset_timezone
-        JSONB definition
+        uuid tenant_id
+        uuid id "PK"
+        uuid catalog_revision_id
+        text plan_key
+        text display_name
+        text description
+        text rate_card
+        text allowed_operations
+        text credit_policy_key
+        text admission_policy_key
+        text default_rollout
+        bursar credit_allowance_amount
+        integer credit_allowance_priority
+        text credit_allowance_bucket
+        text credit_allowance_reset_unit
+        integer credit_allowance_reset_count
+        text credit_allowance_reset_anchor
+        text credit_allowance_reset_timezone
+        jsonb definition
     }
     catalog_plan_features {
         UUID tenant_id "FK"
@@ -179,18 +179,18 @@ erDiagram
         JSONB feature_value
     }
     catalog_plan_quotas {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT plan_key "FK,UK"
-        TEXT quota_key "UK"
-        TEXT operation_key "FK"
-        TEXT measure_key
-        NUMERIC20 quota_limit
-        JSONB window_policy
-        TEXT enforcement
-        INTEGER emit_at_percent
-        JSONB definition
+        uuid tenant_id
+        uuid id "PK"
+        uuid catalog_revision_id
+        text plan_key
+        text quota_key
+        text operation_key
+        text measure_key
+        bursar quota_limit
+        jsonb window_policy
+        text enforcement
+        integer emit_at_percent
+        jsonb definition
     }
     catalog_grant_programs {
         UUID tenant_id "FK"
@@ -205,59 +205,59 @@ erDiagram
         JSONB definition
     }
     catalog_grant_awards {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID catalog_revision_id "FK,UK"
-        UUID grant_program_id "FK,UK"
-        INTEGER award_index "UK"
-        TEXT recipient
-        NUMERIC20 amount
-        TEXT bucket_key "FK"
-        JSONB expiry_policy
-        JSONB definition
+        uuid tenant_id
+        uuid id "PK"
+        uuid catalog_revision_id
+        uuid grant_program_id
+        integer award_index
+        text recipient
+        bursar amount
+        text bucket_key
+        jsonb expiry_policy
+        jsonb definition
     }
     catalog_offers {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT offer_key "UK"
-        TEXT display_name
-        TEXT description
-        INTEGER sort_order
-        JSONB availability
-        BIGINT amount_minor
-        TEXT currency
-        TEXT tax_behavior
-        TEXT plan_key "FK"
-        TEXT billing_unit
-        INTEGER billing_count
-        JSONB trial_policy
-        NUMERIC20 cycle_grant_amount
-        TEXT cycle_grant_bucket_key "FK"
-        TEXT cycle_grant_renewal
-        JSONB cycle_grant_expiry_policy
-        JSONB definition
+        uuid tenant_id
+        uuid id "PK"
+        uuid catalog_revision_id
+        text offer_key
+        text display_name
+        text description
+        integer sort_order
+        jsonb availability
+        bigint amount_minor
+        text currency
+        text tax_behavior
+        text plan_key
+        text billing_unit
+        integer billing_count
+        jsonb trial_policy
+        bursar cycle_grant_amount
+        text cycle_grant_bucket_key
+        text cycle_grant_renewal
+        jsonb cycle_grant_expiry_policy
+        jsonb definition
     }
     catalog_topups {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT topup_key "UK"
-        TEXT display_name
-        TEXT description
-        INTEGER sort_order
-        JSONB availability
-        BIGINT amount_minor
-        TEXT currency
-        TEXT tax_behavior
-        NUMERIC20 credits_per_unit
-        TEXT bucket_key "FK"
-        INTEGER min_quantity
-        INTEGER max_quantity
-        INTEGER default_quantity
-        JSONB expiry_policy
-        TEXT lot_behavior
-        JSONB definition
+        uuid tenant_id
+        uuid id "PK"
+        uuid catalog_revision_id
+        text topup_key
+        text display_name
+        text description
+        integer sort_order
+        jsonb availability
+        bigint amount_minor
+        text currency
+        text tax_behavior
+        bursar credits_per_unit
+        text bucket_key
+        integer min_quantity
+        integer max_quantity
+        integer default_quantity
+        jsonb expiry_policy
+        text lot_behavior
+        jsonb definition
     }
     catalog_provider_refs {
         UUID tenant_id "FK"
@@ -271,22 +271,22 @@ erDiagram
         TEXT object_key
     }
     credit_accounts {
-        UUID tenant_id "FK,UK"
-        UUID id "PK"
-        UUID subject_id "FK,UK"
-        TEXT account_kind "UK"
-        NUMERIC20 balance
-        BIGINT version
-        TIMESTAMPTZ updated_at
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid subject_id
+        text account_kind
+        bursar balance
+        bigint version
+        timestamptz updated_at
+        timestamptz created_at
     }
     credit_ledger_entries {
         uuid tenant_id
         uuid id "PK"
         uuid account_id
         bursar kind
-        numeric amount
-        numeric balance_after
+        bursar amount
+        bursar balance_after
         uuid reference_entry_id
         uuid catalog_revision_id
         text idempotency_key
@@ -296,79 +296,79 @@ erDiagram
         timestamptz created_at
     }
     credit_lots {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID account_id "FK"
-        UUID source_entry_id "FK"
-        UUID catalog_revision_id "FK"
-        TEXT bucket_key "FK"
-        INTEGER priority
-        NUMERIC20 granted
-        NUMERIC20 consumed
-        TIMESTAMPTZ expires_at
-        JSONB expiry_policy_snapshot
-        TEXT source_type
-        UUID source_id
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid account_id
+        uuid source_entry_id "UK"
+        uuid catalog_revision_id
+        text bucket_key
+        integer priority
+        bursar granted
+        bursar consumed
+        timestamptz expires_at
+        jsonb expiry_policy_snapshot
+        text source_type
+        uuid source_id
+        timestamptz created_at
     }
     credit_lot_sources {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID lot_id "FK"
-        UUID ledger_entry_id "FK"
-        NUMERIC20 amount
-        TEXT source_type
-        UUID source_id
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid lot_id
+        uuid ledger_entry_id "UK"
+        bursar amount
+        text source_type
+        uuid source_id
+        timestamptz created_at
     }
     credit_lot_allocations {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID debit_entry_id "FK,UK"
-        UUID lot_id "FK,UK"
-        NUMERIC20 amount
-        TEXT allocation_kind
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid debit_entry_id
+        uuid lot_id
+        bursar amount
+        text allocation_kind
+        timestamptz created_at
     }
     credit_lot_source_allocations {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID lot_allocation_id "FK,UK"
-        UUID lot_source_id "FK,UK"
-        NUMERIC20 amount
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid lot_allocation_id
+        uuid lot_source_id
+        bursar amount
+        timestamptz created_at
     }
     credit_lot_restorations {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID refund_entry_id "FK,UK"
-        UUID original_allocation_id "FK,UK"
-        UUID lot_id "FK"
-        NUMERIC20 amount
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid refund_entry_id
+        uuid original_allocation_id
+        uuid lot_id
+        bursar amount
+        timestamptz created_at
     }
     credit_lot_source_restorations {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID lot_restoration_id "FK,UK"
-        UUID source_allocation_id "FK,UK"
-        NUMERIC20 amount
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid lot_restoration_id
+        uuid source_allocation_id
+        bursar amount
+        timestamptz created_at
     }
     credit_unallocated_debits {
-        UUID tenant_id "FK"
-        UUID ledger_entry_id "PK,FK"
-        UUID account_id "FK"
-        NUMERIC20 amount
-        TEXT reason
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid ledger_entry_id "PK"
+        uuid account_id
+        bursar amount
+        text reason
+        timestamptz created_at
     }
     credit_debt_repayments {
-        UUID tenant_id "FK"
-        UUID ledger_entry_id "PK,FK"
-        UUID account_id "FK"
-        NUMERIC20 amount
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid ledger_entry_id "PK"
+        uuid account_id
+        bursar amount
+        timestamptz created_at
     }
     credit_usage_charges {
         uuid tenant_id
@@ -376,10 +376,10 @@ erDiagram
         uuid account_id
         text operation
         timestamptz event_at
-        numeric requested
-        numeric charged
-        numeric allowance_requested
-        numeric allowance_covered
+        bursar requested
+        bursar charged
+        bursar allowance_requested
+        bursar allowance_covered
         text billing_disposition
         uuid catalog_revision_id
         uuid plan_id
@@ -392,7 +392,7 @@ erDiagram
     usage_charge_payloads {
         UUID tenant_id "FK"
         UUID charge_id "PK,FK"
-        TIMESTAMPTZ event_at "PK"
+        TIMESTAMPTZ event_at "PK,FK"
         JSONB measures
         TEXT feature
         TEXT model
@@ -403,17 +403,17 @@ erDiagram
         TIMESTAMPTZ created_at
     }
     usage_daily_rollups {
-        UUID tenant_id "FK"
-        DATE usage_day "PK"
-        UUID account_id "PK,FK"
-        TEXT operation "PK"
-        TEXT model_key "PK"
-        TEXT region_key "PK"
-        SMALLINT rollup_shard "PK"
-        NUMERIC20 charged
-        NUMERIC20 allowance_covered
-        BIGINT charge_count
-        TIMESTAMPTZ updated_at
+        uuid tenant_id
+        date usage_day
+        uuid account_id
+        text operation
+        text model_key
+        text region_key
+        smallint rollup_shard
+        bursar charged
+        bursar allowance_covered
+        bigint charge_count
+        timestamptz updated_at
     }
     event_outbox {
         uuid tenant_id
@@ -482,59 +482,59 @@ erDiagram
         timestamptz applied_at
     }
     allowance_windows {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID account_id "FK,UK"
-        UUID plan_id "FK,UK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT allowance_key "UK"
-        TIMESTAMPTZ window_start "UK"
-        TIMESTAMPTZ window_end "UK"
-        TEXT period_unit
-        INTEGER period_count
-        TEXT period_anchor
-        TEXT period_timezone
-        NUMERIC20 allowance
-        NUMERIC20 reserved
-        NUMERIC20 consumed
-        JSONB policy_snapshot
+        uuid tenant_id
+        uuid id "PK"
+        uuid account_id
+        uuid plan_id
+        uuid catalog_revision_id
+        text allowance_key
+        timestamptz window_start
+        timestamptz window_end
+        text period_unit
+        integer period_count
+        text period_anchor
+        text period_timezone
+        bursar allowance
+        bursar reserved
+        bursar consumed
+        jsonb policy_snapshot
     }
     quota_windows {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID account_id "FK,UK"
-        UUID plan_id "FK,UK"
-        UUID catalog_revision_id "FK,UK"
-        TEXT quota_key "UK"
-        TEXT operation_key
-        TEXT measure_key
-        TIMESTAMPTZ window_start "UK"
-        TIMESTAMPTZ window_end "UK"
-        NUMERIC20 quota_limit
-        NUMERIC20 reserved
-        NUMERIC20 consumed
-        TEXT enforcement
-        JSONB policy_snapshot
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid account_id
+        uuid plan_id
+        uuid catalog_revision_id
+        text quota_key
+        text operation_key
+        text measure_key
+        timestamptz window_start
+        timestamptz window_end
+        bursar quota_limit
+        bursar reserved
+        bursar consumed
+        text enforcement
+        jsonb policy_snapshot
+        timestamptz created_at
     }
     quota_usage_events {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID account_id "FK,UK"
-        UUID plan_id "FK"
-        UUID catalog_revision_id "FK"
-        UUID catalog_quota_id "FK,UK"
-        TEXT quota_key
-        TEXT operation_key
-        TEXT measure_key
-        NUMERIC20 amount
-        TIMESTAMPTZ event_at
-        UUID usage_charge_id "FK"
-        UUID correction_of_event_id "FK"
-        TEXT idempotency_key "UK"
-        BYTEA request_digest
-        JSONB metadata
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid account_id
+        uuid plan_id
+        uuid catalog_revision_id
+        uuid catalog_quota_id
+        text quota_key
+        text operation_key
+        text measure_key
+        bursar amount
+        timestamptz event_at
+        uuid usage_charge_id
+        uuid correction_of_event_id
+        text idempotency_key
+        bytea request_digest
+        jsonb metadata
+        timestamptz created_at
     }
     quota_events {
         uuid tenant_id
@@ -558,16 +558,16 @@ erDiagram
         jsonb metadata
         uuid catalog_revision_id
         uuid plan_id
-        numeric reserved_amount
-        numeric reserved_allowance
+        bursar reserved_amount
+        bursar reserved_allowance
         uuid allowance_window_id
-        numeric minimum_balance
+        bursar minimum_balance
         integer max_concurrent
         timestamptz expires_at
         bursar status
         text idempotency_key
         bytea request_digest
-        numeric settled_amount
+        bursar settled_amount
         text settlement_idempotency_key
         bytea settlement_request_digest
         uuid ledger_entry_id
@@ -576,44 +576,46 @@ erDiagram
         timestamptz updated_at
     }
     credit_lease_quota_reservations {
-        UUID tenant_id "FK"
-        UUID lease_id "PK,FK"
-        UUID catalog_quota_id "PK,FK"
-        UUID quota_window_id "FK"
-        NUMERIC20 amount
-        TIMESTAMPTZ window_start
-        TIMESTAMPTZ window_end
-        TIMESTAMPTZ released_at
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid lease_id
+        uuid catalog_quota_id
+        uuid quota_window_id
+        bursar amount
+        timestamptz window_start
+        timestamptz window_end
+        timestamptz released_at
+        timestamptz created_at
     }
     credit_teams {
         UUID tenant_id "FK,UK"
         UUID id "PK"
         UUID subject_id "FK,UK"
         TEXT name
+        TEXT creation_idempotency_key "UK"
+        BYTEA creation_request_digest
         TIMESTAMPTZ created_at
     }
     credit_team_members {
-        UUID tenant_id "FK"
-        UUID team_id "PK,FK"
-        UUID subject_id "PK,FK"
-        TEXT role
-        NUMERIC20 spend_cap
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ left_at
+        uuid tenant_id
+        uuid team_id
+        uuid subject_id
+        text role
+        bursar spend_cap
+        timestamptz created_at
+        timestamptz left_at
     }
     credit_team_usage_charges {
-        UUID tenant_id "FK"
-        UUID id "PK"
-        UUID team_id "FK,UK"
-        UUID subject_id "FK"
-        UUID ledger_entry_id "FK"
-        TEXT operation
-        NUMERIC20 amount
-        JSONB metadata
-        TEXT idempotency_key "UK"
-        BYTEA request_digest
-        TIMESTAMPTZ created_at
+        uuid tenant_id
+        uuid id "PK"
+        uuid team_id
+        uuid subject_id
+        uuid ledger_entry_id "UK"
+        text operation
+        bursar amount
+        jsonb metadata
+        text idempotency_key
+        bytea request_digest
+        timestamptz created_at
     }
     grant_program_events {
         UUID tenant_id "FK,UK"
@@ -724,6 +726,7 @@ erDiagram
     billing_events {
         uuid tenant_id
         uuid id "PK"
+        uuid subject_id
         text provider
         text provider_environment
         text provider_event_id
@@ -745,7 +748,7 @@ erDiagram
     billing_event_payloads {
         UUID tenant_id "FK"
         UUID event_id "PK,FK"
-        TIMESTAMPTZ received_at "PK"
+        TIMESTAMPTZ received_at "PK,FK"
         JSONB envelope
         TIMESTAMPTZ created_at
     }
@@ -770,7 +773,7 @@ erDiagram
         uuid subscription_id
         uuid catalog_revision_id
         text grant_key
-        numeric configured_credits
+        bursar configured_credits
         integer quantity
         jsonb expiry_policy_snapshot
         uuid ledger_entry_id
@@ -794,12 +797,12 @@ erDiagram
         TIMESTAMPTZ updated_at
     }
     billing_refund_grants {
-        UUID tenant_id "FK"
-        UUID refund_id "PK,FK"
-        UUID grant_id "PK,FK"
-        BIGINT amount_minor
-        NUMERIC20 credit_amount
-        UUID ledger_entry_id "FK"
+        uuid tenant_id
+        uuid refund_id
+        uuid grant_id
+        bigint amount_minor
+        bursar credit_amount
+        uuid ledger_entry_id
     }
     billing_subscription_changes {
         uuid tenant_id
@@ -820,29 +823,29 @@ erDiagram
         timestamptz updated_at
     }
     billing_auto_recharge_profiles {
-        UUID tenant_id "PK,FK"
-        UUID subject_id "PK,FK"
-        BOOLEAN enabled
-        BOOLEAN armed
-        TEXT state
-        TEXT provider
-        TEXT provider_environment "PK"
-        UUID catalog_revision_id "FK"
-        UUID topup_id "FK"
-        INTEGER quantity
-        NUMERIC20 threshold
-        NUMERIC20 rearm_above
-        INTEGER max_charges_per_window
-        BIGINT max_charge_minor
-        INTEGER cooldown_seconds
-        INTEGER max_consecutive_failures
-        INTEGER consecutive_failures
-        TEXT window_unit
-        INTEGER window_count
-        TEXT window_anchor
-        TEXT window_timezone
-        TIMESTAMPTZ last_attempt_at
-        TIMESTAMPTZ updated_at
+        uuid tenant_id
+        uuid subject_id
+        boolean enabled
+        boolean armed
+        text state
+        text provider
+        text provider_environment
+        uuid catalog_revision_id
+        uuid topup_id
+        integer quantity
+        bursar threshold
+        bursar rearm_above
+        integer max_charges_per_window
+        bigint max_charge_minor
+        integer cooldown_seconds
+        integer max_consecutive_failures
+        integer consecutive_failures
+        text window_unit
+        integer window_count
+        text window_anchor
+        text window_timezone
+        timestamptz last_attempt_at
+        timestamptz updated_at
     }
     billing_auto_recharge_attempts {
         uuid tenant_id
@@ -867,27 +870,27 @@ erDiagram
         timestamptz updated_at
     }
     catalog_auto_recharge_policies {
-        UUID tenant_id "FK"
-        UUID catalog_revision_id "PK,FK"
-        TEXT eligible_topup_keys
-        TEXT default_topup_key "FK"
-        INTEGER quantity_min
-        INTEGER quantity_max
-        INTEGER quantity
-        NUMERIC20 balance_min
-        NUMERIC20 balance_max
-        NUMERIC20 balance_below
-        NUMERIC20 rearm_above
-        INTEGER max_purchases
-        BIGINT max_charge_minor
-        INTEGER cooldown_seconds
-        INTEGER max_consecutive_failures
-        TEXT failure_action
-        TEXT period_unit
-        INTEGER period_count
-        TEXT period_anchor
-        TEXT period_timezone
-        JSONB definition
+        uuid tenant_id
+        uuid catalog_revision_id "PK"
+        text eligible_topup_keys
+        text default_topup_key
+        integer quantity_min
+        integer quantity_max
+        integer quantity
+        bursar balance_min
+        bursar balance_max
+        bursar balance_below
+        bursar rearm_above
+        integer max_purchases
+        bigint max_charge_minor
+        integer cooldown_seconds
+        integer max_consecutive_failures
+        text failure_action
+        text period_unit
+        integer period_count
+        text period_anchor
+        text period_timezone
+        jsonb definition
     }
     billing_checkout_intents {
         UUID tenant_id "FK,UK"
@@ -895,11 +898,12 @@ erDiagram
         UUID subject_id "FK,UK"
         TEXT provider "UK"
         TEXT provider_environment "UK"
-        TEXT checkout_kind "UK"
-        TEXT product_key "UK"
+        TEXT checkout_kind
+        TEXT product_key
         TEXT region
-        UUID catalog_revision_id "FK,UK"
-        BYTEA request_digest "UK"
+        UUID catalog_revision_id "FK"
+        TEXT operation_key "UK"
+        BYTEA request_digest
         TEXT status
         TEXT provider_session_id
         TEXT checkout_url
@@ -957,8 +961,6 @@ erDiagram
     tenants ||--o{ tenant_catalog_counters : "tenant_id to id"
     tenants ||--o{ catalog_operations : "tenant_id to id"
     catalog_revisions ||--|| catalog_operations : "catalog_revision_id to id"
-    tenants ||--o{ catalog_credit_policies : "tenant_id to id"
-    catalog_revisions ||--|| catalog_credit_policies : "catalog_revision_id to id"
     tenants ||--o{ catalog_admission_policies : "tenant_id to id"
     catalog_revisions ||--|| catalog_admission_policies : "catalog_revision_id to id"
     tenants ||--o{ catalog_admission_operation_policies : "tenant_id to id"
@@ -967,101 +969,24 @@ erDiagram
     catalog_operations ||--o{ catalog_admission_operation_policies : "operation_key to operation_key"
     tenants ||--o{ catalog_entitlement_features : "tenant_id to id"
     catalog_revisions ||--|| catalog_entitlement_features : "catalog_revision_id to id"
-    tenants ||--o{ catalog_plans : "tenant_id to id"
-    catalog_buckets ||--|| catalog_plans : "catalog_revision_id to catalog_revision_id"
-    catalog_rate_cards ||--o{ catalog_plans : "rate_card to rate_card_key"
-    catalog_credit_policies ||--o{ catalog_plans : "credit_policy_key to policy_key"
-    catalog_admission_policies ||--o{ catalog_plans : "admission_policy_key to policy_key"
-    catalog_buckets ||--o{ catalog_plans : "credit_allowance_bucket to bucket_key"
     tenants ||--o{ catalog_plan_features : "tenant_id to id"
     catalog_entitlement_features ||--o{ catalog_plan_features : "catalog_revision_id to catalog_revision_id"
     catalog_plans ||--o{ catalog_plan_features : "plan_key to plan_key"
     catalog_entitlement_features ||--o{ catalog_plan_features : "feature_key to feature_key"
-    tenants ||--o{ catalog_plan_quotas : "tenant_id to id"
-    catalog_operations ||--|| catalog_plan_quotas : "catalog_revision_id to catalog_revision_id"
-    catalog_plans ||--|| catalog_plan_quotas : "plan_key to plan_key"
-    catalog_operations ||--o{ catalog_plan_quotas : "operation_key to operation_key"
     tenants ||--o{ catalog_grant_programs : "tenant_id to id"
     catalog_revisions ||--|| catalog_grant_programs : "catalog_revision_id to id"
-    tenants ||--o{ catalog_grant_awards : "tenant_id to id"
-    catalog_buckets ||--|| catalog_grant_awards : "catalog_revision_id to catalog_revision_id"
-    catalog_grant_programs ||--|| catalog_grant_awards : "grant_program_id to id"
-    catalog_buckets ||--o{ catalog_grant_awards : "bucket_key to bucket_key"
-    tenants ||--o{ catalog_offers : "tenant_id to id"
-    catalog_buckets ||--|| catalog_offers : "catalog_revision_id to catalog_revision_id"
-    catalog_plans ||--o{ catalog_offers : "plan_key to plan_key"
-    catalog_buckets ||--o{ catalog_offers : "cycle_grant_bucket_key to bucket_key"
-    tenants ||--o{ catalog_topups : "tenant_id to id"
-    catalog_buckets ||--|| catalog_topups : "catalog_revision_id to catalog_revision_id"
-    catalog_buckets ||--o{ catalog_topups : "bucket_key to bucket_key"
     tenants ||--o{ catalog_provider_refs : "tenant_id to id"
     catalog_revisions ||--|| catalog_provider_refs : "catalog_revision_id to id"
-    tenants ||--|| credit_accounts : "tenant_id to id"
-    subjects ||--|| credit_accounts : "subject_id to id"
-    tenants ||--o{ credit_lots : "tenant_id to id"
-    credit_accounts ||--o{ credit_lots : "account_id to id"
-    credit_ledger_entries ||--o{ credit_lots : "source_entry_id to id"
-    catalog_buckets ||--o{ credit_lots : "catalog_revision_id to catalog_revision_id"
-    catalog_buckets ||--o{ credit_lots : "bucket_key to bucket_key"
-    tenants ||--o{ credit_lot_sources : "tenant_id to id"
-    credit_lots ||--o{ credit_lot_sources : "lot_id to id"
-    credit_ledger_entries ||--o{ credit_lot_sources : "ledger_entry_id to id"
-    tenants ||--o{ credit_lot_allocations : "tenant_id to id"
-    credit_ledger_entries ||--|| credit_lot_allocations : "debit_entry_id to id"
-    credit_lots ||--|| credit_lot_allocations : "lot_id to id"
-    tenants ||--o{ credit_lot_source_allocations : "tenant_id to id"
-    credit_lot_allocations ||--|| credit_lot_source_allocations : "lot_allocation_id to id"
-    credit_lot_sources ||--|| credit_lot_source_allocations : "lot_source_id to id"
-    tenants ||--o{ credit_lot_restorations : "tenant_id to id"
-    credit_ledger_entries ||--|| credit_lot_restorations : "refund_entry_id to id"
-    credit_lot_allocations ||--|| credit_lot_restorations : "original_allocation_id to id"
-    credit_lots ||--o{ credit_lot_restorations : "lot_id to id"
-    tenants ||--o{ credit_lot_source_restorations : "tenant_id to id"
-    credit_lot_restorations ||--|| credit_lot_source_restorations : "lot_restoration_id to id"
-    credit_lot_source_allocations ||--|| credit_lot_source_restorations : "source_allocation_id to id"
-    tenants ||--o{ credit_unallocated_debits : "tenant_id to id"
-    credit_ledger_entries ||--o{ credit_unallocated_debits : "ledger_entry_id to id"
-    credit_accounts ||--o{ credit_unallocated_debits : "account_id to id"
-    tenants ||--o{ credit_debt_repayments : "tenant_id to id"
-    credit_ledger_entries ||--o{ credit_debt_repayments : "ledger_entry_id to id"
-    credit_accounts ||--o{ credit_debt_repayments : "account_id to id"
     tenants ||--o{ usage_charge_payloads : "tenant_id to id"
     credit_usage_charges ||--o{ usage_charge_payloads : "charge_id to id"
-    tenants ||--o{ usage_daily_rollups : "tenant_id to id"
-    credit_accounts ||--o{ usage_daily_rollups : "account_id to id"
+    credit_usage_charges ||--o{ usage_charge_payloads : "event_at to event_at"
     tenants ||--o{ account_plan_assignments : "tenant_id to id"
     credit_accounts ||--o{ account_plan_assignments : "account_id to id"
     catalog_plans ||--o{ account_plan_assignments : "plan_id to id"
     catalog_plans ||--o{ account_plan_assignments : "catalog_revision_id to catalog_revision_id"
     catalog_plans ||--o{ account_plan_assignments : "plan_key to plan_key"
-    tenants ||--o{ allowance_windows : "tenant_id to id"
-    credit_accounts ||--|| allowance_windows : "account_id to id"
-    catalog_plans ||--|| allowance_windows : "plan_id to id"
-    catalog_plans ||--|| allowance_windows : "catalog_revision_id to catalog_revision_id"
-    tenants ||--o{ quota_windows : "tenant_id to id"
-    credit_accounts ||--|| quota_windows : "account_id to id"
-    catalog_plans ||--|| quota_windows : "plan_id to id"
-    catalog_plans ||--|| quota_windows : "catalog_revision_id to catalog_revision_id"
-    tenants ||--o{ quota_usage_events : "tenant_id to id"
-    credit_accounts ||--|| quota_usage_events : "account_id to id"
-    catalog_plans ||--o{ quota_usage_events : "plan_id to id"
-    catalog_plans ||--o{ quota_usage_events : "catalog_revision_id to catalog_revision_id"
-    catalog_plan_quotas ||--|| quota_usage_events : "catalog_quota_id to id"
-    credit_usage_charges ||--o{ quota_usage_events : "usage_charge_id to id"
-    quota_usage_events ||--o{ quota_usage_events : "correction_of_event_id to id"
-    tenants ||--o{ credit_lease_quota_reservations : "tenant_id to id"
-    credit_leases ||--o{ credit_lease_quota_reservations : "lease_id to id"
-    catalog_plan_quotas ||--o{ credit_lease_quota_reservations : "catalog_quota_id to id"
-    quota_windows ||--o{ credit_lease_quota_reservations : "quota_window_id to id"
     tenants ||--|| credit_teams : "tenant_id to id"
     subjects ||--|| credit_teams : "subject_id to id"
-    tenants ||--o{ credit_team_members : "tenant_id to id"
-    credit_teams ||--o{ credit_team_members : "team_id to id"
-    subjects ||--o{ credit_team_members : "subject_id to id"
-    tenants ||--o{ credit_team_usage_charges : "tenant_id to id"
-    credit_team_members ||--|| credit_team_usage_charges : "team_id to team_id"
-    credit_team_members ||--o{ credit_team_usage_charges : "subject_id to subject_id"
-    credit_ledger_entries ||--o{ credit_team_usage_charges : "ledger_entry_id to id"
     tenants ||--|| grant_program_events : "tenant_id to id"
     catalog_grant_programs ||--o{ grant_program_events : "catalog_revision_id to catalog_revision_id"
     catalog_grant_programs ||--o{ grant_program_events : "grant_program_id to id"
@@ -1084,22 +1009,12 @@ erDiagram
     billing_subscriptions ||--|| billing_entitlement_sources : "subscription_id to id"
     tenants ||--o{ billing_event_payloads : "tenant_id to id"
     billing_events ||--o{ billing_event_payloads : "event_id to id"
+    billing_events ||--o{ billing_event_payloads : "received_at to payload_received_at"
     tenants ||--|| billing_refunds : "tenant_id to id"
     billing_payments ||--o{ billing_refunds : "payment_id to id"
-    tenants ||--o{ billing_refund_grants : "tenant_id to id"
-    billing_refunds ||--o{ billing_refund_grants : "refund_id to id"
-    billing_credit_grants ||--o{ billing_refund_grants : "grant_id to id"
-    credit_ledger_entries ||--o{ billing_refund_grants : "ledger_entry_id to id"
-    tenants ||--o{ billing_auto_recharge_profiles : "tenant_id to id"
-    subjects ||--o{ billing_auto_recharge_profiles : "subject_id to id"
-    catalog_topups ||--o{ billing_auto_recharge_profiles : "catalog_revision_id to catalog_revision_id"
-    catalog_topups ||--o{ billing_auto_recharge_profiles : "topup_id to id"
-    tenants ||--o{ catalog_auto_recharge_policies : "tenant_id to id"
-    catalog_topups ||--o{ catalog_auto_recharge_policies : "catalog_revision_id to catalog_revision_id"
-    catalog_topups ||--o{ catalog_auto_recharge_policies : "default_topup_key to topup_key"
     tenants ||--|| billing_checkout_intents : "tenant_id to id"
     subjects ||--|| billing_checkout_intents : "subject_id to id"
-    catalog_revisions ||--|| billing_checkout_intents : "catalog_revision_id to id"
+    catalog_revisions ||--o{ billing_checkout_intents : "catalog_revision_id to id"
     tenants ||--|| billing_invoices : "tenant_id to id"
     billing_subscriptions ||--o{ billing_invoices : "subject_id to subject_id"
     billing_subscriptions ||--|| billing_invoices : "provider to provider"

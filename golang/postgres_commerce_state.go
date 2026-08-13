@@ -43,8 +43,12 @@ func (s *PostgresStore) UpsertBillingCustomer(ctx context.Context, customer Bill
 	if customer.ProviderCustomerID, err = requireText(customer.ProviderCustomerID, "billing customer provider customer ID"); err != nil {
 		return err
 	}
+	typedAccountID, err := postgresUUID(customer.AccountID, "billing customer account ID")
+	if err != nil {
+		return err
+	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "upsert_billing_customer", customer.AccountID, customer.Provider, customer.ProviderCustomerID, nullableText(customer.Email))
+		rows, callErr := tx.Call(ctx, "upsert_billing_customer", typedAccountID, customer.Provider, customer.ProviderCustomerID, nullableText(customer.Email))
 		if callErr != nil {
 			return callErr
 		}
@@ -68,9 +72,13 @@ func (s *PostgresStore) GetBillingCustomer(ctx context.Context, accountID, provi
 	if err != nil {
 		return nil, err
 	}
+	typedAccountID, err := postgresUUID(accountID, "billing customer account ID")
+	if err != nil {
+		return nil, err
+	}
 	provider = strings.TrimSpace(provider)
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "get_billing_customer", accountID, nullableText(provider))
+		rows, callErr := tx.Call(ctx, "get_billing_customer", typedAccountID, nullableText(provider))
 		if callErr != nil {
 			return callErr
 		}
@@ -121,12 +129,16 @@ func (s *PostgresStore) GetBillingSubscription(ctx context.Context, accountID st
 	if err != nil {
 		return nil, err
 	}
+	typedAccountID, err := postgresUUID(accountID, "billing subscription account ID")
+	if err != nil {
+		return nil, err
+	}
 	allowed, err := commerceStateSubscriptionStatusSet(statuses)
 	if err != nil {
 		return nil, err
 	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "list_billing_subscriptions", accountID)
+		rows, callErr := tx.Call(ctx, "list_billing_subscriptions", typedAccountID)
 		if callErr != nil {
 			return callErr
 		}
@@ -171,8 +183,12 @@ func (s *PostgresStore) ListBillingSubscriptions(ctx context.Context, accountID 
 	if err != nil {
 		return nil, err
 	}
+	typedAccountID, err := postgresUUID(accountID, "billing subscription account ID")
+	if err != nil {
+		return nil, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "list_billing_subscriptions", accountID)
+		rows, callErr := tx.Call(ctx, "list_billing_subscriptions", typedAccountID)
 		if callErr != nil {
 			return callErr
 		}
@@ -248,7 +264,7 @@ func commerceStateSubscriptionFromRow(ctx context.Context, tx *PostgresTransacti
 	if !commerceStateSubscriptionStatus(status) {
 		return nil, NewStoreError(operation+" returned an unsupported subscription status", ErrorOptions{Details: map[string]any{"status": status}})
 	}
-	interval, intervalCount, offerKey, planKey, err := commerceStateOfferContext(ctx, tx, offerID, revisionID, operation)
+	interval, intervalCount, offerKey, planID, planKey, err := commerceStateOfferContext(ctx, tx, offerID, revisionID, operation)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +292,14 @@ func commerceStateSubscriptionFromRow(ctx context.Context, tx *PostgresTransacti
 	if err != nil {
 		return nil, err
 	}
+	graceExpiredAt, err := optionalRowTime(row, "grace_expired_at", operation)
+	if err != nil {
+		return nil, err
+	}
+	providerUpdatedAt, err := rowTime(row, "provider_updated_at", operation)
+	if err != nil {
+		return nil, err
+	}
 	cancelAtPeriodEnd, err := rowBool(row, "cancel_at_period_end", operation)
 	if err != nil {
 		return nil, err
@@ -286,12 +310,14 @@ func commerceStateSubscriptionFromRow(ctx context.Context, tx *PostgresTransacti
 	}
 	return &CommerceSubscription{
 		ID:                     id,
+		CatalogRevisionID:      revisionID,
 		Provider:               provider,
 		ProviderSubscriptionID: providerSubscriptionID,
 		AccountID:              accountID,
 		ProviderCustomerID:     optionalRowText(row, "provider_customer_id"),
 		OfferID:                offerID,
 		OfferKey:               offerKey,
+		PlanID:                 planID,
 		PlanKey:                planKey,
 		Status:                 status,
 		Interval:               interval,
@@ -303,12 +329,24 @@ func commerceStateSubscriptionFromRow(ctx context.Context, tx *PostgresTransacti
 		EndedAt:                endedAt,
 		CancelAtPeriodEnd:      cancelAtPeriodEnd,
 		GraceEndsAt:            graceEndsAt,
+		GraceExpiredAt:         graceExpiredAt,
+		ProviderUpdatedAt:      providerUpdatedAt,
 		Metadata:               metadata,
 	}, nil
 }
 
-func commerceStateOfferContext(ctx context.Context, tx *PostgresTransaction, offerID, revisionID, operation string) (interval string, intervalCount int, offerKey, planKey string, err error) {
-	rows, callErr := tx.Call(ctx, "get_catalog_offer_context", offerID, revisionID)
+func commerceStateOfferContext(ctx context.Context, tx *PostgresTransaction, offerID, revisionID, operation string) (interval string, intervalCount int, offerKey, planID, planKey string, err error) {
+	typedOfferID, parseErr := postgresUUID(offerID, operation+" offer ID")
+	if parseErr != nil {
+		err = parseErr
+		return
+	}
+	typedRevisionID, parseErr := postgresUUID(revisionID, operation+" catalog revision ID")
+	if parseErr != nil {
+		err = parseErr
+		return
+	}
+	rows, callErr := tx.Call(ctx, "get_catalog_offer_context", typedOfferID, typedRevisionID)
 	if callErr != nil {
 		err = callErr
 		return
@@ -323,6 +361,10 @@ func commerceStateOfferContext(ctx context.Context, tx *PostgresTransaction, off
 		return
 	}
 	planKey, err = requiredRowText(row, "plan_key", operation+".get_catalog_offer_context")
+	if err != nil {
+		return
+	}
+	planID, err = requiredRowText(row, "plan_id", operation+".get_catalog_offer_context")
 	if err != nil {
 		return
 	}
@@ -409,23 +451,38 @@ func commerceStateBillingOfferFromRow(ctx context.Context, tx *PostgresTransacti
 	if err != nil {
 		return nil, err
 	}
-	interval, intervalCount, contextOfferKey, contextPlanKey, err := commerceStateOfferContext(ctx, tx, id, revisionID, operation)
+	interval, intervalCount, contextOfferKey, planID, contextPlanKey, err := commerceStateOfferContext(ctx, tx, id, revisionID, operation)
 	if err != nil {
 		return nil, err
 	}
 	if offerKey != contextOfferKey || planKey != contextPlanKey {
 		return nil, NewStoreError("resolved catalog offer context does not match offer", ErrorOptions{Details: map[string]any{"offer_id": id, "catalog_revision_id": revisionID}})
 	}
+	var grant *BillingGrantResult
+	if rowValue(row, "cycle_grant_amount") != nil {
+		credits, valueErr := rowAmount(row, "cycle_grant_amount", operation)
+		if valueErr != nil {
+			return nil, valueErr
+		}
+		bucket, valueErr := requiredRowText(row, "cycle_grant_bucket_key", operation)
+		if valueErr != nil {
+			return nil, valueErr
+		}
+		renewal := optionalRowText(row, "cycle_grant_renewal")
+		grant = &BillingGrantResult{Mode: "cycle_grant", Credits: credits, Bucket: bucket, ReplacePrior: renewal == "replace_previous"}
+	}
 	return &BillingOffer{
 		ID:          id,
 		Provider:    provider,
 		OfferKey:    offerKey,
+		PlanID:      planID,
 		PlanKey:     planKey,
 		ProductID:   strings.TrimSpace(productID),
 		PriceID:     strings.TrimSpace(priceID),
 		LookupKey:   strings.TrimSpace(lookupKey),
 		Interval:    interval,
 		IntervalCnt: intervalCount,
+		Grant:       grant,
 	}, nil
 }
 
@@ -457,6 +514,10 @@ func (s *PostgresStore) CreateBillingSubscriptionChange(ctx context.Context, inp
 	if input.ProrationBehavior != "provider_default" && input.ProrationBehavior != "invoice_immediately" && input.ProrationBehavior != "none" {
 		return result, NewError("subscription change proration behavior is invalid", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
+	typedOfferID, err := postgresUUID(input.ToOfferID, "subscription change target offer ID")
+	if err != nil {
+		return result, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
 		subscriptionRows, callErr := tx.Call(ctx, "get_billing_subscription_by_provider", input.Provider, input.ProviderSubscriptionID)
 		if callErr != nil {
@@ -470,7 +531,11 @@ func (s *PostgresStore) CreateBillingSubscriptionChange(ctx context.Context, inp
 		if valueErr != nil {
 			return valueErr
 		}
-		rows, openErr := tx.Call(ctx, "open_subscription_change", subscriptionID, input.ToOfferID, input.EffectiveAt.UTC(), input.Effective, input.OperationKey, input.ProrationBehavior)
+		typedSubscriptionID, valueErr := postgresUUID(subscriptionID, "subscription change subscription ID")
+		if valueErr != nil {
+			return valueErr
+		}
+		rows, openErr := tx.Call(ctx, "open_subscription_change", typedSubscriptionID, typedOfferID, input.EffectiveAt.UTC(), input.Effective, input.OperationKey, input.ProrationBehavior)
 		if openErr != nil {
 			return openErr
 		}
@@ -634,7 +699,7 @@ func commerceStateSubscriptionChangeFromRow(ctx context.Context, tx *PostgresTra
 	if err != nil {
 		return nil, err
 	}
-	interval, _, offerKey, planKey, err := commerceStateOfferContext(ctx, tx, toOfferID, toRevisionID, operation)
+	interval, _, offerKey, _, planKey, err := commerceStateOfferContext(ctx, tx, toOfferID, toRevisionID, operation)
 	if err != nil {
 		return nil, err
 	}
@@ -713,8 +778,12 @@ func (s *PostgresStore) GetBillingPreferences(ctx context.Context, accountID str
 	if err != nil {
 		return nil, err
 	}
+	typedAccountID, err := postgresUUID(accountID, "billing preferences account ID")
+	if err != nil {
+		return nil, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "get_billing_preferences", accountID)
+		rows, callErr := tx.Call(ctx, "get_billing_preferences", typedAccountID)
 		if callErr != nil {
 			return callErr
 		}
@@ -774,11 +843,15 @@ func (s *PostgresStore) UpsertBillingPreferences(ctx context.Context, preference
 	if preferences.AccountID, err = requireText(preferences.AccountID, "billing preferences account ID"); err != nil {
 		return err
 	}
+	typedAccountID, err := postgresUUID(preferences.AccountID, "billing preferences account ID")
+	if err != nil {
+		return err
+	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
 		rows, callErr := tx.Call(
 			ctx,
 			"upsert_billing_preferences",
-			preferences.AccountID,
+			typedAccountID,
 			preferences.AutoRecharge,
 			preferences.OverageProtection,
 			preferences.EmailNotifications,
@@ -812,8 +885,12 @@ func (s *PostgresStore) ListBillingInvoices(ctx context.Context, accountID strin
 	if err != nil {
 		return nil, err
 	}
+	typedAccountID, err := postgresUUID(accountID, "billing invoices account ID")
+	if err != nil {
+		return nil, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "list_billing_invoices", accountID)
+		rows, callErr := tx.Call(ctx, "list_billing_invoices", typedAccountID)
 		if callErr != nil {
 			return callErr
 		}
@@ -1021,8 +1098,12 @@ func (s *PostgresStore) GetAutoRechargeProfile(ctx context.Context, userID strin
 	if err != nil {
 		return nil, err
 	}
+	typedUserID, err := postgresUUID(userID, "auto-recharge user ID")
+	if err != nil {
+		return nil, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "get_auto_recharge_profile", userID)
+		rows, callErr := tx.Call(ctx, "get_auto_recharge_profile", typedUserID)
 		if callErr != nil {
 			return callErr
 		}
@@ -1145,11 +1226,19 @@ func (s *PostgresStore) UpsertAutoRechargeProfile(ctx context.Context, profile A
 	} else if profile.State != "" && profile.State != AutoRechargeStateDisabled {
 		return NewError("disabled auto-recharge state is invalid", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
+	typedUserID, err := postgresUUID(profile.UserID, "auto-recharge user ID")
+	if err != nil {
+		return err
+	}
+	typedTopupID, err := nullablePostgresUUID(profile.TopupID, "auto-recharge top-up ID")
+	if err != nil {
+		return err
+	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		var provider, topupID, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state any
+		var provider, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state any
+		var topupID any = typedTopupID
 		if profile.Enabled {
 			provider = profile.Provider
-			topupID = profile.TopupID
 			quantity = int(profile.Quantity)
 			threshold = amountArgument(profile.Threshold)
 			maxCharges = profile.MaxChargesPerWindow
@@ -1163,7 +1252,7 @@ func (s *PostgresStore) UpsertAutoRechargeProfile(ctx context.Context, profile A
 			armed = true
 			state = string(AutoRechargeStateDisabled)
 		}
-		rows, callErr := tx.Call(ctx, "upsert_auto_recharge_profile", profile.UserID, profile.Enabled, provider, topupID, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state, options.ResetCooldown)
+		rows, callErr := tx.Call(ctx, "upsert_auto_recharge_profile", typedUserID, profile.Enabled, provider, topupID, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state, options.ResetCooldown)
 		if callErr != nil {
 			return callErr
 		}
@@ -1189,8 +1278,12 @@ func (s *PostgresStore) ClaimAutoRechargeAttempt(ctx context.Context, claim Auto
 	if claim.IdempotencyKey, err = requireStableKey(claim.IdempotencyKey, "auto-recharge idempotency key"); err != nil {
 		return nil, err
 	}
+	typedUserID, err := postgresUUID(claim.UserID, "auto-recharge user ID")
+	if err != nil {
+		return nil, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "claim_auto_recharge_attempt", claim.UserID, claim.IdempotencyKey)
+		rows, callErr := tx.Call(ctx, "claim_auto_recharge_attempt", typedUserID, claim.IdempotencyKey)
 		if callErr != nil {
 			return callErr
 		}
@@ -1359,8 +1452,12 @@ func (s *PostgresStore) UpdateAutoRechargeAttempt(ctx context.Context, update Au
 	if err != nil {
 		return err
 	}
+	typedAttemptID, err := postgresUUID(update.ID, "auto-recharge attempt ID")
+	if err != nil {
+		return err
+	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "get_auto_recharge_attempt", update.ID)
+		rows, callErr := tx.Call(ctx, "get_auto_recharge_attempt", typedAttemptID)
 		if callErr != nil {
 			return callErr
 		}
@@ -1377,7 +1474,7 @@ func (s *PostgresStore) UpdateAutoRechargeAttempt(ctx context.Context, update Au
 			return pathErr
 		}
 		for _, next := range path {
-			advancedRows, advanceErr := tx.Call(ctx, "advance_auto_recharge_attempt", update.ID, string(next), nullableText(update.ProviderAttemptID), nullableText(update.FailureCode), nullableText(update.FailureMessage), metadata)
+			advancedRows, advanceErr := tx.Call(ctx, "advance_auto_recharge_attempt", typedAttemptID, string(next), nullableText(update.ProviderAttemptID), nullableText(update.FailureCode), nullableText(update.FailureMessage), metadata)
 			if advanceErr != nil {
 				return advanceErr
 			}
@@ -1449,8 +1546,12 @@ func (s *PostgresStore) CountAutoRechargeAttempts(ctx context.Context, userID st
 	if since.IsZero() {
 		return 0, NewError("auto-recharge attempt window start is required", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
+	typedUserID, err := postgresUUID(userID, "auto-recharge user ID")
+	if err != nil {
+		return 0, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "count_auto_recharge_attempts", userID, since.UTC())
+		rows, callErr := tx.Call(ctx, "count_auto_recharge_attempts", typedUserID, since.UTC())
 		if callErr != nil {
 			return callErr
 		}

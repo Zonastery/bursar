@@ -617,6 +617,23 @@ const (
 	CreditPolicyOverdraft     CreditPolicyPreset = "overdraft"
 )
 
+// UsageAnalyticsStore is the read-only aggregate backend used by
+// CreditsService. PostgreSQL remains the default; high-volume deployments may
+// supply the optional ClickHouse adapter without moving accounting writes.
+type UsageAnalyticsStore interface {
+	SpendByUser(context.Context, time.Time, time.Time) ([]SpendByUserRow, error)
+	SpendByModel(context.Context, time.Time, time.Time) ([]SpendByModelRow, error)
+	TopUsers(context.Context, int, time.Time, time.Time) ([]TopUserRow, error)
+	DailySpend(context.Context, time.Time, time.Time) ([]DailySpendRow, error)
+	AggregateStats(context.Context, time.Time, time.Time) (AggregateStats, error)
+}
+
+// UsageChargeStore is the independently selectable read-only usage-receipt
+// backend. It defaults to the authoritative CreditStore.
+type UsageChargeStore interface {
+	ListUsageCharges(context.Context, string, ListUsageChargesOptions) (UsageChargePage, error)
+}
+
 // CreditsServiceOptions controls portable orchestration above CreditStore.
 // It deliberately contains no framework hooks or CLI settings.
 type CreditsServiceOptions struct {
@@ -627,6 +644,30 @@ type CreditsServiceOptions struct {
 	EventSink       CreditEventSink
 	LowBalance      []Amount
 	PostDeduction   PostDeductionHook
+	Instrumentation Instrumentation
+	Analytics       UsageAnalyticsStore
+	UsageStore      UsageChargeStore
+}
+
+// PricedUsageOptions controls a metric-priced immediate charge. System-owned
+// operation, measure, dimension, breakdown, and replay metadata is written
+// after Metadata so callers cannot override accounting context.
+type PricedUsageOptions struct {
+	IdempotencyKey string
+	Feature        string
+	Metadata       CreditMetadata
+}
+
+// PricedUsageRecordOptions controls a metric-priced record-only receipt.
+type PricedUsageRecordOptions struct {
+	IdempotencyKey string
+	Metadata       CreditMetadata
+}
+
+// PricedTeamDeductionOptions controls a metric-priced shared-pool charge.
+type PricedTeamDeductionOptions struct {
+	IdempotencyKey string
+	Metadata       CreditMetadata
 }
 
 // ReserveOptions controls the service-level reserve shortcut.

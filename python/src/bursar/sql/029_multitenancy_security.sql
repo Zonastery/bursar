@@ -1,7 +1,24 @@
+-- Migration: 029_multitenancy_security.sql
+-- Purpose: Install tenant runtime roles, forced RLS, caller ACLs, and operator RPCs.
+-- Depends on: Complete schema/RPC surface through 028 and host migration ownership.
+-- Security: Non-login owners execute narrow SECURITY DEFINER surfaces; FORCE RLS
+--   binds business rows to one active transaction tenant while operator work is separate.
+--
+-- Contents
+--   1. Fail-closed runtime, client, and operator roles
+--   2. Runtime object access and function ownership
+--   3. Client RPC allow-list and host trigger boundary
+--   4. Forced tenant RLS and operator lifecycle RPCs
+--   5. Security catalog comments
+--
 -- Finalize tenant runtime security after all tables and RPCs exist.
 -- Tenant columns, keys, relationships, uniqueness, and storage contracts are
 -- defined in their baseline schema files. This step only installs the runtime
--- role, forced RLS, partition policy helper, and operator tenant lifecycle RPCs.
+-- role, forced RLS, and operator tenant lifecycle RPCs.
+
+-- ---------------------------------------------------------------------------
+-- 1. Fail-closed runtime, client, and operator roles
+-- ---------------------------------------------------------------------------
 
 -- Tenant RPCs execute as a dedicated, non-BYPASSRLS owner. Applications call
 -- those RPCs through the least-privilege bursar_client group role. Cross-tenant
@@ -165,6 +182,10 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 2. Runtime object access and function ownership
+-- ---------------------------------------------------------------------------
+
 -- PostgreSQL grants EXECUTE on newly created functions to PUBLIC through the
 -- global default ACL. bursar_runtime can create functions only in the bursar
 -- schema, so make that owner role fail closed before granting schema CREATE.
@@ -174,6 +195,8 @@ ALTER DEFAULT PRIVILEGES
 REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 RESET ROLE;
 
+-- Clear every direct client/operator object capability before rebuilding the
+-- runtime and caller allow-lists from explicit schema, table, and function grants.
 REVOKE ALL ON SCHEMA bursar FROM bursar_client, bursar_operator;
 REVOKE ALL ON ALL TABLES IN SCHEMA bursar
 FROM bursar_client, bursar_operator;
@@ -182,6 +205,8 @@ FROM bursar_client, bursar_operator;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bursar
 FROM bursar_client, bursar_operator;
 
+-- Give the runtime owner only the schemas and extension primitives required by
+-- tenant RPC bodies; schema CREATE is revoked after ownership transfer.
 GRANT USAGE ON SCHEMA bursar TO bursar_runtime;
 GRANT CREATE ON SCHEMA bursar TO bursar_runtime;
 GRANT USAGE ON SCHEMA extensions TO bursar_runtime;
@@ -201,6 +226,8 @@ GRANT EXECUTE
 ON FUNCTION extensions.jsonschema_validation_errors(json, json)
 TO bursar_runtime;
 
+-- Grant CRUD only on tenant-bearing parent tables (plus tenants); FORCE RLS below
+-- remains authoritative for which active tenant rows the owner may see or write.
 DO $$
 DECLARE
     v_table record;
@@ -233,6 +260,7 @@ BEGIN
 END
 $$;
 
+-- The global storage singleton is read-only to tenant runtime functions.
 GRANT SELECT ON bursar.storage_settings TO bursar_runtime;
 -- storage_settings is a global (non-tenant) singleton, but 026 blanket-enables
 -- RLS on every bursar table. Without an explicit runtime policy the SELECT grant
@@ -241,6 +269,7 @@ GRANT SELECT ON bursar.storage_settings TO bursar_runtime;
 -- (check_quota_usage_event, validate_catalog_plan_quota) read directly -- which
 -- would disable the event-lateness and rolling-quota-retention guards. No tenant
 -- data lives here, so grant runtime read of this operator-global config.
+-- Permit the non-bypass runtime owner to read the non-tenant singleton under RLS.
 CREATE POLICY storage_settings_runtime_read ON bursar.storage_settings
 FOR SELECT TO bursar_runtime
 USING (TRUE);
@@ -252,6 +281,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA bursar TO bursar_runtime;
 -- remain unavailable to the tenant runtime role.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bursar FROM bursar_runtime;
 
+-- Grant execution of ordinary invoker dependencies called from runtime-owned
+-- definer functions; table privileges and RLS still constrain their data access.
 DO $$
 DECLARE
     v_function record;
@@ -273,6 +304,8 @@ BEGIN
 END
 $$;
 
+-- Transfer all tenant SECURITY DEFINER functions except the explicitly reserved
+-- storage, operator, partition, and host-integration surface.
 DO $$
 DECLARE
     v_function record;
@@ -284,6 +317,7 @@ BEGIN
           ON namespace_info.oid = function_info.pronamespace
         WHERE namespace_info.nspname = 'bursar'
           AND function_info.prosecdef
+          AND function_info.proowner = current_user::regrole
           AND function_info.proname NOT IN (
               'get_storage_settings',
               'configure_storage',
@@ -293,7 +327,8 @@ BEGIN
               'complete_outbox_event',
               'archive_billing_event_payload',
               'fail_outbox_event',
-              'run_storage_partition_maintenance',
+              'secure_tenant_partition',
+              'run_storage_partition_maintenance_base',
               'run_storage_maintenance',
               'maybe_run_storage_maintenance',
               'renew_tenant_outbox_claim',
@@ -315,6 +350,10 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 3. Client RPC allow-list and host trigger boundary
+-- ---------------------------------------------------------------------------
+
 -- Only the documented, tenant-scoped RPC surface is callable by application
 -- connections. Runtime-owned helpers remain private even though tenant RPCs
 -- need them internally through SECURITY DEFINER execution.
@@ -325,6 +364,7 @@ GRANT USAGE ON SCHEMA bursar TO bursar_client;
 -- the migration-owned integration helpers below.
 SET LOCAL ROLE bursar_runtime;
 
+-- Grant the fixed, signature-qualified SDK surface; helpers remain runtime-only.
 DO $$
 DECLARE
     v_function text;
@@ -466,7 +506,12 @@ $$;
 
 RESET ROLE;
 
+-- End the temporary ownership-transfer capability before serving application calls.
 REVOKE CREATE ON SCHEMA bursar FROM bursar_runtime;
+
+-- ---------------------------------------------------------------------------
+-- 4. Forced tenant RLS and operator lifecycle RPCs
+-- ---------------------------------------------------------------------------
 
 -- Apply tenant RLS to every business table and every partition created during
 -- pg_partman registration. The maintenance wrapper secures future children.
@@ -516,128 +561,14 @@ BEGIN
 END
 $$;
 
+-- The tenant registry exposes only the transaction tenant itself to runtime RPCs.
 ALTER TABLE bursar.tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bursar.tenants FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_self_read ON bursar.tenants
 FOR SELECT TO bursar_runtime
 USING (id = (SELECT bursar.current_tenant_id()));
 
-CREATE FUNCTION bursar.secure_tenant_partition(p_partition regclass)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_partition text;
-    v_parent text;
-    v_policy text;
-BEGIN
-    SELECT
-        child.relname,
-        parent.relname
-    INTO v_partition, v_parent
-    FROM pg_inherits
-    JOIN pg_class AS child
-      ON child.oid = pg_inherits.inhrelid
-    JOIN pg_namespace AS child_schema
-      ON child_schema.oid = child.relnamespace
-    JOIN pg_class AS parent
-      ON parent.oid = pg_inherits.inhparent
-    JOIN pg_namespace AS parent_schema
-      ON parent_schema.oid = parent.relnamespace
-    WHERE child.oid = p_partition
-      AND child_schema.nspname = 'bursar'
-      AND parent_schema.nspname = 'bursar'
-      AND parent.relname IN (
-          'usage_charge_payloads',
-          'billing_event_payloads'
-      );
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'invalid tenant partition'
-            USING ERRCODE = '22023';
-    END IF;
-
-    v_policy := left('tenant_isolation_' || v_partition, 63);
-
-    EXECUTE format(
-        'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
-        v_partition
-    );
-    EXECUTE format(
-        'ALTER TABLE bursar.%I FORCE ROW LEVEL SECURITY',
-        v_partition
-    );
-    EXECUTE format(
-        'REVOKE ALL ON TABLE bursar.%I FROM PUBLIC, bursar_runtime',
-        v_partition
-    );
-    EXECUTE format(
-        'COMMENT ON TABLE bursar.%I IS %L',
-        v_partition,
-        format(
-            'pg_partman-managed child of bursar.%I; direct access is denied.',
-            v_parent
-        )
-    );
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_policy
-        WHERE polrelid = p_partition
-          AND polname = v_policy
-    ) THEN
-        EXECUTE format(
-            'CREATE POLICY %I ON bursar.%I '
-            'FOR ALL TO bursar_runtime '
-            'USING ('
-            'tenant_id = (SELECT bursar.current_tenant_id()) '
-            'AND (SELECT bursar.current_tenant_is_active())'
-            ') '
-            'WITH CHECK ('
-            'tenant_id = (SELECT bursar.current_tenant_id()) '
-            'AND (SELECT bursar.current_tenant_is_active())'
-            ')',
-            v_policy,
-            v_partition
-        );
-    END IF;
-END
-$$;
-
-REVOKE ALL
-ON FUNCTION bursar.secure_tenant_partition(regclass)
-FROM PUBLIC;
-
--- The initial pg_partman children predate this helper. Re-apply the helper so
--- they receive the same privileges, forced RLS policy, and documentation as
--- children created by later maintenance runs.
-DO $$
-DECLARE
-    v_partition regclass;
-BEGIN
-    FOR v_partition IN
-        SELECT child.oid::regclass
-        FROM pg_inherits AS inheritance
-        JOIN pg_class AS child
-          ON child.oid = inheritance.inhrelid
-        JOIN pg_class AS parent
-          ON parent.oid = inheritance.inhparent
-        JOIN pg_namespace AS parent_schema
-          ON parent_schema.oid = parent.relnamespace
-        WHERE parent_schema.nspname = 'bursar'
-          AND parent.relname IN (
-              'usage_charge_payloads',
-              'billing_event_payloads'
-          )
-        ORDER BY child.oid
-    LOOP
-        PERFORM bursar.secure_tenant_partition(v_partition);
-    END LOOP;
-END
-$$;
-
+-- Provision or replay one global tenant slug without permitting ID reassignment.
 CREATE FUNCTION bursar.create_tenant(
     p_tenant_id uuid,
     p_slug text,
@@ -684,6 +615,7 @@ BEGIN
 END
 $$;
 
+-- Apply one allow-listed tenant lifecycle status by exact tenant identity.
 CREATE FUNCTION bursar.set_tenant_status(
     p_tenant_id uuid,
     p_status text
@@ -700,72 +632,17 @@ AS $$
     RETURNING true
 $$;
 
+-- Close both global tenant lifecycle functions before the operator grant below.
 REVOKE ALL ON FUNCTION bursar.create_tenant(uuid, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.set_tenant_status(uuid, text) FROM PUBLIC;
 
--- Cross-tenant workers and deployment tooling use a distinct caller role.
--- These functions remain owned by the trusted migration role and are never
--- reachable through bursar_client or bursar_runtime.
+-- Cross-tenant workers and deployment tooling use a distinct caller role. The
+-- exact function allow-list is granted while ownership is transferred in 030.
 GRANT USAGE ON SCHEMA bursar TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.get_storage_settings()
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.configure_storage(
-    integer, integer, integer, integer, integer, integer,
-    integer, integer, integer, integer, integer, integer,
-    integer, integer
-) TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
-    integer, integer, text []
-) TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
-    uuid, integer, integer, text []
-) TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.export_usage_charge(uuid)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.export_billing_event_payload(uuid)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.complete_outbox_event(bigint, uuid)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.archive_billing_event_payload(
-    uuid, text, text
-) TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.fail_outbox_event(
-    bigint, uuid, text, integer, integer
-) TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.run_storage_partition_maintenance(
-    text, timestamptz
-) TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.run_storage_maintenance(timestamptz)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.create_tenant(uuid, text, text)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.set_tenant_status(uuid, text)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.resolve_active_tenant_for_trigger(text)
-TO bursar_operator;
-GRANT EXECUTE
-ON FUNCTION bursar.renew_tenant_outbox_claim(uuid, bigint, uuid, integer)
-TO bursar_operator;
-GRANT EXECUTE
-ON FUNCTION bursar.complete_tenant_outbox_event(uuid, bigint, uuid)
-TO bursar_operator;
-GRANT EXECUTE
-ON FUNCTION bursar.fail_tenant_outbox_event(
-    uuid, bigint, uuid, text, integer, integer
-)
-TO bursar_operator;
-GRANT EXECUTE ON FUNCTION bursar.get_outbox_stats(uuid)
-TO bursar_operator;
-GRANT EXECUTE
-ON FUNCTION bursar.list_outbox_dead_letters(
-    uuid, timestamptz, bigint, integer
-)
-TO bursar_operator;
-GRANT EXECUTE
-ON FUNCTION bursar.requeue_outbox_dead_letter(uuid, bigint)
-TO bursar_operator;
+
+-- ---------------------------------------------------------------------------
+-- 5. Security catalog comments
+-- ---------------------------------------------------------------------------
 
 COMMENT ON TABLE bursar.tenants IS
 'SaaS tenant boundary for all Bursar catalog, credit, billing, and usage data.';
@@ -778,9 +655,6 @@ COMMENT ON FUNCTION bursar.require_tenant_id() IS
 
 COMMENT ON FUNCTION bursar.current_tenant_is_active() IS
 'Returns true only when the current tenant exists and is active.';
-
-COMMENT ON FUNCTION bursar.secure_tenant_partition(regclass) IS
-'Revokes direct access and applies forced tenant RLS to a managed partition.';
 
 COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) IS
 'Claims cross-tenant outbox work and returns the owning tenant UUID.';

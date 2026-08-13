@@ -20,6 +20,7 @@ from bursar.credits.postgres.repositories.schemas import (
     TeamMemberRow,
 )
 from bursar.errors import StoreError
+from bursar.expr import quantize_money
 
 
 class TeamRepository:
@@ -176,7 +177,7 @@ class TeamRepository:
             "TeamRepository.deduct_team",
             indeterminate=True,
         )
-        if row.error_code is None and Decimal(str(row.amount)) != Decimal(amount):
+        if row.error_code is None and Decimal(str(row.amount)) != quantize_money(Decimal(amount)):
             raise StoreError(
                 "TeamRepository.deduct_team: committed amount differs from the request",
                 indeterminate=True,
@@ -187,7 +188,7 @@ class TeamRepository:
                 "entry_id": row.entry_id,
                 "team_id": row.team_id,
                 "user_id": row.subject_id,
-                "amount": amount,
+                "amount": row.amount if row.error_code is None else amount,
                 "team_balance_after": row.balance_after,
                 "replayed": row.replayed,
                 "error": row.error_code,

@@ -1,5 +1,11 @@
--- Auto-recharge claim and state RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 020_auto_recharge_rpc.sql
+-- Purpose: Define idempotent auto-recharge claim and terminal-state transitions.
+-- Depends on: Auto-recharge profiles, attempts, catalog policies, and credit accounts.
+-- Security: SECURITY DEFINER RPCs require tenant context; claims use the current
+--   provider environment and serialize threshold/window admission.
+
+-- Claim or replay one recharge attempt under the active profile, provider
+-- environment, balance threshold, cooldown, and window charge-count fences.
 
 CREATE FUNCTION bursar.claim_auto_recharge_attempt(
     p_subject_id uuid,
@@ -23,8 +29,7 @@ DECLARE
 
 BEGIN
     IF p_subject_id IS NULL
-       OR NOT bursar.is_nonempty_text(p_idempotency_key)
-       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
+       OR NOT bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
     THEN
         RETURN;
     END IF;
@@ -87,6 +92,9 @@ BEGIN
     SELECT window_start, window_end
     INTO v_window_start, v_window_end
     FROM bursar.policy_period_window(
+        -- Auto-recharge windows are calendar- or statement-time rolling
+        -- periods, never plan-assignment anchored. NULL is therefore the
+        -- intentional sentinel for the unused assignment anchor.
         NULL,
         v_profile.window_unit,
         v_profile.window_count,
@@ -129,6 +137,8 @@ BEGIN
 
 END $$;
 
+-- Advance one tenant-owned attempt through its legal provider lifecycle without
+-- reopening terminal outcomes or replacing an established provider attempt ID.
 CREATE FUNCTION bursar.advance_auto_recharge_attempt(
     p_attempt_id uuid,
     p_state bursar.recharge_attempt_status,
@@ -144,17 +154,22 @@ DECLARE
 
     v_subject uuid;
     v_environment text;
+    v_metadata jsonb;
+    v_failure_message text;
 
 BEGIN
     IF p_attempt_id IS NULL
        OR p_state IS NULL
        OR (
            p_provider_attempt_id IS NOT NULL
-           AND NOT bursar.is_nonempty_text(p_provider_attempt_id)
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_provider_attempt_id,
+               255
+           )
        )
        OR (
            p_failure_code IS NOT NULL
-           AND NOT bursar.is_nonempty_text(p_failure_code)
+           AND NOT bursar.is_nonempty_bounded_text(p_failure_code, 255)
        )
        OR (
            p_failure_message IS NOT NULL
@@ -177,8 +192,40 @@ BEGIN
     IF NOT FOUND THEN RETURN false;
  END IF;
 
-    IF v_old=p_state THEN RETURN true;
- END IF;
+    v_metadata := CASE
+        WHEN bursar.is_subject_pseudonymized(v_subject) THEN '{}'::jsonb
+        ELSE COALESCE(p_metadata, '{}'::jsonb)
+    END;
+    v_failure_message := CASE
+        WHEN bursar.is_subject_pseudonymized(v_subject) THEN NULL
+        ELSE p_failure_message
+    END;
+
+    IF p_provider_attempt_id IS NOT NULL
+       AND EXISTS (
+           SELECT 1
+           FROM bursar.billing_auto_recharge_attempts AS attempt
+           WHERE attempt.id = p_attempt_id
+             AND attempt.provider_attempt_id IS NOT NULL
+             AND attempt.provider_attempt_id <> p_provider_attempt_id
+       )
+    THEN
+        RETURN false;
+    END IF;
+
+    IF v_old=p_state THEN
+        UPDATE bursar.billing_auto_recharge_attempts
+        SET provider_attempt_id = COALESCE(
+                provider_attempt_id,
+                p_provider_attempt_id
+            ),
+            failure_code = COALESCE(p_failure_code, failure_code),
+            failure_message = COALESCE(v_failure_message, failure_message),
+            metadata = v_metadata
+        WHERE id = p_attempt_id;
+
+        RETURN true;
+    END IF;
 
     IF (v_old,p_state) NOT IN (
         ('claimed','submitted'),
@@ -194,7 +241,12 @@ BEGIN
         ('unknown','failed'),
         ('action_required','processing'),
         ('action_required','succeeded'),
-        ('action_required','failed')
+        ('action_required','failed'),
+        ('claimed','canceled'),
+        ('submitted','canceled'),
+        ('processing','canceled'),
+        ('unknown','canceled'),
+        ('action_required','canceled')
     ) THEN
         RETURN false;
 
@@ -204,8 +256,8 @@ BEGIN
     SET state=p_state,
         provider_attempt_id=COALESCE(p_provider_attempt_id,provider_attempt_id),
         failure_code=COALESCE(p_failure_code,failure_code),
-        failure_message=COALESCE(p_failure_message,failure_message),
-        metadata=COALESCE(p_metadata,'{}'::jsonb)
+        failure_message=COALESCE(v_failure_message,failure_message),
+        metadata=v_metadata
     WHERE id=p_attempt_id;
 
     -- A successful attempt remains disarmed until its credit grant updates the
@@ -235,6 +287,16 @@ BEGIN
         WHERE subject_id=v_subject
           AND provider_environment=v_environment
           AND enabled;
+
+    ELSIF p_state='canceled' AND v_old <> 'action_required' THEN
+        -- A cancellation before customer action is requested is safe to retry;
+        -- action-required cancellation keeps the profile paused for review.
+        UPDATE bursar.billing_auto_recharge_profiles
+        SET armed=true
+        WHERE subject_id=v_subject
+          AND provider_environment=v_environment
+          AND enabled
+          AND state='active';
 
     ELSIF p_state='succeeded' THEN
         UPDATE bursar.billing_auto_recharge_profiles

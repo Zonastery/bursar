@@ -25,14 +25,16 @@ type billingLifecycleStoreStub struct {
 	failed    int
 	failure   string
 	steps     []string
+	claimed   map[string]any
 }
 
 func (s *billingLifecycleStoreStub) ProviderEnvironment() ProviderEnvironment {
 	return s.environment
 }
 
-func (s *billingLifecycleStoreStub) ClaimBillingEvent(_ context.Context, _ BillingEvent, _ map[string]any) (BillingEventClaim, error) {
+func (s *billingLifecycleStoreStub) ClaimBillingEvent(_ context.Context, _ BillingEvent, envelope map[string]any) (BillingEventClaim, error) {
 	s.steps = append(s.steps, "claim")
+	s.claimed = envelope
 	return BillingEventClaim{State: BillingEventClaimed, ClaimToken: "claim-token"}, nil
 }
 
@@ -62,12 +64,27 @@ func (s *billingLifecycleStoreStub) ProcessBillingEvent(_ context.Context, event
 }
 
 func lifecycleEvent(eventType BillingEventType) BillingEvent {
-	return BillingEvent{
+	event := BillingEvent{
 		ID:         "event-1",
 		Provider:   "stripe",
 		Type:       eventType,
 		OccurredAt: time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC),
 	}
+	switch {
+	case strings.HasPrefix(string(eventType), "customer."):
+		event.Customer = &BillingCustomer{ProviderCustomerID: "cus-1"}
+	case strings.HasPrefix(string(eventType), "subscription."):
+		event.Subscription = &BillingSubscription{ProviderSubscriptionID: "sub-1", Provider: "stripe", Status: "active"}
+	case strings.HasPrefix(string(eventType), "invoice."):
+		event.Invoice = &BillingInvoice{ProviderInvoiceID: "in-1", Provider: "stripe", Status: "paid", Currency: "USD"}
+	case strings.HasPrefix(string(eventType), "payment."):
+		event.Payment = &BillingPayment{ProviderPaymentID: "pay-1", Provider: "stripe", Purpose: "subscription", Status: "succeeded", Currency: "USD"}
+	case strings.HasPrefix(string(eventType), "refund."):
+		event.Refund = &BillingRefund{ProviderRefundID: "re-1", ProviderPaymentID: "pay-1", Provider: "stripe", Status: "succeeded", Currency: "USD", AmountMinor: 1}
+	case strings.HasPrefix(string(eventType), "dispute."):
+		event.Dispute = &BillingDispute{ProviderDisputeID: "dp-1", ProviderPaymentID: "pay-1", Provider: "stripe", Status: "under_review"}
+	}
+	return event
 }
 
 func newBillingLifecycleService(t *testing.T, store *billingLifecycleStoreStub) *BillingService {
@@ -77,6 +94,18 @@ func newBillingLifecycleService(t *testing.T, store *billingLifecycleStoreStub) 
 		t.Fatalf("NewBillingService() error = %v", err)
 	}
 	return service
+}
+
+func TestBillingServiceHasProvisioningReflectsConfiguredPort(t *testing.T) {
+	store := &billingLifecycleStoreStub{environment: ProviderEnvironmentTest}
+	service := newBillingLifecycleService(t, store)
+	if service.HasProvisioning() {
+		t.Fatal("HasProvisioning() = true without a provisioning port")
+	}
+	service.provisioning = &creditStoreStub{}
+	if !service.HasProvisioning() {
+		t.Fatal("HasProvisioning() = false with a provisioning port")
+	}
 }
 
 func TestBillingServiceUsesStoreLifecycleProcessor(t *testing.T) {
@@ -102,6 +131,50 @@ func TestBillingServiceUsesStoreLifecycleProcessor(t *testing.T) {
 	}
 	if got, want := strings.Join(store.steps, ","), "claim,process,complete"; got != want {
 		t.Fatalf("processing order = %q, want %q", got, want)
+	}
+}
+
+func TestBillingServiceClaimsCanonicalEnvelopeWithoutRawPayload(t *testing.T) {
+	store := &billingLifecycleStoreStub{
+		environment:   ProviderEnvironmentTest,
+		processResult: BillingEventResult{Handled: true},
+	}
+	service := newBillingLifecycleService(t, store)
+	event := lifecycleEvent(BillingEventPaymentSucceeded)
+	event.AccountID = "account-1"
+	event.BillingEventID = "internal-event-id"
+	event.RawPayload = []byte(`{"secret":"provider-body"}`)
+	event.Metadata = map[string]any{"provider_key": "preserved"}
+	event.Payment.ID = "legacy-payment-id"
+	event.Payment.ProviderPaymentID = "pay-1"
+	event.Payment.AccountID = "account-1"
+	event.Payment.Refs = &ProviderRef{ProductID: "prod-1", PriceID: "price-1"}
+
+	if _, err := service.Ingest(context.Background(), event); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	for _, forbidden := range []string{"occurredAt", "occurred_at", "raw", "rawPayload", "billingEventId", "billing_event_id", "id", "type"} {
+		if _, exists := store.claimed[forbidden]; exists {
+			t.Fatalf("claim envelope contains forbidden field %q: %#v", forbidden, store.claimed)
+		}
+	}
+	if store.claimed["eventId"] != "event-1" || store.claimed["eventType"] != string(BillingEventPaymentSucceeded) || store.claimed["accountId"] != "account-1" {
+		t.Fatalf("claim envelope = %#v, want canonical event identity", store.claimed)
+	}
+	metadata, ok := store.claimed["metadata"].(map[string]any)
+	if !ok || metadata["provider_key"] != "preserved" {
+		t.Fatalf("claim metadata = %#v, want provider key preserved", store.claimed["metadata"])
+	}
+	payment, ok := store.claimed["payment"].(map[string]any)
+	if !ok || payment["providerPaymentId"] != "pay-1" || payment["purpose"] != "subscription" || payment["status"] != "succeeded" {
+		t.Fatalf("claim payment = %#v, want canonical payment", store.claimed["payment"])
+	}
+	if _, exists := payment["id"]; exists {
+		t.Fatalf("claim payment contains legacy ID: %#v", payment)
+	}
+	refs, ok := payment["refs"].(map[string]any)
+	if !ok || refs["productId"] != "prod-1" || refs["priceId"] != "price-1" {
+		t.Fatalf("claim payment refs = %#v, want canonical provider references", payment["refs"])
 	}
 }
 
@@ -164,8 +237,8 @@ func TestBillingServiceLifecycleProcessorFailureFailsClaim(t *testing.T) {
 	if store.processed != 1 || store.completed != 0 || store.failed != 1 {
 		t.Fatalf("processor/completion/failure = %d/%d/%d, want 1/0/1", store.processed, store.completed, store.failed)
 	}
-	if !strings.Contains(store.failure, processorErr.Error()) {
-		t.Fatalf("failure diagnostic = %q, want processor error", store.failure)
+	if store.failure != "billing_event_failed:Error" {
+		t.Fatalf("failure diagnostic = %q, want safe taxonomy", store.failure)
 	}
 }
 

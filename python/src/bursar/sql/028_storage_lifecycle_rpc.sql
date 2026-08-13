@@ -1,4 +1,21 @@
--- PostgreSQL-first storage lifecycle and optional-export RPCs.
+-- Migration: 028_storage_lifecycle_rpc.sql
+-- Purpose: Define retention settings, outbox leasing, exports, and storage maintenance.
+-- Depends on: Storage settings, outbox, usage/billing payload partitions, and pg_partman.
+-- Security: Operator-owned SECURITY DEFINER RPCs expose bounded cross-tenant work;
+--   tenant overloads require matching context and outbox claims use lease tokens.
+--
+-- Contents
+--   1. Retention settings
+--   2. Outbox claim and dead-letter lifecycle
+--   3. Optional export projections and archive pointers
+--   4. Bounded row and partition maintenance
+--   5. pg_partman registration, catalog comments, and PUBLIC revocation
+
+-- ---------------------------------------------------------------------------
+-- 1. Retention settings
+-- ---------------------------------------------------------------------------
+
+-- Read the singleton hot-storage and maintenance policy through its reviewed RPC.
 
 CREATE FUNCTION bursar.get_storage_settings()
 RETURNS bursar.storage_settings
@@ -12,6 +29,8 @@ AS $$
     WHERE settings.singleton
 $$;
 
+-- Atomically revise retention and work budgets while proving quota-event
+-- retention still covers every published rolling window and correction horizon.
 CREATE FUNCTION bursar.configure_storage(
     p_usage_payload_retention_days integer DEFAULT NULL,
     p_quota_event_retention_days integer DEFAULT NULL,
@@ -156,6 +175,12 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 2. Outbox claim and dead-letter lifecycle
+-- ---------------------------------------------------------------------------
+
+-- Claim a bounded cross-tenant SKIP LOCKED batch with one lease token per call;
+-- this overload is reserved for the operator boundary.
 CREATE FUNCTION bursar.claim_outbox_events(
     p_limit integer DEFAULT 100,
     p_lease_seconds integer DEFAULT 60,
@@ -187,13 +212,15 @@ BEGIN
        OR (
            p_topics IS NOT NULL
            AND (
-               cardinality(p_topics) NOT BETWEEN 1 AND 64
+               array_ndims(p_topics) IS DISTINCT FROM 1
+               OR cardinality(p_topics) NOT BETWEEN 1 AND 64
                OR EXISTS (
                    SELECT 1
                    FROM unnest(p_topics) AS requested(topic)
-                   WHERE requested.topic IS NULL
-                      OR NOT bursar.is_nonempty_text(requested.topic)
-                      OR NOT bursar.is_bounded_text(requested.topic, 255)
+                   WHERE NOT bursar.is_nonempty_bounded_text(
+                       requested.topic,
+                       255
+                   )
                )
            )
        )
@@ -244,6 +271,8 @@ BEGIN
 END
 $$;
 
+-- Claim a bounded batch for one active tenant, rejecting context/argument mismatch
+-- and returning tenant identity with every leased event.
 CREATE FUNCTION bursar.claim_outbox_events(
     p_tenant_id uuid,
     p_limit integer DEFAULT 100,
@@ -283,13 +312,15 @@ BEGIN
        OR (
            p_topics IS NOT NULL
            AND (
-               cardinality(p_topics) NOT BETWEEN 1 AND 64
+               array_ndims(p_topics) IS DISTINCT FROM 1
+               OR cardinality(p_topics) NOT BETWEEN 1 AND 64
                OR EXISTS (
                    SELECT 1
                    FROM unnest(p_topics) AS requested(topic)
-                   WHERE requested.topic IS NULL
-                      OR NOT bursar.is_nonempty_text(requested.topic)
-                      OR NOT bursar.is_bounded_text(requested.topic, 255)
+                   WHERE NOT bursar.is_nonempty_bounded_text(
+                       requested.topic,
+                       255
+                   )
                )
            )
        )
@@ -345,6 +376,7 @@ BEGIN
 END
 $$;
 
+-- Extend one tenant-bound live claim only when its token still owns the event.
 CREATE FUNCTION bursar.renew_tenant_outbox_claim(
     p_tenant_id uuid,
     p_event_id bigint,
@@ -392,6 +424,7 @@ BEGIN
 END
 $$;
 
+-- Mark one tenant-bound claimed event delivered and clear its lease state.
 CREATE FUNCTION bursar.complete_tenant_outbox_event(
     p_tenant_id uuid,
     p_event_id bigint,
@@ -433,6 +466,8 @@ BEGIN
 END
 $$;
 
+-- Release a tenant-bound claim for delayed retry or dead-letter it at the
+-- attempt ceiling, retaining bounded diagnostic detail.
 CREATE FUNCTION bursar.fail_tenant_outbox_event(
     p_tenant_id uuid,
     p_event_id bigint,
@@ -490,6 +525,7 @@ BEGIN
 END
 $$;
 
+-- Return status counts only when the explicit tenant matches transaction context.
 CREATE FUNCTION bursar.get_outbox_stats(p_tenant_id uuid)
 RETURNS TABLE (
     pending_count bigint,
@@ -523,6 +559,7 @@ BEGIN
 END
 $$;
 
+-- Page one tenant's dead letters by stable creation-time/event-ID cursor.
 CREATE FUNCTION bursar.list_outbox_dead_letters(
     p_tenant_id uuid,
     p_cursor_created_at timestamptz DEFAULT NULL,
@@ -557,6 +594,10 @@ BEGIN
     IF p_limit IS NULL
        OR p_limit NOT BETWEEN 1 AND 100
        OR (p_cursor_created_at IS NULL) <> (p_cursor_event_id IS NULL)
+       OR (
+           p_cursor_created_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_cursor_created_at)
+       )
        OR (p_cursor_event_id IS NOT NULL AND p_cursor_event_id <= 0)
     THEN
         RAISE EXCEPTION 'invalid outbox dead-letter list request'
@@ -590,6 +631,7 @@ BEGIN
 END
 $$;
 
+-- Reset one tenant-bound dead letter for a fresh bounded delivery lifecycle.
 CREATE FUNCTION bursar.requeue_outbox_dead_letter(
     p_tenant_id uuid,
     p_event_id bigint
@@ -631,6 +673,11 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 3. Optional export projections and archive pointers
+-- ---------------------------------------------------------------------------
+
+-- Project one retained usage charge and payload for an external analytics sink.
 CREATE FUNCTION bursar.export_usage_charge(p_charge_id uuid)
 RETURNS jsonb
 LANGUAGE sql
@@ -674,6 +721,7 @@ AS $$
     WHERE charge.id = p_charge_id
 $$;
 
+-- Project one billing envelope together with any existing external archive pointer.
 CREATE FUNCTION bursar.export_billing_event_payload(p_event_id uuid)
 RETURNS jsonb
 LANGUAGE sql
@@ -684,6 +732,7 @@ AS $$
     SELECT jsonb_build_object(
         'tenant_id', event.tenant_id,
         'event_id', event.id,
+        'subject_id', event.subject_id,
         'provider', event.provider,
         'provider_environment', event.provider_environment,
         'provider_event_id', event.provider_event_id,
@@ -704,6 +753,7 @@ AS $$
     WHERE event.id = p_event_id
 $$;
 
+-- Complete a cross-tenant operator claim using its exact event/token fence.
 CREATE FUNCTION bursar.complete_outbox_event(
     p_event_id bigint,
     p_claim_token uuid
@@ -725,6 +775,8 @@ AS $$
     RETURNING true
 $$;
 
+-- Record one immutable durable object identity before deleting the retained
+-- PostgreSQL payload; retries must name the exact same object and version.
 CREATE FUNCTION bursar.archive_billing_event_payload(
     p_event_id uuid,
     p_object_key text,
@@ -759,8 +811,20 @@ BEGIN
         RETURN false;
     END IF;
 
+    IF v_event.payload_archived_at IS NOT NULL THEN
+        IF v_event.payload_object_key = p_object_key
+           AND v_event.payload_object_version IS NOT DISTINCT FROM
+               p_object_version
+        THEN
+            RETURN true;
+        END IF;
+
+        RAISE EXCEPTION 'billing payload archive identity conflict'
+            USING ERRCODE = '23505';
+    END IF;
+
     UPDATE bursar.billing_events
-    SET payload_archived_at = COALESCE(payload_archived_at, now()),
+    SET payload_archived_at = now(),
         payload_object_key = p_object_key,
         payload_object_version = p_object_version
     WHERE id = p_event_id;
@@ -773,6 +837,7 @@ BEGIN
 END
 $$;
 
+-- Retry or dead-letter one cross-tenant operator claim with bounded backoff and attempts.
 CREATE FUNCTION bursar.fail_outbox_event(
     p_event_id bigint,
     p_claim_token uuid,
@@ -819,7 +884,140 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION bursar.run_storage_partition_maintenance(
+-- ---------------------------------------------------------------------------
+-- 4. Bounded row and partition maintenance
+-- ---------------------------------------------------------------------------
+
+-- Harden one verified pg_partman child for tenant access, operator retention,
+-- and the private partition owner's FORCE-RLS probes. This is deliberately
+-- defined before maintenance so a missing hardener can never be ignored.
+CREATE FUNCTION bursar.secure_tenant_partition(p_partition regclass)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_partition name;
+    v_parent name;
+    v_policy name;
+    v_command name;
+BEGIN
+    SELECT child.relname, parent.relname
+    INTO v_partition, v_parent
+    FROM pg_inherits AS inheritance
+    JOIN pg_class AS child
+      ON child.oid = inheritance.inhrelid
+    JOIN pg_namespace AS child_schema
+      ON child_schema.oid = child.relnamespace
+    JOIN pg_class AS parent
+      ON parent.oid = inheritance.inhparent
+    JOIN pg_namespace AS parent_schema
+      ON parent_schema.oid = parent.relnamespace
+    WHERE child.oid = p_partition
+      AND child_schema.nspname = 'bursar'
+      AND parent_schema.nspname = 'bursar'
+      AND parent.relname IN (
+          'usage_charge_payloads',
+          'billing_event_payloads'
+      );
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'invalid tenant partition'
+            USING ERRCODE = '22023';
+    END IF;
+
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', p_partition);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', p_partition);
+    EXECUTE format(
+        'REVOKE ALL ON TABLE %s FROM PUBLIC, bursar_runtime',
+        p_partition
+    );
+    EXECUTE format(
+        'COMMENT ON TABLE %s IS %L',
+        p_partition,
+        format(
+            'pg_partman-managed child of bursar.%I; direct access is denied.',
+            v_parent
+        )
+    );
+
+    v_policy := left('tenant_isolation_' || v_partition, 63);
+    EXECUTE format(
+        'DROP POLICY IF EXISTS %I ON %s',
+        v_policy,
+        p_partition
+    );
+    EXECUTE format(
+        'CREATE POLICY %I ON %s '
+        'FOR ALL TO bursar_runtime '
+        'USING ('
+        'tenant_id = (SELECT bursar.current_tenant_id()) '
+        'AND (SELECT bursar.current_tenant_is_active())'
+        ') '
+        'WITH CHECK ('
+        'tenant_id = (SELECT bursar.current_tenant_id()) '
+        'AND (SELECT bursar.current_tenant_is_active())'
+        ')',
+        v_policy,
+        p_partition
+    );
+
+    EXECUTE format(
+        'GRANT SELECT, UPDATE, DELETE ON TABLE %s '
+        'TO bursar_operator_runtime',
+        p_partition
+    );
+    FOREACH v_command IN ARRAY ARRAY[
+        'select',
+        'update',
+        'delete'
+    ]::name[]
+    LOOP
+        v_policy := left(
+            'operator_runtime_' || v_command || '_' || v_partition,
+            63
+        );
+        EXECUTE format(
+            'DROP POLICY IF EXISTS %I ON %s',
+            v_policy,
+            p_partition
+        );
+        EXECUTE format(
+            'CREATE POLICY %I ON %s FOR %s '
+            'TO bursar_operator_runtime USING (TRUE)%s',
+            v_policy,
+            p_partition,
+            upper(v_command),
+            CASE
+                WHEN v_command = 'update' THEN ' WITH CHECK (TRUE)'
+                ELSE ''
+            END
+        );
+    END LOOP;
+
+    EXECUTE format(
+        'GRANT SELECT ON TABLE %s TO bursar_partition_runtime',
+        p_partition
+    );
+    v_policy := left('partition_runtime_select_' || v_partition, 63);
+    EXECUTE format(
+        'DROP POLICY IF EXISTS %I ON %s',
+        v_policy,
+        p_partition
+    );
+    EXECUTE format(
+        'CREATE POLICY %I ON %s '
+        'FOR SELECT TO bursar_partition_runtime USING (TRUE)',
+        v_policy,
+        p_partition
+    );
+END
+$$;
+
+-- Run pg_partman creation and retention for one allow-listed payload parent
+-- under an advisory lock and operator-configured lock timeout.
+CREATE FUNCTION bursar.run_storage_partition_maintenance_base(
     p_parent_table text,
     p_now timestamptz DEFAULT now()
 )
@@ -849,7 +1047,7 @@ BEGIN
         'usage_charge_payloads',
         'billing_event_payloads'
     )
-       OR p_now IS NULL
+       OR NOT bursar.is_finite_timestamptz(p_now)
     THEN
         RAISE EXCEPTION 'invalid storage partition maintenance request'
             USING ERRCODE = '22023';
@@ -985,36 +1183,28 @@ BEGIN
             END IF;
     END;
 
-    -- pg_partman deliberately does not know Bursar's tenant policy. Harden
-    -- every new child before returning from operator maintenance.
-    IF to_regprocedure(
-        'bursar.secure_tenant_partition(regclass)'
-    ) IS NOT NULL THEN
-        FOR v_partition IN
-            SELECT child.oid::regclass
-            FROM pg_inherits AS inheritance
-            JOIN pg_class AS child
-              ON child.oid = inheritance.inhrelid
-            WHERE inheritance.inhparent = v_parent
-              AND (
-                  NOT child.relrowsecurity
-                  OR NOT child.relforcerowsecurity
-                  OR NOT EXISTS (
-                      SELECT 1
-                      FROM pg_policy AS policy
-                      WHERE policy.polrelid = child.oid
-                        AND policy.polname LIKE 'tenant_isolation_%'
-                  )
+    -- pg_partman deliberately does not know Bursar's tenant policy. Never
+    -- commit a newly visible child unless the hardener succeeds.
+    FOR v_partition IN
+        SELECT child.oid::regclass
+        FROM pg_inherits AS inheritance
+        JOIN pg_class AS child
+          ON child.oid = inheritance.inhrelid
+        WHERE inheritance.inhparent = v_parent
+          AND (
+              NOT child.relrowsecurity
+              OR NOT child.relforcerowsecurity
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM pg_policy AS policy
+                  WHERE policy.polrelid = child.oid
+                    AND policy.polname LIKE 'tenant_isolation_%'
               )
-            ORDER BY child.oid
-        LOOP
-            -- Security is fail-closed: never commit a newly visible child
-            -- unless its forced-RLS policy and direct-access revokes succeed.
-            EXECUTE
-                'SELECT bursar.secure_tenant_partition($1)'
-                USING v_partition;
-        END LOOP;
-    END IF;
+          )
+        ORDER BY child.oid
+    LOOP
+        PERFORM bursar.secure_tenant_partition(v_partition);
+    END LOOP;
 
     SELECT child.oid::regclass
     INTO v_default_partition
@@ -1056,6 +1246,8 @@ EXCEPTION
 END
 $$;
 
+-- Perform one bounded retention/compaction pass across hot payloads, quota state,
+-- terminal leases, rollups, and retention-eligible outbox rows without partition DDL.
 CREATE FUNCTION bursar.run_storage_maintenance(
     p_now timestamptz DEFAULT now()
 )
@@ -1080,7 +1272,7 @@ DECLARE
     v_outbox_remaining integer := 0;
     v_has_more boolean := false;
 BEGIN
-    IF p_now IS NULL THEN
+    IF NOT bursar.is_finite_timestamptz(p_now) THEN
         RAISE EXCEPTION 'maintenance timestamp is required'
             USING ERRCODE = '22023';
     END IF;
@@ -1364,6 +1556,7 @@ BEGIN
 END
 $$;
 
+-- Run the bounded maintenance pass only after the configured interval has elapsed.
 CREATE FUNCTION bursar.maybe_run_storage_maintenance(
     p_now timestamptz DEFAULT now()
 )
@@ -1375,7 +1568,7 @@ AS $$
 DECLARE
     v_settings bursar.storage_settings;
 BEGIN
-    IF p_now IS NULL THEN
+    IF NOT bursar.is_finite_timestamptz(p_now) THEN
         RAISE EXCEPTION 'maintenance timestamp is required'
             USING ERRCODE = '22023';
     END IF;
@@ -1407,6 +1600,10 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 5. pg_partman registration, catalog comments, and PUBLIC revocation
+-- ---------------------------------------------------------------------------
+
 -- Register the two native partitioned parents with pg_partman. Version 5.4
 -- renamed create_parent() to create_partition(); the named arguments used by
 -- Bursar are otherwise common to the audited 5.x APIs.
@@ -1414,6 +1611,11 @@ DO $$
 DECLARE
     v_partition_set record;
     v_create_function text;
+    v_created boolean;
+    v_start_partition text := to_char(
+        date_trunc('month', transaction_timestamp() AT TIME ZONE 'UTC'),
+        'YYYY-MM-DD HH24:MI:SS'
+    );
 BEGIN
     PERFORM set_config('TimeZone', 'UTC', true);
 
@@ -1462,6 +1664,7 @@ BEGIN
                 'p_interval := ''1 month'', '
                 'p_type := ''range'', '
                 'p_premake := 4, '
+                'p_start_partition := $3, '
                 'p_default_table := true, '
                 'p_automatic_maintenance := ''off'', '
                 'p_jobmon := false, '
@@ -1469,9 +1672,17 @@ BEGIN
                 ')',
                 v_create_function
             )
+            INTO v_created
             USING
                 v_partition_set.parent_table,
-                v_partition_set.control_column;
+                v_partition_set.control_column,
+                v_start_partition;
+
+            IF NOT COALESCE(v_created, false) THEN
+                RAISE EXCEPTION 'pg_partman did not create initial partitions for %',
+                    v_partition_set.parent_table
+                    USING ERRCODE = '55000';
+            END IF;
         END IF;
 
         UPDATE partman.part_config
@@ -1495,10 +1706,62 @@ BEGIN
                 v_partition_set.parent_table
                 USING ERRCODE = '55000';
         END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_inherits AS inheritance
+            JOIN pg_class AS child
+              ON child.oid = inheritance.inhrelid
+            WHERE inheritance.inhparent =
+                v_partition_set.parent_table::regclass
+              AND pg_get_expr(child.relpartbound, child.oid) <> 'DEFAULT'
+              AND to_char(
+                  date_trunc(
+                      'month',
+                      transaction_timestamp() AT TIME ZONE 'UTC'
+                  ),
+                  'YYYYMMDD'
+              ) = substring(child.relname FROM '_p([0-9]{8})$')
+        ) OR NOT EXISTS (
+            SELECT 1
+            FROM pg_inherits AS inheritance
+            JOIN pg_class AS child
+              ON child.oid = inheritance.inhrelid
+            WHERE inheritance.inhparent =
+                v_partition_set.parent_table::regclass
+              AND pg_get_expr(child.relpartbound, child.oid) = 'DEFAULT'
+        ) THEN
+            RAISE EXCEPTION 'pg_partman initial partition coverage missing for %',
+                v_partition_set.parent_table
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF (
+            SELECT count(*)
+            FROM pg_inherits AS inheritance
+            JOIN pg_class AS child
+              ON child.oid = inheritance.inhrelid
+            WHERE inheritance.inhparent =
+                v_partition_set.parent_table::regclass
+              AND pg_get_expr(child.relpartbound, child.oid) <> 'DEFAULT'
+              AND substring(child.relname FROM '_p([0-9]{8})$') >=
+                  to_char(
+                      date_trunc(
+                          'month',
+                          transaction_timestamp() AT TIME ZONE 'UTC'
+                      ),
+                      'YYYYMMDD'
+                  )
+        ) < 5 THEN
+            RAISE EXCEPTION 'pg_partman premake horizon missing for %',
+                v_partition_set.parent_table
+                USING ERRCODE = '55000';
+        END IF;
     END LOOP;
 END
 $$;
 
+-- Catalog the retention, lease, export, and maintenance surface for operators.
 COMMENT ON FUNCTION bursar.get_storage_settings()
 IS 'Return PostgreSQL hot-storage retention and maintenance settings.';
 COMMENT ON FUNCTION bursar.configure_storage(
@@ -1543,7 +1806,9 @@ COMMENT ON FUNCTION bursar.archive_billing_event_payload(
 IS 'Record an external webhook-envelope object and purge its PostgreSQL payload.';
 COMMENT ON FUNCTION bursar.fail_outbox_event(bigint, uuid, text, integer, integer)
 IS 'Release or dead-letter one claimed outbox event after delivery failure.';
-COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(
+COMMENT ON FUNCTION bursar.secure_tenant_partition(regclass)
+IS 'Hardens a pg_partman child for tenant runtime and operator maintenance.';
+COMMENT ON FUNCTION bursar.run_storage_partition_maintenance_base(
     text, timestamptz
 )
 IS 'Run pg_partman creation and retention for one Bursar payload partition set.';
@@ -1552,6 +1817,8 @@ IS 'Perform one bounded row-retention pass, including record-only usage telemetr
 COMMENT ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
 IS 'Run one bounded retention pass only when the configured interval has elapsed.';
 
+-- Keep every storage/operator RPC closed to PostgreSQL's implicit PUBLIC role;
+-- migrations 029 and 030 grant only the reviewed caller surfaces.
 REVOKE ALL ON FUNCTION bursar.get_storage_settings() FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
@@ -1586,7 +1853,8 @@ REVOKE ALL ON FUNCTION bursar.archive_billing_event_payload(
 REVOKE ALL ON FUNCTION bursar.fail_outbox_event(
     bigint, uuid, text, integer, integer
 ) FROM PUBLIC;
-REVOKE ALL ON FUNCTION bursar.run_storage_partition_maintenance(
+REVOKE ALL ON FUNCTION bursar.secure_tenant_partition(regclass) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.run_storage_partition_maintenance_base(
     text, timestamptz
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.run_storage_maintenance(timestamptz) FROM PUBLIC;

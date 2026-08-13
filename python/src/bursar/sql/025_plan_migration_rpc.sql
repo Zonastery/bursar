@@ -1,4 +1,21 @@
--- Current assignment changes, catalog rollouts, and subscription transitions.
+-- Migration: 025_plan_migration_rpc.sql
+-- Purpose: Define current plan assignment, catalog rollout, and subscription transitions.
+-- Depends on: Catalog plans, account assignments, allowance/quota state, and subscriptions.
+-- Security: SECURITY DEFINER state machines require tenant context and serialize
+--   account transitions; each RPC defines its own pin, compatibility, and replay rules.
+--
+-- Contents
+--   1. Direct assignment and revision pinning
+--   2. Catalog rollout scheduling and application
+--   3. Explicit account-plan migrations
+--   4. Provider subscription transitions
+
+-- ---------------------------------------------------------------------------
+-- 1. Direct assignment and revision pinning
+-- ---------------------------------------------------------------------------
+
+-- Assign one exact plan to a tenant-owned subject, closing prior history and
+-- carrying compatible allowance/quota state into the new effective interval.
 
 CREATE FUNCTION bursar.assign_plan(
     p_subject_id uuid,
@@ -19,6 +36,11 @@ DECLARE
 BEGIN
     IF p_subject_id IS NULL
        OR p_plan_id IS NULL
+       OR NOT bursar.is_finite_timestamptz(v_starts_at)
+       OR (
+           p_ends_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_ends_at)
+       )
        OR (p_ends_at IS NOT NULL
        AND p_ends_at <= v_starts_at
        )
@@ -152,6 +174,7 @@ $$;
 -- Public, key-based assignment boundary used by the SDK. Resolution and
 -- mutation happen in one database statement, avoiding a catalog activation
 -- race between a client-side lookup and assign_plan.
+-- Return the resolved immutable plan identity and resulting assignment state.
 CREATE FUNCTION bursar.set_subject_plan(
     p_subject_id uuid,
     p_plan_key text,
@@ -172,7 +195,13 @@ DECLARE
     v_plan bursar.catalog_plans;
     v_assignment bursar.account_plan_assignments;
 BEGIN
-    IF p_subject_id IS NULL OR NOT bursar.is_nonempty_text(p_plan_key) THEN
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_nonempty_bounded_text(p_plan_key, 255)
+       OR (
+           p_starts_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_starts_at)
+       )
+    THEN
         RAISE EXCEPTION 'subject id and plan key are required'
             USING ERRCODE = '22023';
     END IF;
@@ -229,6 +258,7 @@ BEGIN
 END
 $$;
 
+-- End the subject's active plan assignment with an audited reason and effective time.
 CREATE FUNCTION bursar.unassign_plan(
     p_subject_id uuid,
     p_reason text DEFAULT 'manual_unassignment'
@@ -241,7 +271,9 @@ AS $$
 DECLARE
     v_account uuid;
 BEGIN
-    IF p_subject_id IS NULL OR NOT bursar.is_nonempty_text(p_reason) THEN
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_nonempty_bounded_text(p_reason, 255)
+    THEN
         RETURN false;
     END IF;
 
@@ -265,6 +297,7 @@ BEGIN
 END
 $$;
 
+-- Pin or unpin a subject so automatic catalog rollouts respect explicit revision choice.
 CREATE FUNCTION bursar.set_plan_revision_pin(
     p_subject_id uuid,
     p_pinned boolean
@@ -311,6 +344,8 @@ BEGIN
 END
 $$;
 
+-- Transfer compatible allowance and quota state between revisions of the same
+-- logical plan, optionally rejecting incompatible policy changes.
 CREATE FUNCTION bursar.carry_catalog_plan_revision_state(
     p_account_id uuid,
     p_from_plan_id uuid,
@@ -441,6 +476,11 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 2. Catalog rollout scheduling and application
+-- ---------------------------------------------------------------------------
+
+-- Return the closed JSON Schema accepted by catalog plan rollout manifests.
 CREATE FUNCTION bursar.catalog_plan_rollout_schema()
 RETURNS json
 LANGUAGE sql
@@ -476,6 +516,8 @@ AS $function$
     $schema$::json
 $function$;
 
+-- Validate a newly activated revision's rollout manifest, apply explicit pin
+-- overrides, and schedule or apply each eligible plan change.
 CREATE FUNCTION bursar.schedule_catalog_plan_rollout(
     p_catalog_revision_id uuid,
     p_rollout jsonb DEFAULT '{"plans": {}}'::jsonb
@@ -722,6 +764,8 @@ BEGIN
 END
 $$;
 
+-- Claim and apply a bounded SKIP LOCKED batch of due plan changes, preserving
+-- assignment history and compatible policy-window state.
 CREATE FUNCTION bursar.apply_due_plan_assignment_changes(
     p_limit integer DEFAULT 100
 )
@@ -868,6 +912,11 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 3. Explicit account-plan migrations
+-- ---------------------------------------------------------------------------
+
+-- Create a fresh tenant-scoped migration from an optional source to a distinct target.
 CREATE FUNCTION bursar.start_plan_migration(
     p_from_plan_id uuid,
     p_to_plan_id uuid
@@ -911,6 +960,7 @@ BEGIN
 END
 $$;
 
+-- Advance one migration through a bounded account batch using its stable cursor.
 CREATE FUNCTION bursar.migrate_plan_batch(
     p_migration_id uuid,
     p_batch_size integer DEFAULT 100
@@ -1011,6 +1061,12 @@ BEGIN
 END
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 4. Provider subscription transitions
+-- ---------------------------------------------------------------------------
+
+-- Create or replay one transition for a subscription selected by tenant-scoped UUID,
+-- fencing effective behavior and target offer with an immutable idempotency key.
 CREATE FUNCTION bursar.open_subscription_change(
     p_subscription_id uuid,
     p_to_offer_id uuid,
@@ -1035,9 +1091,8 @@ DECLARE
 BEGIN
     IF p_subscription_id IS NULL
        OR p_to_offer_id IS NULL
-       OR NOT bursar.is_nonempty_text(p_idempotency_key)
-       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
-       OR p_effective_at IS NULL
+       OR NOT bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
+       OR NOT bursar.is_finite_timestamptz(p_effective_at)
        OR p_effective_behavior IS NULL
        OR p_effective_behavior NOT IN ('immediate', 'renewal')
        OR p_proration_behavior IS NULL
@@ -1143,6 +1198,8 @@ BEGIN
 END
 $$;
 
+-- Advance an open subscription transition through its legal provider outcome,
+-- storing the latest non-null provider operation ID and bounded failure detail.
 CREATE FUNCTION bursar.advance_subscription_change(
     p_change_id bigint,
     p_state text,
@@ -1160,6 +1217,8 @@ DECLARE
     target_offer bursar.catalog_offers;
     target_plan bursar.catalog_plans;
     v_account uuid;
+    v_subject uuid;
+    v_error_message text;
 BEGIN
     IF p_change_id IS NULL
        OR p_state IS NULL
@@ -1168,7 +1227,10 @@ BEGIN
     )
        OR (
            p_provider_operation_id IS NOT NULL
-           AND NOT bursar.is_nonempty_text(p_provider_operation_id)
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_provider_operation_id,
+               255
+           )
        )
        OR (
            p_error_message IS NOT NULL
@@ -1188,7 +1250,36 @@ BEGIN
         RETURN false;
     END IF;
 
+    SELECT subscription.subject_id
+    INTO v_subject
+    FROM bursar.billing_subscriptions AS subscription
+    WHERE subscription.id = change_row.subscription_id;
+
+    v_error_message := CASE
+        WHEN bursar.is_subject_pseudonymized(v_subject) THEN NULL
+        ELSE p_error_message
+    END;
+
+    IF p_provider_operation_id IS NOT NULL
+       AND change_row.provider_operation_id IS NOT NULL
+       AND change_row.provider_operation_id <> p_provider_operation_id
+    THEN
+        RETURN false;
+    END IF;
+
     IF change_row.state = p_state THEN
+        UPDATE bursar.billing_subscription_changes
+        SET provider_operation_id = COALESCE(
+                provider_operation_id,
+                p_provider_operation_id
+            ),
+            error_message = CASE
+                WHEN p_state = 'failed'
+                    THEN COALESCE(v_error_message, error_message)
+                ELSE error_message
+            END
+        WHERE id = p_change_id;
+
         RETURN true;
     END IF;
 
@@ -1293,7 +1384,7 @@ BEGIN
         ),
         error_message = CASE
             WHEN p_state = 'failed'
-                THEN COALESCE(p_error_message, error_message)
+                THEN COALESCE(v_error_message, error_message)
             ELSE error_message
         END
     WHERE id = p_change_id;

@@ -1,5 +1,16 @@
--- Operation charge orchestration RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 016_operation_charge_rpc.sql
+-- Purpose: Orchestrate plan-aware operation charging and quota attribution.
+-- Depends on: 009_credit_account_rpc.sql, 010_usage_charge_rpc.sql, and policy,
+--   allowance, quota, and lease helpers through 015_policy_window_rpc.sql.
+-- Security: SECURITY DEFINER binds through the tenant account, locks it before
+--   admission, and delegates all ledger mutation to the canonical posting RPCs.
+
+-- Orchestrate plan-aware operation charging and quota attribution.
+
+-- Lock the tenant account before replay, plan, entitlement, quota, allowance,
+-- lease-hold, and exact-credit calculations. The stored usage request remains the
+-- idempotency authority; blocked quota events may record denied admission, while
+-- usage and threshold quota events follow only successful non-replayed charges.
 
 CREATE FUNCTION bursar.charge_usage_for_operation(
     p_subject_id uuid,
@@ -34,10 +45,14 @@ DECLARE
     v_existing record;
     v_has_assignment boolean := false;
     v_quota_error text;
-    v_event_at timestamptz;
+    v_event_at timestamptz := now();
+    v_replay_metadata jsonb;
 BEGIN
+    p_requested := round(p_requested, 6);
+
     IF p_subject_id IS NULL
-       OR NOT bursar.is_finite_numeric(p_requested)
+       OR p_requested IS NULL
+       OR NOT bursar.is_credit_numeric(p_requested)
        OR p_requested < 0
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
@@ -45,15 +60,15 @@ BEGIN
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (
            p_feature IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_feature, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_feature, 255)
        )
        OR (
            p_model IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_model, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_model, 255)
        )
        OR (
            p_region IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_region, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_region, 255)
        )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
@@ -88,13 +103,49 @@ BEGIN
     WHERE id = v_account
     FOR UPDATE;
 
-    SELECT c.allowance_requested, c.allowance_covered
+    SELECT
+        c.allowance_requested,
+        c.allowance_covered,
+        c.event_at,
+        allowance.allowance_key,
+        allowance.window_start,
+        allowance.window_end
     INTO v_existing
     FROM bursar.credit_usage_charges AS c
+    LEFT JOIN LATERAL (
+        SELECT
+            allowance_window.allowance_key,
+            allowance_window.window_start,
+            allowance_window.window_end
+        FROM bursar.allowance_windows AS allowance_window
+        WHERE allowance_window.account_id = c.account_id
+          AND allowance_window.plan_id = c.plan_id
+          AND allowance_window.catalog_revision_id = c.catalog_revision_id
+          AND allowance_window.allowance_key = '__included_credits__'
+          AND c.event_at >= allowance_window.window_start
+          AND c.event_at < allowance_window.window_end
+        ORDER BY allowance_window.window_start DESC, allowance_window.id
+        LIMIT 1
+    ) AS allowance ON true
     WHERE c.account_id = v_account
       AND c.idempotency_key = p_idempotency_key;
 
     IF FOUND THEN
+        v_replay_metadata := COALESCE(p_metadata, '{}'::jsonb);
+        IF v_existing.allowance_key IS NOT NULL THEN
+            v_replay_metadata := v_replay_metadata || jsonb_build_object(
+                '_bursar_allowance_window',
+                jsonb_build_object(
+                    'allowance_key', v_existing.allowance_key,
+                    'window_start', v_existing.window_start,
+                    'window_end', v_existing.window_end,
+                    'allowance_requested', bursar.digest_numeric_text(
+                        v_existing.allowance_requested
+                    )
+                )
+            );
+        END IF;
+
         SELECT *
         INTO v_result
         FROM bursar.charge_usage(
@@ -106,8 +157,9 @@ BEGIN
             p_model,
             p_region,
             v_existing.allowance_covered,
-            p_metadata,
+            v_replay_metadata,
             v_existing.allowance_requested,
+            p_event_at => v_existing.event_at,
             p_measures => COALESCE(p_measures, '{}'::jsonb),
             p_dimensions => COALESCE(p_dimensions, '{}'::jsonb)
         );
@@ -327,6 +379,7 @@ BEGIN
                 v_free,
                 p_metadata,
                 v_free,
+                p_event_at => v_event_at,
                 p_measures => COALESCE(p_measures, '{}'::jsonb),
                 p_dimensions => COALESCE(p_dimensions, '{}'::jsonb)
             );
@@ -364,6 +417,7 @@ BEGIN
             0,
             p_metadata,
             0,
+            p_event_at => v_event_at,
             p_measures => COALESCE(p_measures, '{}'::jsonb),
             p_dimensions => COALESCE(p_dimensions, '{}'::jsonb)
         );

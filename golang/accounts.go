@@ -90,7 +90,7 @@ func (s *AccountService) OnAccountCreated(ctx context.Context, input AccountCrea
 		if program.Trigger != "account_created" {
 			continue
 		}
-		awards, err := store.ExecuteGrantProgram(ctx, ExecuteGrantProgramRequest{
+		awards, err := s.credits.ExecuteGrantProgram(ctx, ExecuteGrantProgramRequest{
 			Trigger:    "account_created",
 			ProgramKey: programKey,
 			SubjectID:  accountID,

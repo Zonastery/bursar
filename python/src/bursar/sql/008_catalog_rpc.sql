@@ -1,4 +1,15 @@
--- Immutable catalog publication, projection, activation, and expiry helpers.
+-- Migration: 008_catalog_rpc.sql
+-- Purpose: Publish immutable catalog revisions and resolve active policy state.
+-- Depends on: 001_schema_and_types.sql through 007_indexes.sql.
+-- Security: SECURITY DEFINER entry points use an empty search path and the
+--   transaction-local tenant context; catalog activation is serialized per tenant.
+
+-- Publish immutable catalogs and resolve their active credit policy.
+
+-- Validate and hash the complete catalog document, then project one immutable
+-- tenant revision under the catalog activation advisory lock. Identical source
+-- digests replay the existing revision; activation and rollout remain one
+-- transaction, and policy numerics are stored without crossing the ledger boundary.
 
 CREATE FUNCTION bursar.publish_and_activate_catalog(
     p_yaml_schema_version integer,
@@ -28,6 +39,18 @@ BEGIN
        OR p_yaml_schema_version IS NULL
        OR p_yaml_schema_version <> 1
        OR p_source_document IS NULL
+       OR p_rollout IS NULL
+       OR NOT COALESCE(
+           extensions.jsonb_matches_schema(
+               bursar.catalog_plan_rollout_schema(),
+               p_rollout
+           ),
+           false
+       )
+       OR (
+           p_label IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_label, 255)
+       )
     THEN
         RAISE EXCEPTION 'invalid_catalog' USING ERRCODE = '22023';
     END IF;
@@ -255,8 +278,8 @@ BEGIN
         p_label,
         now()
     )
-    RETURNING id, catalog_revisions.revision_no
-    INTO v_revision, v_no;
+    RETURNING id, catalog_revisions.revision_no, catalog_revisions.status
+    INTO v_revision, v_no, v_status;
 
     INSERT INTO bursar.catalog_buckets(
         catalog_revision_id,
@@ -405,7 +428,7 @@ BEGIN
         policy_entry.value->>'type',
         CASE policy_entry.value->>'type'
             WHEN 'credit_line'
-                THEN (policy_entry.value->>'limit')::numeric
+                THEN round((policy_entry.value->>'limit')::numeric, 6)
         END,
         policy_entry.value
     FROM jsonb_each(
@@ -527,9 +550,9 @@ BEGIN
             END
         ),
         CASE WHEN plan_entry.value ? 'credit_allowance'
-            THEN (
+            THEN round((
                 plan_entry.value #>> '{credit_allowance,amount}'
-            )::numeric
+            )::numeric, 6)
         END,
         CASE WHEN plan_entry.value ? 'credit_allowance'
             THEN (
@@ -630,7 +653,7 @@ BEGIN
         quota_entry.key,
         quota_entry.value->>'operation',
         quota_entry.value->>'measure',
-        (quota_entry.value->>'limit')::numeric,
+        round((quota_entry.value->>'limit')::numeric, 6),
         quota_entry.value->'window',
         quota_entry.value->>'enforcement',
         ARRAY(
@@ -697,7 +720,7 @@ BEGIN
         program.id,
         award.ordinality::integer - 1,
         COALESCE(award.value->>'recipient', 'subject'),
-        (award.value->>'amount')::numeric,
+        round((award.value->>'amount')::numeric, 6),
         award.value->>'bucket',
         award.value->'expiry',
         award.value
@@ -757,9 +780,9 @@ BEGIN
             1
         ),
         offer_entry.value->'trial',
-        (
+        round((
             offer_entry.value #>> '{cycle_grant,amount}'
-        )::numeric,
+        )::numeric, 6),
         offer_entry.value #>> '{cycle_grant,bucket}',
         offer_entry.value #>> '{cycle_grant,renewal}',
         offer_entry.value #> '{cycle_grant,expiry}',
@@ -804,7 +827,7 @@ BEGIN
             offer_entry.value #>> '{price,tax_behavior}',
             'unspecified'
         ),
-        (offer_entry.value->>'credits_per_unit')::numeric,
+        round((offer_entry.value->>'credits_per_unit')::numeric, 6),
         offer_entry.value->>'bucket',
         COALESCE(
             (offer_entry.value #>> '{quantity,minimum}')::integer,
@@ -919,22 +942,22 @@ BEGIN
                 p_source_document
                     #>> '{commerce,auto_recharge,quantity,default}'
             )::integer,
-            (
+            round((
                 p_source_document
                     #>> '{commerce,auto_recharge,balance_below,minimum}'
-            )::numeric,
-            (
+            )::numeric, 6),
+            round((
                 p_source_document
                     #>> '{commerce,auto_recharge,balance_below,maximum}'
-            )::numeric,
-            (
+            )::numeric, 6),
+            round((
                 p_source_document
                     #>> '{commerce,auto_recharge,balance_below,default}'
-            )::numeric,
-            (
+            )::numeric, 6),
+            round((
                 p_source_document
                     #>> '{commerce,auto_recharge,rearm_above}'
-            )::numeric,
+            )::numeric, 6),
             (
                 p_source_document
                     #>> '{commerce,auto_recharge,limits,max_purchases}'
@@ -1051,8 +1074,6 @@ BEGIN
             p_rollout
         );
         v_status := 'active';
-    ELSE
-        v_status := 'published';
     END IF;
 
     RETURN QUERY
@@ -1069,6 +1090,10 @@ EXCEPTION
 END
 $$;
 
+-- 2. Revision lookup and activation
+
+-- Return the active revision visible in the bound tenant context. SECURITY
+-- DEFINER supplies table access only; RLS tenant binding remains authoritative.
 CREATE FUNCTION bursar.active_catalog_revision()
 RETURNS bursar.catalog_revisions
 LANGUAGE sql
@@ -1081,6 +1106,7 @@ AS $$
     WHERE status = 'active'
 $$;
 
+-- Resolve one tenant-visible immutable revision by its monotonic revision number.
 CREATE FUNCTION bursar.catalog_revision_by_number(
     p_revision_no bigint
 )
@@ -1095,22 +1121,33 @@ AS $$
     WHERE revision_no = p_revision_no
 $$;
 
+-- List a bounded, newest-first tenant revision history without exposing catalog
+-- rows from any other transaction-local tenant context.
 CREATE FUNCTION bursar.list_catalog_revisions(
     p_limit integer DEFAULT 100
 )
 RETURNS SETOF bursar.catalog_revisions
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
-    SELECT *
-    FROM bursar.catalog_revisions
-    WHERE p_limit BETWEEN 1 AND 500
-    ORDER BY revision_no DESC
-    LIMIT p_limit
+BEGIN
+    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 500 THEN
+        RAISE EXCEPTION 'invalid catalog revision limit'
+            USING ERRCODE = '22023';
+    END IF;
+
+    RETURN QUERY
+    SELECT revision.*
+    FROM bursar.catalog_revisions AS revision
+    ORDER BY revision.revision_no DESC
+    LIMIT p_limit;
+END
 $$;
 
+-- Serialize a tenant's active-revision transition, preserve published history,
+-- and make repeated activation stable while still accepting an explicit rollout.
 CREATE FUNCTION bursar.activate_catalog_revision(
     p_revision_no bigint,
     p_rollout jsonb DEFAULT '{"plans": {}}'::jsonb
@@ -1123,6 +1160,20 @@ AS $$
 DECLARE
     v_revision bursar.catalog_revisions;
 BEGIN
+    IF p_revision_no IS NULL
+       OR p_rollout IS NULL
+       OR NOT COALESCE(
+           extensions.jsonb_matches_schema(
+               bursar.catalog_plan_rollout_schema(),
+               p_rollout
+           ),
+           false
+       )
+    THEN
+        RAISE EXCEPTION 'invalid_catalog_activation'
+            USING ERRCODE = '22023';
+    END IF;
+
     PERFORM pg_advisory_xact_lock(
         hashtextextended(
             'bursar.tenant:'
@@ -1181,6 +1232,11 @@ BEGIN
 END
 $$;
 
+-- 3. Credit expiry resolution
+
+-- Resolve a validated catalog expiry policy against the subject's tenant-visible
+-- subscription or plan assignment. This stable helper computes timestamps only;
+-- it never mutates balances, lots, or ledger entries.
 CREATE FUNCTION bursar.expiry_policy_at(
     p_subject_id uuid,
     p_catalog_revision_id uuid,
@@ -1203,13 +1259,37 @@ DECLARE
     v_base timestamptz;
     v_expiry timestamptz;
     v_step interval;
+    v_base_local timestamp;
+    v_granted_local timestamp;
+    v_step_months bigint;
+    v_elapsed_months bigint;
+    v_periods bigint;
+    v_candidate timestamp;
 BEGIN
+    IF p_subject_id IS NULL
+       OR p_catalog_revision_id IS NULL
+       OR p_policy IS NULL
+       OR jsonb_typeof(p_policy) <> 'object'
+       OR p_granted_at IS NULL
+       OR NOT pg_catalog.isfinite(p_granted_at)
+    THEN
+        RAISE EXCEPTION 'invalid_expiry_policy_input'
+            USING ERRCODE = '22023';
+    END IF;
+
     IF v_type = 'never' THEN
         RETURN NULL;
     END IF;
 
     IF v_type = 'fixed_at' THEN
-        RETURN (p_policy->>'at')::timestamptz;
+        v_expiry := (p_policy->>'at')::timestamptz;
+
+        IF v_expiry IS NULL OR NOT pg_catalog.isfinite(v_expiry) THEN
+            RAISE EXCEPTION 'invalid fixed expiry timestamp'
+                USING ERRCODE = '22023';
+        END IF;
+
+        RETURN v_expiry;
     END IF;
 
     IF v_type = 'subscription_end' THEN
@@ -1223,6 +1303,11 @@ BEGIN
         WHERE id = p_subscription_id
           AND subject_id = p_subject_id
           AND catalog_revision_id = p_catalog_revision_id;
+
+        IF v_expiry IS NOT NULL AND NOT pg_catalog.isfinite(v_expiry) THEN
+            RAISE EXCEPTION 'subscription expiry timestamp must be finite'
+                USING ERRCODE = '22023';
+        END IF;
 
         RETURN v_expiry;
     END IF;
@@ -1288,6 +1373,20 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
+    IF v_count IS NULL
+       OR v_count < 1
+       OR v_base IS NULL
+       OR NOT pg_catalog.isfinite(v_base)
+       OR NOT EXISTS (
+           SELECT 1
+           FROM pg_catalog.pg_timezone_names
+           WHERE name = v_timezone
+       )
+    THEN
+        RAISE EXCEPTION 'invalid expiry interval'
+            USING ERRCODE = '22023';
+    END IF;
+
     v_step := CASE v_unit
         WHEN 'day' THEN make_interval(days => v_count)
         WHEN 'week' THEN make_interval(weeks => v_count)
@@ -1295,27 +1394,82 @@ BEGIN
         WHEN 'year' THEN make_interval(years => v_count)
     END;
 
-    IF v_step IS NULL THEN
+    IF v_step IS NULL
+       OR NOT pg_catalog.isfinite(v_step)
+       OR v_step <= interval '0'
+    THEN
         RAISE EXCEPTION 'unsupported expiry interval'
             USING ERRCODE = '22023';
     END IF;
 
-    v_expiry := (
-        v_base AT TIME ZONE v_timezone + v_step
-    ) AT TIME ZONE v_timezone;
+    IF v_anchor = 'plan_assignment' THEN
+        v_base_local := v_base AT TIME ZONE v_timezone;
+        v_granted_local := p_granted_at AT TIME ZONE v_timezone;
 
-    IF v_anchor <> 'rolling' THEN
-        WHILE v_expiry <= p_granted_at LOOP
-            v_expiry := (
-                v_expiry AT TIME ZONE v_timezone + v_step
-            ) AT TIME ZONE v_timezone;
-        END LOOP;
+        -- Jump directly to the first assignment boundary after the grant.
+        -- Iterating by a day or month makes an old assignment an unbounded CPU
+        -- path during refunds or catalog grant execution.
+        IF v_unit IN ('day', 'week') THEN
+            v_candidate := date_bin(
+                v_step,
+                v_granted_local,
+                v_base_local
+            ) + v_step;
+        ELSE
+            v_step_months := v_count::bigint
+                * CASE WHEN v_unit = 'year' THEN 12 ELSE 1 END;
+            v_elapsed_months :=
+                (extract(year FROM v_granted_local)::bigint
+                    - extract(year FROM v_base_local)::bigint) * 12
+                + extract(month FROM v_granted_local)::bigint
+                - extract(month FROM v_base_local)::bigint;
+            v_periods := greatest(v_elapsed_months / v_step_months, 0);
+
+            IF v_periods * v_step_months > 2147483647 THEN
+                RAISE EXCEPTION 'invalid expiry interval'
+                    USING ERRCODE = '22023';
+            END IF;
+
+            v_candidate := v_base_local + make_interval(
+                months => (v_periods * v_step_months)::integer
+            );
+            IF v_candidate <= v_granted_local THEN
+                v_periods := v_periods + 1;
+                IF v_periods * v_step_months > 2147483647 THEN
+                    RAISE EXCEPTION 'invalid expiry interval'
+                        USING ERRCODE = '22023';
+                END IF;
+                v_candidate := v_base_local + make_interval(
+                    months => (v_periods * v_step_months)::integer
+                );
+            END IF;
+        END IF;
+
+        v_expiry := v_candidate AT TIME ZONE v_timezone;
+    ELSE
+        v_expiry := (
+            v_base AT TIME ZONE v_timezone + v_step
+        ) AT TIME ZONE v_timezone;
+    END IF;
+
+    IF NOT pg_catalog.isfinite(v_expiry) THEN
+        RAISE EXCEPTION 'expiry timestamp must be finite'
+            USING ERRCODE = '22023';
     END IF;
 
     RETURN v_expiry;
+EXCEPTION
+    WHEN invalid_datetime_format
+       OR datetime_field_overflow
+       OR numeric_value_out_of_range
+    THEN
+        RAISE EXCEPTION 'invalid expiry policy timestamp'
+            USING ERRCODE = '22023';
 END
 $$;
 
+-- Resolve a catalog bucket in the bound tenant and delegate its immutable policy
+-- snapshot to expiry_policy_at; a missing bucket is a stable foreign-key outcome.
 CREATE FUNCTION bursar.bucket_expiry_at(
     p_subject_id uuid,
     p_revision_id uuid,

@@ -1,5 +1,16 @@
--- Usage charge and idempotency RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 010_usage_charge_rpc.sql
+-- Purpose: Persist billable and record-only usage with durable replay outcomes.
+-- Depends on: Usage/accounting tables through 007_indexes.sql and
+--   009_credit_account_rpc.sql.
+-- Security: SECURITY DEFINER RPCs bind through tenant-scoped accounts, lock the
+--   account before replay checks, and open internal mutation context only locally.
+
+-- Persist billable and record-only usage with durable replay outcomes.
+
+-- Lock the tenant account, hash canonical exact-numeric request fields, and
+-- resolve idempotency before posting any debit. The RPC atomically delegates
+-- credit mutation to post_credit, records allowance attribution and usage detail,
+-- and emits one stable outbox outcome for either PostgreSQL or ClickHouse storage.
 
 CREATE FUNCTION bursar.charge_usage(
     p_subject_id uuid,
@@ -16,7 +27,7 @@ CREATE FUNCTION bursar.charge_usage(
     p_plan_id uuid DEFAULT NULL,
     p_rate_card_key text DEFAULT NULL,
     p_minimum_balance numeric DEFAULT NULL,
-    p_event_at timestamptz DEFAULT now(),
+    p_event_at timestamptz DEFAULT NULL,
     p_measures jsonb DEFAULT '{}'::jsonb,
     p_dimensions jsonb DEFAULT '{}'::jsonb
 )
@@ -41,14 +52,27 @@ DECLARE v_account uuid;
  v_plan uuid;
  v_rate_card text;
  v_ledger_metadata jsonb;
+ v_dimensions jsonb;
 
 BEGIN
     p_allowance_requested:=COALESCE(p_allowance_requested,p_allowance);
+    p_requested := round(p_requested, 6);
+    p_allowance := round(p_allowance, 6);
+    p_allowance_requested := round(p_allowance_requested, 6);
+    p_minimum_balance := CASE
+        WHEN p_minimum_balance IS NULL THEN NULL
+        ELSE round(p_minimum_balance, 6)
+    END;
+    v_dimensions := COALESCE(p_dimensions, '{}'::jsonb)
+        || jsonb_strip_nulls(
+            jsonb_build_object('model', p_model, 'region', p_region)
+        );
 
     IF p_subject_id IS NULL
-       OR NOT bursar.is_finite_numeric(p_requested)
-       OR NOT bursar.is_finite_numeric(p_allowance)
-       OR NOT bursar.is_finite_numeric(p_allowance_requested)
+       OR p_requested IS NULL
+       OR NOT bursar.is_credit_numeric(p_requested)
+       OR NOT bursar.is_credit_numeric(p_allowance)
+       OR NOT bursar.is_credit_numeric(p_allowance_requested)
        OR p_requested < 0
        OR p_allowance < 0
        OR p_allowance > p_requested
@@ -56,7 +80,7 @@ BEGIN
        OR p_allowance_requested > p_requested
        OR (
            p_minimum_balance IS NOT NULL
-           AND NOT bursar.is_finite_numeric(p_minimum_balance)
+           AND NOT bursar.is_credit_numeric(p_minimum_balance)
        )
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
@@ -64,17 +88,20 @@ BEGIN
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (
            p_feature IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_feature, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_feature, 255)
        )
        OR (
            p_model IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_model, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_model, 255)
        )
        OR (
            p_region IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_region, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_region, 255)
        )
-       OR p_event_at IS NULL
+       OR (
+           p_event_at IS NOT NULL
+           AND NOT pg_catalog.isfinite(p_event_at)
+       )
        OR (p_plan_id IS NOT NULL AND p_catalog_revision_id IS NULL)
        OR (p_plan_id IS NULL AND p_rate_card_key IS NOT NULL)
        OR NOT bursar.is_bounded_json_object(
@@ -86,7 +113,7 @@ BEGIN
            16384
        )
        OR NOT bursar.valid_dimension_object(
-           COALESCE(p_dimensions, '{}'::jsonb),
+           v_dimensions,
            65536
        )
     THEN
@@ -96,8 +123,6 @@ BEGIN
 
     v_account:=bursar.account_for_subject(p_subject_id);
 
-    v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',COALESCE(p_metadata,'{}'::jsonb))::text,'UTF8'),'sha256');
-
   SELECT account.tenant_id, account.subject_id
   INTO v_tenant, v_subject
   FROM bursar.credit_accounts AS account
@@ -106,11 +131,17 @@ BEGIN
 
   SELECT * INTO v_existing FROM bursar.credit_usage_charges WHERE account_id=v_account AND idempotency_key=p_idempotency_key FOR UPDATE;
 
-  IF FOUND THEN IF v_existing.request_digest<>v_digest THEN RETURN QUERY SELECT NULL::uuid,NULL::uuid,0::numeric,0::numeric,false,'idempotency_conflict';
- ELSE RETURN QUERY SELECT v_existing.id,v_existing.ledger_entry_id,v_existing.charged,v_existing.allowance_covered,true,NULL::text;
+  IF FOUND THEN
+      p_event_at := COALESCE(p_event_at, v_existing.event_at);
+      v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'event_at',p_event_at,'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',COALESCE(p_metadata,'{}'::jsonb))::text,'UTF8'),'sha256');
+      IF v_existing.request_digest<>v_digest THEN RETURN QUERY SELECT NULL::uuid,NULL::uuid,0::numeric,0::numeric,false,'idempotency_conflict';
+ ELSE RETURN QUERY SELECT v_existing.id,v_existing.ledger_entry_id,v_existing.charged::numeric,v_existing.allowance_covered::numeric,true,NULL::text;
  END IF;
  RETURN;
  END IF;
+
+    p_event_at := COALESCE(p_event_at, now());
+    v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'event_at',p_event_at,'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',COALESCE(p_metadata,'{}'::jsonb))::text,'UTF8'),'sha256');
 
     IF p_catalog_revision_id IS NOT NULL
        AND p_plan_id IS NOT NULL
@@ -168,8 +199,8 @@ BEGIN
           ON plan.id=assignment.plan_id
          AND plan.catalog_revision_id=assignment.catalog_revision_id
         WHERE assignment.account_id=v_account
-          AND assignment.starts_at<=now()
-          AND (assignment.ends_at IS NULL OR assignment.ends_at>now());
+          AND assignment.starts_at<=p_event_at
+          AND (assignment.ends_at IS NULL OR assignment.ends_at>p_event_at);
     END IF;
 
     v_id := bursar.uuid_v7();
@@ -241,10 +272,7 @@ BEGIN
             p_feature,
             p_model,
             p_region,
-            COALESCE(p_dimensions, '{}'::jsonb)
-                || jsonb_strip_nulls(
-                    jsonb_build_object('model', p_model, 'region', p_region)
-                ),
+            v_dimensions,
             COALESCE(p_metadata, '{}'::jsonb),
             jsonb_build_object(
                 'requested', bursar.digest_numeric_text(p_requested),
@@ -282,8 +310,7 @@ BEGIN
                 'model', p_model,
                 'region', p_region,
                 'measures', COALESCE(p_measures, '{}'::jsonb),
-                'dimensions', COALESCE(p_dimensions, '{}'::jsonb)
-                    || jsonb_strip_nulls(jsonb_build_object('model', p_model, 'region', p_region)),
+                'dimensions', v_dimensions,
                 'metadata', COALESCE(p_metadata, '{}'::jsonb),
                 'requested', bursar.digest_numeric_text(p_requested),
                 'charged', bursar.digest_numeric_text(p_requested - p_allowance),
@@ -322,9 +349,12 @@ BEGIN
 
 END $$;
 
--- Append usage already covered by a parent fixed charge. The independently
--- priced amount remains available for attribution, but this path creates no
--- ledger debit and consumes no allowance.
+-- 2. Record-only usage attribution
+
+-- Append a priced record-only usage receipt without another account debit or
+-- allowance consumption, including usage billed by an external system. Account
+-- locking fences concurrent first attempts; identical digests replay and divergent
+-- payloads conflict.
 CREATE FUNCTION bursar.record_usage(
     p_subject_id uuid,
     p_operation text,
@@ -361,9 +391,17 @@ DECLARE
     v_plan uuid;
     v_rate_card text;
     v_event_at timestamptz := now();
+    v_dimensions jsonb;
 BEGIN
+    p_requested := round(p_requested, 6);
+    v_dimensions := COALESCE(p_dimensions, '{}'::jsonb)
+        || jsonb_strip_nulls(
+            jsonb_build_object('model', p_model, 'region', p_region)
+        );
+
     IF p_subject_id IS NULL
-       OR NOT bursar.is_finite_numeric(p_requested)
+       OR p_requested IS NULL
+       OR NOT bursar.is_credit_numeric(p_requested)
        OR p_requested < 0
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
@@ -371,15 +409,15 @@ BEGIN
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (
            p_feature IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_feature, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_feature, 255)
        )
        OR (
            p_model IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_model, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_model, 255)
        )
        OR (
            p_region IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_region, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_region, 255)
        )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
@@ -390,7 +428,7 @@ BEGIN
            16384
        )
        OR NOT bursar.valid_dimension_object(
-           COALESCE(p_dimensions, '{}'::jsonb),
+           v_dimensions,
            65536
        )
     THEN
@@ -453,10 +491,10 @@ BEGIN
             RETURN QUERY
             SELECT
                 v_existing.id,
-                v_existing.requested,
+                v_existing.requested::numeric,
                 v_existing.ledger_entry_id,
-                v_existing.charged,
-                v_existing.allowance_covered,
+                v_existing.charged::numeric,
+                v_existing.allowance_covered::numeric,
                 true,
                 NULL::text;
         END IF;
@@ -534,10 +572,7 @@ BEGIN
             p_feature,
             p_model,
             p_region,
-            COALESCE(p_dimensions, '{}'::jsonb)
-                || jsonb_strip_nulls(
-                    jsonb_build_object('model', p_model, 'region', p_region)
-                ),
+            v_dimensions,
             COALESCE(p_metadata, '{}'::jsonb),
             jsonb_build_object(
                 'requested', bursar.digest_numeric_text(p_requested),
@@ -572,10 +607,7 @@ BEGIN
                 'model', p_model,
                 'region', p_region,
                 'measures', COALESCE(p_measures, '{}'::jsonb),
-                'dimensions', COALESCE(p_dimensions, '{}'::jsonb)
-                    || jsonb_strip_nulls(
-                        jsonb_build_object('model', p_model, 'region', p_region)
-                    ),
+                'dimensions', v_dimensions,
                 'metadata', COALESCE(p_metadata, '{}'::jsonb),
                 'requested', bursar.digest_numeric_text(p_requested),
                 'charged', '0',

@@ -84,11 +84,15 @@ func TestBursarFacadeOwnsBillingIngestion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	if !sdk.Billing.HasProvisioning() {
+		t.Fatal("facade billing did not receive the shared CreditsService provisioning port")
+	}
 	result, err := sdk.IngestBillingEvent(context.Background(), BillingEvent{
 		ID:         "event-1",
 		Provider:   "stripe",
 		Type:       BillingEventPaymentSucceeded,
 		OccurredAt: time.Now().UTC(),
+		Payment:    &BillingPayment{ProviderPaymentID: "pay-1", Provider: "stripe", Purpose: "subscription", Status: "succeeded", Currency: "USD"},
 	})
 	if err != nil {
 		t.Fatalf("IngestBillingEvent() error = %v", err)

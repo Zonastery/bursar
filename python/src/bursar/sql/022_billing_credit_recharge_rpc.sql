@@ -1,5 +1,13 @@
--- Billing credit, refund, and recharge records.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 022_billing_credit_recharge_rpc.sql
+-- Purpose: Define billing credit grants, refunds, recharge profiles, and preferences.
+-- Depends on: Payments, subscriptions, top-ups, refunds, profiles, and catalog policy.
+-- Security: SECURITY DEFINER RPCs enforce tenant scope, provider-environment
+--   identity where applicable, monetary bounds, replay rules, and subject ownership.
+
+-- === Billing grants and refunds ===
+
+-- Create or return a credit grant after validating settled top-up money or
+-- subscription eligibility; replay lookup uses payment/top-up or billing-event identity.
 
 CREATE FUNCTION bursar.create_billing_credit_grant(
     p_payment_id uuid,
@@ -22,8 +30,13 @@ DECLARE
     v_expected_credits numeric;
     v_quantity_min integer;
     v_quantity_max integer;
+    v_configured_credits numeric;
+    v_provider text;
+    v_provider_environment text;
 
 BEGIN
+    v_configured_credits := round(p_configured_credits, 6);
+
     IF (
            p_topup_id IS NOT NULL
            AND (
@@ -35,9 +48,12 @@ BEGIN
            p_topup_id IS NULL
            AND p_subscription_id IS NULL
        )
-       OR NOT bursar.is_finite_numeric(p_configured_credits)
-       OR p_configured_credits <= 0
+       OR NOT bursar.is_credit_numeric(v_configured_credits)
+       OR v_configured_credits <= 0
        OR p_quantity <= 0
+       OR NOT bursar.is_credit_numeric(
+           v_configured_credits * p_quantity
+       )
     THEN
         RAISE EXCEPTION 'invalid billing credit grant' USING ERRCODE='22023';
 
@@ -46,12 +62,16 @@ BEGIN
     IF p_topup_id IS NOT NULL THEN
         SELECT
             p.subject_id,
+            p.provider,
+            p.provider_environment,
             t.catalog_revision_id,
             t.credits_per_unit,
             t.min_quantity,
             t.max_quantity
         INTO
             v_subject,
+            v_provider,
+            v_provider_environment,
             v_revision,
             v_expected_credits,
             v_quantity_min,
@@ -66,10 +86,25 @@ BEGIN
               t.amount_minor::numeric * p_quantity;
 
         IF NOT FOUND
-           OR p_configured_credits <> v_expected_credits
+           OR v_configured_credits <> v_expected_credits
            OR p_quantity NOT BETWEEN v_quantity_min AND v_quantity_max
         THEN
             RAISE EXCEPTION 'invalid payment grant' USING ERRCODE='22023';
+        END IF;
+
+        IF p_billing_event_id IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1
+               FROM bursar.billing_events AS billing_event
+               WHERE billing_event.id = p_billing_event_id
+                 AND billing_event.provider = v_provider
+                 AND billing_event.provider_environment =
+                     v_provider_environment
+                 AND billing_event.status = 'processing'
+           )
+        THEN
+            RAISE EXCEPTION 'invalid top-up billing event'
+                USING ERRCODE = '22023';
         END IF;
 
         SELECT * INTO v_existing
@@ -103,7 +138,7 @@ BEGIN
            OR p_topup_id IS NOT NULL
            OR p_billing_event_id IS NULL
            OR v_expected_credits IS NULL
-           OR p_configured_credits <> v_expected_credits
+           OR v_configured_credits <> v_expected_credits
            OR p_quantity <> 1
         THEN
             RAISE EXCEPTION 'invalid subscription grant' USING ERRCODE='22023';
@@ -136,8 +171,18 @@ BEGIN
 
     END IF;
 
-    IF FOUND THEN
-        IF v_existing.configured_credits<>p_configured_credits
+    IF p_billing_event_id IS NOT NULL
+       AND NOT bursar.attribute_billing_event_subject(
+           p_billing_event_id,
+           v_subject
+       )
+    THEN
+        RAISE EXCEPTION 'billing event missing for grant'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF v_existing.id IS NOT NULL THEN
+        IF v_existing.configured_credits<>v_configured_credits
            OR v_existing.quantity<>p_quantity
            OR v_existing.subject_id<>v_subject
         THEN
@@ -155,7 +200,7 @@ BEGIN
     )
     VALUES (
         p_payment_id,v_subject,p_topup_id,p_subscription_id,v_revision,
-        p_configured_credits,p_quantity,p_billing_event_id
+        v_configured_credits,p_quantity,p_billing_event_id
     )
     RETURNING id INTO v_id;
 
@@ -163,6 +208,8 @@ BEGIN
 
 END $$;
 
+-- Reconcile a provider refund only when payment subject and currency match,
+-- preserving monotonic provider state and bounded refundable amount.
 CREATE FUNCTION bursar.upsert_billing_refund(
     p_payment_id uuid,
     p_provider_refund_id text,
@@ -186,15 +233,15 @@ DECLARE
     v_environment text;
     v_existing bursar.billing_refunds;
     v_metadata jsonb;
+    v_reason text;
 
 BEGIN
     IF p_payment_id IS NULL
-       OR NOT bursar.is_nonempty_text(p_provider_refund_id)
-       OR p_amount_minor IS NULL
-       OR p_amount_minor <= 0
+       OR NOT bursar.is_nonempty_bounded_text(p_provider_refund_id, 255)
+       OR NOT bursar.is_positive_safe_integer(p_amount_minor)
        OR p_status IS NULL
        OR p_status NOT IN ('pending', 'succeeded', 'failed', 'canceled')
-       OR p_provider_updated_at IS NULL
+       OR NOT bursar.is_finite_timestamptz(p_provider_updated_at)
        OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
        OR (
            p_reason IS NOT NULL
@@ -212,6 +259,11 @@ BEGIN
     IF NOT FOUND THEN RAISE EXCEPTION 'payment missing' USING ERRCODE='23503';
     END IF;
 
+    PERFORM 1
+    FROM bursar.subjects
+    WHERE id = v_subject_id
+    FOR UPDATE;
+
     IF p_expected_subject_id IS NOT NULL
        AND p_expected_subject_id <> v_subject_id
     THEN
@@ -226,9 +278,20 @@ BEGIN
             USING ERRCODE='23514';
     END IF;
 
+    IF p_expected_currency IS NOT NULL
+       AND p_expected_currency !~ '^[A-Z]{3}$'
+    THEN
+        RAISE EXCEPTION 'invalid refund currency'
+            USING ERRCODE='22023';
+    END IF;
+
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(v_subject_id) THEN '{}'::jsonb
         ELSE p_metadata
+    END;
+    v_reason := CASE
+        WHEN bursar.is_subject_pseudonymized(v_subject_id) THEN NULL
+        ELSE p_reason
     END;
 
     INSERT INTO bursar.billing_refunds(
@@ -237,7 +300,7 @@ BEGIN
     )
     VALUES (
         p_payment_id,v_provider,v_environment,p_provider_refund_id,
-        p_amount_minor,v_currency,p_status,p_reason,v_metadata,p_provider_updated_at
+        p_amount_minor,v_currency,p_status,v_reason,v_metadata,p_provider_updated_at
     )
     ON CONFLICT (
         tenant_id,
@@ -279,7 +342,7 @@ BEGIN
 
         IF v_existing.provider_updated_at = p_provider_updated_at
            AND ROW(v_existing.status, v_existing.reason, v_existing.metadata)
-               IS DISTINCT FROM ROW(p_status, p_reason, v_metadata)
+               IS DISTINCT FROM ROW(p_status, v_reason, v_metadata)
         THEN
             RAISE EXCEPTION
                 'conflicting refund state at provider timestamp'
@@ -293,6 +356,10 @@ BEGIN
 
 END $$;
 
+-- === Auto-recharge policy ===
+
+-- Enable or revise a subject's environment-specific recharge profile only when
+-- active catalog policy permits it; disabling does not require an active catalog.
 CREATE FUNCTION bursar.upsert_auto_recharge_profile(
     p_subject_id uuid,
     p_enabled boolean,
@@ -319,6 +386,7 @@ DECLARE
 
     v_policy record;
     v_environment text:=bursar.current_provider_environment();
+    v_threshold numeric;
 
 BEGIN
     IF p_subject_id IS NULL OR p_enabled IS NULL THEN
@@ -339,11 +407,16 @@ BEGIN
         RETURN true;
     END IF;
 
+    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+        RAISE EXCEPTION 'pseudonymized subject cannot enable auto-recharge'
+            USING ERRCODE = '55000';
+    END IF;
+
     IF p_armed IS NULL
        OR p_state IS NULL
        OR p_state NOT IN ('active', 'paused')
        OR p_reset_cooldown IS NULL
-       OR NOT bursar.is_nonempty_text(p_provider)
+       OR NOT bursar.is_nonempty_bounded_text(p_provider, 100)
        OR p_topup_id IS NULL
        OR p_quantity IS NULL
        OR NOT bursar.is_finite_numeric(p_threshold)
@@ -354,6 +427,13 @@ BEGIN
        OR p_window_timezone IS NULL
     THEN
         RAISE EXCEPTION 'invalid enabled auto-recharge state' USING ERRCODE='22023';
+    END IF;
+
+    v_threshold := round(p_threshold, 6);
+
+    IF NOT bursar.is_credit_numeric(v_threshold) OR v_threshold < 0 THEN
+        RAISE EXCEPTION 'invalid auto-recharge threshold'
+            USING ERRCODE='22023';
     END IF;
 
     SELECT t.catalog_revision_id,t.topup_key,t.amount_minor
@@ -374,7 +454,7 @@ BEGIN
     IF NOT FOUND
        OR NOT (v_topup_key=ANY(v_policy.eligible_topup_keys))
        OR p_quantity NOT BETWEEN v_policy.quantity_min AND v_policy.quantity_max
-       OR p_threshold NOT BETWEEN v_policy.balance_min AND v_policy.balance_max
+       OR v_threshold NOT BETWEEN v_policy.balance_min AND v_policy.balance_max
        OR p_max_charges_per_window <> v_policy.max_purchases
        OR p_window_unit <> v_policy.period_unit
        OR p_window_count <> v_policy.period_count
@@ -385,6 +465,7 @@ BEGIN
            AND v_amount_minor::numeric * p_quantity
                 > v_policy.max_charge_minor
        )
+       OR v_amount_minor::numeric * p_quantity > 9007199254740991
        OR NOT EXISTS (
            SELECT 1
            FROM bursar.catalog_provider_refs AS provider_ref
@@ -403,6 +484,16 @@ BEGIN
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
+    PERFORM 1
+    FROM bursar.subjects
+    WHERE id = p_subject_id
+    FOR UPDATE;
+
+    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+        RAISE EXCEPTION 'pseudonymized subject cannot enable auto-recharge'
+            USING ERRCODE = '55000';
+    END IF;
+
     INSERT INTO bursar.billing_auto_recharge_profiles(
         subject_id,enabled,armed,state,provider,provider_environment,
         catalog_revision_id,topup_id,quantity,threshold,rearm_above,
@@ -412,7 +503,7 @@ BEGIN
     )
     VALUES (
         p_subject_id,true,p_armed,p_state,
-        p_provider,v_environment,v_revision,p_topup_id,p_quantity,p_threshold,
+        p_provider,v_environment,v_revision,p_topup_id,p_quantity,v_threshold,
         v_policy.rearm_above,
         p_max_charges_per_window,
         v_policy.max_charge_minor,
@@ -448,6 +539,9 @@ BEGIN
 
 END $$;
 
+-- === Billing preferences ===
+
+-- Replace the tenant-owned subject's notification and payment preference flags.
 CREATE FUNCTION bursar.upsert_billing_preferences(
     p_subject_id uuid,
     p_auto_recharge boolean,
@@ -473,13 +567,34 @@ BEGIN
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
+    PERFORM 1
+    FROM bursar.subjects
+    WHERE id = p_subject_id
+    FOR UPDATE;
+
     INSERT INTO bursar.billing_preferences(
         subject_id,auto_recharge,overage_protection,email_notifications,
         usage_alerts,invoice_reminders
     )
     VALUES (
-        p_subject_id,p_auto_recharge,p_overage_protection,p_email_notifications,
-        p_usage_alerts,p_invoice_reminders
+        p_subject_id,
+        CASE
+            WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN false
+            ELSE p_auto_recharge
+        END,
+        p_overage_protection,
+        CASE
+            WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN false
+            ELSE p_email_notifications
+        END,
+        CASE
+            WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN false
+            ELSE p_usage_alerts
+        END,
+        CASE
+            WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN false
+            ELSE p_invoice_reminders
+        END
     )
     ON CONFLICT (tenant_id, subject_id) DO UPDATE
     SET auto_recharge=EXCLUDED.auto_recharge,

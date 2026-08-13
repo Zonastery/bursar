@@ -1,4 +1,14 @@
--- Plan-aware public operation lease.
+-- Migration: 017_operation_lease_rpc.sql
+-- Purpose: Expose the plan-aware operation lease entry point.
+-- Depends on: 014_lease_capacity_rpc.sql and 015_policy_window_rpc.sql.
+-- Security: This SECURITY DEFINER wrapper has an empty search path and delegates
+--   tenant binding, exact-credit checks, locking, and lease fencing to create_lease.
+
+-- Expose the restricted plan-aware operation lease entry point.
+
+-- Forward the public operation contract without widening the trusted mutation
+-- surface. create_lease owns request-digest idempotency, account-first lock order,
+-- policy and quota admission, and the stable durable lease result.
 
 CREATE FUNCTION bursar.create_lease_for_operation(
     p_subject_id uuid,

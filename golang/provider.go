@@ -127,7 +127,17 @@ type PaymentMethodPortalProvider interface {
 }
 
 type CustomerProvider interface {
-	CreateCustomer(context.Context, string, string, map[string]string) (string, error)
+	CreateCustomer(context.Context, CreateCustomerRequest) (string, error)
+}
+
+// CreateCustomerRequest makes provider customer creation replay-safe. The
+// idempotency key is required because a timeout after provider commit cannot
+// otherwise be reconciled without creating duplicate customer records.
+type CreateCustomerRequest struct {
+	Email          string
+	Name           string
+	Metadata       map[string]string
+	IdempotencyKey string
 }
 
 type SubscriptionProvider interface {
@@ -150,19 +160,21 @@ type ProviderFactoryContext struct {
 type ProviderFactory func(context.Context, ProviderFactoryContext) (PaymentProvider, error)
 
 type providerLoad struct {
-	done     chan struct{}
-	provider PaymentProvider
-	err      error
+	done       chan struct{}
+	generation uint64
+	provider   PaymentProvider
+	err        error
 }
 
 // ProviderRegistry owns lazy provider creation. It ensures a provider is
 // initialized once even under concurrent checkout and webhook traffic.
 type ProviderRegistry struct {
-	mu        sync.Mutex
-	context   ProviderFactoryContext
-	factories map[string]ProviderFactory
-	instances map[string]PaymentProvider
-	loading   map[string]*providerLoad
+	mu         sync.Mutex
+	context    ProviderFactoryContext
+	factories  map[string]ProviderFactory
+	instances  map[string]PaymentProvider
+	loading    map[string]*providerLoad
+	generation uint64
 }
 
 // NewProviderRegistry constructs a registry from non-empty named factories.
@@ -219,6 +231,21 @@ func (r *ProviderRegistry) Environment() ProviderEnvironment {
 	return r.context.ProviderEnvironment
 }
 
+// Clear discards cached and in-flight provider registrations. Existing callers
+// may still receive the provider instance they were already awaiting, but it
+// cannot repopulate the cleared cache; the next lookup creates a fresh
+// instance. This mirrors the provider-cache lifecycle in the other SDKs.
+func (r *ProviderRegistry) Clear() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.generation++
+	r.instances = make(map[string]PaymentProvider, len(r.factories))
+	r.loading = make(map[string]*providerLoad)
+	r.mu.Unlock()
+}
+
 // Get lazily constructs and returns provider name.
 func (r *ProviderRegistry) Get(ctx context.Context, name string) (PaymentProvider, error) {
 	if r == nil {
@@ -248,7 +275,7 @@ func (r *ProviderRegistry) Get(ctx context.Context, name string) (PaymentProvide
 		r.mu.Unlock()
 		return nil, fmt.Errorf("bursar: provider %q is not configured", name)
 	}
-	load := &providerLoad{done: make(chan struct{})}
+	load := &providerLoad{done: make(chan struct{}), generation: r.generation}
 	r.loading[name] = load
 	r.mu.Unlock()
 
@@ -262,9 +289,11 @@ func (r *ProviderRegistry) Get(ctx context.Context, name string) (PaymentProvide
 	}
 
 	r.mu.Lock()
-	delete(r.loading, name)
+	if r.loading[name] == load {
+		delete(r.loading, name)
+	}
 	load.provider, load.err = provider, err
-	if err == nil {
+	if err == nil && load.generation == r.generation {
 		r.instances[name] = provider
 	}
 	close(load.done)

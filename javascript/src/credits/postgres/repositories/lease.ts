@@ -10,6 +10,7 @@ import {
 } from "../../../shared/postgres-validation.js";
 import { StoreError } from "../../../errors.js";
 import { Decimal } from "decimal.js";
+import { quantizeMoney } from "../../../expr.js";
 
 const decimal = z.union([z.string().min(1), z.number().finite()] as const);
 const timestamp = z.union([z.string().min(1), z.date()] as const).transform((value, context) => {
@@ -230,7 +231,10 @@ export class LeaseRepository {
       requireRow(rows, "LeaseRepository.settleLease"),
       "LeaseRepository.settleLease",
     );
-    if (row.error_code === null && !new Decimal(row.settled_amount).equals(params.amount)) {
+    if (
+      row.error_code === null &&
+      !new Decimal(row.settled_amount).equals(quantizeMoney(new Decimal(params.amount)))
+    ) {
       throw new StoreError(
         "LeaseRepository.settleLease: committed amount differs from the request",
         {

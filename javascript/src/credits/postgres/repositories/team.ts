@@ -8,6 +8,7 @@ import {
   safeParse,
 } from "../../../shared/postgres-validation.js";
 import { StoreError } from "../../../errors.js";
+import { quantizeMoney } from "../../../expr.js";
 
 const decimal = z.union([z.string().min(1), z.number().finite()] as const);
 const safeInteger = z
@@ -219,7 +220,10 @@ export class TeamRepository {
       requireRow(rows, "TeamRepository.deductTeam"),
       "TeamRepository.deductTeam",
     );
-    if (row.error_code === null && !new Decimal(row.amount).equals(amount)) {
+    if (
+      row.error_code === null &&
+      !new Decimal(row.amount).equals(quantizeMoney(new Decimal(amount)))
+    ) {
       throw new StoreError("TeamRepository.deductTeam: committed amount differs from the request", {
         indeterminate: true,
       });
@@ -230,7 +234,7 @@ export class TeamRepository {
         entry_id: row.entry_id,
         team_id: row.team_id,
         user_id: row.subject_id,
-        amount,
+        amount: row.error_code === null ? row.amount : amount,
         team_balance_after: row.balance_after,
         replayed: row.replayed,
         error: row.error_code,

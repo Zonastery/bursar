@@ -776,6 +776,37 @@ def test_record_usage_appends_external_usage_without_debiting(store: PostgresSto
     old_event_at = maintenance_now - timedelta(days=100)
     with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT set_config('bursar.mutation_context', 'internal', true)")
+        # The payload's partition key is deliberately tied to the permanent
+        # usage fact. Move the child rows out while this retention fixture
+        # backdates both sides of that composite relationship.
+        cursor.execute(
+            """
+            CREATE TEMP TABLE moved_usage_payloads ON COMMIT DROP AS
+            SELECT payload.*
+            FROM bursar.usage_charge_payloads AS payload
+            JOIN bursar.credit_usage_charges AS charge
+              ON charge.id = payload.charge_id
+             AND charge.event_at = payload.event_at
+            WHERE charge.idempotency_key IN (%s, %s)
+            """,
+            [
+                "roadmap-1:usage:outline",
+                "roadmap-1:billable-retention-control",
+            ],
+        )
+        cursor.execute(
+            """
+            DELETE FROM bursar.usage_charge_payloads AS payload
+            USING bursar.credit_usage_charges AS charge
+            WHERE charge.id = payload.charge_id
+              AND charge.event_at = payload.event_at
+              AND charge.idempotency_key IN (%s, %s)
+            """,
+            [
+                "roadmap-1:usage:outline",
+                "roadmap-1:billable-retention-control",
+            ],
+        )
         cursor.execute(
             """
             UPDATE bursar.credit_usage_charges
@@ -787,6 +818,38 @@ def test_record_usage_appends_external_usage_without_debiting(store: PostgresSto
                 "roadmap-1:usage:outline",
                 "roadmap-1:billable-retention-control",
             ],
+        )
+        assert cursor.rowcount == 2
+        cursor.execute(
+            """
+            INSERT INTO bursar.usage_charge_payloads (
+                tenant_id,
+                charge_id,
+                event_at,
+                measures,
+                feature,
+                model,
+                region,
+                dimensions,
+                metadata,
+                pricing_snapshot,
+                created_at
+            )
+            SELECT
+                tenant_id,
+                charge_id,
+                %s,
+                measures,
+                feature,
+                model,
+                region,
+                dimensions,
+                metadata,
+                pricing_snapshot,
+                created_at
+            FROM moved_usage_payloads
+            """,
+            [old_event_at],
         )
         assert cursor.rowcount == 2
         cursor.execute(

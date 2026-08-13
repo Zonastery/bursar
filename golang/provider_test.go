@@ -56,6 +56,35 @@ func TestProviderRegistryLazilyInitializesOnce(t *testing.T) {
 	}
 }
 
+func TestProviderRegistryClearCreatesFreshInstance(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	registry, err := NewProviderRegistry(ProviderFactoryContext{ProviderEnvironment: ProviderEnvironmentTest}, map[string]ProviderFactory{
+		"stub": func(context.Context, ProviderFactoryContext) (PaymentProvider, error) {
+			calls.Add(1)
+			return &providerStub{name: "stub"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := registry.Get(context.Background(), "stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.Clear()
+	second, err := registry.Get(context.Background(), "stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("Clear() reused the cached provider instance")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("factory calls = %d, want 2", got)
+	}
+}
+
 func TestProviderRegistryRejectsAmbiguousSelection(t *testing.T) {
 	t.Parallel()
 	registry, err := NewProviderRegistry(ProviderFactoryContext{ProviderEnvironment: ProviderEnvironmentTest}, map[string]ProviderFactory{

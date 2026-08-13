@@ -34,6 +34,7 @@ USER_ID = "00000000-0000-0000-0000-000000000901"
 LEASE_ID = "00000000-0000-0000-0000-000000000902"
 ENTRY_ID = "00000000-0000-0000-0000-000000000903"
 USAGE_ID = "00000000-0000-0000-0000-000000000904"
+TEAM_ID = "00000000-0000-0000-0000-000000000905"
 
 
 def test_usage_metadata_preserves_typed_dimensions() -> None:
@@ -257,6 +258,63 @@ def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
     assert settled.balance_after == "92"
     assert settled.allowance_consumed == "2"
     assert settled.bucket_breakdown == {"purchased": "6"}
+
+
+def test_credit_repository_postconditions_use_canonical_six_place_amounts() -> None:
+    def lease_callproc(name: str, _params: list[object]) -> list[object]:
+        if name == "settle_lease":
+            return [
+                {
+                    "charge_id": USAGE_ID,
+                    "ledger_entry_id": ENTRY_ID,
+                    "settled_amount": "8.123457",
+                    "replayed": False,
+                    "error_code": None,
+                }
+            ]
+        if name == "get_credit_operation_details":
+            return [{"balance_after": "91.876543", "allowance_covered": "0", "bucket_breakdown": {}}]
+        raise AssertionError(f"unexpected RPC: {name}")
+
+    settled = LeaseRepository(lease_callproc).settle_lease(
+        SettleLeaseParams(
+            user_id=USER_ID,
+            lease_id=LEASE_ID,
+            amount="8.1234565",
+            idempotency_key="chat:canonical-settle",
+            feature=None,
+            model=None,
+            measures="{}",
+            dimensions="{}",
+            metadata="{}",
+        )
+    )
+
+    def team_callproc(name: str, _params: list[object]) -> list[object]:
+        assert name == "deduct_team"
+        return [
+            {
+                "entry_id": ENTRY_ID,
+                "team_id": TEAM_ID,
+                "subject_id": USER_ID,
+                "amount": "1.000001",
+                "balance_after": "98.999999",
+                "replayed": False,
+                "error_code": None,
+            }
+        ]
+
+    team_charge = TeamRepository(team_callproc).deduct_team(
+        TEAM_ID,
+        USER_ID,
+        "1.0000005",
+        "team:canonical-charge",
+        "team_usage",
+        "{}",
+    )
+
+    assert Decimal(str(settled.amount)) == Decimal("8.123457")
+    assert Decimal(str(team_charge.amount)) == Decimal("1.000001")
 
 
 def test_lease_repository_renews_through_official_rpc() -> None:

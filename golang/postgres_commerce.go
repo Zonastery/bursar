@@ -51,6 +51,10 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 	if !input.ExpiresAt.After(time.Now().UTC()) {
 		return intent, NewError("checkout expiration must be in the future", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
+	typedSubjectID, err := postgresUUID(input.SubjectID, "checkout subject ID")
+	if err != nil {
+		return intent, err
+	}
 	digest, err := checkoutRequestDigest(input)
 	if err != nil {
 		return intent, err
@@ -62,7 +66,7 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 		rows, callErr := tx.Call(
 			ctx,
 			"create_checkout_intent",
-			input.SubjectID,
+			typedSubjectID,
 			input.Provider,
 			input.IdempotencyKey,
 			input.CheckoutKind,
@@ -120,6 +124,10 @@ func (s *PostgresStore) UpdateCheckoutIntent(ctx context.Context, intentID, subj
 	if update.Status != "" && update.Status != "open" && update.Status != "completed" && update.Status != "failed" && update.Status != "expired" {
 		return NewError("invalid checkout intent status", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
+	typedIntentID, err := postgresUUID(intentID, "checkout intent ID")
+	if err != nil {
+		return err
+	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
 		loaded, loadErr := s.checkoutIntent(ctx, tx, intentID, subjectID)
 		if loadErr != nil {
@@ -128,7 +136,7 @@ func (s *PostgresStore) UpdateCheckoutIntent(ctx context.Context, intentID, subj
 		if loaded == nil {
 			return NewError("checkout intent was not found", ErrorOptions{Code: ErrorCodeCommerceResourceNotFound, Category: ErrorCategoryNotFound})
 		}
-		rows, callErr := tx.Call(ctx, "advance_checkout_intent", intentID, nullableText(update.Status), nullableText(update.ProviderSessionID), nullableText(update.ProviderURL))
+		rows, callErr := tx.Call(ctx, "advance_checkout_intent", typedIntentID, nullableText(update.Status), nullableText(update.ProviderSessionID), nullableText(update.ProviderURL))
 		if callErr != nil {
 			return callErr
 		}
@@ -171,7 +179,15 @@ func (s *PostgresStore) GetCheckoutIntent(ctx context.Context, intentID, subject
 }
 
 func (s *PostgresStore) checkoutIntent(ctx context.Context, tx *PostgresTransaction, intentID, subjectID string) (*CheckoutIntent, error) {
-	rows, err := tx.Call(ctx, "get_checkout_intent", intentID, subjectID)
+	typedIntentID, err := postgresUUID(intentID, "checkout intent ID")
+	if err != nil {
+		return nil, err
+	}
+	typedSubjectID, err := postgresUUID(subjectID, "checkout subject ID")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Call(ctx, "get_checkout_intent", typedIntentID, typedSubjectID)
 	if err != nil {
 		return nil, err
 	}

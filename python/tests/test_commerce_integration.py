@@ -333,7 +333,10 @@ async def test_checkout_operation_key_replays_once_and_conflicts_before_provider
             {"quantity": 2},
             {"offer_key": "pro_month", "quantity": 1},
         ):
-            with pytest.raises(CheckoutConflictError):
+            with pytest.raises(
+                CheckoutConflictError,
+                match="different checkout request",
+            ):
                 await checkout(**changed)
         assert len(provider.checkout_params) == 1
 

@@ -22,6 +22,7 @@ from bursar.credits.postgres.repositories.schemas import (
     SettleLeaseRpcRow,
 )
 from bursar.errors import StoreError
+from bursar.expr import quantize_money
 
 
 class LeaseRepository:
@@ -116,7 +117,7 @@ class LeaseRepository:
             "LeaseRepository.settle_lease",
             indeterminate=True,
         )
-        if row.error_code is None and Decimal(str(row.settled_amount)) != Decimal(params.amount):
+        if row.error_code is None and Decimal(str(row.settled_amount)) != quantize_money(Decimal(params.amount)):
             raise StoreError(
                 "LeaseRepository.settle_lease: committed amount differs from the request",
                 indeterminate=True,

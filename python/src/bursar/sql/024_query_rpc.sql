@@ -1,5 +1,22 @@
--- Read-only reporting and catalog resolution RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 024_query_rpc.sql
+-- Purpose: Define tenant-scoped credit, billing, catalog, plan, quota, and report reads.
+-- Depends on: All credit, billing, catalog, plan, allowance, quota, and checkout tables.
+-- Security: SECURITY DEFINER read contracts require tenant context and bind provider
+--   lookups to the configured environment; subject reads remain owner-key scoped.
+--
+-- Contents
+--   1. Credit balances, entitlements, and usage reports
+--   2. Billing and catalog lookups
+--   3. Credit operation and lease detail
+--   4. Plan, allowance, and quota state
+--   5. Checkout, subscription-change, invoice, and recharge lookups
+
+-- ---------------------------------------------------------------------------
+-- 1. Credit balances, entitlements, and usage reports
+-- ---------------------------------------------------------------------------
+
+-- Return active and funded historical bucket balances excluding expired lots;
+-- account-level lease reservations are not allocated to buckets here.
 
 CREATE FUNCTION bursar.get_credit_bucket_balances(
     p_subject_id uuid
@@ -83,6 +100,8 @@ AS $$
         all_keys.bucket_key
 $$;
 
+-- Resolve typed feature values from the subject's effective plan at one instant,
+-- falling back to catalog defaults without crossing tenant or revision scope.
 CREATE FUNCTION bursar.get_subject_entitlements(
     p_subject_id uuid,
     p_at timestamptz DEFAULT now()
@@ -149,10 +168,11 @@ AS $$
      AND plan_feature.plan_key = context.plan_key
      AND plan_feature.feature_key = feature.feature_key
     WHERE p_subject_id IS NOT NULL
-      AND p_at IS NOT NULL
+      AND bursar.is_finite_timestamptz(p_at)
     ORDER BY feature.feature_key
 $$;
 
+-- Return bounded aggregate and edge rows for the current tenant's usage interval.
 CREATE FUNCTION bursar.usage_analytics_slice(
     p_start timestamptz,
     p_end timestamptz
@@ -189,8 +209,8 @@ AS $$
                 date_trunc('day', p_end AT TIME ZONE 'UTC')
                 AT TIME ZONE 'UTC'
             ) AS full_end
-        WHERE p_start IS NOT NULL
-          AND p_end IS NOT NULL
+        WHERE bursar.is_finite_timestamptz(p_start)
+          AND bursar.is_finite_timestamptz(p_end)
           AND p_end > p_start
     ),
     complete_days AS (
@@ -252,6 +272,8 @@ AS $$
     SELECT * FROM edge_rows
 $$;
 
+-- Page one subject's monetary ledger by stable created-at/ID cursor with optional
+-- entry-type, time-range, and usage-only filters.
 CREATE FUNCTION bursar.list_ledger(
     p_subject_id uuid,
     p_after_created_at timestamptz DEFAULT NULL,
@@ -294,11 +316,29 @@ AS $$
     JOIN bursar.credit_accounts AS account
       ON account.id = entry.account_id
     WHERE account.subject_id=p_subject_id
+      AND p_subject_id IS NOT NULL
       -- SDKs fetch one look-ahead row to determine whether a cursor follows.
       AND p_page_size BETWEEN 1 AND 201
       AND (
           p_entry_types IS NULL
-          OR entry.kind::text = ANY(p_entry_types)
+          OR (
+              array_ndims(p_entry_types) = 1
+              AND cardinality(p_entry_types) BETWEEN 1 AND 10
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM unnest(p_entry_types) AS requested(entry_type)
+                  WHERE NOT bursar.is_nonempty_bounded_text(
+                      requested.entry_type,
+                      64
+                  )
+                     OR requested.entry_type NOT IN (
+                         'grant', 'purchase', 'usage', 'expiry',
+                         'revocation', 'refund', 'refund_clawback',
+                         'adjustment', 'reservation', 'release'
+                     )
+              )
+              AND entry.kind::text = ANY(p_entry_types)
+          )
       )
       AND (
           NOT p_usage_only
@@ -307,9 +347,19 @@ AS $$
       AND (p_from_at IS NULL OR entry.created_at >= p_from_at)
       AND (p_to_at IS NULL OR entry.created_at < p_to_at)
       AND (
+          p_from_at IS NULL
+          OR bursar.is_finite_timestamptz(p_from_at)
+      )
+      AND (
+          p_to_at IS NULL
+          OR bursar.is_finite_timestamptz(p_to_at)
+      )
+      AND (p_from_at IS NULL OR p_to_at IS NULL OR p_from_at < p_to_at)
+      AND (
           (p_after_created_at IS NULL AND p_after_id IS NULL)
           OR (
               p_after_created_at IS NOT NULL AND p_after_id IS NOT NULL
+              AND bursar.is_finite_timestamptz(p_after_created_at)
               AND (entry.created_at,entry.id)
                     < (p_after_created_at,p_after_id)
           )
@@ -318,6 +368,7 @@ AS $$
     LIMIT p_page_size
 $$;
 
+-- Fetch one exact ledger entry only when it belongs to the supplied subject.
 CREATE FUNCTION bursar.get_ledger_entry(
     p_subject_id uuid,
     p_entry_id uuid
@@ -360,6 +411,7 @@ $$;
 -- Usage history is sourced from the usage-charge journal rather than the
 -- monetary ledger. This keeps allowance-covered events visible without
 -- fabricating a zero-value ledger entry.
+-- Page one subject's billable and optionally record-only usage by event-time cursor.
 CREATE FUNCTION bursar.list_usage_charges(
     p_subject_id uuid,
     p_after_event_at timestamptz DEFAULT NULL,
@@ -414,15 +466,26 @@ AS $$
       ON payload.charge_id = charge.id
      AND payload.event_at = charge.event_at
     WHERE account.subject_id = p_subject_id
+      AND p_subject_id IS NOT NULL
       -- SDKs fetch one look-ahead row to determine whether a cursor follows.
       AND p_page_size BETWEEN 1 AND 201
       AND (p_from_at IS NULL OR charge.event_at >= p_from_at)
       AND (p_to_at IS NULL OR charge.event_at < p_to_at)
+      AND (
+          p_from_at IS NULL
+          OR bursar.is_finite_timestamptz(p_from_at)
+      )
+      AND (
+          p_to_at IS NULL
+          OR bursar.is_finite_timestamptz(p_to_at)
+      )
+      AND (p_from_at IS NULL OR p_to_at IS NULL OR p_from_at < p_to_at)
       AND (p_include_record_only OR charge.billing_disposition = 'billable')
       AND (
           (p_after_event_at IS NULL AND p_after_id IS NULL)
           OR (
               p_after_event_at IS NOT NULL AND p_after_id IS NOT NULL
+              AND bursar.is_finite_timestamptz(p_after_event_at)
               AND (charge.event_at, charge.id)
                     < (p_after_event_at, p_after_id)
           )
@@ -431,6 +494,7 @@ AS $$
     LIMIT p_page_size
 $$;
 
+-- Aggregate charged usage by subject for the current tenant and half-open interval.
 CREATE FUNCTION bursar.spend_by_user(
     p_start timestamptz,
     p_end timestamptz
@@ -451,6 +515,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     ORDER BY sum(usage.charged) DESC
 $$;
 
+-- Aggregate charged usage by model for the current tenant and half-open interval.
 CREATE FUNCTION bursar.spend_by_model(
     p_start timestamptz,
     p_end timestamptz
@@ -470,6 +535,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     ORDER BY sum(charged) DESC
 $$;
 
+-- Aggregate exact charged usage into UTC calendar days for the current tenant.
 CREATE FUNCTION bursar.daily_spend(
     p_start timestamptz,
     p_end timestamptz
@@ -486,6 +552,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     ORDER BY usage_day
 $$;
 
+-- Return one tenant-wide usage summary over the requested half-open interval.
 CREATE FUNCTION bursar.aggregate_usage_stats(
     p_start timestamptz,
     p_end timestamptz
@@ -546,8 +613,16 @@ AS $$
         (SELECT model FROM model_rank),
         (SELECT subject_id FROM user_rank)
     FROM totals
+    WHERE bursar.is_finite_timestamptz(p_start)
+      AND bursar.is_finite_timestamptz(p_end)
+      AND p_end > p_start
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 2. Billing and catalog lookups
+-- ---------------------------------------------------------------------------
+
+-- List a subject's billing customer identities, optionally narrowed to one provider.
 CREATE FUNCTION bursar.get_billing_customer(
     p_subject_id uuid,
     p_provider text DEFAULT NULL
@@ -555,13 +630,20 @@ CREATE FUNCTION bursar.get_billing_customer(
 RETURNS SETOF bursar.billing_customers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
- FROM bursar.billing_customers
- WHERE subject_id=p_subject_id
- AND (p_provider IS NULL OR provider=p_provider)
+    FROM bursar.billing_customers
+    WHERE subject_id=p_subject_id
+    AND (
+        p_provider IS NULL
+        OR (
+            bursar.is_nonempty_bounded_text(p_provider, 100)
+            AND provider=p_provider
+        )
+    )
  AND provider_environment=bursar.current_provider_environment()
  ORDER BY provider
 $$;
 
+-- Resolve one provider customer inside the current tenant and provider environment.
 CREATE FUNCTION bursar.get_billing_customer_by_provider(
     p_provider text,
     p_provider_customer_id text
@@ -569,12 +651,15 @@ CREATE FUNCTION bursar.get_billing_customer_by_provider(
 RETURNS SETOF bursar.billing_customers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
- FROM bursar.billing_customers
- WHERE provider=p_provider
+    FROM bursar.billing_customers
+    WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+    AND bursar.is_nonempty_bounded_text(p_provider_customer_id, 255)
+    AND provider=p_provider
  AND provider_environment=bursar.current_provider_environment()
  AND provider_customer_id=p_provider_customer_id
 $$;
 
+-- Resolve one environment-scoped provider subscription for the current tenant.
 CREATE FUNCTION bursar.get_billing_subscription_by_provider(
     p_provider text,
     p_provider_subscription_id text
@@ -582,12 +667,15 @@ CREATE FUNCTION bursar.get_billing_subscription_by_provider(
 RETURNS SETOF bursar.billing_subscriptions
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
- FROM bursar.billing_subscriptions
- WHERE provider=p_provider
+    FROM bursar.billing_subscriptions
+    WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+    AND bursar.is_nonempty_bounded_text(p_provider_subscription_id, 255)
+    AND provider=p_provider
  AND provider_environment=bursar.current_provider_environment()
  AND provider_subscription_id=p_provider_subscription_id
 $$;
 
+-- List all provider subscriptions owned by one tenant-scoped subject.
 CREATE FUNCTION bursar.list_billing_subscriptions(
     p_subject_id uuid
 )
@@ -600,6 +688,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  ORDER BY created_at,id
 $$;
 
+-- Resolve one environment-scoped provider payment for the current tenant.
 CREATE FUNCTION bursar.get_billing_payment_by_provider(
     p_provider text,
     p_provider_payment_id text
@@ -607,12 +696,15 @@ CREATE FUNCTION bursar.get_billing_payment_by_provider(
 RETURNS SETOF bursar.billing_payments
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
- FROM bursar.billing_payments
- WHERE provider=p_provider
+    FROM bursar.billing_payments
+    WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+    AND bursar.is_nonempty_bounded_text(p_provider_payment_id, 255)
+    AND provider=p_provider
  AND provider_environment=bursar.current_provider_environment()
  AND provider_payment_id=p_provider_payment_id
 $$;
 
+-- Read the billing preferences for one tenant-owned subject.
 CREATE FUNCTION bursar.get_billing_preferences(
     p_subject_id uuid
 )
@@ -623,6 +715,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  WHERE subject_id=p_subject_id
 $$;
 
+-- Read the subject's recharge profile in the configured provider environment.
 CREATE FUNCTION bursar.get_auto_recharge_profile(
     p_subject_id uuid
 )
@@ -634,6 +727,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  AND provider_environment=bursar.current_provider_environment()
 $$;
 
+-- Read one tenant-owned recharge attempt by internal identity.
 CREATE FUNCTION bursar.get_auto_recharge_attempt(
     p_attempt_id uuid
 )
@@ -644,6 +738,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  WHERE id=p_attempt_id
 $$;
 
+-- Resolve an active offer through one environment-specific provider reference.
 CREATE FUNCTION bursar.resolve_catalog_offer(
     p_provider text,
     p_lookup_type text,
@@ -658,7 +753,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  JOIN bursar.catalog_offers o
  ON o.catalog_revision_id=r.catalog_revision_id
  AND o.offer_key=r.object_key
- WHERE r.provider=p_provider
+ WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+ AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
+ AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
+ AND r.provider=p_provider
  AND cr.status='active'
  AND r.provider_environment=bursar.current_provider_environment()
  AND r.lookup_type=p_lookup_type
@@ -668,6 +766,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  LIMIT 1
 $$;
 
+-- Resolve an active top-up through one environment-specific provider reference.
 CREATE FUNCTION bursar.resolve_catalog_topup(
     p_provider text,
     p_lookup_type text,
@@ -682,7 +781,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  JOIN bursar.catalog_topups t
  ON t.catalog_revision_id=r.catalog_revision_id
  AND t.topup_key=r.object_key
- WHERE r.provider=p_provider
+ WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+ AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
+ AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
+ AND r.provider=p_provider
  AND cr.status='active'
  AND r.provider_environment=bursar.current_provider_environment()
  AND r.lookup_type=p_lookup_type
@@ -692,6 +794,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  LIMIT 1
 $$;
 
+-- Resolve the plan behind an active environment-specific provider offer reference.
 CREATE FUNCTION bursar.resolve_catalog_plan(
     p_provider text,
     p_lookup_type text,
@@ -713,7 +816,10 @@ AS $$
     JOIN bursar.catalog_plans AS plan
       ON plan.catalog_revision_id = offer.catalog_revision_id
      AND plan.plan_key = offer.plan_key
-    WHERE provider_ref.provider = p_provider
+    WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+      AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
+      AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
+      AND provider_ref.provider = p_provider
       AND revision.status = 'active'
       AND provider_ref.provider_environment =
           bursar.current_provider_environment()
@@ -724,6 +830,11 @@ AS $$
     LIMIT 1
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 3. Credit operation and lease detail
+-- ---------------------------------------------------------------------------
+
+-- Return one subject's account balance, lot state, and active reservation totals.
 CREATE FUNCTION bursar.get_credit_state(
     p_subject_id uuid
 )
@@ -779,6 +890,8 @@ AS $$
     CROSS JOIN lifetime
 $$;
 
+-- Resolve the latest matching usage charge by ledger ID or key; an unmatched
+-- lookup returns the account's current balance with empty allocation context.
 CREATE FUNCTION bursar.get_credit_operation_details(
     p_subject_id uuid,
     p_ledger_entry_id uuid DEFAULT NULL,
@@ -810,7 +923,7 @@ AS $$
             p_ledger_entry_id IS NOT NULL
             AND usage_charge.ledger_entry_id = p_ledger_entry_id
         ) OR (
-            p_idempotency_key IS NOT NULL
+            bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
             AND usage_charge.idempotency_key = p_idempotency_key
         )
         ORDER BY usage_charge.created_at DESC, usage_charge.id DESC
@@ -849,6 +962,7 @@ AS $$
     LEFT JOIN allocation ON allocation.account_id = account.id
 $$;
 
+-- Return the lot provenance created by one subject-owned credit ledger grant.
 CREATE FUNCTION bursar.get_credit_grant_details(
     p_subject_id uuid,
     p_ledger_entry_id uuid
@@ -870,6 +984,7 @@ AS $$
       AND lot.source_entry_id = p_ledger_entry_id
 $$;
 
+-- Fetch one exact lease only when it belongs to the supplied tenant-scoped subject.
 CREATE FUNCTION bursar.get_credit_lease(
     p_subject_id uuid,
     p_lease_id uuid
@@ -888,6 +1003,7 @@ AS $$
       AND lease.id = p_lease_id
 $$;
 
+-- Read the immutable catalog/rate-card snapshot captured by a subject-owned lease.
 CREATE FUNCTION bursar.get_credit_lease_pricing_context(
     p_subject_id uuid,
     p_lease_id uuid
@@ -921,6 +1037,11 @@ AS $$
       AND lease.id = p_lease_id
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 4. Plan, allowance, and quota state
+-- ---------------------------------------------------------------------------
+
+-- Resolve one plan reference only from the current tenant's active catalog revision.
 CREATE FUNCTION bursar.resolve_active_plan(
     p_plan_reference text
 )
@@ -935,12 +1056,16 @@ AS $$
     JOIN bursar.catalog_revisions AS revision
       ON revision.id = plan.catalog_revision_id
      AND revision.status = 'active'
-    WHERE plan.id::text = p_plan_reference
-       OR plan.plan_key = p_plan_reference
+    WHERE bursar.is_nonempty_bounded_text(p_plan_reference, 255)
+      AND (
+          plan.id::text = p_plan_reference
+          OR plan.plan_key = p_plan_reference
+      )
     ORDER BY revision.revision_no DESC
     LIMIT 1
 $$;
 
+-- Return the subject's effective plan assignment, revision pin, and transition context.
 CREATE FUNCTION bursar.get_subject_plan(
     p_subject_id uuid
 )
@@ -1046,6 +1171,7 @@ AS $$
     LIMIT 1
 $$;
 
+-- Return normalized allowance consumption and reservation state for one subject window.
 CREATE FUNCTION bursar.get_subject_allowance(
     p_subject_id uuid,
     p_window_start timestamptz DEFAULT NULL
@@ -1107,8 +1233,8 @@ AS $$
          AND charge.plan_id = current_window.plan_id
          AND charge.catalog_revision_id =
              current_window.catalog_revision_id
-         AND charge.event_at > current_window.window_start
-         AND charge.event_at <= current_window.window_end
+         AND charge.event_at >= current_window.window_start
+         AND charge.event_at < current_window.window_end
         WHERE current_window.period_anchor = 'rolling'
     ),
     rolling_holds AS (
@@ -1157,10 +1283,15 @@ AS $$
      AND allowance_window.window_start = current_window.window_start
      AND allowance_window.window_end = current_window.window_end
     WHERE p_window_start IS NULL
-       OR current_window.window_start = p_window_start
+       OR (
+           bursar.is_finite_timestamptz(p_window_start)
+           AND current_window.window_start = p_window_start
+       )
     LIMIT 1
 $$;
 
+-- Return current quota consumption, reservations, remaining capacity, and overage,
+-- optionally narrowed to one quota key.
 CREATE FUNCTION bursar.get_subject_quota_state(
     p_subject_id uuid,
     p_quota_key text DEFAULT NULL
@@ -1295,6 +1426,8 @@ AS $$
     ORDER BY state.quota_key
 $$;
 
+-- Page persisted subject quota notifications with a stable time/ID cursor and
+-- optional idempotency-key narrowing.
 CREATE FUNCTION bursar.list_subject_quota_events(
     p_subject_id uuid,
     p_after timestamptz DEFAULT NULL,
@@ -1337,21 +1470,33 @@ AS $$
       AND account.account_kind = 'personal'
       AND p_limit BETWEEN 1 AND 500
       AND (
-          p_after IS NULL
+          (p_after IS NULL AND p_after_id IS NULL)
           OR (
-              p_after_id IS NULL
-              AND event.created_at > p_after
+              bursar.is_finite_timestamptz(p_after)
+              AND p_after_id IS NULL
+              AND event.created_at < p_after
           )
-          OR (event.created_at, event.id) > (p_after, p_after_id)
+          OR (
+              bursar.is_finite_timestamptz(p_after)
+              AND (event.created_at, event.id) < (p_after, p_after_id)
+          )
       )
       AND (
           p_idempotency_key IS NULL
-          OR event.idempotency_key = p_idempotency_key
+          OR (
+              bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
+              AND event.idempotency_key = p_idempotency_key
+          )
       )
     ORDER BY event.created_at DESC, event.id DESC
     LIMIT p_limit
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 5. Checkout, subscription-change, invoice, and recharge lookups
+-- ---------------------------------------------------------------------------
+
+-- Fetch one checkout intent only for its tenant-owned subject and environment.
 CREATE FUNCTION bursar.get_checkout_intent(
     p_intent_id uuid,
     p_subject_id uuid
@@ -1369,6 +1514,7 @@ AS $$
       AND provider_environment = bursar.current_provider_environment()
 $$;
 
+-- Resolve one offer key from the current tenant's active catalog revision.
 CREATE FUNCTION bursar.resolve_active_catalog_offer(
     p_offer_key text
 )
@@ -1388,6 +1534,7 @@ AS $$
     LIMIT 1
 $$;
 
+-- Read immutable plan and billing-cadence context for an exact offer and revision.
 CREATE FUNCTION bursar.get_catalog_offer_context(
     p_offer_id uuid,
     p_catalog_revision_id uuid
@@ -1418,6 +1565,7 @@ AS $$
       AND offer.catalog_revision_id = p_catalog_revision_id
 $$;
 
+-- Return the open transition for one environment-scoped provider subscription.
 CREATE FUNCTION bursar.get_open_billing_subscription_change(
     p_provider text,
     p_provider_subscription_id text
@@ -1432,7 +1580,12 @@ AS $$
     FROM bursar.billing_subscription_changes AS change
     JOIN bursar.billing_subscriptions AS subscription
       ON subscription.id = change.subscription_id
-    WHERE subscription.provider = p_provider
+    WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+      AND bursar.is_nonempty_bounded_text(
+          p_provider_subscription_id,
+          255
+      )
+      AND subscription.provider = p_provider
       AND subscription.provider_environment =
           bursar.current_provider_environment()
       AND subscription.provider_subscription_id =
@@ -1442,6 +1595,7 @@ AS $$
     LIMIT 1
 $$;
 
+-- Fetch one tenant-owned subscription transition by internal identity.
 CREATE FUNCTION bursar.get_billing_subscription_change(
     p_change_id bigint
 )
@@ -1456,6 +1610,7 @@ AS $$
     WHERE id = p_change_id
 $$;
 
+-- Return the oldest tenant-owned credit grant linked to one payment.
 CREATE FUNCTION bursar.get_billing_credit_grant_by_payment(
     p_payment_id uuid
 )
@@ -1472,6 +1627,7 @@ AS $$
     LIMIT 1
 $$;
 
+-- Page one subject's environment-scoped invoices by stable sort-time/ID cursor.
 CREATE FUNCTION bursar.list_billing_invoices(
     p_subject_id uuid,
     p_before_sort_at timestamptz DEFAULT NULL,
@@ -1528,6 +1684,7 @@ AS $$
           OR (
               p_before_sort_at IS NOT NULL
               AND p_before_id IS NOT NULL
+              AND bursar.is_finite_timestamptz(p_before_sort_at)
               AND (
                   COALESCE(invoice.period_end, invoice.created_at),
                   invoice.id
@@ -1540,6 +1697,7 @@ AS $$
     LIMIT p_page_size
 $$;
 
+-- Resolve one recharge attempt by environment-specific provider attempt identity.
 CREATE FUNCTION bursar.get_auto_recharge_attempt_by_provider(
     p_provider text,
     p_provider_attempt_id text
@@ -1552,11 +1710,14 @@ SET search_path TO ''
 AS $$
     SELECT *
     FROM bursar.billing_auto_recharge_attempts
-    WHERE provider = p_provider
+    WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
+      AND bursar.is_nonempty_bounded_text(p_provider_attempt_id, 255)
+      AND provider = p_provider
       AND provider_environment = bursar.current_provider_environment()
       AND provider_attempt_id = p_provider_attempt_id
 $$;
 
+-- Count a subject's environment-scoped recharge attempts since one timestamp.
 CREATE FUNCTION bursar.count_auto_recharge_attempts(
     p_subject_id uuid,
     p_since timestamptz
@@ -1571,6 +1732,7 @@ AS $$
     FROM bursar.billing_auto_recharge_attempts
     WHERE subject_id = p_subject_id
       AND provider_environment = bursar.current_provider_environment()
+      AND bursar.is_finite_timestamptz(p_since)
       AND created_at >= p_since
       AND state IN (
           'submitted',

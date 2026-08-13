@@ -1,0 +1,610 @@
+// Copyright 2026 Zonastery
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package bursar
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+)
+
+var (
+	_ BillingLifecycleProcessor           = (*PostgresStore)(nil)
+	_ configuredBillingLifecycleProcessor = (*PostgresStore)(nil)
+	_ BillingProvisioningPort             = (*PostgresStore)(nil)
+)
+
+// ProcessBillingEvent applies verified provider truth to the tenant-scoped
+// PostgreSQL billing model. It never trusts webhook product references for
+// prices, credits, or entitlements: those are resolved from the active catalog.
+func (s *PostgresStore) ProcessBillingEvent(ctx context.Context, event BillingEvent, accountID string) (BillingEventResult, error) {
+	processor := postgresBillingLifecycle{store: s, provisioning: s, autoSelectEntitlementSource: true, pastDueGracePeriod: 7 * 24 * time.Hour}
+	return processor.process(ctx, event, accountID)
+}
+
+func (s *PostgresStore) processBillingEvent(ctx context.Context, event BillingEvent, accountID string, provisioning BillingProvisioningPort, autoSelect bool, gracePeriod time.Duration, terminalPlanKey string) (BillingEventResult, error) {
+	processor := postgresBillingLifecycle{store: s, provisioning: provisioning, autoSelectEntitlementSource: autoSelect, pastDueGracePeriod: gracePeriod, terminalPlanKey: terminalPlanKey}
+	return processor.process(ctx, event, accountID)
+}
+
+type postgresBillingLifecycle struct {
+	store                       *PostgresStore
+	provisioning                BillingProvisioningPort
+	autoSelectEntitlementSource bool
+	pastDueGracePeriod          time.Duration
+	terminalPlanKey             string
+}
+
+func (p postgresBillingLifecycle) process(ctx context.Context, event BillingEvent, accountID string) (BillingEventResult, error) {
+	resolved, err := p.resolveAccount(ctx, event, accountID)
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	accountID = resolved
+	switch event.Type {
+	case BillingEventCustomerCreated, BillingEventCustomerUpdated:
+		if event.Customer != nil && accountID != "" && event.Customer.canonicalProviderCustomerID() != "" {
+			if err := p.store.UpsertBillingCustomer(ctx, BillingCustomerRecord{Provider: event.Provider, ProviderCustomerID: event.Customer.canonicalProviderCustomerID(), AccountID: accountID, Email: event.Customer.Email}); err != nil {
+				return BillingEventResult{}, err
+			}
+		}
+		return handledBilling(event.Type, accountID, ""), nil
+	case BillingEventCustomerDeleted:
+		return handledBilling(event.Type, accountID, ""), nil
+	case BillingEventCheckoutCompleted:
+		if event.Customer != nil && accountID != "" && event.Customer.canonicalProviderCustomerID() != "" {
+			if err := p.store.UpsertBillingCustomer(ctx, BillingCustomerRecord{Provider: event.Provider, ProviderCustomerID: event.Customer.canonicalProviderCustomerID(), AccountID: accountID, Email: event.Customer.Email}); err != nil {
+				return BillingEventResult{}, err
+			}
+		}
+		if event.Subscription != nil {
+			return p.applySubscription(ctx, event, accountID, "subscription_created")
+		}
+		if err := p.updateCheckoutFromEvent(ctx, event, "completed"); err != nil {
+			return BillingEventResult{}, err
+		}
+		return handledBilling(event.Type, accountID, ""), nil
+	case BillingEventCheckoutExpired:
+		if err := p.updateCheckoutFromEvent(ctx, event, "expired"); err != nil {
+			return BillingEventResult{}, err
+		}
+		result := handledBilling(event.Type, accountID, "")
+		result.Ignored = true
+		return result, nil
+	case BillingEventSubscriptionCreated:
+		return p.applySubscription(ctx, event, accountID, "subscription_created")
+	case BillingEventSubscriptionUpdated:
+		return p.applySubscription(ctx, event, accountID, "subscription_updated")
+	case BillingEventSubscriptionActivated:
+		event.Subscription.Status = "active"
+		return p.applySubscription(ctx, event, accountID, "subscription_activated")
+	case BillingEventSubscriptionRenewed:
+		event.Subscription.Status = "active"
+		return p.applySubscription(ctx, event, accountID, "subscription_renewed")
+	case BillingEventSubscriptionPlanChanged:
+		return p.applySubscription(ctx, event, accountID, "subscription_plan_changed")
+	case BillingEventSubscriptionCancellationScheduled:
+		event.Subscription.CancelAtPeriodEnd = true
+		return p.applySubscription(ctx, event, accountID, "cancellation_scheduled")
+	case BillingEventSubscriptionCancellationUnscheduled:
+		event.Subscription.CancelAtPeriodEnd = false
+		return p.applySubscription(ctx, event, accountID, "cancellation_unscheduled")
+	case BillingEventSubscriptionCanceled:
+		event.Subscription.Status = "canceled"
+		event.Subscription.CancelAtPeriodEnd = true
+		return p.applySubscription(ctx, event, accountID, "subscription_canceled")
+	case BillingEventSubscriptionExpired:
+		event.Subscription.Status = "expired"
+		return p.applySubscription(ctx, event, accountID, "subscription_expired")
+	case BillingEventSubscriptionPaused:
+		event.Subscription.Status = "paused"
+		return p.applySubscription(ctx, event, accountID, "subscription_paused")
+	case BillingEventSubscriptionResumed:
+		event.Subscription.Status = "active"
+		event.Subscription.CancelAtPeriodEnd = false
+		return p.applySubscription(ctx, event, accountID, "subscription_resumed")
+	case BillingEventSubscriptionTrialWillEnd:
+		result := handledBilling(event.Type, accountID, event.Subscription.canonicalProviderSubscriptionID())
+		result.Action = "trial_will_end_notified"
+		return result, nil
+	case BillingEventInvoicePaid:
+		if event.Subscription != nil {
+			event.Subscription.Status = "active"
+			if _, err := p.applySubscription(ctx, event, accountID, "subscription_renewed"); err != nil {
+				return BillingEventResult{}, err
+			}
+		}
+		if err := p.persistInvoice(ctx, event, accountID); err != nil {
+			return BillingEventResult{}, err
+		}
+		return handledBilling(event.Type, accountID, subscriptionEventID(event)), nil
+	case BillingEventInvoiceCreated, BillingEventInvoiceUpdated, BillingEventInvoiceFinalized, BillingEventInvoiceFinalizationFailed, BillingEventInvoicePaymentFailed, BillingEventInvoicePaymentActionRequired, BillingEventInvoiceVoided:
+		if accountID != "" {
+			if err := p.persistInvoice(ctx, event, accountID); err != nil {
+				return BillingEventResult{}, err
+			}
+		}
+		return handledBilling(event.Type, accountID, subscriptionEventID(event)), nil
+	case BillingEventInvoiceUpcoming:
+		result := handledBilling(event.Type, accountID, subscriptionEventID(event))
+		result.Ignored = true
+		return result, nil
+	case BillingEventPaymentSucceeded:
+		return p.paymentSucceeded(ctx, event, accountID)
+	case BillingEventPaymentFailed:
+		return p.paymentFailed(ctx, event, accountID)
+	case BillingEventRefundCreated, BillingEventRefundUpdated, BillingEventRefundFailed:
+		return p.refund(ctx, event, accountID)
+	case BillingEventDisputeCreated, BillingEventDisputeUpdated, BillingEventDisputeClosed:
+		if err := p.store.UpsertBillingDisputeState(ctx, BillingDisputeUpsert{Provider: event.Provider, ProviderDisputeID: event.Dispute.canonicalProviderDisputeID(), ProviderPaymentID: event.Dispute.canonicalProviderPaymentID(), Status: event.Dispute.Status, Reason: event.Dispute.Reason, ProviderUpdatedAt: event.OccurredAt, Metadata: event.Metadata}); err != nil {
+			return BillingEventResult{}, err
+		}
+		return handledBilling(event.Type, accountID, ""), nil
+	case BillingEventPaymentMethodAttached, BillingEventPaymentMethodUpdated, BillingEventPaymentMethodDetached:
+		return handledBilling(event.Type, accountID, ""), nil
+	default:
+		return BillingEventResult{}, NewError("unsupported billing lifecycle event", ErrorOptions{Code: ErrorCodeBilling, Category: ErrorCategoryInvalidRequest, Details: map[string]any{"event_type": event.Type}})
+	}
+}
+
+func (p postgresBillingLifecycle) resolveAccount(ctx context.Context, event BillingEvent, accountID string) (string, error) {
+	if value := strings.TrimSpace(firstNonEmpty(accountID, event.AccountID)); value != "" {
+		return value, nil
+	}
+	if event.Customer != nil && event.Customer.canonicalProviderCustomerID() != "" {
+		customer, err := p.store.GetBillingCustomerByProvider(ctx, event.Provider, event.Customer.canonicalProviderCustomerID())
+		if err != nil {
+			return "", err
+		}
+		if customer != nil {
+			return customer.AccountID, nil
+		}
+	}
+	if event.Subscription != nil && event.Subscription.canonicalProviderSubscriptionID() != "" {
+		subscription, err := p.store.GetBillingSubscriptionByProvider(ctx, event.Provider, event.Subscription.canonicalProviderSubscriptionID())
+		if err != nil {
+			return "", err
+		}
+		if subscription != nil {
+			return subscription.AccountID, nil
+		}
+	}
+	paymentID := ""
+	if event.Payment != nil {
+		paymentID = event.Payment.canonicalProviderPaymentID()
+	} else if event.Refund != nil {
+		paymentID = event.Refund.canonicalProviderPaymentID()
+	} else if event.Dispute != nil {
+		paymentID = event.Dispute.canonicalProviderPaymentID()
+	}
+	if paymentID != "" {
+		payment, err := p.store.GetBillingPaymentByProvider(ctx, event.Provider, paymentID)
+		if err != nil {
+			return "", err
+		}
+		if payment != nil {
+			return payment.AccountID, nil
+		}
+	}
+	return "", nil
+}
+
+func (p postgresBillingLifecycle) applySubscription(ctx context.Context, event BillingEvent, accountID, action string) (BillingEventResult, error) {
+	if accountID == "" {
+		return BillingEventResult{}, NewStoreError("billing subscription account could not be resolved", ErrorOptions{Retryable: true})
+	}
+	subscription := event.Subscription
+	providerSubscriptionID := subscription.canonicalProviderSubscriptionID()
+	if event.Customer != nil && event.Customer.canonicalProviderCustomerID() != "" {
+		if err := p.store.UpsertBillingCustomer(ctx, BillingCustomerRecord{Provider: event.Provider, ProviderCustomerID: event.Customer.canonicalProviderCustomerID(), AccountID: accountID, Email: event.Customer.Email}); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	existing, err := p.store.GetBillingSubscriptionByProvider(ctx, event.Provider, providerSubscriptionID)
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	offer, err := p.offerForEvent(ctx, event)
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	if offer == nil && existing == nil {
+		return BillingEventResult{}, NewStoreError("billing subscription offer could not be resolved", ErrorOptions{Retryable: true, Details: map[string]any{"provider": event.Provider, "provider_subscription_id": providerSubscriptionID}})
+	}
+	if offer == nil {
+		offer = &BillingOffer{ID: existing.OfferID, OfferKey: existing.OfferKey, PlanID: existing.PlanID, PlanKey: existing.PlanKey, Interval: existing.Interval, IntervalCnt: existing.IntervalCount}
+	}
+	if action == "subscription_created" {
+		all, listErr := p.store.ListBillingSubscriptions(ctx, accountID)
+		if listErr != nil {
+			return BillingEventResult{}, listErr
+		}
+		for _, other := range all {
+			if other.Provider == event.Provider && other.ProviderSubscriptionID != providerSubscriptionID && oneOf(other.Status, "active", "trialing", "past_due", "incomplete") {
+				conflictErr := p.store.RecordSubscriptionConflict(ctx, BillingSubscriptionConflictCreate{AccountID: accountID, Provider: event.Provider, DuplicateProviderSubscriptionID: providerSubscriptionID, ExistingProviderSubscriptionID: other.ProviderSubscriptionID, ProviderEventID: event.canonicalEventID(), Metadata: event.Metadata})
+				if conflictErr != nil {
+					return BillingEventResult{}, conflictErr
+				}
+				return BillingEventResult{}, NewError("billing subscription conflicts with an existing current subscription", ErrorOptions{Code: ErrorCodeBilling, Category: ErrorCategoryConflict})
+			}
+		}
+	}
+	status := subscription.Status
+	if status == "" && existing != nil {
+		status = existing.Status
+	}
+	if status == "" {
+		status = "incomplete"
+	}
+	state := CommerceSubscription{Provider: event.Provider, ProviderSubscriptionID: providerSubscriptionID, AccountID: accountID, ProviderCustomerID: firstNonEmpty(customerProviderID(event.Customer), subscription.CustomerID, existingText(existing, func(value *CommerceSubscription) string { return value.ProviderCustomerID })), OfferID: offer.ID, OfferKey: offer.OfferKey, PlanID: offer.PlanID, PlanKey: offer.PlanKey, Status: status, Interval: firstNonEmpty(subscription.Interval, offer.Interval), IntervalCount: firstPositive(subscription.IntervalCount, offer.IntervalCnt), CurrentPeriodStart: firstTime(subscription.PeriodStart, subscription.CurrentPeriodStart, existingTime(existing, func(value *CommerceSubscription) *time.Time { return value.CurrentPeriodStart })), CurrentPeriodEnd: firstTime(subscription.PeriodEnd, subscription.CurrentPeriodEnd, existingTime(existing, func(value *CommerceSubscription) *time.Time { return value.CurrentPeriodEnd })), TrialEnd: firstTime(subscription.TrialEnd, existingTime(existing, func(value *CommerceSubscription) *time.Time { return value.TrialEnd })), CancelAt: firstTime(subscription.CancelAt, existingTime(existing, func(value *CommerceSubscription) *time.Time { return value.CancelAt })), EndedAt: firstTime(subscription.EndedAt, subscription.CanceledAt, existingTime(existing, func(value *CommerceSubscription) *time.Time { return value.EndedAt })), CancelAtPeriodEnd: subscription.CancelAtPeriodEnd, ProviderUpdatedAt: event.OccurredAt, Metadata: mergedBillingMetadata(existing, event.Metadata, subscription.Metadata)}
+	if status == "past_due" {
+		if existing != nil && existing.GraceEndsAt != nil {
+			state.GraceEndsAt = firstTime(existing.GraceEndsAt)
+		} else {
+			grace := event.OccurredAt.UTC().Add(p.pastDueGracePeriod)
+			state.GraceEndsAt = &grace
+		}
+	}
+	if existing != nil && action != "cancellation_scheduled" && action != "cancellation_unscheduled" && !subscription.CancelAtPeriodEnd {
+		state.CancelAtPeriodEnd = existing.CancelAtPeriodEnd
+	}
+	var preservedAllowanceAnchor *time.Time
+	if action == "subscription_plan_changed" && p.provisioning != nil {
+		currentPlan, planErr := p.provisioning.GetUserPlan(ctx, accountID)
+		if planErr != nil {
+			return BillingEventResult{}, planErr
+		}
+		if currentPlan.PlanAssignedAt != nil && !currentPlan.PlanAssignedAt.After(time.Now().UTC()) {
+			preservedAllowanceAnchor = firstTime(currentPlan.PlanAssignedAt)
+		}
+	}
+	subscriptionID, err := p.store.UpsertBillingSubscriptionState(ctx, state)
+	if err != nil {
+		if action == "subscription_created" {
+			all, listErr := p.store.ListBillingSubscriptions(ctx, accountID)
+			if listErr == nil {
+				for _, other := range all {
+					if other.Provider == event.Provider && other.ProviderSubscriptionID != providerSubscriptionID && oneOf(other.Status, "active", "trialing", "past_due", "incomplete") {
+						if conflictErr := p.store.RecordSubscriptionConflict(ctx, BillingSubscriptionConflictCreate{AccountID: accountID, Provider: event.Provider, DuplicateProviderSubscriptionID: providerSubscriptionID, ExistingProviderSubscriptionID: other.ProviderSubscriptionID, ProviderEventID: event.canonicalEventID(), Metadata: event.Metadata}); conflictErr != nil {
+							return BillingEventResult{}, conflictErr
+						}
+						return BillingEventResult{}, NewError("billing subscription conflicts with an existing current subscription", ErrorOptions{Code: ErrorCodeBilling, Category: ErrorCategoryConflict})
+					}
+				}
+			}
+		}
+		return BillingEventResult{}, err
+	}
+	if action == "subscription_plan_changed" {
+		pending, pendingErr := p.store.GetOpenBillingSubscriptionChange(ctx, event.Provider, providerSubscriptionID)
+		if pendingErr != nil {
+			return BillingEventResult{}, pendingErr
+		}
+		if pending != nil {
+			applied := "applied"
+			if pendingErr = p.store.UpdateBillingSubscriptionChange(ctx, pending.ID, BillingSubscriptionChangeUpdate{State: &applied}); pendingErr != nil {
+				return BillingEventResult{}, pendingErr
+			}
+		}
+	}
+	graceExpired := status == "past_due" && ((existing != nil && existing.GraceExpiredAt != nil) || (state.GraceEndsAt != nil && !state.GraceEndsAt.After(time.Now().UTC())))
+	if p.provisioning != nil && strings.TrimSpace(offer.PlanKey) != "" && (oneOf(status, "active", "trialing") || (status == "past_due" && !graceExpired)) {
+		assignedAt := state.CurrentPeriodStart
+		if action == "subscription_plan_changed" {
+			assignedAt = preservedAllowanceAnchor
+			if assignedAt == nil {
+				assignedAt = firstTime(&event.OccurredAt)
+			}
+		}
+		if _, err := p.provisioning.SetUserPlan(ctx, accountID, offer.PlanKey, SetUserPlanOptions{PlanAssignedAt: assignedAt}); err != nil {
+			return BillingEventResult{}, err
+		}
+		if p.autoSelectEntitlementSource {
+			selected, selectErr := p.store.SelectSubscriptionEntitlementSource(ctx, accountID, subscriptionID)
+			if selectErr != nil {
+				return BillingEventResult{}, selectErr
+			}
+			if !selected {
+				return BillingEventResult{}, NewStoreError("subscription entitlement source selection was rejected", ErrorOptions{})
+			}
+		}
+	} else if oneOf(status, "canceled", "expired", "unpaid", "paused", "incomplete_expired") || graceExpired {
+		if err := p.revokeIfCurrent(ctx, accountID, providerSubscriptionID); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	if oneOf(status, "active", "trialing") {
+		if err := p.updateCheckoutFromEvent(ctx, event, "completed"); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	if action == "subscription_renewed" && offer.Grant != nil && offer.Grant.Mode == "cycle_grant" && event.BillingEventID != "" {
+		grantID, grantErr := p.store.CreateBillingCreditGrant(ctx, BillingCreditGrantCreate{SubscriptionID: subscriptionID, Credits: offer.Grant.Credits, Quantity: 1, BillingEventID: event.BillingEventID})
+		if grantErr != nil {
+			return BillingEventResult{}, grantErr
+		}
+		posting, grantErr := p.store.GrantBillingCredit(ctx, grantID, "billing:"+event.canonicalEventID()+":subscription-cycle")
+		if grantErr != nil {
+			return BillingEventResult{}, grantErr
+		}
+		if grantErr = billingLifecyclePostingError("billing subscription grant", posting); grantErr != nil {
+			return BillingEventResult{}, grantErr
+		}
+	}
+	result := handledBilling(event.Type, accountID, providerSubscriptionID)
+	result.Action = action
+	return result, nil
+}
+
+func (p postgresBillingLifecycle) offerForEvent(ctx context.Context, event BillingEvent) (*BillingOffer, error) {
+	if event.Subscription == nil || event.Subscription.Refs == nil {
+		return nil, nil
+	}
+	refs := event.Subscription.Refs
+	return p.store.ResolveBillingOffer(ctx, event.Provider, refs.ProductID, refs.PriceID, refs.LookupKey)
+}
+
+func (p postgresBillingLifecycle) paymentSucceeded(ctx context.Context, event BillingEvent, accountID string) (BillingEventResult, error) {
+	if accountID == "" {
+		return BillingEventResult{}, NewStoreError("billing payment account could not be resolved", ErrorOptions{Retryable: true})
+	}
+	payment := event.Payment
+	metadata := cloneAnyMap(event.Metadata)
+	var topup *BillingTopupResult
+	var err error
+	if payment.Purpose == "credit_topup" && payment.Refs != nil {
+		topup, err = p.store.ResolveBillingTopup(ctx, event.Provider, payment.Refs.ProductID, payment.Refs.PriceID, payment.Refs.LookupKey)
+		if err != nil {
+			return BillingEventResult{}, err
+		}
+		if topup != nil {
+			if metadata == nil {
+				metadata = make(map[string]any)
+			}
+			metadata["credits_per_unit"] = topup.CreditsPerUnit.String()
+		}
+	}
+	paymentID, err := p.store.UpsertBillingPaymentState(ctx, BillingPaymentUpsert{Provider: event.Provider, ProviderPaymentID: payment.canonicalProviderPaymentID(), ProviderInvoiceID: payment.InvoiceID, AccountID: accountID, AmountMinor: payment.AmountMinor, TaxMinor: payment.TaxMinor, Currency: payment.Currency, Purpose: payment.Purpose, Status: payment.Status, ProviderUpdatedAt: event.OccurredAt, Metadata: metadata})
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	if payment.Purpose == "credit_topup" {
+		if topup == nil {
+			return BillingEventResult{}, NewStoreError("billing top-up reference could not be resolved", ErrorOptions{Retryable: true})
+		}
+		if payment.AmountMinor < topup.MinAmountMinor || payment.AmountMinor > topup.MaxAmountMinor || topup.AmountMinor <= 0 || payment.AmountMinor%topup.AmountMinor != 0 {
+			result := handledBilling(event.Type, accountID, "")
+			result.Action = "payment_succeeded_out_of_bounds"
+			return result, nil
+		}
+		quantity := payment.AmountMinor / topup.AmountMinor
+		if quantity > int64(^uint(0)>>1) {
+			return BillingEventResult{}, NewStoreError("billing top-up quantity overflows this platform", ErrorOptions{})
+		}
+		grantID, grantErr := p.store.CreateBillingCreditGrant(ctx, BillingCreditGrantCreate{PaymentID: paymentID, TopupID: topup.TopupID, Credits: topup.CreditsPerUnit, Quantity: int(quantity), BillingEventID: event.BillingEventID})
+		if grantErr != nil {
+			return BillingEventResult{}, grantErr
+		}
+		posting, grantErr := p.store.GrantBillingCredit(ctx, grantID, "billing:"+event.canonicalEventID()+":topup")
+		if grantErr != nil {
+			return BillingEventResult{}, grantErr
+		}
+		if grantErr = billingLifecyclePostingError("billing top-up grant", posting); grantErr != nil {
+			return BillingEventResult{}, grantErr
+		}
+		if err := p.store.UpdateAutoRechargeAttemptByProviderPayment(ctx, AutoRechargeProviderPaymentUpdate{Provider: event.Provider, ProviderPaymentID: payment.canonicalProviderPaymentID(), State: AutoRechargeAttemptSucceeded}); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	if payment.Purpose == "subscription" && event.Subscription != nil {
+		event.Subscription.Status = "active"
+		if _, err := p.applySubscription(ctx, event, accountID, "subscription_renewed"); err != nil {
+			return BillingEventResult{}, err
+		}
+		invoice := BillingInvoice{ProviderInvoiceID: firstNonEmpty(payment.InvoiceID, payment.canonicalProviderPaymentID()), Provider: event.Provider, Status: "paid", AmountPaidMinor: payment.AmountMinor, AmountDueMinor: payment.AmountMinor, Currency: payment.Currency, PeriodStart: event.Subscription.PeriodStart, PeriodEnd: event.Subscription.PeriodEnd}
+		event.Invoice = &invoice
+		if err := p.persistInvoice(ctx, event, accountID); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	if err := p.updateCheckoutFromEvent(ctx, event, "completed"); err != nil {
+		return BillingEventResult{}, err
+	}
+	result := handledBilling(event.Type, accountID, subscriptionEventID(event))
+	result.Action = "payment_succeeded"
+	return result, nil
+}
+
+func (p postgresBillingLifecycle) paymentFailed(ctx context.Context, event BillingEvent, accountID string) (BillingEventResult, error) {
+	if accountID != "" {
+		payment := event.Payment
+		if _, err := p.store.UpsertBillingPaymentState(ctx, BillingPaymentUpsert{Provider: event.Provider, ProviderPaymentID: payment.canonicalProviderPaymentID(), ProviderInvoiceID: payment.InvoiceID, AccountID: accountID, AmountMinor: payment.AmountMinor, TaxMinor: payment.TaxMinor, Currency: payment.Currency, Purpose: payment.Purpose, Status: payment.Status, ProviderUpdatedAt: event.OccurredAt, Metadata: event.Metadata}); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	if err := p.store.UpdateAutoRechargeAttemptByProviderPayment(ctx, AutoRechargeProviderPaymentUpdate{Provider: event.Provider, ProviderPaymentID: event.Payment.canonicalProviderPaymentID(), State: AutoRechargeAttemptFailed, FailureCode: "provider_payment_failed"}); err != nil {
+		return BillingEventResult{}, err
+	}
+	if accountID != "" && event.Subscription != nil {
+		event.Subscription.Status = "past_due"
+		if _, err := p.applySubscription(ctx, event, accountID, "payment_failed_recorded"); err != nil {
+			return BillingEventResult{}, err
+		}
+	}
+	if err := p.updateCheckoutFromEvent(ctx, event, "failed"); err != nil {
+		return BillingEventResult{}, err
+	}
+	result := handledBilling(event.Type, accountID, subscriptionEventID(event))
+	result.Action = "payment_failed_recorded"
+	return result, nil
+}
+
+func (p postgresBillingLifecycle) refund(ctx context.Context, event BillingEvent, accountID string) (BillingEventResult, error) {
+	if accountID == "" {
+		return BillingEventResult{}, NewStoreError("billing refund account could not be resolved", ErrorOptions{Retryable: true})
+	}
+	refund := event.Refund
+	refundID, err := p.store.UpsertBillingRefundState(ctx, BillingRefundUpsert{Provider: event.Provider, ProviderRefundID: refund.canonicalProviderRefundID(), ProviderPaymentID: refund.canonicalProviderPaymentID(), AccountID: accountID, AmountMinor: refund.AmountMinor, Currency: refund.Currency, Reason: refund.Reason, Status: refund.Status, ProviderUpdatedAt: event.OccurredAt, Metadata: event.Metadata})
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	result := handledBilling(event.Type, accountID, "")
+	result.Action = "refund_recorded"
+	if refund.Status != "succeeded" {
+		return result, nil
+	}
+	payment, err := p.store.GetBillingPaymentByProvider(ctx, event.Provider, refund.canonicalProviderPaymentID())
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	if payment == nil || payment.Purpose != "credit_topup" {
+		return result, nil
+	}
+	grantID, err := p.store.GetBillingCreditGrantByPayment(ctx, payment.ID)
+	if err != nil || grantID == "" {
+		return result, err
+	}
+	posting, err := p.store.PostBillingRefund(ctx, refundID, grantID, refund.AmountMinor, "billing:"+event.canonicalEventID()+":refund")
+	if err != nil {
+		return BillingEventResult{}, err
+	}
+	if err := billingLifecyclePostingError("billing refund", posting); err != nil {
+		return BillingEventResult{}, err
+	}
+	result.Action = "refund_clawback"
+	return result, nil
+}
+
+func (p postgresBillingLifecycle) persistInvoice(ctx context.Context, event BillingEvent, accountID string) error {
+	if event.Invoice == nil {
+		return nil
+	}
+	return p.store.UpsertBillingInvoiceState(ctx, BillingInvoiceUpsert{Provider: event.Provider, ProviderInvoiceID: event.Invoice.canonicalProviderInvoiceID(), ProviderSubscriptionID: subscriptionEventID(event), AccountID: accountID, Status: event.Invoice.Status, AmountPaidMinor: event.Invoice.AmountPaidMinor, AmountDueMinor: event.Invoice.AmountDueMinor, Currency: event.Invoice.Currency, PeriodStart: event.Invoice.PeriodStart, PeriodEnd: event.Invoice.PeriodEnd, ProviderUpdatedAt: event.OccurredAt, Metadata: event.Metadata})
+}
+
+func (p postgresBillingLifecycle) updateCheckoutFromEvent(ctx context.Context, event BillingEvent, status string) error {
+	value, ok := event.Metadata["checkout_intent_id"].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return nil
+	}
+	intentID := strings.TrimSpace(value)
+	typedIntentID, err := postgresUUID(intentID, "checkout intent ID")
+	if err != nil {
+		return err
+	}
+	// The SQL transition is deliberately internal here: a verified webhook does
+	// not carry the authenticated SubjectID required by the public store method.
+	return p.store.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		rows, err := tx.Call(ctx, "advance_checkout_intent", typedIntentID, status, nil, nil)
+		if err != nil {
+			return err
+		}
+		row, err := rowRequired(rows, "advance_checkout_intent")
+		if err != nil {
+			return err
+		}
+		value, err := firstScalar(row, "advance_checkout_intent")
+		if err != nil {
+			return err
+		}
+		advanced, err := scalarBool(value, "advance_checkout_intent")
+		if err != nil {
+			return err
+		}
+		if !advanced {
+			return NewStoreError("billing checkout intent transition was rejected", ErrorOptions{Details: map[string]any{"checkout_intent_id": intentID, "status": status}})
+		}
+		return nil
+	})
+}
+
+func (p postgresBillingLifecycle) revokeIfCurrent(ctx context.Context, accountID, providerSubscriptionID string) error {
+	current, err := p.store.GetBillingSubscription(ctx, accountID, []string{"active", "trialing", "past_due"})
+	if err != nil {
+		return err
+	}
+	if current != nil && current.ProviderSubscriptionID != providerSubscriptionID {
+		return nil
+	}
+	if p.provisioning == nil {
+		return nil
+	}
+	if strings.TrimSpace(p.terminalPlanKey) != "" {
+		_, err = p.provisioning.SetUserPlan(ctx, accountID, p.terminalPlanKey, SetUserPlanOptions{})
+		return err
+	}
+	_, err = p.provisioning.UnsetUserPlan(ctx, accountID)
+	return err
+}
+
+func customerProviderID(customer *BillingCustomer) string {
+	if customer == nil {
+		return ""
+	}
+	return customer.canonicalProviderCustomerID()
+}
+
+func handledBilling(eventType BillingEventType, accountID, subscriptionID string) BillingEventResult {
+	return BillingEventResult{Handled: true, AccountID: accountID, Action: strings.ReplaceAll(string(eventType), ".", "_"), SubscriptionID: subscriptionID}
+}
+
+func subscriptionEventID(event BillingEvent) string {
+	if event.Subscription == nil {
+		return ""
+	}
+	return event.Subscription.canonicalProviderSubscriptionID()
+}
+
+func existingText(value *CommerceSubscription, getter func(*CommerceSubscription) string) string {
+	if value == nil {
+		return ""
+	}
+	return getter(value)
+}
+
+func existingTime(value *CommerceSubscription, getter func(*CommerceSubscription) *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	return getter(value)
+}
+
+func firstTime(values ...*time.Time) *time.Time {
+	for _, value := range values {
+		if value != nil {
+			copy := value.UTC()
+			return &copy
+		}
+	}
+	return nil
+}
+
+func firstPositive(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 1
+}
+
+func mergedBillingMetadata(existing *CommerceSubscription, maps ...map[string]any) map[string]any {
+	result := make(map[string]any)
+	if existing != nil {
+		for key, value := range existing.Metadata {
+			result[key] = value
+		}
+	}
+	for _, values := range maps {
+		for key, value := range values {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func billingLifecycleError(action string, event BillingEvent, cause error) error {
+	return NewStoreError(fmt.Sprintf("billing lifecycle %s failed", action), ErrorOptions{Cause: cause, Details: map[string]any{"provider": event.Provider, "event_id": event.canonicalEventID(), "event_type": event.Type}})
+}

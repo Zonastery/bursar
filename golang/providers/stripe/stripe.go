@@ -13,11 +13,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	bursar "github.com/Zonastery/bursar/golang/v2"
-	"github.com/Zonastery/bursar/golang/v2/providers/internal/normalize"
 	"github.com/shopspring/decimal"
 	stripego "github.com/stripe/stripe-go/v84"
 )
@@ -32,7 +32,11 @@ const ProviderName = "stripe"
 type Options struct {
 	APIKey        string
 	WebhookSecret string
-	Client        *stripego.Client
+	Environment   bursar.ProviderEnvironment
+	// HTTPClient is used by stripe-go and is primarily useful for deterministic
+	// tests and application-owned transports.
+	HTTPClient *http.Client
+	Client     *stripego.Client
 }
 
 // Provider uses Stripe's official client for checkout requests and official
@@ -40,6 +44,7 @@ type Options struct {
 type Provider struct {
 	client        *stripego.Client
 	webhookSecret string
+	environment   bursar.ProviderEnvironment
 }
 
 var _ bursar.PaymentProvider = (*Provider)(nil)
@@ -65,6 +70,13 @@ func New(options Options) (*Provider, error) {
 			Category: bursar.ErrorCategoryInvalidRequest,
 		})
 	}
+	environment := options.Environment
+	if environment == "" {
+		environment = bursar.ProviderEnvironmentTest
+	}
+	if err := environment.Validate(); err != nil {
+		return nil, bursar.NewError("invalid Stripe provider environment", bursar.ErrorOptions{Code: bursar.ErrorCodeConfig, Category: bursar.ErrorCategoryInvalidRequest, Cause: err})
+	}
 	client := options.Client
 	if client == nil {
 		apiKey := strings.TrimSpace(options.APIKey)
@@ -74,13 +86,25 @@ func New(options Options) (*Provider, error) {
 				Category: bursar.ErrorCategoryInvalidRequest,
 			})
 		}
-		client = stripego.NewClient(apiKey)
+		if options.HTTPClient != nil {
+			client = stripego.NewClient(apiKey, stripego.WithBackends(stripego.NewBackends(options.HTTPClient)))
+		} else {
+			client = stripego.NewClient(apiKey)
+		}
 	}
-	return &Provider{client: client, webhookSecret: webhookSecret}, nil
+	return &Provider{client: client, webhookSecret: webhookSecret, environment: environment}, nil
 }
 
 // Name returns the stable catalog provider key.
 func (*Provider) Name() string { return ProviderName }
+
+// ProviderEnvironment returns the configured financial namespace.
+func (p *Provider) ProviderEnvironment() bursar.ProviderEnvironment {
+	if p == nil {
+		return ""
+	}
+	return p.environment
+}
 
 // CreateCheckoutSession creates a hosted Stripe Checkout Session. ProductID is
 // interpreted as a Stripe Price ID, and the Bursar account ID is written to
@@ -261,25 +285,32 @@ func (p *Provider) CreatePaymentMethodSetupSession(ctx context.Context, customer
 	return requireStripeResponseText(session.URL, "create payment method setup session", "url")
 }
 
-// CreateCustomer creates a Stripe customer for a previously authorized Bursar
-// account. CustomerProvider has no idempotency key, so an indeterminate
-// response is explicit and callers must reconcile it before retrying.
-func (p *Provider) CreateCustomer(ctx context.Context, email, name string, metadata map[string]string) (string, error) {
+// CreateCustomer creates an idempotent Stripe customer for a previously
+// authorized Bursar account.
+func (p *Provider) CreateCustomer(ctx context.Context, request bursar.CreateCustomerRequest) (string, error) {
 	if p == nil || p.client == nil {
 		return "", stripeUninitializedError()
 	}
 	var err error
-	if email, err = requireStripeInputText(email, "customer email"); err != nil {
+	email, err := requireStripeInputText(request.Email, "customer email")
+	if err != nil {
 		return "", err
 	}
-	if name, err = requireStripeInputText(name, "customer name"); err != nil {
+	name, err := requireStripeInputText(request.Name, "customer name")
+	if err != nil {
 		return "", err
 	}
-	customer, err := p.client.V1Customers.Create(ctx, &stripego.CustomerCreateParams{
+	idempotencyKey, err := requireStripeIdempotencyKey(request.IdempotencyKey)
+	if err != nil {
+		return "", err
+	}
+	params := &stripego.CustomerCreateParams{
 		Email:    stripego.String(email),
 		Name:     stripego.String(name),
-		Metadata: cloneMetadata(metadata),
-	})
+		Metadata: cloneMetadata(request.Metadata),
+	}
+	params.SetIdempotencyKey(idempotencyKey)
+	customer, err := p.client.V1Customers.Create(ctx, params)
 	if err != nil {
 		return "", stripeRequestError("create customer", err, true)
 	}
@@ -815,7 +846,7 @@ func (p *Provider) stripePlanChangePreview(ctx context.Context, invoice *stripeg
 // HandleWebhook verifies Stripe-Signature against the exact raw request body
 // before decoding and normalizing its event. Invalid signatures are surfaced as
 // errors and never enter Bursar's billing-event lifecycle.
-func (p *Provider) HandleWebhook(_ context.Context, request bursar.WebhookRequest) (bursar.WebhookResult, error) {
+func (p *Provider) HandleWebhook(ctx context.Context, request bursar.WebhookRequest) (bursar.WebhookResult, error) {
 	if p == nil || p.webhookSecret == "" {
 		return bursar.WebhookResult{}, bursar.NewError("Stripe provider is not initialized", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid})
 	}
@@ -834,18 +865,19 @@ func (p *Provider) HandleWebhook(_ context.Context, request bursar.WebhookReques
 			Cause:    err,
 		})
 	}
-	if event.Data == nil {
+	if (p.environment == bursar.ProviderEnvironmentLive) != event.Livemode {
+		return bursar.WebhookResult{}, bursar.NewError("Stripe webhook environment does not match provider configuration", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
+	}
+	if event.Data == nil || len(event.Data.Raw) == 0 {
 		return bursar.WebhookResult{}, bursar.NewError("Stripe webhook has no event data", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
 	}
-	object := make(map[string]any, len(event.Data.Object))
-	for key, value := range event.Data.Object {
-		object[key] = value
-	}
-	occurredAt := time.Unix(event.Created, 0).UTC()
-	if event.Created <= 0 {
+	if event.Created < 0 {
 		return bursar.WebhookResult{}, bursar.NewError("Stripe webhook has an invalid timestamp", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
 	}
-	normalized := normalize.Event(ProviderName, event.ID, string(event.Type), occurredAt, request.RawBody, object)
+	normalized, err := p.mapStripeEvent(ctx, event, request.RawBody)
+	if err != nil {
+		return bursar.WebhookResult{}, err
+	}
 	return bursar.WebhookResult{
 		Received:  true,
 		Provider:  ProviderName,

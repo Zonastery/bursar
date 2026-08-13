@@ -3,7 +3,10 @@
 
 package bursar
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // BillingLifecycleProcessor is an optional BillingStore capability for the
 // durable, built-in billing lifecycle. It is invoked only after Bursar has
@@ -17,6 +20,10 @@ import "context"
 // necessary.
 type BillingLifecycleProcessor interface {
 	ProcessBillingEvent(context.Context, BillingEvent, string) (BillingEventResult, error)
+}
+
+type configuredBillingLifecycleProcessor interface {
+	processBillingEvent(context.Context, BillingEvent, string, BillingProvisioningPort, bool, time.Duration, string) (BillingEventResult, error)
 }
 
 // IsBillingLifecycleEventType reports whether eventType belongs to Bursar's

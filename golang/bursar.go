@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // BillingServiceOptions configures application-owned handlers around Bursar's
@@ -14,8 +15,12 @@ import (
 // handlers or a BillingStore implementation; it is never inferred from an
 // unverified provider webhook.
 type BillingServiceOptions struct {
-	Handlers       map[BillingEventType]BillingEventHandler
-	DefaultHandler BillingEventHandler
+	Handlers                    map[BillingEventType]BillingEventHandler
+	DefaultHandler              BillingEventHandler
+	Provisioning                BillingProvisioningPort
+	AutoSelectEntitlementSource *bool
+	PastDueGracePeriod          *time.Duration
+	TerminalPlanKey             string
 }
 
 // Options constructs Bursar's single application-facing facade. CreditStore
@@ -64,10 +69,7 @@ func New(options Options) (*Bursar, error) {
 	if err != nil {
 		return nil, err
 	}
-	catalog, err := NewCatalogService(options.CreditStore)
-	if err != nil {
-		return nil, err
-	}
+	catalog := credits.Catalog()
 	accounts, err := NewAccountService(credits, catalog)
 	if err != nil {
 		return nil, err
@@ -76,12 +78,31 @@ func New(options Options) (*Bursar, error) {
 	if options.BillingStore == nil {
 		return sdk, nil
 	}
-	billing, err := NewBillingService(options.BillingStore)
+	var billing *BillingService
+	if options.BillingOptions == nil {
+		billing, err = NewBillingService(options.BillingStore)
+	} else {
+		billing, err = NewBillingService(options.BillingStore, *options.BillingOptions)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if err := applyBillingOptions(billing, options.BillingOptions); err != nil {
-		return nil, err
+	if billing.provisioning == nil {
+		billing.provisioning = credits
+	}
+	autoRechargeStore, _ := options.BillingStore.(AutoRechargeStore)
+	autoRechargeOptions := AutoRechargeServiceOptions{}
+	if options.CommerceOptions != nil {
+		if options.CommerceOptions.AutoRechargeStore != nil {
+			autoRechargeStore = options.CommerceOptions.AutoRechargeStore
+		}
+		autoRechargeOptions = options.CommerceOptions.AutoRechargeOptions
+	}
+	if autoRechargeStore != nil {
+		billing.AutoRecharge, err = NewAutoRechargeService(catalog, autoRechargeStore, autoRechargeOptions)
+		if err != nil {
+			return nil, err
+		}
 	}
 	sdk.Billing = billing
 	if options.CommerceOptions == nil {
@@ -223,6 +244,20 @@ func applyBillingOptions(service *BillingService, options *BillingServiceOptions
 		}
 	}
 	service.SetDefaultHandler(options.DefaultHandler)
+	if options.Provisioning != nil {
+		service.provisioning = options.Provisioning
+	}
+	service.autoSelectEntitlementSource = true
+	if options.AutoSelectEntitlementSource != nil {
+		service.autoSelectEntitlementSource = *options.AutoSelectEntitlementSource
+	}
+	if options.PastDueGracePeriod != nil && *options.PastDueGracePeriod < 0 {
+		return NewError("billing past-due grace period must be non-negative", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	if options.PastDueGracePeriod != nil {
+		service.pastDueGracePeriod = *options.PastDueGracePeriod
+	}
+	service.terminalPlanKey = options.TerminalPlanKey
 	return nil
 }
 

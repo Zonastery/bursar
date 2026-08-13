@@ -1,4 +1,16 @@
--- Targeted lot mutation, expiry, revocation, and source-preserving refunds.
+-- Migration: 011_credit_lot_rpc.sql
+-- Purpose: Mutate credit lots, expire or revoke sources, and restore refunds.
+-- Depends on: Lot/ledger schema through 007_indexes.sql plus 008_catalog_rpc.sql
+--   and 009_credit_account_rpc.sql.
+-- Security: SECURITY DEFINER RPCs remain tenant-bound, acquire account locks
+--   before lot/source locks, and use transaction-local internal mutation context.
+
+-- Mutate credit lots, revoke sources, and restore refunds.
+
+-- Lock the tenant account before the selected lot and its source rows, then post
+-- one exact debit and allocation chain under internal mutation context. The
+-- idempotency digest makes an identical retry return the original ledger entry
+-- while a divergent request fails before any balance mutation.
 
 CREATE FUNCTION bursar.targeted_lot_debit(
     p_lot_id uuid,
@@ -23,9 +35,12 @@ DECLARE
     v_source_remaining numeric;
     v_source_take numeric;
 BEGIN
+    p_amount := round(p_amount, 6);
+
     IF p_kind IS NULL
        OR p_kind NOT IN ('expiry', 'revocation', 'refund_clawback')
-       OR NOT bursar.is_finite_numeric(p_amount)
+       OR p_amount IS NULL
+       OR NOT bursar.is_credit_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
@@ -84,6 +99,11 @@ BEGIN
 
     IF NOT FOUND OR v_lot.granted - v_lot.consumed < p_amount THEN
         RAISE EXCEPTION 'lot_unavailable' USING ERRCODE = '22023';
+    END IF;
+
+    IF NOT bursar.is_credit_numeric(v_balance - p_amount) THEN
+        RAISE EXCEPTION 'balance_out_of_range'
+            USING ERRCODE = '22003';
     END IF;
 
     PERFORM set_config('bursar.mutation_context', 'internal', true);
@@ -198,6 +218,10 @@ BEGIN
 END
 $$;
 
+-- Claw back one positive source entry while preserving its lot-source lineage.
+-- Account-first locking serializes refunds and spending; exact source limits and
+-- request digests yield stable replay, conflict, or over-clawback outcomes, with
+-- any amount no longer present in a lot recorded as refund debt.
 CREATE FUNCTION bursar.clawback_credit_source(
     p_source_entry_id uuid,
     p_amount numeric,
@@ -229,7 +253,11 @@ DECLARE
     v_remaining numeric;
     v_allocation_id uuid;
 BEGIN
-    IF NOT bursar.is_finite_numeric(p_amount)
+    p_amount := round(p_amount, 6);
+
+    IF p_source_entry_id IS NULL
+       OR p_amount IS NULL
+       OR NOT bursar.is_credit_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
@@ -288,7 +316,7 @@ BEGIN
             RETURN QUERY
             SELECT
                 v_existing.id,
-                v_existing.balance_after,
+                v_existing.balance_after::numeric,
                 true,
                 NULL::text;
         ELSE
@@ -311,6 +339,12 @@ BEGIN
             v_balance,
             false,
             'clawback_exceeds_credit_source';
+        RETURN;
+    END IF;
+
+    IF NOT bursar.is_credit_numeric(v_balance - p_amount) THEN
+        RETURN QUERY
+        SELECT NULL::uuid, v_balance, false, 'balance_out_of_range';
         RETURN;
     END IF;
 
@@ -450,6 +484,11 @@ BEGIN
 END
 $$;
 
+-- 2. Expiry and revocation
+
+-- Select due tenant lots in deterministic order and, for mutation runs, claim
+-- each account with SKIP LOCKED before invoking the idempotent targeted debit.
+-- Dry runs are read-only projections; repeated sweeps reuse each lot's expiry key.
 CREATE FUNCTION bursar.sweep_expired_lots(
     p_limit integer DEFAULT 100,
     p_subject_id uuid DEFAULT NULL,
@@ -591,6 +630,8 @@ BEGIN
 END
 $$;
 
+-- Map the targeted lot-debit exceptions to stable revocation result codes while
+-- retaining the helper's tenant binding, account-first lock order, and replay key.
 CREATE FUNCTION bursar.revoke_lot(
     p_lot_id uuid,
     p_amount numeric,
@@ -605,6 +646,18 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
+    p_amount := round(p_amount, 6);
+
+    IF p_lot_id IS NULL
+       OR p_amount IS NULL
+       OR NOT bursar.is_credit_numeric(p_amount)
+       OR p_amount <= 0
+       OR NOT bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
+    THEN
+        RETURN QUERY SELECT NULL::uuid, 'invalid_request';
+        RETURN;
+    END IF;
+
     RETURN QUERY
     SELECT
         bursar.targeted_lot_debit(
@@ -619,11 +672,19 @@ EXCEPTION
         RETURN QUERY SELECT NULL::uuid, 'idempotency_conflict';
     WHEN invalid_parameter_value THEN
         RETURN QUERY SELECT NULL::uuid, 'lot_unavailable';
+    WHEN numeric_value_out_of_range THEN
+        RETURN QUERY SELECT NULL::uuid, 'balance_out_of_range';
     WHEN check_violation THEN
         RETURN QUERY SELECT NULL::uuid, 'balance_lot_mismatch';
 END
 $$;
 
+-- 3. Source-preserving refunds
+
+-- Lock the subject account, append one exact refund ledger entry, and restore
+-- original lot and source allocations in reverse spend order. Request-digest
+-- idempotency fences replays; debt repayment, new-lot fallback, and immediate
+-- re-expiry occur atomically under transaction-local mutation context.
 CREATE FUNCTION bursar.refund_credit(
     p_subject_id uuid,
     p_amount numeric,
@@ -665,9 +726,12 @@ DECLARE
     v_source_restore numeric;
     v_restore_remaining numeric;
 BEGIN
+    p_amount := round(p_amount, 6);
+
     IF p_subject_id IS NULL
        OR p_original_entry_id IS NULL
-       OR NOT bursar.is_finite_numeric(p_amount)
+       OR p_amount IS NULL
+       OR NOT bursar.is_credit_numeric(p_amount)
        OR p_amount <= 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
@@ -732,7 +796,7 @@ BEGIN
             RETURN QUERY
             SELECT
                 v_existing.id,
-                v_existing.balance_after,
+                v_existing.balance_after::numeric,
                 true,
                 NULL::text;
         ELSE
@@ -751,6 +815,12 @@ BEGIN
     IF v_refunded + p_amount > -v_original.amount THEN
         RETURN QUERY
         SELECT NULL::uuid, NULL::numeric, false, 'refund_exceeds_original';
+        RETURN;
+    END IF;
+
+    IF NOT bursar.is_credit_numeric(v_balance + p_amount) THEN
+        RETURN QUERY
+        SELECT NULL::uuid, v_balance, false, 'balance_out_of_range';
         RETURN;
     END IF;
 
@@ -1002,6 +1072,10 @@ BEGIN
 END
 $$;
 
+-- Resolve a debit entry's remaining refundable exact amount under its account
+-- lock, delegate source restoration to refund_credit, and reverse quota lineage
+-- only after a full refund. The original caller payload defines replay identity,
+-- so omitted-amount retries return the stored outcome instead of recalculating.
 CREATE FUNCTION bursar.refund_credit_by_entry(
     p_original_entry_id uuid,
     p_amount numeric,
@@ -1032,6 +1106,11 @@ DECLARE
     v_correction_event_id uuid;
     v_request_digest bytea;
 BEGIN
+    p_amount := CASE
+        WHEN p_amount IS NULL THEN NULL
+        ELSE round(p_amount, 6)
+    END;
+
     IF p_original_entry_id IS NULL
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
@@ -1045,7 +1124,7 @@ BEGIN
            16384
        )
        OR (p_amount IS NOT NULL AND (
-           NOT bursar.is_finite_numeric(p_amount) OR p_amount <= 0
+           NOT bursar.is_credit_numeric(p_amount) OR p_amount <= 0
        ))
     THEN
         RETURN QUERY
@@ -1080,11 +1159,26 @@ BEGIN
         RETURN;
     END IF;
 
+    SELECT account.subject_id
+    INTO v_subject_id
+    FROM bursar.credit_accounts AS account
+    WHERE account.id = v_original.account_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'original entry account is missing'
+            USING ERRCODE = '23503';
+    END IF;
+
+    -- Preserve the global subject-before-account lock order used by personal
+    -- account RPCs. Calling refund_credit after taking only the account lock
+    -- would invert account_for_subject's order and could deadlock with account
+    -- provisioning or pseudonymization for the same subject.
+    PERFORM bursar.account_for_subject(v_subject_id);
+
     -- Serialize replay and remaining-amount calculation with every posting on
     -- this account. In particular, two omitted-amount refunds with different
     -- keys must not both calculate the same refundable remainder.
-    SELECT account.subject_id
-    INTO v_subject_id
+    PERFORM 1
     FROM bursar.credit_accounts AS account
     WHERE account.id = v_original.account_id
     FOR UPDATE;
@@ -1120,8 +1214,8 @@ BEGIN
             SELECT
                 v_existing.id,
                 v_subject_id,
-                v_existing.amount,
-                v_existing.balance_after,
+                v_existing.amount::numeric,
+                v_existing.balance_after::numeric,
                 true,
                 NULL::text;
         ELSE
@@ -1152,7 +1246,7 @@ BEGIN
             v_subject_id,
             0::numeric,
             (
-                SELECT account.balance
+                SELECT account.balance::numeric
                 FROM bursar.credit_accounts AS account
                 WHERE account.id = v_original.account_id
             ),
@@ -1268,7 +1362,7 @@ BEGIN
                 ) DO NOTHING
                 RETURNING id INTO v_correction_event_id;
 
-                -- Calendar quotas use quota_windows as their admission cache.
+                -- Non-rolling quotas use quota_windows as their admission cache.
                 -- Rolling quotas read the immutable event stream directly.
                 IF v_correction_event_id IS NOT NULL THEN
                     UPDATE bursar.quota_windows
@@ -1298,6 +1392,12 @@ BEGIN
 END
 $$;
 
+-- 4. Operation-scoped revocation
+
+-- Lock the tenant account and revoke every remaining lot sourced by one operation
+-- in deterministic allocation order. Per-lot idempotency keys keep repeated calls
+-- side-effect safe, while each aggregate result reports only credits revoked by that
+-- call. Any child failure rolls back the whole aggregate.
 CREATE FUNCTION bursar.revoke_subject_credits_by_operation(
     p_subject_id uuid,
     p_operation text
@@ -1372,7 +1472,7 @@ BEGIN
     RETURN QUERY
     SELECT
         v_revoked,
-        account.balance,
+        account.balance::numeric,
         NULL::text
     FROM bursar.credit_accounts AS account
     WHERE account.id = v_account;

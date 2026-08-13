@@ -51,6 +51,8 @@ def render_sql_shape_schema(schema: dict[str, object]) -> str:
     payload = json.dumps(compact_shape_schema(schema), separators=(",", ":"))
     return f"""\
 {SQL_SCHEMA_BEGIN}
+-- Embed the generated catalog shape contract in PostgreSQL so write-boundary
+-- and projection validators share structural definitions with the SDKs.
 CREATE FUNCTION bursar.catalog_document_shape_schema()
 RETURNS jsonb
 LANGUAGE sql

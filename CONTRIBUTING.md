@@ -187,7 +187,7 @@ Implement the `CreditStore` ABC in `python/src/bursar/credits/`:
 
 Releases are tag-triggered. The Python and npm packages are published from the
 same tag via **OIDC trusted publishing** (no long-lived tokens); the Go module
-is distributed directly from that immutable source tag:
+is distributed directly from an immutable nested-module tag:
 
 ```bash
 # tag and push (version must match python/pyproject.toml and javascript/package.json)
@@ -195,22 +195,29 @@ git tag v2.0.2
 git push origin v2.0.2
 ```
 
-On a `v*` tag, CI runs the full matrix, then two separate publish jobs run under
+On a `v*` tag, CI runs the full matrix, then the ordered publish jobs run under
 a **protected `release` GitHub environment**:
 
+- `release-go-tag` — creates or verifies the nested Go module tag at the release
+  commit.
 - `release-pypi` — `uv build && uv publish` to PyPI via OIDC.
 - `release-npm` — Bun installs and builds the SDK, then
   `npm publish --access public --provenance` publishes it via npm OIDC.
 
 The Go SDK lives in `golang/` as the nested module
 `github.com/Zonastery/bursar/golang/v2`. Its `/v2` semantic import suffix is
-verified against the shared release version before either registry is touched.
-No separate Go registry or release CLI is needed.
+verified against the shared release version before anything is published. Once
+the complete release preflight passes, `release-go-tag` creates
+`golang/v2.0.2` at the exact commit referenced by `v2.0.2`. A rerun accepts an
+existing nested tag only when it resolves to that same commit; a conflicting
+tag fails the release. Maintainers create and push only the shared root tag—the
+workflow owns the nested tag. No separate Go registry or release CLI is needed.
 
-Splitting the jobs means a failure in one registry does not leave the other
-half-published, and the `release` environment lets maintainers require approval
-before any publish runs. Tag (release) runs are explicitly **not** cancellable
-in the workflow concurrency config so a publish cannot be killed mid-flight.
+The ordered, idempotent jobs let maintainers recover from a registry outage by
+rerunning the same immutable release, and the `release` environment allows an
+approval requirement before publishing begins. Tag (release) runs are
+explicitly **not** cancellable in the workflow concurrency config so a publish
+cannot be killed mid-flight.
 
 ### One-time maintainer setup
 
@@ -228,3 +235,6 @@ in the workflow concurrency config so a publish cannot be killed mid-flight.
 - **GitHub environment**: create a `release` environment (Settings →
   Environments) and, ideally, add required reviewers and restrict it to tag
   refs.
+- **Go tag permission**: keep Actions' `contents: write` permission enabled and,
+  if repository rules protect tags, allow `ci.yml` to create `golang/v*`. The
+  release job fails closed if it cannot create or verify that nested tag.

@@ -1,27 +1,47 @@
 ---
 title: Go API
 sidebar_label: Go API
-description: Use Bursar from Go with exact decimal amounts, context-aware operations, and the shared PostgreSQL contract.
+description: Use Bursar from Go for exact pricing, credits, billing, providers, storage projections, and runtime operations.
 ---
 
 # Go API
 
-Install the versioned Go module:
+Install the versioned module:
 
 ```bash
 go get github.com/Zonastery/bursar/golang/v2
 ```
 
-The Go SDK is an idiomatic mirror of Bursar's Python and TypeScript contracts.
-Its public operations accept `context.Context` first and return `(T, error)`.
-It does not include a migration or administrative CLI: use the Python `bursar`
-CLI to apply the shared PostgreSQL baseline and create tenants.
+The Go SDK mirrors Bursar's Python and TypeScript contracts with
+`context.Context`-first operations and typed `(T, error)` results.
 
-## Construct the facade
+:::important Python owns the CLI
+The Go module deliberately has no CLI, migration command, or tenant
+administration command. Use the Python `bursar` CLI to apply the shared SQL
+baseline and administer tenants, then use Go for application runtime behavior.
+See the [quickstart](../quickstart.mdx).
+:::
 
-Create one tenant-bound store, then attach it to the facade. `TenantID` is a
-required UUID-formatted string; the constructor validates it before opening a
-database connection.
+## Package map
+
+| Area                     | Public Go surface                                                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Facade and runtime       | `bursar.New`, `Bursar`, `NewBursarRuntime`                                                                                                 |
+| Catalog and pricing      | `CatalogService`, `PricingEngine`, `UsageMetrics`                                                                                          |
+| Credits and accounting   | `CreditsService`, exact `Amount`, priced usage, leases, plans, quotas, teams, ledger, and analytics                                        |
+| Billing and commerce     | `BillingService`, normalized lifecycle events, customer/subscription/invoice/payment state, checkout, auto-recharge, and `CommerceService` |
+| Payment providers        | `providers/stripe`, `providers/dodo`, `providers/mock`, and `ProviderRegistry`                                                             |
+| Storage and outbox       | `PostgresStorageRepository`, `OutboxWorker`, projection handlers, maintenance, `storage/clickhouse`, and `storage/s3`                      |
+| Telemetry and resilience | `Instrumentation`, `telemetry/opentelemetry`, and `RetryBursarOperation`                                                                   |
+
+The complete exported signatures are available on
+[pkg.go.dev](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2).
+
+## Construct the facade and runtime
+
+Create one tenant-bound store. Passing it as both `CreditStore` and
+`BillingStore` enables the default PostgreSQL billing lifecycle as well as the
+catalog, credits, and account surfaces.
 
 ```go
 package main
@@ -36,7 +56,6 @@ import (
 
 func main() {
 	ctx := context.Background()
-
 	store, err := bursar.NewPostgresStore(ctx, os.Getenv("DATABASE_URL"), bursar.PostgresStoreOptions{
 		TenantID:            os.Getenv("BURSAR_TENANT_ID"),
 		ProviderEnvironment: bursar.ProviderEnvironmentTest,
@@ -44,75 +63,213 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer store.Close()
 
-	sdk, err := bursar.New(bursar.Options{CreditStore: store})
+	sdk, err := bursar.New(bursar.Options{
+		CreditStore:  store,
+		BillingStore: store,
+	})
+	if err != nil {
+		_ = store.Close()
+		log.Fatal(err)
+	}
+
+	runtime, err := bursar.NewBursarRuntime(bursar.BursarRuntimeOptions{Bursar: sdk})
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := sdk.LoadCatalog(ctx); err != nil {
+	if err := runtime.Start(ctx); err != nil { // Loads the active catalog by default.
 		log.Fatal(err)
+	}
+	defer runtime.Close(context.Background())
+
+	if !runtime.Health().Ready {
+		log.Fatal("Bursar runtime is not ready")
 	}
 }
 ```
 
-The SDK has no migration or administrative CLI. Before this code runs, apply
-the shared SQL baseline and create the tenant with the Python CLI as shown in
-the [quickstart](../quickstart.mdx).
+`Bursar` exposes `Credits`, `Catalog`, `Accounts`, and optional `Billing` and
+`Commerce` capabilities. `BursarRuntime` coordinates catalog loading,
+background `RuntimeComponent` instances, local readiness, dependency checks,
+flush, and reverse-order close. It never runs migrations or schedules
+maintenance for the host.
 
-## Exact amounts
+## Exact and metric-priced credits
 
-All credits and prices use `bursar.Amount`, an alias of
-[`shopspring/decimal`](https://pkg.go.dev/github.com/shopspring/decimal)'s
-exact decimal type. Do not pass `float64` values through application billing
-paths. Parse external input as a canonical base-10 string and preserve the
-result as an amount:
+All credits, measures, and prices use `bursar.Amount`, an alias of the
+battle-tested [`shopspring/decimal`](https://pkg.go.dev/github.com/shopspring/decimal)
+type. Parse runtime input with `NewAmount`; use `MustAmount` only for static
+constants and tests. `QuantizeMoney` applies the shared six-decimal, half-up
+accounting rule.
 
 ```go
-package main
-
-import (
-	"fmt"
-
-	bursar "github.com/Zonastery/bursar/golang/v2"
-)
-
-func main() {
-	amount, err := bursar.NewAmount("25.125")
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(bursar.QuantizeMoney(amount).StringFixed(bursar.MoneyDecimalPlaces)) // 25.125000
+metrics := bursar.UsageMetrics{
+	Operation: "completion",
+	Measures: map[string]bursar.Amount{
+		"input_tokens":  bursar.MustAmount("1200"),
+		"output_tokens": bursar.MustAmount("300"),
+	},
+	Dimensions: map[string]any{"model": "gpt-5"},
 }
+
+charged, err := sdk.Credits.DeductUsage(ctx, userID, metrics, bursar.PricedUsageOptions{
+	IdempotencyKey: "request:job-42",
+})
 ```
 
-`QuantizeMoney` applies Bursar's six-decimal, half-up accounting rule. Use
-`MustAmount` only for static program constants or tests; parse runtime values
-with `NewAmount` so invalid input returns an error.
+`DeductUsage`, `CanAffordUsage`, `RecordUsageMetrics`, and `DeductTeamUsage`
+price `UsageMetrics` with the subject's effective catalog and rate card.
+`ReserveUsage` records the pricing context on a durable lease;
+`SettleUsage` prices final metrics against that immutable lease revision, so a
+catalog activation cannot change an in-flight charge.
+
+The lower-level exact-amount methods remain available for administrative or
+already-priced operations: `AddCredits`, `Deduct`, `Reserve`, `Settle`,
+`Release`, `Renew`, refunds, grants, plans, entitlements, quotas, teams,
+ledger pages, usage receipts, and spend aggregates.
+
+## Billing management and provider events
+
+`BillingService` owns durable event claim/complete/fail processing and the
+default provider-neutral PostgreSQL lifecycle. Its management methods cover
+checkout intents, customer and subscription state, preferences, invoices,
+subscription changes, offer/top-up resolution, grace expiry, and
+pseudonymization. When the store supports auto-recharge, the facade also
+attaches `Billing.AutoRecharge` for profile, quote, enable/disable, retry, and
+post-deduction processing. `CommerceService` adds checkout, verified webhook,
+subscription commands, plan changes, portals, invoice links, and account
+overview operations.
+
+Provider adapters verify raw webhook signatures before returning a normalized
+`BillingEvent`. Only then should the application ingest the event:
+
+```go
+webhook, err := bursar.WebhookRequestFromHTTP(request, 1<<20)
+if err != nil {
+	return err
+}
+verified, err := provider.HandleWebhook(request.Context(), webhook)
+if err != nil {
+	return err
+}
+if verified.Event != nil {
+	_, err = sdk.IngestBillingEvent(request.Context(), *verified.Event)
+}
+return err
+```
+
+The maintained adapters are:
+
+- [`providers/stripe.New`](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2/providers/stripe#New),
+  backed by the official `stripe-go` client.
+- [`providers/dodo.New`](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2/providers/dodo#New),
+  backed by Dodo's official Go client and Standard Webhooks verification.
+- [`providers/mock.New`](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2/providers/mock#New),
+  a deterministic in-memory implementation for tests and local examples only.
+
+Stripe and Dodo implement the portable checkout and webhook contract plus
+their supported optional capabilities, including checkout status, customer
+and payment-method portals, customer creation, subscriptions, invoices,
+saved-payment charges, and plan changes. `ProviderRegistry` lazily constructs
+configured providers once. When a registry is attached through
+`CommerceOptions`, the facade rejects a live, test, or sandbox environment that
+does not match the tenant-bound store.
+
+## Storage projections, outbox, and maintenance
+
+PostgreSQL remains authoritative for accounting and the transactional outbox.
+`NewPostgresStorageRepositoryFromStore` exposes leased claim renewal,
+completion, retry/dead-letter recovery, stats, canonical usage exports, and
+billing-payload exports.
+
+```go
+repository, err := bursar.NewPostgresStorageRepositoryFromStore(store)
+if err != nil {
+	return err
+}
+usageHandler, err := bursar.NewUsageChargeOutboxHandler(repository, usageSink)
+if err != nil {
+	return err
+}
+archiveHandler, err := bursar.NewBillingPayloadOutboxHandler(repository, billingArchive)
+if err != nil {
+	return err
+}
+worker, err := bursar.NewOutboxWorker(
+	repository,
+	[]bursar.OutboxHandler{usageHandler, archiveHandler},
+	bursar.OutboxWorkerOptions{Concurrency: 4},
+)
+```
+
+`OutboxWorker` is a bounded, concurrent `RuntimeComponent` with claim
+heartbeats, exponential retry delays, single-flight flushes, claim-loss
+reporting, and dead-letter limits. The two supplied handlers project only
+canonical records reloaded from PostgreSQL when necessary.
+
+Optional projection packages keep PostgreSQL as the financial authority:
+
+- [`storage/clickhouse.NewUsageStore`](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2/storage/clickhouse#NewUsageStore)
+  uses the official `clickhouse-go/v2` connection for idempotent usage
+  projection, schema compatibility checks, receipt history, and spend
+  analytics.
+- [`storage/s3.NewBillingArchive`](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2/storage/s3#NewBillingArchive)
+  uses the official AWS SDK for Go v2 to archive canonical billing envelopes
+  under deterministic tenant-scoped keys. It supports the AWS credential
+  chain, S3-compatible endpoints, server-side encryption, and checksums.
+
+`NewBursarMaintenanceFromStore` runs bounded tenant-scoped lease, credit,
+catalog-change, and optional billing-grace work when invoked by the host.
+`NewBursarOperatorMaintenance` is restricted to an unscoped
+`bursar_operator` PostgreSQL client for storage-retention and partition work.
+Neither helper schedules itself.
+
+## Telemetry and retry
+
+Core instrumentation is vendor-neutral and no-op by default. To use the
+official
+[`telemetry/opentelemetry`](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2/telemetry/opentelemetry)
+Go API adapter, configure the host's SDK/exporters and enable it **before**
+constructing stores and services:
+
+```go
+import bursarotel "github.com/Zonastery/bursar/golang/v2/telemetry/opentelemetry"
+
+restore, err := bursarotel.Enable(bursarotel.Options{})
+if err != nil {
+	return err
+}
+defer restore()
+```
+
+The adapter emits operation spans, counts, and durations through host-provided
+tracer and meter providers. Bursar allowlists and sanitizes low-cardinality
+attributes; raw SQL, provider payloads, secrets, emails, and full identifiers
+are excluded.
+
+`RetryBursarOperation` uses bounded, context-aware exponential backoff from
+`cenkalti/backoff/v5`. By default it makes at most three attempts and retries
+only typed Bursar errors marked retryable. Retry mutations only when they are
+replay-safe and always reuse the exact idempotency key.
+
+```go
+result, err := bursar.RetryBursarOperation(ctx, func(ctx context.Context) (bursar.BalanceResult, error) {
+	return sdk.Credits.GetBalance(ctx, userID)
+})
+```
 
 ## Errors
 
 SDK failures are typed `*bursar.BursarError` values. Use Go's normal
-`errors.As`/`errors.Is` flow or `bursar.AsBursarError`; the stable error code,
-category, retryability, and indeterminate-write flag let HTTP or RPC adapters
-make safe decisions without inspecting a message string.
+`errors.As`/`errors.Is` flow or `bursar.AsBursarError`; stable codes,
+categories, retryability, and the indeterminate-write flag let transport
+adapters make safe decisions without parsing messages.
 
 ```go
 if classified, ok := bursar.AsBursarError(err); ok && classified.Retryable {
-	// Retry mutations only with the original idempotency key.
+	// Retry only a read or a replay-safe mutation with its original key.
 }
 ```
 
-## PostgreSQL and providers
-
-The SDK uses Bursar's existing PostgreSQL RPC contract and binds a tenant to
-each database transaction. It intentionally does not ship SQL migrations or
-framework-specific web handlers. Provider integrations consume raw webhook
-bytes and headers, so applications can use standard `net/http` or their own
-router without a Next.js-style adapter.
-
-Follow the [quickstart](../quickstart.mdx) for the shared migration and tenant
-setup, then use the generated Go API on
-[pkg.go.dev](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2) for the exact
-facade, store, billing, and commerce signatures.
+The Go package contains no router integration or CLI. Applications retain
+their own `net/http`, Chi, Gin, Fiber, gRPC, worker, and scheduler composition.

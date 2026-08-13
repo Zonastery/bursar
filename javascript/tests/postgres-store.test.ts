@@ -5,6 +5,8 @@ import { PostgresStore as BasePostgresStore } from "../src/credits/postgres/stor
 import { PostgresBillingStore as BasePostgresBillingStore } from "../src/billing/postgres/store.js";
 import { PostgresClient } from "../src/shared/postgres-client.js";
 import { StoreUnavailableError } from "../src/errors.js";
+import { LeaseRepository } from "../src/credits/postgres/repositories/lease.js";
+import { TeamRepository } from "../src/credits/postgres/repositories/team.js";
 
 const D = (n: number | string) => new Decimal(n);
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
@@ -12,6 +14,8 @@ const TEST_USER_ID = "00000000-0000-0000-0000-000000000002";
 const TEST_PLAN_ID = "00000000-0000-0000-0000-000000000003";
 const TEST_CHARGE_ID = "00000000-0000-0000-0000-000000000004";
 const TEST_LEDGER_ID = "00000000-0000-0000-0000-000000000005";
+const TEST_LEASE_ID = "00000000-0000-0000-0000-000000000006";
+const TEST_TEAM_ID = "00000000-0000-0000-0000-000000000007";
 
 class PostgresStore extends BasePostgresStore {
   constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
@@ -1263,5 +1267,63 @@ describe("PostgresStore", () => {
     // Quantization to 6dp ROUND_HALF_UP: 100.12345... → 100.1235.
     const quantized = result.amount.toDecimalPlaces(4, Decimal.ROUND_HALF_UP);
     expect(quantized.equals(D("100.1235"))).toBe(true);
+  });
+
+  it("accepts canonical six-place amounts in lease and team postconditions", async () => {
+    const lease = new LeaseRepository(async (name) => {
+      if (name === "settle_lease") {
+        return [
+          {
+            charge_id: TEST_CHARGE_ID,
+            ledger_entry_id: TEST_LEDGER_ID,
+            settled_amount: "8.123457",
+            replayed: false,
+            error_code: null,
+          },
+        ];
+      }
+      if (name === "get_credit_operation_details") {
+        return [{ balance_after: "91.876543", allowance_covered: "0", bucket_breakdown: {} }];
+      }
+      throw new Error(`unexpected RPC: ${name}`);
+    });
+    const settled = await lease.settleLease({
+      userId: TEST_USER_ID,
+      leaseId: TEST_LEASE_ID,
+      amount: "8.1234565",
+      idempotencyKey: "lease:canonical-settle",
+      feature: null,
+      model: null,
+      region: null,
+      measures: "{}",
+      dimensions: "{}",
+      metadata: "{}",
+    });
+
+    const team = new TeamRepository(async (name) => {
+      if (name !== "deduct_team") throw new Error(`unexpected RPC: ${name}`);
+      return [
+        {
+          entry_id: TEST_LEDGER_ID,
+          team_id: TEST_TEAM_ID,
+          subject_id: TEST_USER_ID,
+          amount: "1.000001",
+          balance_after: "98.999999",
+          replayed: false,
+          error_code: null,
+        },
+      ];
+    });
+    const teamCharge = await team.deductTeam(
+      TEST_TEAM_ID,
+      TEST_USER_ID,
+      "1.0000005",
+      "team:canonical-charge",
+      "team_usage",
+      "{}",
+    );
+
+    expect(new Decimal(settled.amount).equals("8.123457")).toBe(true);
+    expect(new Decimal(teamCharge.amount).equals("1.000001")).toBe(true);
   });
 });

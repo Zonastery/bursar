@@ -1,10 +1,248 @@
+-- Migration: 001_schema_and_types.sql
+-- Purpose: Establish Bursar's isolated schemas, extension prerequisites, shared
+--   validation helpers, tenant context, and provider-environment contract.
+-- Depends on: PostgreSQL with pgcrypto, pg_jsonschema, and pg_partman 5.x available.
+-- Security: Keeps dependencies schema-qualified and tenant/provider context fail-closed.
+
+-- Contents
+--   1. Schemas and extension prerequisites
+--   2. Shared scalar and identity helpers
+--   3. Generated catalog contract and validation
+--   4. Bounded-value and backend helpers
+--   5. Tenant context and provider environment
+
+-- 1. Schemas and extension prerequisites
+
+-- Isolate Bursar-owned objects from host application objects and reserve a
+-- separate namespace for dependency calls whose ACLs remain host-controlled.
 CREATE SCHEMA IF NOT EXISTS bursar;
+
+-- The migration runner bootstraps this namespace and its ledger immediately
+-- before loading 001. Refuse a pre-existing namespace takeover or unexpected
+-- object instead of creating SECURITY DEFINER functions beside attacker-owned
+-- relations. The ledger's complete column/key shape is asserted below.
+DO $$
+DECLARE
+    v_unexpected_objects text[];
+BEGIN
+    IF (SELECT nspowner FROM pg_namespace WHERE nspname = 'bursar')
+       IS DISTINCT FROM current_user::regrole::oid
+    THEN
+        RAISE EXCEPTION
+            'bursar schema must be owned by migration role %', current_user
+            USING ERRCODE = '42501';
+    END IF;
+
+    -- Only the runner-created ledger, its index, and PostgreSQL-generated row
+    -- types may exist before Bursar begins creating trusted objects.
+    SELECT array_agg(unexpected.object_name ORDER BY unexpected.object_name)
+    INTO v_unexpected_objects
+    FROM (
+        SELECT format('relation:%I', relation_info.relname) AS object_name
+        FROM pg_class AS relation_info
+        WHERE relation_info.relnamespace = 'bursar'::regnamespace
+          AND NOT (
+              relation_info.relname = 'schema_migrations'
+              AND relation_info.relkind = 'r'
+              AND relation_info.relowner = current_user::regrole::oid
+          )
+          AND NOT (
+              relation_info.relname = 'schema_migrations_pkey'
+              AND relation_info.relkind = 'i'
+              AND relation_info.relowner = current_user::regrole::oid
+          )
+
+        UNION ALL
+
+        SELECT format('routine:%I', routine_info.proname)
+        FROM pg_proc AS routine_info
+        WHERE routine_info.pronamespace = 'bursar'::regnamespace
+
+        UNION ALL
+
+        SELECT format('type:%I', type_info.typname)
+        FROM pg_type AS type_info
+        WHERE type_info.typnamespace = 'bursar'::regnamespace
+          AND NOT (
+              type_info.typname IN (
+                  'schema_migrations',
+                  '_schema_migrations'
+              )
+              AND type_info.typowner = current_user::regrole::oid
+          )
+
+        UNION ALL
+
+        SELECT format('constraint:%I', constraint_info.conname)
+        FROM pg_constraint AS constraint_info
+        WHERE constraint_info.connamespace = 'bursar'::regnamespace
+          AND NOT (
+              constraint_info.conrelid = 'bursar.schema_migrations'::regclass
+              AND constraint_info.conname = 'schema_migrations_pkey'
+          )
+
+        UNION ALL
+
+        -- A schema-scoped default ACL can grant access to every trusted object
+        -- created below even when the schema and bootstrap ledger start closed.
+        SELECT format('default_acl:%s', owner_role.rolname)
+        FROM pg_default_acl AS default_acl
+        JOIN pg_roles AS owner_role
+          ON owner_role.oid = default_acl.defaclrole
+        WHERE default_acl.defaclnamespace = 'bursar'::regnamespace
+    ) AS unexpected;
+
+    IF v_unexpected_objects IS NOT NULL THEN
+        RAISE EXCEPTION
+            'unexpected pre-bootstrap objects in bursar schema: %',
+            array_to_string(v_unexpected_objects, ', ')
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_class AS table_info
+        WHERE table_info.oid = 'bursar.schema_migrations'::regclass
+          AND table_info.relkind = 'r'
+          AND table_info.relpersistence = 'p'
+          AND NOT table_info.relispartition
+          AND NOT table_info.relrowsecurity
+          AND NOT table_info.relforcerowsecurity
+          AND table_info.relowner = current_user::regrole::oid
+    )
+    OR (
+        SELECT array_agg(
+            format(
+                '%s:%s:%s:%s',
+                column_info.attname,
+                column_info.atttypid::regtype,
+                CASE
+                    WHEN column_info.attnotnull THEN 'true'
+                    ELSE 'false'
+                END,
+                COALESCE(
+                    pg_get_expr(default_info.adbin, default_info.adrelid),
+                    ''
+                )
+            )
+            ORDER BY column_info.attnum
+        )
+        FROM pg_attribute AS column_info
+        LEFT JOIN pg_attrdef AS default_info
+          ON default_info.adrelid = column_info.attrelid
+         AND default_info.adnum = column_info.attnum
+        WHERE column_info.attrelid = 'bursar.schema_migrations'::regclass
+          AND column_info.attnum > 0
+          AND NOT column_info.attisdropped
+    ) IS DISTINCT FROM ARRAY[
+        'version:text:true:',
+        'checksum:text:true:',
+        'applied_at:timestamp with time zone:true:now()'
+    ]
+    OR EXISTS (
+        SELECT 1
+        FROM pg_attribute AS column_info
+        WHERE column_info.attrelid = 'bursar.schema_migrations'::regclass
+          AND column_info.attnum > 0
+          AND (
+              column_info.attisdropped
+              OR column_info.attidentity <> ''
+              OR column_info.attgenerated <> ''
+              OR column_info.attacl IS NOT NULL
+          )
+    )
+    OR NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint AS constraint_info
+        JOIN pg_index AS index_info
+          ON index_info.indexrelid = constraint_info.conindid
+        WHERE constraint_info.conrelid = 'bursar.schema_migrations'::regclass
+          AND constraint_info.conname = 'schema_migrations_pkey'
+          AND pg_get_constraintdef(constraint_info.oid) =
+              'PRIMARY KEY (version)'
+          AND index_info.indisvalid
+          AND index_info.indisready
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_trigger AS trigger_info
+        WHERE trigger_info.tgrelid = 'bursar.schema_migrations'::regclass
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_rewrite AS rule_info
+        WHERE rule_info.ev_class = 'bursar.schema_migrations'::regclass
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_policy AS policy_info
+        WHERE policy_info.polrelid = 'bursar.schema_migrations'::regclass
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_inherits AS inheritance_info
+        WHERE inheritance_info.inhrelid =
+                  'bursar.schema_migrations'::regclass
+           OR inheritance_info.inhparent =
+                  'bursar.schema_migrations'::regclass
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_class AS table_info
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(
+                table_info.relacl,
+                acldefault('r', table_info.relowner)
+            )
+        ) AS privilege_info
+        WHERE table_info.oid = 'bursar.schema_migrations'::regclass
+          AND privilege_info.grantee <> table_info.relowner
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_namespace AS namespace_info
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(
+                namespace_info.nspacl,
+                acldefault('n', namespace_info.nspowner)
+            )
+        ) AS privilege_info
+        WHERE namespace_info.oid = 'bursar'::regnamespace
+          AND privilege_info.grantee <> namespace_info.nspowner
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM bursar.schema_migrations
+    )
+    THEN
+        RAISE EXCEPTION 'invalid bursar.schema_migrations bootstrap table'
+            USING ERRCODE = '55000';
+    END IF;
+END
+$$;
+
+-- The supported Python runner applies the complete migration set in one
+-- transaction. Fail closed here as defense for direct/manual execution,
+-- interrupted alternative runners, or future orchestration changes so they
+-- cannot expose the schema through PostgreSQL's default function ACL.
+REVOKE ALL ON SCHEMA bursar FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
+REVOKE ALL ON TABLES FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
+REVOKE ALL ON SEQUENCES FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
+REVOKE ALL ON FUNCTIONS FROM PUBLIC;
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pg_jsonschema WITH SCHEMA extensions;
 
+-- Fail installation if pre-existing extensions live elsewhere: all later
+-- function bodies deliberately use stable, schema-qualified dependency names.
 DO $$
 DECLARE
     v_extension text;
@@ -40,6 +278,8 @@ CREATE SCHEMA IF NOT EXISTS partman;
 
 CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;
 
+-- Partition maintenance relies on pg_partman 5.x behavior and a fixed schema,
+-- so reject hosts whose installed dependency cannot satisfy that contract.
 DO $$
 DECLARE
     v_version text;
@@ -78,9 +318,13 @@ SET standard_conforming_strings = on;
 
 SET client_min_messages = warning;
 
-COMMENT ON SCHEMA bursar IS
-'Backend-only Bursar accounting, catalog, and billing schema.';
+-- Durable schema catalog documentation is attached with the rest of the
+-- baseline's public object descriptions in 027_documentation.sql.
 
+-- 2. Shared scalar and identity helpers
+
+-- Generate time-local UUID keys without sacrificing distributed uniqueness;
+-- time-biased insertion locality keeps the primary B-trees less fragmented.
 CREATE FUNCTION bursar.uuid_v7()
 RETURNS uuid
 LANGUAGE plpgsql
@@ -117,6 +361,8 @@ BEGIN
 END
 $$;
 
+-- Centralize the rejection of PostgreSQL's non-finite numeric sentinels before
+-- exact values enter balances, quantities, prices, or policy limits.
 CREATE FUNCTION bursar.is_finite_numeric(
     p_value numeric
 )
@@ -130,6 +376,126 @@ AS $$
        AND p_value NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)
 $$;
 
+-- Accept exactly the values representable by Bursar's canonical credit type,
+-- numeric(20, 6), without relying on an assignment cast that could round or
+-- overflow after an idempotency digest or policy comparison was computed.
+CREATE FUNCTION bursar.is_credit_numeric(
+    p_value numeric
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT bursar.is_finite_numeric(p_value)
+       AND p_value = round(p_value, 6)
+       AND abs(p_value) < 100000000000000::numeric
+$$;
+
+-- Store exact credits without a numeric typmod: numeric(20,6) silently rounds
+-- before a column CHECK can inspect the submitted value. This domain rejects
+-- extra fractional precision and out-of-range values at the true table boundary.
+CREATE DOMAIN bursar.credit_numeric AS numeric
+CHECK (VALUE IS NULL OR bursar.is_credit_numeric(VALUE));
+
+-- Minor-unit money crosses JSON/JavaScript SDK boundaries, so retain exact
+-- integer semantics throughout the stack rather than merely fitting bigint.
+CREATE FUNCTION bursar.is_nonnegative_safe_integer(
+    p_value bigint
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_value IS NOT NULL
+       AND p_value BETWEEN 0 AND 9007199254740991
+$$;
+
+-- Require a non-zero minor-unit value while preserving the shared safe-integer
+-- boundary used by every SDK and JSON transport.
+CREATE FUNCTION bursar.is_positive_safe_integer(
+    p_value bigint
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_value IS NOT NULL
+       AND p_value BETWEEN 1 AND 9007199254740991
+$$;
+
+-- PostgreSQL accepts +/-infinity for temporal types. Bursar uses NULL for an
+-- open end, so every persisted business timestamp/date must instead be finite.
+CREATE FUNCTION bursar.is_finite_timestamptz(
+    p_value timestamptz
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_value IS NOT NULL AND pg_catalog.isfinite(p_value)
+$$;
+
+-- Apply the same finite-only contract to calendar dates used by rollups.
+CREATE FUNCTION bursar.is_finite_date(
+    p_value date
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_value IS NOT NULL AND pg_catalog.isfinite(p_value)
+$$;
+
+-- The runner-owned ledger is part of the persisted schema contract too.
+ALTER TABLE bursar.schema_migrations
+ADD CONSTRAINT schema_migrations_applied_at_finite_check
+CHECK (bursar.is_finite_timestamptz(applied_at));
+
+-- Quota thresholds are stored in the order they are crossed; enforcing their
+-- canonical increasing form removes duplicate notifications and sort drift.
+CREATE FUNCTION bursar.is_canonical_threshold_array(
+    p_values integer []
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_values IS NOT NULL
+       AND cardinality(p_values) <= 100
+       AND (
+           cardinality(p_values) = 0
+           OR (
+               array_ndims(p_values) = 1
+               AND array_lower(p_values, 1) = 1
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM unnest(p_values) WITH ORDINALITY
+                        AS value(item, position)
+                   WHERE value.item IS NULL
+                      OR value.item NOT BETWEEN 1 AND 100
+                      OR (
+                          value.position > 1
+                          AND value.item <= p_values[value.position - 1]
+                      )
+               )
+           )
+       )
+$$;
+
+-- Canonicalize exact numeric values for stable hashes and idempotency digests,
+-- independent of representational trailing zeroes.
 CREATE FUNCTION bursar.digest_numeric_text(
     p_value numeric
 ) RETURNS text
@@ -141,7 +507,11 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path TO '' AS $$
     END
 $$;
 
+-- 3. Generated catalog contract and validation
+
 -- BEGIN GENERATED CATALOG SHAPE SCHEMA
+-- Embed the generated catalog shape contract in PostgreSQL so write-boundary
+-- and projection validators share structural definitions with the SDKs.
 CREATE FUNCTION bursar.catalog_document_shape_schema()
 RETURNS jsonb
 LANGUAGE sql
@@ -153,6 +523,8 @@ AS $function$
 $function$;
 -- END GENERATED CATALOG SHAPE SCHEMA
 
+-- Reject malformed catalog documents at their write boundary and surface the
+-- first schema diagnostic as a deterministic data exception.
 CREATE FUNCTION bursar.require_catalog_document_shape(
     p_document jsonb
 ) RETURNS void
@@ -181,6 +553,8 @@ BEGIN
 END
 $$;
 
+-- Validate a value against an arbitrary fragment while retaining access to
+-- the catalog's shared definitions; invalid fragments fail closed.
 CREATE FUNCTION bursar.matches_catalog_fragment(
     p_value jsonb,
     p_fragment_schema jsonb
@@ -212,6 +586,8 @@ AS $$
     FROM composed
 $$;
 
+-- Let projection constraints accept one of a named set of catalog definitions
+-- without duplicating or drifting from the generated schema.
 CREATE FUNCTION bursar.matches_catalog_definitions(
     p_value jsonb,
     VARIADIC p_definition_names text []
@@ -261,6 +637,8 @@ AS $$
     CROSS JOIN requested
 $$;
 
+-- Derive the runtime value contract from a feature definition so stored
+-- entitlement values cannot disagree with their catalog-declared type/range.
 CREATE FUNCTION bursar.entitlement_value_schema(
     p_definition jsonb
 ) RETURNS json
@@ -292,6 +670,10 @@ AS $$
     END::json
 $$;
 
+-- 4. Bounded-value and backend helpers
+
+-- Bound opaque JSON metadata at the database boundary to protect rows and
+-- outbox payloads from unbounded tenant-controlled documents.
 CREATE FUNCTION bursar.is_bounded_json_object(
     p_value jsonb,
     p_max_bytes integer
@@ -313,6 +695,8 @@ AS $$
        AND octet_length(p_value::text) <= p_max_bytes
 $$;
 
+-- Apply a reusable character ceiling to externally supplied identifiers and
+-- labels while allowing callers to decide whether empty text is meaningful.
 CREATE FUNCTION bursar.is_bounded_text(
     p_value text,
     p_max_characters integer
@@ -327,6 +711,8 @@ AS $$
        AND length(p_value) <= p_max_characters
 $$;
 
+-- Require canonical, trimmed identifiers so uniqueness and provider matching
+-- cannot diverge through invisible leading or trailing whitespace.
 CREATE FUNCTION bursar.is_nonempty_bounded_text(
     p_value text,
     p_max_characters integer
@@ -343,6 +729,47 @@ AS $$
        AND length(p_value) BETWEEN 1 AND p_max_characters
 $$;
 
+-- Validate compact one-dimensional identifier sets before a table-specific
+-- trigger resolves their relational targets. Empty arrays are allowed because
+-- an empty allow-list has an intentional catalog meaning.
+CREATE FUNCTION bursar.is_canonical_identifier_array(
+    p_values text [],
+    p_max_items integer DEFAULT 1000,
+    p_max_characters integer DEFAULT 255
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_values IS NOT NULL
+       AND p_max_items > 0
+       AND p_max_characters > 0
+       AND cardinality(p_values) <= p_max_items
+       AND (
+           cardinality(p_values) = 0
+           OR (
+               array_ndims(p_values) = 1
+               AND array_lower(p_values, 1) = 1
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM unnest(p_values) AS value(item)
+                   WHERE NOT bursar.is_nonempty_bounded_text(
+                       value.item,
+                       p_max_characters
+                   )
+               )
+               AND cardinality(p_values) = (
+                   SELECT count(DISTINCT value.item)
+                   FROM unnest(p_values) AS value(item)
+               )
+           )
+       )
+$$;
+
+-- Return conservative seconds for rolling windows and zero for non-rolling
+-- policies; invalid or overflowing rolling policies return NULL to fail closed.
 CREATE FUNCTION bursar.policy_duration_seconds(
     p_policy jsonb
 ) RETURNS bigint
@@ -396,6 +823,7 @@ EXCEPTION
 END
 $$;
 
+-- Use one default identifier bound where no domain-specific maximum is needed.
 CREATE FUNCTION bursar.is_nonempty_text(
     p_value text
 ) RETURNS boolean
@@ -407,6 +835,8 @@ AS $$
     SELECT bursar.is_nonempty_bounded_text(p_value, 255)
 $$;
 
+-- Resolve the configured usage store from a closed set and default safely to
+-- PostgreSQL when no transaction/session override exists.
 CREATE FUNCTION bursar.current_usage_backend()
 RETURNS text
 LANGUAGE sql
@@ -421,6 +851,8 @@ AS $$
     END
 $$;
 
+-- Resolve whether billing payload bodies remain in PostgreSQL or S3 while
+-- keeping relational billing facts independent of that storage choice.
 CREATE FUNCTION bursar.current_billing_payload_backend()
 RETURNS text
 LANGUAGE sql
@@ -435,6 +867,8 @@ AS $$
     END
 $$;
 
+-- 5. Tenant context and provider environment
+
 -- Tenancy is part of the baseline data model. Application code binds exactly
 -- one tenant to each transaction with:
 --
@@ -448,14 +882,18 @@ CREATE TABLE bursar.tenants (
     display_name text,
     status text NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'suspended', 'closed')),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(created_at)),
+    updated_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(updated_at)),
     CHECK (
         display_name IS NULL
         OR bursar.is_bounded_text(display_name, 255)
     )
 );
 
+-- Read transaction-local tenant identity without inventing a fallback; NULL is
+-- useful to policy predicates that must deny access rather than raise.
 CREATE FUNCTION bursar.current_tenant_id()
 RETURNS uuid
 LANGUAGE sql
@@ -465,6 +903,8 @@ AS $$
     SELECT NULLIF(current_setting('bursar.tenant_id', true), '')::uuid
 $$;
 
+-- Provide a strict tenant accessor for mutation paths where missing context is
+-- an authentication failure, not an empty result set.
 CREATE FUNCTION bursar.require_tenant_id()
 RETURNS uuid
 LANGUAGE plpgsql
@@ -482,6 +922,8 @@ BEGIN
 END
 $$;
 
+-- Gate tenant work on lifecycle state so suspension or closure disables new
+-- accounting activity without rewriting historical ownership.
 CREATE FUNCTION bursar.current_tenant_is_active()
 RETURNS boolean
 LANGUAGE sql
@@ -500,6 +942,8 @@ REVOKE ALL ON FUNCTION bursar.current_tenant_id() FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.require_tenant_id() FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.current_tenant_is_active() FROM PUBLIC;
 
+-- Require an explicit live/test/sandbox provider namespace to prevent billing
+-- identifiers or events from crossing provider environments.
 CREATE FUNCTION bursar.current_provider_environment()
 RETURNS text
 LANGUAGE plpgsql

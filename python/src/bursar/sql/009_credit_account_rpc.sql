@@ -1,4 +1,14 @@
--- Account creation, account-created grant programs, and credit posting.
+-- Migration: 009_credit_account_rpc.sql
+-- Purpose: Provision tenant accounts, execute grant programs, and post ledger credit.
+-- Depends on: Foundational schema through 007_indexes.sql and 008_catalog_rpc.sql.
+-- Security: SECURITY DEFINER RPCs use an empty search path, tenant-scoped RLS,
+--   and account-first locks; the trigger resolver is restricted to trusted roles.
+
+-- Provision credit accounts, execute grants, and post ledger credit.
+
+-- Idempotently create or lock the tenant-scoped subject account. Only a newly
+-- created personal account runs active account-created grants, so retries return
+-- the stable account identity without duplicating exact-numeric ledger awards.
 
 CREATE FUNCTION bursar.account_for_subject(
     p_subject_id uuid,
@@ -11,9 +21,9 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_id uuid;
-    v_created boolean := false;
     v_revision uuid;
     v_program_key text;
+    v_pseudonymized_at timestamptz;
 BEGIN
     IF p_subject_id IS NULL
        OR p_kind IS NULL
@@ -27,7 +37,16 @@ BEGIN
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
-    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+    -- Serialize provisioning with pseudonymization. A plain visibility check can
+    -- race after it returns and create a fresh financial account for an erased
+    -- subject before the other transaction commits.
+    SELECT subject.pseudonymized_at
+    INTO v_pseudonymized_at
+    FROM bursar.subjects AS subject
+    WHERE subject.id = p_subject_id
+    FOR UPDATE;
+
+    IF v_pseudonymized_at IS NOT NULL THEN
         RAISE EXCEPTION 'subject is pseudonymized'
             USING ERRCODE = '55000';
     END IF;
@@ -37,18 +56,17 @@ BEGIN
     ON CONFLICT (tenant_id, subject_id, account_kind) DO NOTHING
     RETURNING id INTO v_id;
 
-    v_created := FOUND;
-
-    IF NOT v_created THEN
+    IF NOT FOUND THEN
         SELECT id
         INTO v_id
         FROM bursar.credit_accounts
         WHERE subject_id = p_subject_id
           AND account_kind = p_kind
         FOR UPDATE;
+        RETURN v_id;
     END IF;
 
-    IF NOT v_created OR p_kind <> 'personal' THEN
+    IF p_kind <> 'personal' THEN
         RETURN v_id;
     END IF;
 
@@ -84,6 +102,10 @@ BEGIN
 END
 $$;
 
+-- Execute one active tenant catalog grant program with subject- or event-scoped
+-- idempotency, deterministic recipient selection, and exact numeric awards posted
+-- through post_credit. SECURITY DEFINER trusts the bound tenant and returns stable
+-- replay rows or explicit domain error codes without partially applying awards.
 CREATE FUNCTION bursar.execute_grant_program(
     p_trigger_type text,
     p_program_key text,
@@ -121,6 +143,7 @@ DECLARE
     v_expires_at timestamptz;
     v_region text;
     v_event_metadata jsonb;
+    v_lock_subject uuid;
 BEGIN
     -- Canonicalize short ISO-like region codes once. The raw-size guard keeps
     -- pathological inputs out of upper()/btrim() while still accepting modest
@@ -153,7 +176,10 @@ BEGIN
        )
        OR (
            p_trigger_type = 'referral_completed'
-           AND p_referrer_subject_id IS NULL
+           AND (
+               p_referrer_subject_id IS NULL
+               OR p_referrer_subject_id = p_subject_id
+           )
        )
     THEN
         RETURN QUERY
@@ -251,18 +277,33 @@ BEGIN
         RETURN;
     END IF;
 
+    -- A referral can post to two personal accounts. Acquire the same advisory
+    -- keys in UUID order before either account row is locked so opposite
+    -- referrals (A -> B and B -> A) cannot deadlock.
+    FOR v_lock_subject IN
+        SELECT DISTINCT input.subject_id
+        FROM unnest(ARRAY[p_subject_id, p_referrer_subject_id])
+            AS input(subject_id)
+        WHERE input.subject_id IS NOT NULL
+        ORDER BY input.subject_id
+    LOOP
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended(
+                'bursar.tenant:'
+                || bursar.require_tenant_id()::text
+                || ':grant-subject:'
+                || v_lock_subject::text,
+                0
+            )
+        );
+    END LOOP;
+
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
-    -- Account locking serializes the award-limit check, event insertion, and
-    -- all resulting ledger mutations for a recipient.
+    -- account_for_subject retains the account lock through this transaction.
     v_account := bursar.account_for_subject(p_subject_id);
-
-    PERFORM 1
-    FROM bursar.credit_accounts
-    WHERE id = v_account
-    FOR UPDATE;
 
     SELECT assignment.plan_key
     INTO v_plan_key
@@ -345,7 +386,7 @@ BEGIN
             execution.catalog_grant_award_id,
             execution.recipient_subject_id,
             execution.ledger_entry_id,
-            entry.amount,
+            entry.amount::numeric,
             true,
             NULL::text
         FROM bursar.grant_award_executions AS execution
@@ -446,7 +487,7 @@ BEGIN
         FROM bursar.post_credit(
             v_recipient,
             'grant',
-            v_award.amount,
+            v_award.amount::numeric,
             -- Catalog keys may consume their full 255-character budget. Use
             -- a stable digest so the derived ledger operation stays bounded
             -- without conflating long keys that share a prefix.
@@ -504,16 +545,18 @@ BEGIN
             v_award.id,
             v_recipient,
             v_post.entry_id,
-            v_award.amount,
+            v_award.amount::numeric,
             false,
             NULL::text;
     END LOOP;
 END
 $$;
 
+-- 2. Host signup trigger boundary
+
 -- Resolve the host-configured tenant before the runtime trigger binds RLS
 -- context. This narrowly scoped helper retains the migration owner in the
--- multitenancy security step and is executable only by bursar_runtime.
+-- multitenancy security step; migration 029 allow-lists runtime and operator use.
 CREATE FUNCTION bursar.resolve_active_tenant_for_trigger(
     p_tenant_slug text
 )
@@ -632,6 +675,8 @@ $$;
 COMMENT ON FUNCTION bursar.provision_subject_account_on_insert() IS
 'Tenant-aware signup hook that assigns the active default plan and runs account_created grants.';
 
+-- 3. Ordered credit availability
+
 -- Return unreserved, unexpired lot credit that sorts before a configured
 -- allowance priority. Account-scoped mutation RPCs hold the credit-account row
 -- lock before calling this helper, so the balance and aggregate lease holds are
@@ -675,6 +720,13 @@ AS $$
     CROSS JOIN holds
 $$;
 
+-- 4. Exact ledger posting
+
+-- Lock the tenant account before replay detection and all lot mutations, hash
+-- canonical numeric text into the idempotency contract, and atomically append
+-- the ledger entry, cached balance, lot/source allocations, and debt state.
+-- Internal mutation context is transaction-local; stable retries return the
+-- original entry while divergent payloads fail with idempotency_conflict.
 CREATE FUNCTION bursar.post_credit(
     p_subject_id uuid,
     p_kind bursar.ledger_entry_kind,
@@ -723,11 +775,21 @@ DECLARE
     v_source_remaining numeric;
     v_source_take numeric;
     v_settling_minimum numeric;
-    v_requested_minimum_balance numeric := p_minimum_balance;
+    v_requested_minimum_balance numeric;
 BEGIN
+    -- PostgreSQL numeric column assignment rounds implicitly. Normalize before
+    -- validation and hashing so every SDK observes one explicit 6dp contract.
+    p_amount := round(p_amount, 6);
+    p_minimum_balance := CASE
+        WHEN p_minimum_balance IS NULL THEN NULL
+        ELSE round(p_minimum_balance, 6)
+    END;
+    v_requested_minimum_balance := p_minimum_balance;
+
     IF p_subject_id IS NULL
        OR p_kind IS NULL
-       OR NOT bursar.is_finite_numeric(p_amount)
+       OR p_amount IS NULL
+       OR NOT bursar.is_credit_numeric(p_amount)
        OR p_amount = 0
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
@@ -742,7 +804,11 @@ BEGIN
        )
        OR (
            p_minimum_balance IS NOT NULL
-           AND NOT bursar.is_finite_numeric(p_minimum_balance)
+           AND NOT bursar.is_credit_numeric(p_minimum_balance)
+       )
+       OR (
+           p_expires_at IS NOT NULL
+           AND NOT pg_catalog.isfinite(p_expires_at)
        )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_request, '{}'::jsonb),
@@ -815,7 +881,7 @@ BEGIN
             SELECT NULL::uuid, NULL::numeric, false, 'idempotency_conflict';
         ELSE
             RETURN QUERY
-            SELECT v_old.id, v_old.balance_after, true, NULL::text;
+            SELECT v_old.id, v_old.balance_after::numeric, true, NULL::text;
         END IF;
         RETURN;
     END IF;
@@ -882,7 +948,7 @@ BEGIN
 
     IF p_minimum_balance IS NULL THEN
         p_minimum_balance := v_policy_minimum;
-    ELSIF NOT bursar.is_finite_numeric(p_minimum_balance)
+    ELSIF NOT bursar.is_credit_numeric(p_minimum_balance)
           OR (
               v_settling_minimum IS NULL
               AND p_minimum_balance < v_policy_minimum
@@ -1028,6 +1094,12 @@ BEGIN
             FROM bursar.catalog_revisions
             WHERE status = 'active';
         END IF;
+    END IF;
+
+    IF NOT bursar.is_credit_numeric(v_balance + p_amount) THEN
+        RETURN QUERY
+        SELECT NULL::uuid, v_balance, false, 'balance_out_of_range';
+        RETURN;
     END IF;
 
     PERFORM set_config('bursar.mutation_context', 'internal', true);

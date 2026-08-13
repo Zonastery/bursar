@@ -11,11 +11,11 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 
 	bursar "github.com/Zonastery/bursar/golang/v2"
-	"github.com/Zonastery/bursar/golang/v2/providers/internal/normalize"
 	dodopayments "github.com/dodopayments/dodopayments-go"
 	"github.com/dodopayments/dodopayments-go/option"
 	"github.com/dodopayments/dodopayments-go/shared"
@@ -31,6 +31,12 @@ const ProviderName = "dodo"
 type Options struct {
 	APIKey     string
 	WebhookKey string
+	// Environment selects Dodo's live or test endpoint. Sandbox uses Dodo's
+	// test endpoint while retaining Bursar's distinct sandbox namespace.
+	Environment bursar.ProviderEnvironment
+	// HTTPClient is used by the official SDK and is primarily useful for
+	// deterministic tests and application-owned transports.
+	HTTPClient *http.Client
 	// SetupProductID is the Dodo product used for a mandate-only checkout when
 	// an account has no active subscription to update. It is optional unless
 	// CreatePaymentMethodSetupSession is used.
@@ -42,6 +48,7 @@ type Options struct {
 type Provider struct {
 	client         *dodopayments.Client
 	setupProductID string
+	environment    bursar.ProviderEnvironment
 }
 
 var _ bursar.PaymentProvider = (*Provider)(nil)
@@ -67,6 +74,13 @@ func New(options Options) (*Provider, error) {
 			Category: bursar.ErrorCategoryInvalidRequest,
 		})
 	}
+	environment := options.Environment
+	if environment == "" {
+		environment = bursar.ProviderEnvironmentTest
+	}
+	if err := environment.Validate(); err != nil {
+		return nil, bursar.NewError("invalid Dodo provider environment", bursar.ErrorOptions{Code: bursar.ErrorCodeConfig, Category: bursar.ErrorCategoryInvalidRequest, Cause: err})
+	}
 	client := options.Client
 	if client == nil {
 		apiKey := strings.TrimSpace(options.APIKey)
@@ -76,16 +90,34 @@ func New(options Options) (*Provider, error) {
 				Category: bursar.ErrorCategoryInvalidRequest,
 			})
 		}
-		client = dodopayments.NewClient(
+		environmentOption := option.WithEnvironmentTestMode()
+		if environment == bursar.ProviderEnvironmentLive {
+			environmentOption = option.WithEnvironmentLiveMode()
+		}
+		clientOptions := []option.RequestOption{
 			option.WithBearerToken(apiKey),
 			option.WithWebhookKey(webhookKey),
-		)
+			environmentOption,
+		}
+		if options.HTTPClient != nil {
+			clientOptions = append(clientOptions, option.WithHTTPClient(options.HTTPClient))
+		}
+		client = dodopayments.NewClient(clientOptions...)
 	}
-	return &Provider{client: client, setupProductID: strings.TrimSpace(options.SetupProductID)}, nil
+	return &Provider{client: client, setupProductID: strings.TrimSpace(options.SetupProductID), environment: environment}, nil
 }
 
 // Name returns the stable catalog provider key.
 func (*Provider) Name() string { return ProviderName }
+
+// ProviderEnvironment returns the financial namespace selected for this
+// client. It is intentionally separate from the provider name.
+func (p *Provider) ProviderEnvironment() bursar.ProviderEnvironment {
+	if p == nil {
+		return ""
+	}
+	return p.environment
+}
 
 // CreateCheckoutSession creates a Dodo hosted checkout for a catalog-resolved
 // product. The Bursar account identifier is placed in Dodo metadata so a later
@@ -267,26 +299,29 @@ func (p *Provider) CreatePaymentMethodSetupSession(ctx context.Context, customer
 	return requireDodoResponseText(session.CheckoutURL, "create payment method setup session", "checkout_url")
 }
 
-// CreateCustomer creates a provider customer for an already-authorized Bursar
-// account. The root interface has no idempotency key, so an indeterminate
-// response is surfaced explicitly and must be reconciled by the caller.
-func (p *Provider) CreateCustomer(ctx context.Context, email, name string, metadata map[string]string) (string, error) {
+// CreateCustomer creates an idempotent provider customer for an
+// already-authorized Bursar account.
+func (p *Provider) CreateCustomer(ctx context.Context, request bursar.CreateCustomerRequest) (string, error) {
 	if p == nil || p.client == nil || p.client.Customers == nil {
 		return "", dodoUninitializedError()
 	}
-	email, err := requireDodoInputText(email, "customer email")
+	email, err := requireDodoInputText(request.Email, "customer email")
 	if err != nil {
 		return "", err
 	}
-	name, err = requireDodoInputText(name, "customer name")
+	name, err := requireDodoInputText(request.Name, "customer name")
+	if err != nil {
+		return "", err
+	}
+	idempotencyKey, err := requireDodoIdempotencyKey(request.IdempotencyKey)
 	if err != nil {
 		return "", err
 	}
 	customer, err := p.client.Customers.New(ctx, dodopayments.CustomerNewParams{
 		Email:    dodopayments.F(email),
 		Name:     dodopayments.F(name),
-		Metadata: dodopayments.F(dodoMetadata(metadata)),
-	})
+		Metadata: dodopayments.F(dodoMetadata(request.Metadata)),
+	}, dodoIdempotencyOption(idempotencyKey))
 	if err != nil {
 		return "", dodoRequestError("create customer", err, true)
 	}
@@ -592,17 +627,27 @@ func (p *Provider) HandleWebhook(_ context.Context, request bursar.WebhookReques
 	if verified == nil {
 		return bursar.WebhookResult{}, bursar.NewError("Dodo returned no verified webhook event", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
 	}
-	object, eventID, err := decodeWebhookPayload(request.RawBody)
+	envelope, err := decodeWebhookPayload(request.RawBody)
 	if err != nil {
 		return bursar.WebhookResult{}, err
 	}
-	if eventID == "" {
-		eventID = strings.TrimSpace(request.Header.Get("webhook-id"))
+	if envelope.Type != "" && envelope.Type != string(verified.Type) {
+		return bursar.WebhookResult{}, bursar.NewError("Dodo verified webhook type does not match its payload", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
 	}
-	if eventID == "" {
-		return bursar.WebhookResult{}, bursar.NewError("Dodo webhook lacks a stable event ID", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
+	normalized, err := mapDodoEvent(string(verified.Type), verified.Timestamp, request.RawBody, envelope.Data)
+	if err != nil {
+		return bursar.WebhookResult{}, err
 	}
-	normalized := normalize.Event(ProviderName, eventID, string(verified.Type), verified.Timestamp, request.RawBody, object)
+	eventID := ""
+	if normalized != nil {
+		eventID = normalized.EventID
+	} else {
+		resourceID, resourceErr := dodoEventResourceID(string(verified.Type), envelope.Data)
+		if resourceErr != nil {
+			return bursar.WebhookResult{}, resourceErr
+		}
+		eventID = dodoCanonicalEventID(string(verified.Type), resourceID, verified.Timestamp)
+	}
 	return bursar.WebhookResult{
 		Received:  true,
 		Provider:  ProviderName,
@@ -612,26 +657,31 @@ func (p *Provider) HandleWebhook(_ context.Context, request bursar.WebhookReques
 	}, nil
 }
 
-func decodeWebhookPayload(payload []byte) (map[string]any, string, error) {
+type dodoWebhookEnvelope struct {
+	Type string
+	Data map[string]any
+}
+
+func decodeWebhookPayload(payload []byte) (dodoWebhookEnvelope, error) {
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
 	var envelope struct {
-		ID   string          `json:"id"`
+		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
 	if err := decoder.Decode(&envelope); err != nil {
-		return nil, "", bursar.NewError("decode verified Dodo webhook", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest, Cause: err})
+		return dodoWebhookEnvelope{}, bursar.NewError("decode verified Dodo webhook", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest, Cause: err})
 	}
 	if len(envelope.Data) == 0 {
-		return map[string]any{}, strings.TrimSpace(envelope.ID), nil
+		return dodoWebhookEnvelope{}, bursar.NewError("Dodo webhook data is required", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest})
 	}
 	dataDecoder := json.NewDecoder(bytes.NewReader(envelope.Data))
 	dataDecoder.UseNumber()
 	object := map[string]any{}
 	if err := dataDecoder.Decode(&object); err != nil {
-		return nil, "", bursar.NewError("decode verified Dodo webhook data", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest, Cause: err})
+		return dodoWebhookEnvelope{}, bursar.NewError("decode verified Dodo webhook data", bursar.ErrorOptions{Code: bursar.ErrorCodeProviderResponseInvalid, Category: bursar.ErrorCategoryInvalidRequest, Cause: err})
 	}
-	return object, strings.TrimSpace(envelope.ID), nil
+	return dodoWebhookEnvelope{Type: strings.TrimSpace(envelope.Type), Data: object}, nil
 }
 
 func validateCheckoutRequest(request bursar.CheckoutSessionRequest) error {

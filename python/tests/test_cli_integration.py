@@ -725,7 +725,6 @@ def test_cli_manages_tenants_migrations_and_config_versions(
               ON owner_info.oid = function_info.proowner
             WHERE function_info.oid IN (
                 'bursar.secure_tenant_partition(regclass)'::regprocedure,
-                'bursar.secure_tenant_partition_base(regclass)'::regprocedure,
                 'bursar.run_storage_partition_maintenance_base('
                 'text,timestamp with time zone)'::regprocedure
             )
@@ -737,7 +736,6 @@ def test_cli_manages_tenants_migrations_and_config_versions(
                 "bursar.run_storage_partition_maintenance_base(text,timestamp with time zone)",
                 PARTITION_OWNER_ROLE,
             ),
-            ("bursar.secure_tenant_partition_base(regclass)", PARTITION_OWNER_ROLE),
             ("bursar.secure_tenant_partition(regclass)", PARTITION_OWNER_ROLE),
         }
 
@@ -764,10 +762,6 @@ def test_cli_manages_tenants_migrations_and_config_versions(
                     ),
                     (
                         'bursar.secure_tenant_partition('
-                        'regclass)'::regprocedure
-                    ),
-                    (
-                        'bursar.secure_tenant_partition_base('
                         'regclass)'::regprocedure
                     )
             )
@@ -810,10 +804,6 @@ def test_cli_manages_tenants_migrations_and_config_versions(
             (
                 PARTITION_OWNER_ROLE,
                 "bursar.secure_tenant_partition(regclass)",
-            ),
-            (
-                PARTITION_OWNER_ROLE,
-                "bursar.secure_tenant_partition_base(regclass)",
             ),
         }
 

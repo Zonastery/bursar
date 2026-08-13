@@ -14,10 +14,11 @@ import (
 type CatalogService struct {
 	store CreditStore
 
-	mu       sync.RWMutex
-	revision *CatalogRevision
-	config   *BursarConfig
-	engine   *PricingEngine
+	mu             sync.RWMutex
+	revision       *CatalogRevision
+	config         *BursarConfig
+	engine         *PricingEngine
+	versionEngines map[int]*PricingEngine
 }
 
 // NewCatalogService constructs the catalog capability for a durable store.
@@ -25,7 +26,7 @@ func NewCatalogService(store CreditStore) (*CatalogService, error) {
 	if store == nil {
 		return nil, NewError("catalog requires a credit store", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
-	return &CatalogService{store: store}, nil
+	return &CatalogService{store: store, versionEngines: make(map[int]*PricingEngine)}, nil
 }
 
 // GetActive returns the currently active persisted catalog revision, if any.
@@ -93,6 +94,7 @@ func (s *CatalogService) Invalidate() {
 	}
 	s.mu.Lock()
 	s.revision, s.config, s.engine = nil, nil, nil
+	s.versionEngines = make(map[int]*PricingEngine)
 	s.mu.Unlock()
 }
 
@@ -129,6 +131,95 @@ func (s *CatalogService) Engine() (*PricingEngine, error) {
 	if engine == nil {
 		return nil, NewError("catalog is not loaded", ErrorOptions{Code: ErrorCodeCatalogNotLoaded, Category: ErrorCategoryConflict})
 	}
+	return engine, nil
+}
+
+// CalculateForUser prices metrics using the subject's effective catalog
+// revision and rate card. A pinned assignment is always evaluated against its
+// historical immutable revision rather than the process's active catalog.
+func (s *CatalogService) CalculateForUser(ctx context.Context, userID string, metrics UsageMetrics) (CostBreakdown, error) {
+	if s == nil || s.store == nil {
+		return CostBreakdown{}, NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+	}
+	plan, err := s.store.GetUserPlan(ctx, userID)
+	if err != nil {
+		return CostBreakdown{}, err
+	}
+	engine, err := s.engineForVersion(ctx, plan.CatalogVersion)
+	if err != nil {
+		return CostBreakdown{}, err
+	}
+	if plan.RateCard == "" {
+		return engine.Calculate(metrics)
+	}
+	return engine.Calculate(metrics, PricingOptions{RateCard: plan.RateCard})
+}
+
+// CalculateForLease prices settlement metrics from the catalog/plan snapshot
+// captured when the lease was admitted. This prevents a mid-flight catalog or
+// plan change from changing the final price.
+func (s *CatalogService) CalculateForLease(ctx context.Context, userID, leaseID string, metrics UsageMetrics) (CostBreakdown, error) {
+	if s == nil || s.store == nil {
+		return CostBreakdown{}, NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+	}
+	pricingContext, err := s.store.GetLeasePricingContext(ctx, userID, leaseID)
+	if err != nil {
+		return CostBreakdown{}, err
+	}
+	if pricingContext == nil {
+		return CostBreakdown{}, NewError("lease pricing context was not found", ErrorOptions{Code: ErrorCodeLeaseNotFound, Category: ErrorCategoryNotFound})
+	}
+	version := pricingContext.CatalogVersion
+	engine, err := s.engineForVersion(ctx, &version)
+	if err != nil {
+		return CostBreakdown{}, err
+	}
+	rateCard := pricingContext.RateCard
+	if rateCard == "" {
+		rateCard, _ = engine.GetRateCardForPlan(pricingContext.PlanKey)
+	}
+	if rateCard == "" {
+		return engine.Calculate(metrics)
+	}
+	return engine.Calculate(metrics, PricingOptions{RateCard: rateCard})
+}
+
+func (s *CatalogService) engineForVersion(ctx context.Context, version *int) (*PricingEngine, error) {
+	if version == nil {
+		return s.Engine()
+	}
+	s.mu.RLock()
+	engine := s.versionEngines[*version]
+	s.mu.RUnlock()
+	if engine != nil {
+		return engine, nil
+	}
+	revision, err := s.store.GetCatalogRevision(ctx, *version)
+	if err != nil {
+		return nil, err
+	}
+	if revision == nil {
+		return nil, NewError("catalog revision is unavailable for the pinned plan", ErrorOptions{
+			Code:     ErrorCodeCatalogNotLoaded,
+			Category: ErrorCategoryNotFound,
+			Details:  map[string]any{"catalog_version": *version},
+		})
+	}
+	config, err := LoadConfigFromMap(revision.Config)
+	if err != nil {
+		return nil, err
+	}
+	engine, err = NewPricingEngine(config)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if cached := s.versionEngines[*version]; cached != nil {
+		engine = cached
+	} else {
+		s.versionEngines[*version] = engine
+	}
+	s.mu.Unlock()
 	return engine, nil
 }
 
@@ -207,6 +298,8 @@ func (s *CatalogService) install(revision *CatalogRevision) error {
 	s.revision = revision
 	s.config = config
 	s.engine = engine
+	s.versionEngines = make(map[int]*PricingEngine)
+	s.versionEngines[revision.Version] = engine
 	s.mu.Unlock()
 	return nil
 }

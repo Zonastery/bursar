@@ -1,3 +1,22 @@
+-- Migration: 002_schema_types_tables.sql
+-- Purpose: Define lifecycle types and the tenant-owned catalog, identity, and
+--   credit-account foundations used by later financial and billing tables.
+-- Depends on: 001_schema_and_types.sql.
+-- Security: Defaults ownership to required tenant context and namespaces provider IDs.
+
+-- Contents
+--   1. Lifecycle and accounting types
+--   2. Storage retention configuration
+--   3. Tenant subjects and provider identities
+--   4. Catalog revision ledger
+--   5. Catalog pricing and policy projections
+--   6. Plan and commerce projections
+--   7. Credit accounts
+
+-- 1. Lifecycle and accounting types
+
+-- Catalog states support guarded publication, activation, retirement, and
+-- reactivation; later triggers serialize activation and preserve published content.
 CREATE TYPE bursar.catalog_revision_status AS ENUM (
     'draft',
     'published',
@@ -5,6 +24,8 @@ CREATE TYPE bursar.catalog_revision_status AS ENUM (
     'retired'
 );
 
+-- Ledger kinds encode why exact credits moved so downstream reconciliation can
+-- distinguish issuance, consumption, reservation, and corrective entries.
 CREATE TYPE bursar.ledger_entry_kind AS ENUM (
     'grant',
     'purchase',
@@ -18,6 +39,8 @@ CREATE TYPE bursar.ledger_entry_kind AS ENUM (
     'release'
 );
 
+-- Lease states separate spend authorization from terminal settlement/release,
+-- supporting retry-safe ownership of reserved credits.
 CREATE TYPE bursar.lease_status AS ENUM (
     'active',
     'settling',
@@ -26,6 +49,8 @@ CREATE TYPE bursar.lease_status AS ENUM (
     'expired'
 );
 
+-- Payment states retain provider lifecycle detail needed to validate monotonic
+-- transitions and distinguish reversible success from terminal failure.
 CREATE TYPE bursar.billing_payment_status AS ENUM (
     'pending',
     'requires_action',
@@ -37,6 +62,8 @@ CREATE TYPE bursar.billing_payment_status AS ENUM (
     'disputed'
 );
 
+-- Subscription states preserve provider distinctions that affect entitlement
+-- eligibility and stale-event conflict resolution.
 CREATE TYPE bursar.billing_subscription_status AS ENUM (
     'incomplete',
     'incomplete_expired',
@@ -49,6 +76,8 @@ CREATE TYPE bursar.billing_subscription_status AS ENUM (
     'expired'
 );
 
+-- Webhook processing states support leases, replay, ignore, and explicit dead
+-- lettering without treating receipt as successful application.
 CREATE TYPE bursar.billing_event_status AS ENUM (
     'processing',
     'completed',
@@ -57,6 +86,8 @@ CREATE TYPE bursar.billing_event_status AS ENUM (
     'dead_letter'
 );
 
+-- Recharge attempts model asynchronous provider uncertainty explicitly so an
+-- unknown charge is reconciled instead of being blindly retried.
 CREATE TYPE bursar.recharge_attempt_status AS ENUM (
     'claimed',
     'submitted',
@@ -68,6 +99,10 @@ CREATE TYPE bursar.recharge_attempt_status AS ENUM (
     'canceled'
 );
 
+-- 2. Storage retention configuration
+
+-- Keep one operator-controlled retention contract whose cross-field checks
+-- ensure payloads outlive outbox replay and quota correction horizons.
 CREATE TABLE bursar.storage_settings (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     usage_payload_retention_days integer NOT NULL DEFAULT 90
@@ -98,8 +133,11 @@ CREATE TABLE bursar.storage_settings (
     CHECK (maintenance_batch_size BETWEEN 1 AND 5000),
     maintenance_lock_timeout_ms integer NOT NULL DEFAULT 100
     CHECK (maintenance_lock_timeout_ms BETWEEN 1 AND 5000),
-    last_maintenance_at timestamptz,
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    last_maintenance_at timestamptz CHECK (
+        last_maintenance_at IS null OR bursar.is_finite_timestamptz(last_maintenance_at)
+    ),
+    updated_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(updated_at)),
     CHECK (
         quota_event_retention_days * 86400::bigint
         >= quota_max_lateness_seconds
@@ -113,26 +151,36 @@ CREATE TABLE bursar.storage_settings (
 
 INSERT INTO bursar.storage_settings (singleton) VALUES (true);
 
+-- 3. Tenant subjects and provider identities
+
+-- Subjects are deliberately provider-neutral accounting principals; lifecycle
+-- deletion is represented by pseudonymization rather than erasing history.
 CREATE TABLE bursar.subjects (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    pseudonymized_at timestamptz,
+    pseudonymized_at timestamptz CHECK (pseudonymized_at IS null OR bursar.is_finite_timestamptz(pseudonymized_at)),
     created_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(created_at))
 );
 
+-- Map a provider/environment identity to its tenant-local subject, preventing
+-- live, test, and sandbox identifiers from colliding or crossing tenants.
 CREATE TABLE bursar.external_identities (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL
     REFERENCES bursar.subjects (id) ON DELETE CASCADE,
-    provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
+    provider text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(provider, 100)),
     provider_environment text NOT NULL
     DEFAULT bursar.current_provider_environment()
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
-    external_subject text NOT NULL CHECK (bursar.is_nonempty_text(external_subject)),
-    created_at timestamptz NOT NULL DEFAULT now(),
+    external_subject text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(external_subject, 255)),
+    created_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(created_at)),
     UNIQUE (
         tenant_id,
         provider,
@@ -141,6 +189,10 @@ CREATE TABLE bursar.external_identities (
     )
 );
 
+-- 4. Catalog revision ledger
+
+-- Allocate revision numbers independently per tenant without serializing
+-- unrelated tenants on a global sequence.
 CREATE TABLE bursar.tenant_catalog_counters (
     tenant_id uuid PRIMARY KEY DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE CASCADE,
@@ -151,6 +203,8 @@ CREATE TABLE bursar.tenant_catalog_counters (
 COMMENT ON TABLE bursar.tenant_catalog_counters IS
 'Per-tenant catalog revision allocator.';
 
+-- Atomically reserve the next tenant-local revision number; gaps are acceptable
+-- because the number is an ordering key, not a financial sequence.
 CREATE FUNCTION bursar.next_catalog_revision_no()
 RETURNS bigint
 LANGUAGE plpgsql
@@ -179,6 +233,8 @@ REVOKE ALL
 ON FUNCTION bursar.next_catalog_revision_no()
 FROM PUBLIC;
 
+-- Preserve source documents and digests as revision evidence; content becomes
+-- immutable once a revision leaves draft, and timestamps audit its lifecycle.
 CREATE TABLE bursar.catalog_revisions (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
@@ -195,11 +251,14 @@ CREATE TABLE bursar.catalog_revisions (
     ),
     digest bytea NOT NULL CHECK (octet_length(digest) = 32),
     status bursar.catalog_revision_status NOT NULL DEFAULT 'draft',
-    label text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    published_at timestamptz,
-    activated_at timestamptz,
-    retired_at timestamptz,
+    label text CHECK (
+        label IS null OR bursar.is_nonempty_bounded_text(label, 255)
+    ),
+    created_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(created_at)),
+    published_at timestamptz CHECK (published_at IS null OR bursar.is_finite_timestamptz(published_at)),
+    activated_at timestamptz CHECK (activated_at IS null OR bursar.is_finite_timestamptz(activated_at)),
+    retired_at timestamptz CHECK (retired_at IS null OR bursar.is_finite_timestamptz(retired_at)),
     UNIQUE (tenant_id, revision_no),
     UNIQUE (tenant_id, yaml_schema_version, digest),
     CHECK (published_at IS null OR published_at >= created_at),
@@ -207,26 +266,37 @@ CREATE TABLE bursar.catalog_revisions (
     CHECK (retired_at IS null OR activated_at IS NOT null)
 );
 
+-- Record activation intervals separately from revision state so historical
+-- pricing and entitlement resolution can answer which catalog was active.
 CREATE TABLE bursar.catalog_activation_history (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id),
-    activated_at timestamptz NOT NULL DEFAULT now(),
-    deactivated_at timestamptz,
-    label text,
+    activated_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(activated_at)),
+    deactivated_at timestamptz CHECK (deactivated_at IS null OR bursar.is_finite_timestamptz(deactivated_at)),
+    label text CHECK (
+        label IS null OR bursar.is_nonempty_bounded_text(label, 255)
+    ),
     CHECK (deactivated_at IS null OR deactivated_at >= activated_at)
 );
 
+-- 5. Catalog pricing and policy projections
+
+-- Project bucket priority and expiry semantics from each immutable revision;
+-- the all-or-none expiry fields prevent partially materialized policies.
 CREATE TABLE bursar.catalog_buckets (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    bucket_key text NOT NULL CHECK (bursar.is_nonempty_text(bucket_key)),
-    label text NOT NULL CHECK (bursar.is_nonempty_text(label)),
+    bucket_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(bucket_key, 255)),
+    label text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(label, 255)),
     priority integer NOT NULL CHECK (priority >= 0),
     definition jsonb NOT NULL
     CHECK (
@@ -258,7 +328,7 @@ CREATE TABLE bursar.catalog_buckets (
     expires_after_anchor text
     CHECK (expires_after_anchor IN ('calendar', 'plan_assignment', 'rolling')),
     expires_after_timezone text,
-    fixed_expires_at timestamptz,
+    fixed_expires_at timestamptz CHECK (fixed_expires_at IS null OR bursar.is_finite_timestamptz(fixed_expires_at)),
     allow_overdraft boolean NOT NULL DEFAULT false,
     is_default boolean NOT NULL DEFAULT false,
     UNIQUE (catalog_revision_id, bucket_key),
@@ -294,13 +364,16 @@ CREATE TABLE bursar.catalog_buckets (
     )
 );
 
+-- Materialize operation measure/dimension contracts beside their source JSON
+-- so usage validation is revision-pinned and queryable without reparsing YAML.
 CREATE TABLE bursar.catalog_operations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    operation_key text NOT NULL CHECK (bursar.is_nonempty_text(operation_key)),
+    operation_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(operation_key, 255)),
     measures jsonb NOT NULL
     CHECK (
         bursar.is_bounded_json_object(measures, 65536)
@@ -330,14 +403,20 @@ CREATE TABLE bursar.catalog_operations (
     UNIQUE (catalog_revision_id, operation_key)
 );
 
+-- Rate cards remain revision-scoped; the deferred self-reference permits a
+-- child to be loaded before its parent during one atomic catalog publication.
 CREATE TABLE bursar.catalog_rate_cards (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    rate_card_key text NOT NULL CHECK (bursar.is_nonempty_text(rate_card_key)),
-    extends_key text,
+    rate_card_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(rate_card_key, 255)),
+    extends_key text CHECK (
+        extends_key IS null
+        OR bursar.is_nonempty_bounded_text(extends_key, 255)
+    ),
     definition jsonb NOT NULL
     CHECK (
         bursar.is_bounded_json_object(definition, 262144)
@@ -349,15 +428,18 @@ CREATE TABLE bursar.catalog_rate_cards (
     DEFERRABLE INITIALLY DEFERRED
 );
 
+-- Keep prepaid and bounded credit-line behavior revision-pinned, with exact
+-- positive limits only where overdraft policy actually permits debt.
 CREATE TABLE bursar.catalog_credit_policies (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    policy_key text NOT NULL CHECK (bursar.is_nonempty_text(policy_key)),
+    policy_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(policy_key, 255)),
     policy_type text NOT NULL CHECK (policy_type IN ('prepaid', 'credit_line')),
-    credit_limit numeric(20, 6),
+    credit_limit bursar.credit_numeric,
     definition jsonb NOT NULL
     CHECK (
         bursar.is_bounded_json_object(definition, 262144)
@@ -373,19 +455,21 @@ CREATE TABLE bursar.catalog_credit_policies (
         OR
         (
             policy_type = 'credit_line'
-            AND bursar.is_finite_numeric(credit_limit)
             AND credit_limit > 0
         )
     )
 );
 
+-- Store catalog-wide concurrency ceilings independently of runtime counters so
+-- admission decisions can resolve the exact published policy.
 CREATE TABLE bursar.catalog_admission_policies (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    policy_key text NOT NULL CHECK (bursar.is_nonempty_text(policy_key)),
+    policy_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(policy_key, 255)),
     max_in_flight integer CHECK (max_in_flight IS null OR max_in_flight > 0),
     definition jsonb NOT NULL
     CHECK (
@@ -398,6 +482,8 @@ CREATE TABLE bursar.catalog_admission_policies (
     UNIQUE (catalog_revision_id, policy_key)
 );
 
+-- Normalize per-operation concurrency overrides and bind both sides to the
+-- same catalog revision, preventing cross-revision policy composition.
 CREATE TABLE bursar.catalog_admission_operation_policies (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
@@ -422,13 +508,16 @@ CREATE TABLE bursar.catalog_admission_operation_policies (
     ) ON DELETE CASCADE
 );
 
+-- Project feature type/default metadata for revision-aware entitlement reads;
+-- later validation checks plan values against the declared feature contract.
 CREATE TABLE bursar.catalog_entitlement_features (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    feature_key text NOT NULL CHECK (bursar.is_nonempty_text(feature_key)),
+    feature_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(feature_key, 255)),
     value_type text NOT NULL CHECK (value_type IN ('boolean', 'integer', 'string', 'enum')),
     default_value jsonb NOT NULL
     CHECK (octet_length(default_value::text) <= 65536),
@@ -446,29 +535,51 @@ CREATE TABLE bursar.catalog_entitlement_features (
     UNIQUE (catalog_revision_id, feature_key)
 );
 
+-- 6. Plan and commerce projections
+
+-- Gather a plan's revision-local pricing, credit, admission, and allowance
+-- references; allowance fields are all present or all absent as one policy.
 CREATE TABLE bursar.catalog_plans (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    plan_key text NOT NULL CHECK (bursar.is_nonempty_text(plan_key)),
-    display_name text NOT NULL CHECK (bursar.is_nonempty_text(display_name)),
-    description text,
-    rate_card text,
-    allowed_operations text [] NOT NULL DEFAULT ARRAY[]::text [],
-    credit_policy_key text,
-    admission_policy_key text,
+    plan_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(plan_key, 255)),
+    display_name text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(display_name, 255)),
+    description text CHECK (
+        description IS null
+        OR bursar.is_nonempty_bounded_text(description, 8192)
+    ),
+    rate_card text CHECK (
+        rate_card IS null
+        OR bursar.is_nonempty_bounded_text(rate_card, 255)
+    ),
+    allowed_operations text [] NOT NULL DEFAULT ARRAY[]::text []
+    CHECK (bursar.is_canonical_identifier_array(
+        allowed_operations,
+        1000,
+        255
+    )),
+    credit_policy_key text CHECK (
+        credit_policy_key IS null
+        OR bursar.is_nonempty_bounded_text(credit_policy_key, 255)
+    ),
+    admission_policy_key text CHECK (
+        admission_policy_key IS null
+        OR bursar.is_nonempty_bounded_text(admission_policy_key, 255)
+    ),
     default_rollout text NOT NULL DEFAULT 'immediate'
     CHECK (default_rollout IN (
         'immediate', 'next_renewal', 'new_assignments_only'
     )),
-    credit_allowance_amount numeric(20, 6)
+    credit_allowance_amount bursar.credit_numeric
     CHECK (
         credit_allowance_amount IS null
         OR (
-            bursar.is_finite_numeric(credit_allowance_amount)
-            AND credit_allowance_amount >= 0
+            credit_allowance_amount >= 0
         )
     ),
     credit_allowance_priority integer
@@ -543,6 +654,8 @@ CREATE TABLE bursar.catalog_plans (
     )
 );
 
+-- Store typed plan feature values as a revision-local join so plan resolution
+-- cannot accidentally combine definitions from different catalogs.
 CREATE TABLE bursar.catalog_plan_features (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
@@ -562,17 +675,21 @@ CREATE TABLE bursar.catalog_plan_features (
     ) ON DELETE CASCADE
 );
 
+-- Materialize exact quota limits and window policies per plan/operation while
+-- preserving whether exceedance blocks work or only emits telemetry.
 CREATE TABLE bursar.catalog_plan_quotas (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
-    quota_key text NOT NULL CHECK (bursar.is_nonempty_text(quota_key)),
+    quota_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(quota_key, 255)),
     operation_key text NOT NULL,
-    measure_key text NOT NULL CHECK (bursar.is_nonempty_text(measure_key)),
-    quota_limit numeric(20, 6) NOT NULL
-    CHECK (bursar.is_finite_numeric(quota_limit) AND quota_limit >= 0),
+    measure_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(measure_key, 255)),
+    quota_limit bursar.credit_numeric NOT NULL
+    CHECK (quota_limit >= 0),
     window_policy jsonb NOT NULL
     CHECK (
         bursar.is_bounded_json_object(window_policy, 32768)
@@ -583,7 +700,8 @@ CREATE TABLE bursar.catalog_plan_quotas (
         )
     ),
     enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
-    emit_at_percent integer [] NOT NULL DEFAULT ARRAY[]::integer [],
+    emit_at_percent integer [] NOT NULL DEFAULT ARRAY[]::integer []
+    CHECK (bursar.is_canonical_threshold_array(emit_at_percent)),
     definition jsonb NOT NULL
     CHECK (
         bursar.is_bounded_json_object(definition, 262144)
@@ -603,13 +721,16 @@ CREATE TABLE bursar.catalog_plan_quotas (
     ) ON DELETE CASCADE
 );
 
+-- Define revision-pinned award programs with explicit eligibility and
+-- idempotency scope so repeated business events cannot multiply grants.
 CREATE TABLE bursar.catalog_grant_programs (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    program_key text NOT NULL CHECK (bursar.is_nonempty_text(program_key)),
+    program_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(program_key, 255)),
     trigger_type text NOT NULL
     CHECK (trigger_type IN (
         'account_created',
@@ -653,6 +774,8 @@ CREATE TABLE bursar.catalog_grant_programs (
     UNIQUE (id, catalog_revision_id)
 );
 
+-- Expand ordered awards into exact, bucket-bound rows; subscription-end expiry
+-- is excluded because these grants need a standalone lifetime anchor.
 CREATE TABLE bursar.catalog_grant_awards (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
@@ -661,8 +784,8 @@ CREATE TABLE bursar.catalog_grant_awards (
     grant_program_id uuid NOT NULL,
     award_index integer NOT NULL CHECK (award_index >= 0),
     recipient text NOT NULL CHECK (recipient IN ('subject', 'referrer')),
-    amount numeric(20, 6) NOT NULL
-    CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    amount bursar.credit_numeric NOT NULL
+    CHECK (amount > 0),
     bucket_key text NOT NULL,
     expiry_policy jsonb CHECK (
         expiry_policy IS null
@@ -693,15 +816,22 @@ CREATE TABLE bursar.catalog_grant_awards (
     )
 );
 
+-- Project subscription offers with exact minor-unit prices and an all-or-none
+-- cycle grant, pinned to the plan and bucket in the same catalog revision.
 CREATE TABLE bursar.catalog_offers (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    offer_key text NOT NULL CHECK (bursar.is_nonempty_text(offer_key)),
-    display_name text NOT NULL CHECK (bursar.is_nonempty_text(display_name)),
-    description text,
+    offer_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(offer_key, 255)),
+    display_name text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(display_name, 255)),
+    description text CHECK (
+        description IS null
+        OR bursar.is_nonempty_bounded_text(description, 8192)
+    ),
     sort_order integer NOT NULL DEFAULT 0,
     availability jsonb CHECK (
         availability IS null
@@ -714,7 +844,8 @@ CREATE TABLE bursar.catalog_offers (
             )
         )
     ),
-    amount_minor bigint NOT NULL CHECK (amount_minor >= 0),
+    amount_minor bigint NOT NULL
+    CHECK (bursar.is_nonnegative_safe_integer(amount_minor)),
     currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     tax_behavior text NOT NULL
     CHECK (tax_behavior IN ('inclusive', 'exclusive', 'unspecified')),
@@ -733,12 +864,11 @@ CREATE TABLE bursar.catalog_offers (
             )
         )
     ),
-    cycle_grant_amount numeric(20, 6)
+    cycle_grant_amount bursar.credit_numeric
     CHECK (
         cycle_grant_amount IS null
         OR (
-            bursar.is_finite_numeric(cycle_grant_amount)
-            AND cycle_grant_amount > 0
+            cycle_grant_amount > 0
         )
     ),
     cycle_grant_bucket_key text,
@@ -786,15 +916,22 @@ CREATE TABLE bursar.catalog_offers (
     )
 );
 
+-- Project one-time purchases as exact credits-per-unit with bounded quantity
+-- and bucket/expiry rules that remain stable for historical fulfillment.
 CREATE TABLE bursar.catalog_topups (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    topup_key text NOT NULL CHECK (bursar.is_nonempty_text(topup_key)),
-    display_name text NOT NULL CHECK (bursar.is_nonempty_text(display_name)),
-    description text,
+    topup_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(topup_key, 255)),
+    display_name text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(display_name, 255)),
+    description text CHECK (
+        description IS null
+        OR bursar.is_nonempty_bounded_text(description, 8192)
+    ),
     sort_order integer NOT NULL DEFAULT 0,
     availability jsonb CHECK (
         availability IS null
@@ -807,12 +944,13 @@ CREATE TABLE bursar.catalog_topups (
             )
         )
     ),
-    amount_minor bigint NOT NULL CHECK (amount_minor >= 0),
+    amount_minor bigint NOT NULL
+    CHECK (bursar.is_nonnegative_safe_integer(amount_minor)),
     currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     tax_behavior text NOT NULL
     CHECK (tax_behavior IN ('inclusive', 'exclusive', 'unspecified')),
-    credits_per_unit numeric(20, 6) NOT NULL
-    CHECK (bursar.is_finite_numeric(credits_per_unit) AND credits_per_unit > 0),
+    credits_per_unit bursar.credit_numeric NOT NULL
+    CHECK (credits_per_unit > 0),
     bucket_key text NOT NULL,
     min_quantity integer NOT NULL DEFAULT 1 CHECK (min_quantity > 0),
     max_quantity integer NOT NULL DEFAULT 1 CHECK (max_quantity >= min_quantity),
@@ -849,20 +987,26 @@ CREATE TABLE bursar.catalog_topups (
     )
 );
 
+-- Resolve external provider objects to catalog offers/topups using both
+-- environment and revision, avoiding live/test aliasing or mutable lookups.
 CREATE TABLE bursar.catalog_provider_refs (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
-    provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
+    provider text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(provider, 100)),
     provider_environment text NOT NULL
     DEFAULT bursar.current_provider_environment()
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
-    lookup_type text NOT NULL CHECK (bursar.is_nonempty_text(lookup_type)),
-    lookup_value text NOT NULL CHECK (bursar.is_nonempty_text(lookup_value)),
+    lookup_type text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(lookup_type, 100)),
+    lookup_value text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(lookup_value, 255)),
     object_type text NOT NULL CHECK (object_type IN ('offer', 'topup')),
-    object_key text NOT NULL CHECK (bursar.is_nonempty_text(object_key)),
+    object_key text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(object_key, 255)),
     UNIQUE (
         catalog_revision_id,
         provider,
@@ -872,16 +1016,21 @@ CREATE TABLE bursar.catalog_provider_refs (
     )
 );
 
+-- 7. Credit accounts
+
+-- Hold the current exact balance and optimistic-lock version per tenant subject
+-- and account kind; the immutable ledger added next remains the audit source.
 CREATE TABLE bursar.credit_accounts (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     account_kind text NOT NULL CHECK (account_kind IN ('personal', 'team')),
-    balance numeric(20, 6) NOT NULL DEFAULT 0
-    CHECK (bursar.is_finite_numeric(balance)),
+    balance bursar.credit_numeric NOT NULL DEFAULT 0,
     version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(updated_at)),
+    created_at timestamptz NOT NULL DEFAULT now()
+    CHECK (bursar.is_finite_timestamptz(created_at)),
     UNIQUE (tenant_id, subject_id, account_kind)
 );

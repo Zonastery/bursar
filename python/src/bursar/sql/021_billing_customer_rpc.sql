@@ -1,5 +1,13 @@
--- Billing customer, subscription, and payment records.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Migration: 021_billing_customer_rpc.sql
+-- Purpose: Define provider customer, subscription, grace, and payment upserts.
+-- Depends on: Billing identity tables, catalog offers, and entitlement-source state.
+-- Security: SECURITY DEFINER mutations bind provider records to the current tenant
+--   and environment, reject stale updates, and prevent cross-subject reassignment.
+
+-- === Provider customer and subscription truth ===
+
+-- Upsert a customer by tenant, environment, and provider identity without moving
+-- an existing provider customer between subjects.
 
 CREATE FUNCTION bursar.upsert_billing_customer(
     p_subject_id uuid,
@@ -14,8 +22,11 @@ DECLARE v_id uuid;
 
 BEGIN
     IF p_subject_id IS NULL
-       OR NOT bursar.is_nonempty_text(p_provider)
-       OR NOT bursar.is_nonempty_text(p_provider_customer_id)
+       OR NOT bursar.is_nonempty_bounded_text(p_provider, 100)
+       OR NOT bursar.is_nonempty_bounded_text(
+           p_provider_customer_id,
+           255
+       )
        OR (
            p_email IS NOT NULL
            AND NOT bursar.is_nonempty_bounded_text(p_email, 320)
@@ -28,6 +39,12 @@ BEGIN
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
+
+    -- Serialize all subject-linked PII writes with pseudonymization.
+    PERFORM 1
+    FROM bursar.subjects
+    WHERE id = p_subject_id
+    FOR UPDATE;
 
     INSERT INTO bursar.billing_customers(
         subject_id,provider,provider_environment,provider_customer_id,email
@@ -52,6 +69,8 @@ BEGIN
 
 END $$;
 
+-- Reconcile one provider subscription using provider-update ordering, immutable
+-- subject identity, replaceable customer context, catalog, and grace invariants.
 CREATE FUNCTION bursar.upsert_billing_subscription(
     p_subject_id uuid,
     p_provider text,
@@ -89,13 +108,43 @@ BEGIN
        OR p_status IS NULL
        OR p_cancel_at_period_end IS NULL
        OR NOT FOUND
-       OR NOT bursar.is_nonempty_text(p_provider)
-       OR NOT bursar.is_nonempty_text(p_provider_subscription_id)
+       OR NOT bursar.is_nonempty_bounded_text(p_provider, 100)
+       OR NOT bursar.is_nonempty_bounded_text(
+           p_provider_subscription_id,
+           255
+       )
        OR (
            p_provider_customer_id IS NOT NULL
-           AND NOT bursar.is_nonempty_text(p_provider_customer_id)
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_provider_customer_id,
+               255
+           )
        )
-       OR p_provider_updated_at IS NULL
+       OR NOT bursar.is_finite_timestamptz(p_provider_updated_at)
+       OR (
+           p_current_period_start IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_current_period_start)
+       )
+       OR (
+           p_current_period_end IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_current_period_end)
+       )
+       OR (
+           p_trial_end IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_trial_end)
+       )
+       OR (
+           p_cancel_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_cancel_at)
+       )
+       OR (
+           p_ended_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_ended_at)
+       )
+       OR (
+           p_grace_ends_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_grace_ends_at)
+       )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_metadata, '{}'::jsonb),
            16384
@@ -120,6 +169,12 @@ BEGIN
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
+
+    PERFORM 1
+    FROM bursar.subjects
+    WHERE id = p_subject_id
+    FOR UPDATE;
+
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE COALESCE(p_metadata, '{}'::jsonb)
@@ -296,6 +351,9 @@ BEGIN
     RETURN v_id;
 END $$;
 
+-- === Subscription grace lifecycle ===
+
+-- Return a bounded tenant-scoped batch across environments whose grace deadline elapsed.
 CREATE FUNCTION bursar.list_expired_grace_subscriptions(
     p_as_of timestamptz DEFAULT now(),
     p_limit integer DEFAULT 100
@@ -305,6 +363,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     SELECT subscription.*
     FROM bursar.billing_subscriptions AS subscription
     WHERE subscription.status = 'past_due'
+      AND bursar.is_finite_timestamptz(COALESCE(p_as_of, now()))
       AND subscription.grace_ends_at IS NOT NULL
       AND subscription.grace_ends_at <= COALESCE(p_as_of, now())
       AND subscription.grace_expired_at IS NULL
@@ -312,6 +371,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     LIMIT LEAST(GREATEST(COALESCE(p_limit, 100), 1), 1000)
 $$;
 
+-- Compare-and-set the grace completion marker against the expected deadline.
 CREATE FUNCTION bursar.mark_subscription_grace_expired(
     p_subscription_id uuid,
     p_expected_grace_ends_at timestamptz,
@@ -322,6 +382,8 @@ LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
     UPDATE bursar.billing_subscriptions
     SET grace_expired_at = GREATEST(p_expired_at, grace_ends_at)
     WHERE id = p_subscription_id
+      AND bursar.is_finite_timestamptz(p_expected_grace_ends_at)
+      AND bursar.is_finite_timestamptz(p_expired_at)
       AND status = 'past_due'
       AND grace_ends_at = p_expected_grace_ends_at
       AND grace_ends_at <= p_expired_at
@@ -329,6 +391,10 @@ LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
     RETURNING true
 $$;
 
+-- === Provider payment truth ===
+
+-- Upsert provider payment truth with immutable subject/currency/purpose identity
+-- and monotonic provider timestamps for replay-safe webhook handling.
 CREATE FUNCTION bursar.upsert_billing_payment(
     p_subject_id uuid,
     p_provider text,
@@ -351,20 +417,21 @@ DECLARE
     v_metadata jsonb;
 BEGIN
     IF p_subject_id IS NULL
-       OR NOT bursar.is_nonempty_text(p_provider)
-       OR NOT bursar.is_nonempty_text(p_provider_payment_id)
-       OR p_amount_minor IS NULL
-       OR p_amount_minor < 0
-       OR p_tax_minor IS NULL
-       OR p_tax_minor < 0
+       OR NOT bursar.is_nonempty_bounded_text(p_provider, 100)
+       OR NOT bursar.is_nonempty_bounded_text(p_provider_payment_id, 255)
+       OR NOT bursar.is_nonnegative_safe_integer(p_amount_minor)
+       OR NOT bursar.is_nonnegative_safe_integer(p_tax_minor)
        OR p_currency IS NULL
        OR p_currency !~ '^[A-Z]{3}$'
        OR p_purpose IS NULL
        OR p_purpose NOT IN ('subscription', 'credit_topup')
        OR p_status IS NULL
-       OR p_provider_updated_at IS NULL
+       OR NOT bursar.is_finite_timestamptz(p_provider_updated_at)
        OR (p_provider_invoice_id IS NOT NULL
-           AND NOT bursar.is_nonempty_text(p_provider_invoice_id))
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_provider_invoice_id,
+               255
+           ))
        OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
     THEN
         RAISE EXCEPTION 'invalid billing payment' USING ERRCODE='22023';
@@ -373,6 +440,12 @@ BEGIN
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
     ON CONFLICT (tenant_id, id) DO NOTHING;
+
+    PERFORM 1
+    FROM bursar.subjects
+    WHERE id = p_subject_id
+    FOR UPDATE;
+
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE p_metadata

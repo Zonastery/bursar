@@ -1,5 +1,22 @@
--- Relational invariant and lifecycle trigger functions.
+-- Migration: 005_constraints.sql
+-- Purpose: Enforce cross-row accounting, lifecycle, catalog, refund, and
+--   tenant-qualified relationship invariants that table checks cannot express.
+-- Depends on: 004_billing_tables.sql.
+-- Security: Serializes financial checks and prevents cross-tenant relationships.
 
+-- Contents
+--   1. Shared projection and outbox support
+--   2. Time, billing lifecycle, and mutation guards
+--   3. Ledger and lot provenance invariants
+--   4. Quota measurement and plan history
+--   5. Catalog immutability and projection validation
+--   6. Refund bounds
+--   7. Tenant-qualified relationship rewrite
+
+-- 1. Shared projection and outbox support
+
+-- Give mutable operational rows a database-authored modification timestamp so
+-- worker leases and operator changes share one authoritative clock.
 CREATE FUNCTION bursar.touch_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -11,10 +28,14 @@ BEGIN
 END
 $$;
 
+-- Keep tenant lifecycle timestamps current even when status is changed outside
+-- the application path that normally supplies updated_at.
 CREATE TRIGGER tenant_updated_at
 BEFORE UPDATE ON bursar.tenants
 FOR EACH ROW EXECUTE FUNCTION bursar.touch_updated_at();
 
+-- Project billable PostgreSQL-backed usage into sharded daily aggregates when
+-- its payload arrives; skip record-only facts and externally stored payloads.
 CREATE FUNCTION bursar.project_usage_charge()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -26,7 +47,8 @@ BEGIN
     SELECT *
     INTO v_charge
     FROM bursar.credit_usage_charges AS charge
-    WHERE charge.id = NEW.charge_id
+    WHERE charge.tenant_id = NEW.tenant_id
+      AND charge.id = NEW.charge_id
       AND charge.event_at = NEW.event_at;
 
     IF NOT FOUND OR v_charge.billing_disposition = 'record_only' THEN
@@ -35,6 +57,7 @@ BEGIN
 
     IF bursar.current_usage_backend() = 'postgres' THEN
         INSERT INTO bursar.usage_daily_rollups(
+        tenant_id,
         usage_day,
         account_id,
         operation,
@@ -46,6 +69,7 @@ BEGIN
         charge_count
     )
     VALUES(
+        NEW.tenant_id,
         (NEW.event_at AT TIME ZONE 'UTC')::date,
             v_charge.account_id,
             v_charge.operation,
@@ -77,6 +101,8 @@ BEGIN
 END
 $$;
 
+-- Emit each threshold/blocked quota event transactionally with a stable outbox
+-- key, making trigger retries harmless to downstream notification delivery.
 CREATE FUNCTION bursar.enqueue_quota_notification()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -84,6 +110,7 @@ SET search_path TO ''
 AS $$
 BEGIN
     INSERT INTO bursar.event_outbox(
+        tenant_id,
         topic,
         aggregate_type,
         aggregate_id,
@@ -91,6 +118,7 @@ BEGIN
         payload
     )
     VALUES(
+        NEW.tenant_id,
         CASE NEW.event_type
             WHEN 'threshold' THEN 'quota.threshold_reached'
             ELSE 'quota.admission_blocked'
@@ -116,6 +144,8 @@ BEGIN
 END
 $$;
 
+-- Publish immutable quota measurements and corrections with canonical decimal
+-- text so external rolling-window projections can replay exact values.
 CREATE FUNCTION bursar.enqueue_quota_measurement()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -123,6 +153,7 @@ SET search_path TO ''
 AS $$
 BEGIN
     INSERT INTO bursar.event_outbox(
+        tenant_id,
         topic,
         aggregate_type,
         aggregate_id,
@@ -130,6 +161,7 @@ BEGIN
         payload
     )
     VALUES(
+        NEW.tenant_id,
         'quota.measurement_recorded',
         'quota_usage_event',
         NEW.id,
@@ -156,6 +188,8 @@ BEGIN
 END
 $$;
 
+-- Notify PostgreSQL-payload consumers only when a webhook first reaches a
+-- successful/ignored terminal state; tenant idempotency suppresses duplicate updates.
 CREATE FUNCTION bursar.enqueue_completed_billing_event()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -167,6 +201,7 @@ BEGIN
        AND OLD.status IS DISTINCT FROM NEW.status
     THEN
         INSERT INTO bursar.event_outbox(
+            tenant_id,
             topic,
             aggregate_type,
             aggregate_id,
@@ -174,6 +209,7 @@ BEGIN
             payload
         )
         VALUES(
+            NEW.tenant_id,
             'billing.webhook_completed',
             'billing_event',
             NEW.id,
@@ -196,6 +232,10 @@ BEGIN
 END
 $$;
 
+-- 2. Time, billing lifecycle, and mutation guards
+
+-- Validate named time zones against PostgreSQL's catalog so calendar windows
+-- cannot be stored with an interpretation that workers cannot reproduce.
 CREATE FUNCTION bursar.require_valid_timezone()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -219,6 +259,8 @@ BEGIN
 END
 $$;
 
+-- Rearm active personal-account recharge only after an upward balance movement
+-- crosses rearm_above, preserving hysteresis around the charge threshold.
 CREATE FUNCTION bursar.rearm_auto_recharge_profile()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -228,7 +270,8 @@ BEGIN
     IF NEW.account_kind = 'personal' AND NEW.balance > OLD.balance THEN
         UPDATE bursar.billing_auto_recharge_profiles
         SET armed = true
-        WHERE subject_id = NEW.subject_id
+        WHERE tenant_id = NEW.tenant_id
+          AND subject_id = NEW.subject_id
           AND enabled
           AND state = 'active'
           AND NEW.balance >= rearm_above;
@@ -238,6 +281,8 @@ BEGIN
 END
 $$;
 
+-- Permit any provider outcome from pending/requires-action states, then constrain
+-- later changes to the supported refund and reversible-dispute progressions.
 CREATE FUNCTION bursar.validate_billing_payment_transition()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -276,6 +321,8 @@ BEGIN
 END
 $$;
 
+-- Let a pending refund reach any provider outcome once, then make its terminal
+-- state immutable apart from idempotent same-state updates.
 CREATE FUNCTION bursar.validate_billing_refund_transition()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -293,6 +340,8 @@ BEGIN
 END
 $$;
 
+-- Reject protected writes outside Bursar's transaction-scoped internal mutation
+-- convention; privileges and RLS remain the authorization boundaries.
 CREATE FUNCTION bursar.require_internal_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -314,6 +363,25 @@ BEGIN
 END
 $$;
 
+-- Tenant ownership is part of every business key and must never be rewritten
+-- in place; moving a row would invalidate audit history and relationship scope.
+CREATE FUNCTION bursar.reject_tenant_id_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id THEN
+        RAISE EXCEPTION 'tenant ownership is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+-- Expose a stable lifecycle predicate for routines that reject new activity
+-- after pseudonymization; relational checks separately handle missing subjects.
 CREATE FUNCTION bursar.is_subject_pseudonymized(
     p_subject_id uuid
 )
@@ -325,12 +393,17 @@ AS $$
         (
             SELECT subject.pseudonymized_at IS NOT NULL
             FROM bursar.subjects AS subject
-            WHERE subject.id = p_subject_id
+            WHERE subject.tenant_id = bursar.current_tenant_id()
+              AND subject.id = p_subject_id
         ),
         false
     )
 $$;
 
+-- 3. Ledger and lot provenance invariants
+
+-- Lock the account before appending a ledger row, require exact balance
+-- continuity, and keep corrective references within the same account.
 CREATE FUNCTION bursar.check_ledger_balance()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -367,6 +440,8 @@ BEGIN
 END
 $$;
 
+-- Require each lot to originate from a positive ledger entry on the same
+-- account and never claim more credits than that entry issued.
 CREATE FUNCTION bursar.check_credit_lot()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -395,6 +470,8 @@ BEGIN
 END
 $$;
 
+-- Bind every additional lot source to a positive same-account ledger entry and
+-- cap the source amount at the entry's exact value.
 CREATE FUNCTION bursar.check_credit_lot_source()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -404,6 +481,8 @@ DECLARE
     v_entry_account uuid;
     v_entry_amount numeric;
     v_lot_account uuid;
+    v_lot_granted numeric;
+    v_existing_sources numeric;
 BEGIN
     SELECT account_id, amount
     INTO v_entry_account, v_entry_amount
@@ -411,16 +490,22 @@ BEGIN
     WHERE id = NEW.ledger_entry_id
     FOR UPDATE;
 
-    SELECT account_id
-    INTO v_lot_account
+    SELECT account_id, granted
+    INTO v_lot_account, v_lot_granted
     FROM bursar.credit_lots
     WHERE id = NEW.lot_id
     FOR UPDATE;
+
+    SELECT COALESCE(sum(amount), 0)
+    INTO v_existing_sources
+    FROM bursar.credit_lot_sources
+    WHERE lot_id = NEW.lot_id;
 
     IF v_entry_account IS NULL
        OR v_entry_account <> v_lot_account
        OR v_entry_amount <= 0
        OR NEW.amount > v_entry_amount
+       OR v_existing_sources + NEW.amount > v_lot_granted
     THEN
         RAISE EXCEPTION 'credit lot source invariant violated'
             USING ERRCODE = '23514';
@@ -430,6 +515,8 @@ BEGIN
 END
 $$;
 
+-- Serialize against the debit and lot, enforce same-account provenance, and
+-- prevent cumulative lot allocations from exceeding the negative entry.
 CREATE FUNCTION bursar.check_lot_allocation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -472,6 +559,8 @@ BEGIN
 END
 $$;
 
+-- Keep source splits within one lot and cap both the allocation total and each
+-- source's net consumed amount after restorations.
 CREATE FUNCTION bursar.check_lot_source_allocation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -531,6 +620,8 @@ BEGIN
 END
 $$;
 
+-- Require refunds to reference the original same-account debit and cap restored
+-- credits by both the selected allocation and the refund ledger amount.
 CREATE FUNCTION bursar.check_lot_restoration()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -595,6 +686,8 @@ BEGIN
 END
 $$;
 
+-- Mirror lot restoration at source granularity without exceeding either the
+-- restoration total or the original source allocation.
 CREATE FUNCTION bursar.check_lot_source_restoration()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -644,6 +737,10 @@ BEGIN
 END
 $$;
 
+-- 4. Quota measurement and plan history
+
+-- Enforce the event-time horizon for original measurements, catalog/charge
+-- identity for all rows, and bounded one-level corrections before insertion.
 CREATE FUNCTION bursar.check_quota_usage_event()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -749,6 +846,8 @@ BEGIN
 END
 $$;
 
+-- Close and archive the prior assignment only when policy-bearing fields change;
+-- assignment identity is renewed for a new plan interval and retries deduplicate.
 CREATE FUNCTION bursar.archive_plan_assignment()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -791,6 +890,7 @@ BEGIN
 
     IF OLD.starts_at < v_end THEN
         INSERT INTO bursar.account_plan_assignment_history(
+            tenant_id,
             assignment_id,
             account_id,
             plan_id,
@@ -804,6 +904,7 @@ BEGIN
             replacement_reason
         )
         VALUES (
+            OLD.tenant_id,
             OLD.assignment_id,
             OLD.account_id,
             OLD.plan_id,
@@ -841,6 +942,10 @@ BEGIN
 END
 $$;
 
+-- 5. Catalog immutability and projection validation
+
+-- Catalog projection rows are immutable snapshots: new revisions replace them
+-- instead of in-place updates that would rewrite historical policy decisions.
 CREATE FUNCTION bursar.reject_catalog_projection_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -852,6 +957,8 @@ BEGIN
 END
 $$;
 
+-- Keep projected feature type/default columns identical to source JSON and
+-- ensure the default satisfies the definition-derived runtime schema.
 CREATE FUNCTION bursar.validate_catalog_entitlement_feature()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -898,6 +1005,8 @@ BEGIN
 END
 $$;
 
+-- Require every plan feature to be declared in the same revision and validate
+-- its concrete value against that feature's derived schema.
 CREATE FUNCTION bursar.validate_catalog_plan_feature()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -937,6 +1046,42 @@ BEGIN
 END
 $$;
 
+-- Resolve every denormalized operation allow-list member to the same catalog
+-- revision. The table CHECK separately rejects malformed, duplicate, or
+-- noncanonical array members before this relational validation runs.
+CREATE FUNCTION bursar.validate_catalog_plan_allowed_operations()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+DECLARE
+    v_operation_key text;
+BEGIN
+    SELECT allowed.operation_key
+    INTO v_operation_key
+    FROM unnest(NEW.allowed_operations) AS allowed(operation_key)
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM bursar.catalog_operations AS operation
+        WHERE operation.tenant_id = NEW.tenant_id
+          AND operation.catalog_revision_id = NEW.catalog_revision_id
+          AND operation.operation_key = allowed.operation_key
+    )
+    LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'plan references unknown allowed operation: %',
+            v_operation_key
+            USING ERRCODE = '23503';
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+-- Validate operation measures and ensure rolling quota history remains retained
+-- through lateness, correction, and safety horizons.
 CREATE FUNCTION bursar.validate_catalog_plan_quota()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -944,8 +1089,6 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_measures jsonb;
-    v_threshold integer;
-    v_previous integer := 0;
     v_duration_seconds bigint;
     v_required_seconds bigint;
     v_storage bursar.storage_settings;
@@ -960,18 +1103,6 @@ BEGIN
         RAISE EXCEPTION 'quota references an unknown operation measure'
             USING ERRCODE = '23503';
     END IF;
-
-    FOREACH v_threshold IN ARRAY NEW.emit_at_percent LOOP
-        IF v_threshold < 1
-           OR v_threshold > 100
-           OR v_threshold <= v_previous
-        THEN
-            RAISE EXCEPTION
-                'quota thresholds must be unique, increasing, and within 1..100'
-                USING ERRCODE = '23514';
-        END IF;
-        v_previous := v_threshold;
-    END LOOP;
 
     v_duration_seconds := bursar.policy_duration_seconds(NEW.window_policy);
 
@@ -1010,6 +1141,8 @@ BEGIN
 END
 $$;
 
+-- Permit referrer-directed awards only for referral-completed programs, keeping
+-- recipient semantics consistent with the event that can supply a referrer.
 CREATE FUNCTION bursar.validate_catalog_grant_award()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1039,6 +1172,47 @@ BEGIN
 END
 $$;
 
+-- Require every eligible auto-recharge top-up to exist in the same immutable
+-- catalog revision; the default key must also be one of that explicit set.
+CREATE FUNCTION bursar.validate_catalog_auto_recharge_policy()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+DECLARE
+    v_topup_key text;
+BEGIN
+    IF NOT NEW.default_topup_key = ANY(NEW.eligible_topup_keys) THEN
+        RAISE EXCEPTION
+            'default auto-recharge top-up must be eligible'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT eligible.topup_key
+    INTO v_topup_key
+    FROM unnest(NEW.eligible_topup_keys) AS eligible(topup_key)
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM bursar.catalog_topups AS topup
+        WHERE topup.tenant_id = NEW.tenant_id
+          AND topup.catalog_revision_id = NEW.catalog_revision_id
+          AND topup.topup_key = eligible.topup_key
+    )
+    LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION
+            'auto-recharge policy references unknown top-up: %',
+            v_topup_key
+            USING ERRCODE = '23503';
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+-- Keep a provider lookup permanently mapped to one business object across
+-- revisions and require the revision-local offer/topup target to exist.
 CREATE FUNCTION bursar.validate_catalog_provider_ref()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1048,7 +1222,8 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM bursar.catalog_provider_refs AS existing
-        WHERE existing.provider = NEW.provider
+        WHERE existing.tenant_id = NEW.tenant_id
+          AND existing.provider = NEW.provider
           AND existing.provider_environment = NEW.provider_environment
           AND existing.lookup_type = NEW.lookup_type
           AND existing.lookup_value = NEW.lookup_value
@@ -1071,7 +1246,8 @@ BEGIN
         AND EXISTS (
             SELECT 1
             FROM bursar.catalog_offers
-            WHERE catalog_revision_id = NEW.catalog_revision_id
+            WHERE tenant_id = NEW.tenant_id
+              AND catalog_revision_id = NEW.catalog_revision_id
               AND offer_key = NEW.object_key
         )
     )
@@ -1080,7 +1256,8 @@ BEGIN
         AND EXISTS (
             SELECT 1
             FROM bursar.catalog_topups
-            WHERE catalog_revision_id = NEW.catalog_revision_id
+            WHERE tenant_id = NEW.tenant_id
+              AND catalog_revision_id = NEW.catalog_revision_id
               AND topup_key = NEW.object_key
         )
     )
@@ -1093,6 +1270,8 @@ BEGIN
 END
 $$;
 
+-- Serialize activation per tenant, enforce allowed lifecycle transitions, and
+-- retire the previous active revision while preserving publication timestamps.
 CREATE FUNCTION bursar.one_active_catalog_revision()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1129,7 +1308,7 @@ BEGIN
         PERFORM pg_advisory_xact_lock(
             hashtextextended(
                 'bursar.tenant:'
-                || bursar.require_tenant_id()::text
+                || NEW.tenant_id::text
                 || ':catalog.active',
                 0
             )
@@ -1162,6 +1341,8 @@ BEGIN
 END
 $$;
 
+-- Allow abandoned drafts to be removed but preserve every published, active, or
+-- retired revision as immutable historical evidence.
 CREATE FUNCTION bursar.reject_revision_delete()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1177,6 +1358,10 @@ BEGIN
 END
 $$;
 
+-- 6. Refund bounds
+
+-- Serialize payment/refund grants, prevent money or clawbacks exceeding their
+-- source, and derive proportional credit clawback at the canonical six decimals.
 CREATE FUNCTION bursar.check_refund_bounds()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1187,7 +1372,9 @@ DECLARE
     v_grant_payment uuid;
     v_original bigint;
     v_refund_amount bigint;
-    v_refunded bigint;
+    -- sum(bigint) returns numeric. Keep the accumulator widened so adversarial
+    -- row counts reach the intended business-bound exception, not bigint 22003.
+    v_refunded numeric;
     v_payment_provider text;
     v_payment_environment text;
     v_payment_currency text;
@@ -1314,6 +1501,8 @@ BEGIN
 END
 $$;
 
+-- 7. Tenant-qualified relationship rewrite
+
 -- Snapshot the original relationship graph, then replace every relationship
 -- between tenant-owned tables with a tenant-prefixed composite foreign key.
 -- The original single-tenant foreign keys are removed after the composite
@@ -1325,6 +1514,8 @@ $$;
 CREATE UNIQUE INDEX subjects_tenant_id_id_uidx
 ON bursar.subjects (tenant_id, id);
 
+-- Capture the pre-rewrite FK catalog, including action and deferrability metadata,
+-- so the generated tenant-qualified constraints preserve original behavior.
 CREATE TEMPORARY TABLE bursar_multitenant_foreign_keys
 ON COMMIT DROP
 AS
@@ -1369,6 +1560,11 @@ WHERE
             AND NOT parent_tenant.attisdropped
     );
 
+-- For every tenant-owned relationship, create the required tenant-leading parent
+-- key and child lookup index, add the composite FK, then remove the unsafe FK.
+-- Longer keys are processed first so one covering index can serve shorter FKs;
+-- only complete indexes count because an arbitrary partial predicate can omit
+-- rows even when every referenced child column is NOT NULL.
 DO $$
 DECLARE
     v_fk record;
@@ -1380,7 +1576,6 @@ DECLARE
     v_parent_key smallint [];
     v_child_tenant_attnum smallint;
     v_parent_tenant_attnum smallint;
-    v_child_nullable_predicate text;
     v_parent_index_name text;
     v_child_index_name text;
     v_constraint_name text;
@@ -1390,7 +1585,9 @@ DECLARE
     v_deferrability text;
 BEGIN
     FOR v_fk IN
-        SELECT * FROM bursar_multitenant_foreign_keys ORDER BY oid
+        SELECT *
+        FROM bursar_multitenant_foreign_keys
+        ORDER BY cardinality(conkey) DESC, oid
     LOOP
         SELECT
             string_agg(
@@ -1400,15 +1597,10 @@ BEGIN
             string_agg(
                 attribute_info.attname,
                 '_' ORDER BY key_info.ordinality
-            ),
-            string_agg(
-                format('%I IS NOT NULL', attribute_info.attname),
-                ' AND ' ORDER BY key_info.ordinality
-            ) FILTER (WHERE NOT attribute_info.attnotnull)
+            )
         INTO
             v_child_columns,
-            v_child_column_names,
-            v_child_nullable_predicate
+            v_child_column_names
         FROM unnest(v_fk.conkey) WITH ORDINALITY AS key_info(attnum, ordinality)
         JOIN pg_attribute AS attribute_info
           ON attribute_info.attrelid = v_fk.conrelid
@@ -1516,26 +1708,13 @@ BEGIN
                       ' +'
                   )
               )[1:cardinality(v_child_key)]::smallint[] = v_child_key
-              AND (
-                  index_info.indpred IS NULL
-                  OR (
-                      v_child_nullable_predicate IS NOT NULL
-                      AND pg_get_expr(
-                          index_info.indpred,
-                          index_info.indrelid
-                      ) = v_child_nullable_predicate
-                  )
-              )
+              AND index_info.indpred IS NULL
         ) THEN
             EXECUTE format(
-                'CREATE INDEX %I ON %s (tenant_id, %s)%s',
+                'CREATE INDEX %I ON %s (tenant_id, %s)',
                 v_child_index_name,
                 v_fk.conrelid::regclass,
-                v_child_columns,
-                CASE
-                    WHEN v_child_nullable_predicate IS NULL THEN ''
-                    ELSE ' WHERE ' || v_child_nullable_predicate
-                END
+                v_child_columns
             );
         END IF;
 
@@ -1594,3 +1773,13 @@ ALTER TABLE bursar.subjects DROP CONSTRAINT subjects_pkey;
 ALTER TABLE bursar.subjects
 ADD CONSTRAINT subjects_pkey
 PRIMARY KEY USING INDEX subjects_tenant_id_id_uidx;
+
+-- The original timestamp-qualified keys existed only to let PostgreSQL create
+-- the initial foreign keys before the tenant rewrite. Their replacements now
+-- reference tenant-qualified unique indexes, so remove the narrower duplicate
+-- constraints and avoid paying for redundant unique B-trees.
+ALTER TABLE bursar.credit_usage_charges
+DROP CONSTRAINT credit_usage_charges_id_event_at_key;
+
+ALTER TABLE bursar.billing_events
+DROP CONSTRAINT billing_events_id_payload_received_at_key;

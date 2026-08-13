@@ -47,6 +47,7 @@ type PostgresClientOptions struct {
 	MaxConnections         int32
 	ApplicationName        string
 	OnPoolError            func(error)
+	Instrumentation        Instrumentation
 }
 
 func (o PostgresClientOptions) normalized() (PostgresClientOptions, error) {
@@ -124,6 +125,9 @@ func (o PostgresClientOptions) normalized() (PostgresClientOptions, error) {
 	}
 	if strings.ContainsRune(o.ApplicationName, '\x00') {
 		return PostgresClientOptions{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "application name must not contain a null byte")
+	}
+	if isNilInstrumentation(o.Instrumentation) {
+		o.Instrumentation = DefaultInstrumentation()
 	}
 	return o, nil
 }
@@ -234,7 +238,8 @@ func (c *PostgresClient) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 // PostgresTransaction is a configured transaction that can call Bursar's
 // stable SQL RPCs. It is valid only inside WithTx's callback.
 type PostgresTransaction struct {
-	tx pgx.Tx
+	tx              pgx.Tx
+	instrumentation Instrumentation
 }
 
 var postgresRPCNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -243,6 +248,22 @@ var postgresRPCNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // by output-column name. Function names are validated before interpolation;
 // values are always sent as pgx parameters.
 func (tx *PostgresTransaction) Call(ctx context.Context, name string, arguments ...any) ([]map[string]any, error) {
+	instrumentation := Instrumentation(NoopInstrumentation{})
+	if tx != nil && !isNilInstrumentation(tx.instrumentation) {
+		instrumentation = tx.instrumentation
+	}
+	return runInstrumentedValue(ctx, instrumentation, telemetryOperationPostgresRPC, TelemetryAttributes{
+		"bursar.backend": usageBackendPostgres,
+	}, func(ctx context.Context) ([]map[string]any, error) {
+		rows, err := tx.call(ctx, name, arguments...)
+		if err != nil {
+			return rows, normalizePostgresError(err, "execute PostgreSQL RPC", true)
+		}
+		return rows, nil
+	})
+}
+
+func (tx *PostgresTransaction) call(ctx context.Context, name string, arguments ...any) ([]map[string]any, error) {
 	if tx == nil || tx.tx == nil {
 		return nil, NewStoreError("PostgreSQL transaction is not active", ErrorOptions{Code: ErrorCodeStoreClosed})
 	}
@@ -282,6 +303,22 @@ func (tx *PostgresTransaction) Call(ctx context.Context, name string, arguments 
 // intended for repository projections that cannot be represented by a stable
 // database RPC; accounting mutations should use Call instead.
 func (tx *PostgresTransaction) Query(ctx context.Context, query string, arguments ...any) ([]map[string]any, error) {
+	instrumentation := Instrumentation(NoopInstrumentation{})
+	if tx != nil && !isNilInstrumentation(tx.instrumentation) {
+		instrumentation = tx.instrumentation
+	}
+	return runInstrumentedValue(ctx, instrumentation, telemetryOperationPostgresQuery, TelemetryAttributes{
+		"bursar.backend": usageBackendPostgres,
+	}, func(ctx context.Context) ([]map[string]any, error) {
+		rows, err := tx.query(ctx, query, arguments...)
+		if err != nil {
+			return rows, normalizePostgresError(err, "execute PostgreSQL query", true)
+		}
+		return rows, nil
+	})
+}
+
+func (tx *PostgresTransaction) query(ctx context.Context, query string, arguments ...any) ([]map[string]any, error) {
 	if tx == nil || tx.tx == nil {
 		return nil, NewStoreError("PostgreSQL transaction is not active", ErrorOptions{Code: ErrorCodeStoreClosed})
 	}
@@ -342,7 +379,7 @@ func (c *PostgresClient) WithTx(ctx context.Context, callback func(context.Conte
 	if err = c.configure(ctx, tx); err != nil {
 		return normalizePostgresError(err, "configure PostgreSQL transaction", false)
 	}
-	if err = callback(ctx, &PostgresTransaction{tx: tx}); err != nil {
+	if err = callback(ctx, &PostgresTransaction{tx: tx, instrumentation: c.options.Instrumentation}); err != nil {
 		return normalizePostgresError(err, "execute PostgreSQL transaction", true)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -354,13 +391,40 @@ func (c *PostgresClient) WithTx(ctx context.Context, callback func(context.Conte
 
 // Call executes a single PostgreSQL RPC in a configured transaction.
 func (c *PostgresClient) Call(ctx context.Context, name string, arguments ...any) ([]map[string]any, error) {
-	var rows []map[string]any
-	err := c.WithTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		var err error
-		rows, err = tx.Call(ctx, name, arguments...)
-		return err
+	return runInstrumentedValue(ctx, c.instrumentation(), telemetryOperationPostgresRPC, TelemetryAttributes{
+		"bursar.backend": usageBackendPostgres,
+	}, func(ctx context.Context) ([]map[string]any, error) {
+		var rows []map[string]any
+		err := c.WithTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+			var err error
+			rows, err = tx.call(ctx, name, arguments...)
+			return err
+		})
+		return rows, err
 	})
-	return rows, err
+}
+
+// Query executes parameterized SQL in a configured transaction. Accounting
+// mutations should prefer Call so the database remains the source of truth.
+func (c *PostgresClient) Query(ctx context.Context, query string, arguments ...any) ([]map[string]any, error) {
+	return runInstrumentedValue(ctx, c.instrumentation(), telemetryOperationPostgresQuery, TelemetryAttributes{
+		"bursar.backend": usageBackendPostgres,
+	}, func(ctx context.Context) ([]map[string]any, error) {
+		var rows []map[string]any
+		err := c.WithTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+			var err error
+			rows, err = tx.query(ctx, query, arguments...)
+			return err
+		})
+		return rows, err
+	})
+}
+
+func (c *PostgresClient) instrumentation() Instrumentation {
+	if c == nil || isNilInstrumentation(c.options.Instrumentation) {
+		return NoopInstrumentation{}
+	}
+	return c.options.Instrumentation
 }
 
 func (c *PostgresClient) configure(ctx context.Context, tx pgx.Tx) error {

@@ -190,15 +190,22 @@ func NewCommerceService(billing *BillingService, catalog *CatalogService, credit
 		providers:       options.Providers,
 		defaultProvider: strings.TrimSpace(options.DefaultProvider),
 	}
-	autoRechargeStore := options.AutoRechargeStore
-	if autoRechargeStore == nil {
-		autoRechargeStore, _ = options.Store.(AutoRechargeStore)
-	}
-	if autoRechargeStore != nil {
-		autoRecharge, err := NewAutoRechargeService(catalog, autoRechargeStore, options.AutoRechargeOptions)
-		if err != nil {
-			return nil, err
+	autoRecharge := billing.AutoRecharge
+	if autoRecharge == nil {
+		autoRechargeStore := options.AutoRechargeStore
+		if autoRechargeStore == nil {
+			autoRechargeStore, _ = options.Store.(AutoRechargeStore)
 		}
+		if autoRechargeStore != nil {
+			created, createErr := NewAutoRechargeService(catalog, autoRechargeStore, options.AutoRechargeOptions)
+			if createErr != nil {
+				return nil, createErr
+			}
+			autoRecharge = created
+			billing.AutoRecharge = autoRecharge
+		}
+	}
+	if autoRecharge != nil {
 		service.autoRechargeCore = autoRecharge
 		service.AutoRecharge = &CommerceAutoRecharge{commerce: service, service: autoRecharge}
 		service.postDeductionUnsubscribe = credits.AddPostDeductionHook(autoRecharge.PostDeductionHook(options.Providers, options.AutoRechargeReturnURL))
@@ -212,6 +219,16 @@ func (s *CommerceService) Providers() []string {
 		return nil
 	}
 	return s.providers.Configured()
+}
+
+// ClearProviderCache discards lazily constructed provider instances. It is
+// useful after application-owned credential rotation or provider
+// reconfiguration; the next operation constructs a fresh instance.
+func (s *CommerceService) ClearProviderCache() {
+	if s == nil || s.providers == nil {
+		return
+	}
+	s.providers.Clear()
 }
 
 // Close releases Commerce-owned registrations. It does not close a provider

@@ -1,4 +1,15 @@
--- Credit reservation and concurrent-admission leases.
+-- Migration: 014_lease_capacity_rpc.sql
+-- Purpose: Enforce quota, allowance, credit, and concurrency leases.
+-- Depends on: Foundational schema and RPCs through 013_allowance_charge_rpc.sql;
+--   runtime policy-window helpers are defined in 015_policy_window_rpc.sql.
+-- Security: SECURITY DEFINER entry points are tenant-bound with an empty search
+--   path; account-first locks and lease states fence every admission mutation.
+
+-- Enforce quota, allowance, credit, and concurrency leases.
+
+-- Parse a JSON scalar into a canonical non-negative 6dp accounting numeric.
+-- Invalid policy values become NULL so callers
+-- can return stable validation outcomes before any accounting mutation.
 
 CREATE FUNCTION bursar.jsonb_nonnegative_numeric(
     p_value jsonb
@@ -6,20 +17,14 @@ CREATE FUNCTION bursar.jsonb_nonnegative_numeric(
 RETURNS numeric
 LANGUAGE plpgsql
 IMMUTABLE
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path TO ''
 AS $$
 DECLARE
     v_value numeric;
 BEGIN
     IF p_value IS NULL
-       OR NOT COALESCE(
-           extensions.jsonb_matches_schema(
-               '{"anyOf":[{"type":"number"},{"type":"string"}]}'::json,
-               p_value
-           ),
-           false
-       )
+       OR jsonb_typeof(p_value) NOT IN ('number', 'string')
     THEN
         RETURN NULL;
     END IF;
@@ -31,13 +36,18 @@ BEGIN
             RETURN NULL;
     END;
 
-    IF NOT bursar.is_finite_numeric(v_value) OR v_value < 0 THEN
+    v_value := round(v_value, 6);
+
+    IF NOT bursar.is_credit_numeric(v_value) OR v_value < 0 THEN
         RETURN NULL;
     END IF;
     RETURN v_value;
 END
 $$;
 
+-- Evaluate one feature against the subject's tenant-visible active assignment,
+-- falling back to the active catalog default. SECURITY DEFINER grants read access
+-- only; transaction-local tenant context and RLS determine the visible policy set.
 CREATE FUNCTION bursar.subject_has_entitlement(
     p_subject_id uuid,
     p_feature text,
@@ -94,9 +104,17 @@ AS $$
       ON plan_feature.catalog_revision_id = context.catalog_revision_id
      AND plan_feature.plan_key = context.plan_key
      AND plan_feature.feature_key = feature.feature_key
-    WHERE bursar.is_nonempty_text(p_feature)
+    WHERE p_subject_id IS NOT NULL
+      AND bursar.is_nonempty_bounded_text(p_feature, 255)
+      AND p_at IS NOT NULL
+      AND pg_catalog.isfinite(p_at)
 $$;
 
+-- 2. Quota windows and lineage
+
+-- Normalize rolling, assignment-anchored, and calendar quota policy into one
+-- stable time window by delegating timezone arithmetic to policy_period_window.
+-- This helper is read-only and performs no reservation or usage mutation.
 CREATE FUNCTION bursar.quota_policy_window(
     p_anchor_at timestamptz,
     p_policy jsonb
@@ -118,6 +136,15 @@ DECLARE
     v_anchor text;
     v_timezone text;
 BEGIN
+    IF p_anchor_at IS NULL
+       OR NOT pg_catalog.isfinite(p_anchor_at)
+       OR p_policy IS NULL
+       OR jsonb_typeof(p_policy) <> 'object'
+    THEN
+        RAISE EXCEPTION 'invalid quota window policy'
+            USING ERRCODE = '22023';
+    END IF;
+
     IF v_type = 'rolling' THEN
         v_unit := p_policy->'duration'->>'unit';
         v_count := (p_policy->'duration'->>'count')::integer;
@@ -154,6 +181,9 @@ BEGIN
 END
 $$;
 
+-- Sum exact quota usage across catalog revisions sharing the same plan lineage,
+-- including correction events tied to originals inside the assignment boundary.
+-- Tenant visibility is inherited from the caller's bound account context.
 CREATE FUNCTION bursar.quota_lineage_consumed(
     p_account_id uuid,
     p_plan_key text,
@@ -199,6 +229,9 @@ AS $$
       )
 $$;
 
+-- Sum active, unreleased lease quota holds across the same plan lineage and
+-- time window. An optional lease exclusion supports settlement without counting
+-- its own reservation while all other lease fences remain effective.
 CREATE FUNCTION bursar.quota_lineage_reserved(
     p_account_id uuid,
     p_plan_key text,
@@ -229,8 +262,6 @@ AS $$
       AND reservation_quota.measure_key = p_measure_key
       AND reservation.released_at IS NULL
       AND reservation.created_at >= p_assignment_starts_at
-      AND reservation.created_at > p_window_start
-      AND reservation.created_at <= p_window_end
       AND lease.status = 'active'
       AND lease.expires_at > now()
       AND (
@@ -239,6 +270,12 @@ AS $$
       )
 $$;
 
+-- 3. Quota admission, reservation, and accounting
+
+-- Validate exact measure values against every operation quota, combine consumed
+-- and lease-reserved lineage, and return a stable domain error when enforcement
+-- blocks admission. Callers hold the account lock; blocked events use idempotency
+-- keys so retries do not duplicate the admission outcome.
 CREATE FUNCTION bursar.check_operation_quotas(
     p_account_id uuid,
     p_plan_id uuid,
@@ -462,6 +499,9 @@ BEGIN
 END
 $$;
 
+-- Materialize the admitted lease's quota holds in deterministic quota-key order.
+-- Non-rolling windows update their cached reserved amount; rolling policies retain
+-- reservation lineage only. The caller's account lock fences concurrent admission.
 CREATE FUNCTION bursar.reserve_operation_quotas(
     p_lease_id uuid,
     p_measures jsonb
@@ -505,6 +545,10 @@ BEGIN
         v_amount := bursar.jsonb_nonnegative_numeric(
             p_measures->v_quota.measure_key
         );
+        IF v_amount IS NULL THEN
+            RAISE EXCEPTION 'invalid quota measure'
+                USING ERRCODE = '22023';
+        END IF;
         IF v_amount = 0 THEN
             CONTINUE;
         END IF;
@@ -579,6 +623,9 @@ BEGIN
 END
 $$;
 
+-- Release each outstanding lease quota hold once, locking reservations in stable
+-- window/quota order and marking them released. Cached window underflow is treated
+-- as an invariant failure so a partial release cannot become a stable outcome.
 CREATE FUNCTION bursar.release_lease_quota_reservations(
     p_lease_id uuid
 )
@@ -619,6 +666,10 @@ BEGIN
 END
 $$;
 
+-- Append exact quota usage events after a successful non-replayed charge, update
+-- cached non-rolling consumption under row locks, and emit threshold events
+-- idempotently. Rolling windows remain event-derived; uniqueness rejects any
+-- accidental duplicate invocation instead of double-counting quota usage.
 CREATE FUNCTION bursar.record_operation_quotas(
     p_account_id uuid,
     p_plan_id uuid,
@@ -651,13 +702,35 @@ BEGIN
         RETURN;
     END IF;
 
+    IF p_account_id IS NULL
+       OR p_catalog_revision_id IS NULL
+       OR NOT bursar.is_nonempty_bounded_text(p_operation, 255)
+       OR NOT bursar.is_nonempty_bounded_text(p_idempotency_key, 255)
+       OR p_usage_charge_id IS NULL
+       OR p_event_at IS NULL
+       OR NOT pg_catalog.isfinite(p_event_at)
+       OR NOT bursar.valid_measure_object(
+           COALESCE(p_measures, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
+    THEN
+        RAISE EXCEPTION 'invalid quota usage input'
+            USING ERRCODE = '22023';
+    END IF;
+
     SELECT plan.plan_key, assignment.starts_at
     INTO v_plan
     FROM bursar.catalog_plans AS plan
     JOIN LATERAL (
         SELECT context.starts_at
         FROM (
-            SELECT current_assignment.starts_at
+            SELECT
+                current_assignment.starts_at,
+                current_assignment.ends_at
             FROM bursar.account_plan_assignments
                 AS current_assignment
             WHERE current_assignment.account_id = p_account_id
@@ -665,7 +738,9 @@ BEGIN
               AND current_assignment.catalog_revision_id =
                   p_catalog_revision_id
             UNION ALL
-            SELECT historical_assignment.starts_at
+            SELECT
+                historical_assignment.starts_at,
+                historical_assignment.ends_at
             FROM bursar.account_plan_assignment_history
                 AS historical_assignment
             WHERE historical_assignment.account_id = p_account_id
@@ -673,12 +748,23 @@ BEGIN
               AND historical_assignment.catalog_revision_id =
                   p_catalog_revision_id
         ) AS context
-        ORDER BY context.starts_at DESC
+        WHERE context.starts_at <= p_event_at
+        ORDER BY
+            (
+                context.ends_at IS NULL
+                OR context.ends_at > p_event_at
+            ) DESC,
+            context.starts_at DESC
         LIMIT 1
     ) AS assignment ON true
     WHERE plan.id = p_plan_id
       AND plan.catalog_revision_id = p_catalog_revision_id
     LIMIT 1;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'missing plan assignment for quota usage'
+            USING ERRCODE = '23503';
+    END IF;
 
     FOR v_quota IN
         SELECT *
@@ -691,6 +777,10 @@ BEGIN
         v_amount := bursar.jsonb_nonnegative_numeric(
             p_measures->v_quota.measure_key
         );
+        IF v_amount IS NULL THEN
+            RAISE EXCEPTION 'invalid quota measure'
+                USING ERRCODE = '22023';
+        END IF;
         IF v_amount = 0 THEN
             CONTINUE;
         END IF;
@@ -895,6 +985,12 @@ BEGIN
 END
 $$;
 
+-- 4. Lease admission and settlement
+
+-- Lock the tenant account before replay, policy, headroom, allowance, quota, and
+-- concurrency checks. Canonical numeric request digests fence idempotency; the
+-- created lease snapshots policy and atomically reserves allowance, credit, and
+-- quota capacity so identical retries return the durable lease outcome.
 CREATE FUNCTION bursar.create_lease(
     p_subject_id uuid,
     p_operation text,
@@ -939,27 +1035,38 @@ DECLARE
     v_plan_id uuid;
     v_lease_id uuid;
     v_max_concurrent integer;
-    v_requested_minimum numeric := p_minimum_balance;
+    v_requested_minimum numeric;
     v_requested_max_concurrent integer := p_max_concurrent;
     v_quota_error text;
+    v_expires_at timestamptz;
+    v_stale_lease record;
 BEGIN
+    p_estimate := round(p_estimate, 6);
+    p_minimum_balance := CASE
+        WHEN p_minimum_balance IS NULL THEN NULL
+        ELSE round(p_minimum_balance, 6)
+    END;
+    v_requested_minimum := p_minimum_balance;
+
     IF p_subject_id IS NULL
        OR NOT bursar.is_nonempty_text(p_operation)
        OR NOT bursar.is_bounded_text(p_operation, 255)
-       OR NOT bursar.is_finite_numeric(p_estimate)
+       OR p_estimate IS NULL
+       OR NOT bursar.is_credit_numeric(p_estimate)
        OR p_estimate < 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (
            p_feature IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_feature, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_feature, 255)
        )
        OR p_ttl IS NULL
+       OR NOT pg_catalog.isfinite(p_ttl)
        OR p_ttl <= interval '0'
        OR (p_max_concurrent IS NOT NULL AND p_max_concurrent < 1)
        OR (
            p_minimum_balance IS NOT NULL
-           AND NOT bursar.is_finite_numeric(p_minimum_balance)
+           AND NOT bursar.is_credit_numeric(p_minimum_balance)
        )
        OR NOT bursar.is_bounded_json_object(
            COALESCE(p_policy_snapshot, '{}'::jsonb),
@@ -987,6 +1094,29 @@ BEGIN
         RETURN;
     END IF;
 
+    BEGIN
+        v_expires_at := now() + p_ttl;
+    EXCEPTION
+        WHEN datetime_field_overflow THEN
+            RETURN QUERY
+            SELECT
+                NULL::uuid,
+                'active'::bursar.lease_status,
+                0::numeric,
+                'invalid_request';
+            RETURN;
+    END;
+
+    IF NOT pg_catalog.isfinite(v_expires_at) THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            'active'::bursar.lease_status,
+            0::numeric,
+            'invalid_request';
+        RETURN;
+    END IF;
+
     v_account := bursar.account_for_subject(p_subject_id);
 
     SELECT balance
@@ -994,6 +1124,39 @@ BEGIN
     FROM bursar.credit_accounts
     WHERE id = v_account
     FOR UPDATE;
+
+    -- Admission cannot depend on a background sweeper having run. Release all
+    -- expired holds for this account before reading allowance/quota caches;
+    -- otherwise stale rows can deny fresh work indefinitely. Account locking
+    -- serializes this cleanup with settlement, renewal, and other admissions.
+    FOR v_stale_lease IN
+        SELECT lease.*
+        FROM bursar.credit_leases AS lease
+        WHERE lease.account_id = v_account
+          AND lease.status = 'active'
+          AND lease.expires_at <= now()
+        ORDER BY lease.expires_at, lease.id
+        FOR UPDATE
+    LOOP
+        IF v_stale_lease.allowance_window_id IS NOT NULL THEN
+            UPDATE bursar.allowance_windows
+            SET reserved = reserved - v_stale_lease.reserved_allowance
+            WHERE id = v_stale_lease.allowance_window_id
+              AND reserved >= v_stale_lease.reserved_allowance;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'lease allowance expiry is inconsistent'
+                    USING ERRCODE = '23514';
+            END IF;
+        END IF;
+
+        PERFORM bursar.release_lease_quota_reservations(v_stale_lease.id);
+
+        UPDATE bursar.credit_leases
+        SET status = 'expired'
+        WHERE id = v_stale_lease.id
+          AND status = 'active';
+    END LOOP;
 
     -- Idempotency describes only caller input. Derived plan policy is persisted
     -- on the lease, but must not turn a retry into a conflict after activation
@@ -1063,7 +1226,7 @@ BEGIN
             SELECT
                 v_existing.id,
                 v_existing.status,
-                v_existing.reserved_amount,
+                v_existing.reserved_amount::numeric,
                 NULL::text;
         END IF;
         RETURN;
@@ -1110,7 +1273,7 @@ BEGIN
         v_max_concurrent := v_requested_max_concurrent;
     END IF;
 
-    IF NOT bursar.is_finite_numeric(p_minimum_balance) THEN
+    IF NOT bursar.is_credit_numeric(p_minimum_balance) THEN
         RETURN QUERY
         SELECT
             NULL::uuid,
@@ -1449,7 +1612,7 @@ BEGIN
         v_allowance_window_id,
         p_minimum_balance,
         v_max_concurrent,
-        now() + p_ttl,
+        v_expires_at,
         p_idempotency_key,
         v_digest
     )
@@ -1469,6 +1632,10 @@ BEGIN
 END
 $$;
 
+-- Lock the tenant account and lease, verify the canonical settlement digest, and
+-- transition through settling so the lease's own hold is excluded exactly once.
+-- Charging, allowance/quota release, usage recording, and the terminal settled
+-- result commit atomically; replays return stored IDs and divergent retries conflict.
 CREATE FUNCTION bursar.settle_lease(
     p_subject_id uuid,
     p_lease_id uuid,
@@ -1510,21 +1677,26 @@ DECLARE
     v_quota_error text;
     v_event_at timestamptz;
 BEGIN
-    IF NOT bursar.is_finite_numeric(p_actual)
+    p_actual := round(p_actual, 6);
+
+    IF p_subject_id IS NULL
+       OR p_lease_id IS NULL
+       OR p_actual IS NULL
+       OR NOT bursar.is_credit_numeric(p_actual)
        OR p_actual < 0
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
        OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR (
            p_feature IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_feature, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_feature, 255)
        )
        OR (
            p_model IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_model, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_model, 255)
        )
        OR (
            p_region IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_region, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_region, 255)
        )
        OR NOT bursar.valid_measure_object(
            COALESCE(p_measures, '{}'::jsonb),
@@ -1568,6 +1740,13 @@ BEGIN
     v_metadata := COALESCE(v_lease.metadata, '{}'::jsonb)
         || COALESCE(p_metadata, '{}'::jsonb)
         || jsonb_build_object('lease_id', p_lease_id);
+
+    IF NOT bursar.is_bounded_json_object(v_metadata, 1048576) THEN
+        RETURN QUERY
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'invalid_request';
+        RETURN;
+    END IF;
+
     v_settlement_digest := extensions.digest(
         convert_to(
             jsonb_build_object(
@@ -1599,7 +1778,7 @@ BEGIN
         SELECT
             v_lease.ledger_entry_id,
             v_lease.usage_charge_id,
-            COALESCE(v_lease.settled_amount, 0),
+            COALESCE(v_lease.settled_amount, 0)::numeric,
             true,
             NULL::text;
         RETURN;
@@ -1847,6 +2026,11 @@ BEGIN
 END
 $$;
 
+-- 5. Lease renewal, expiry, and release
+
+-- Lock the tenant account before its lease, release expired allowance/quota holds,
+-- and extend only an active lease monotonically. Terminal states return stable
+-- status-specific outcomes without reopening capacity.
 CREATE FUNCTION bursar.renew_lease(
     p_subject_id uuid,
     p_lease_id uuid,
@@ -1865,12 +2049,37 @@ AS $$
 DECLARE
     v_account uuid;
     v_lease bursar.credit_leases;
+    v_new_expires_at timestamptz;
 BEGIN
     IF p_subject_id IS NULL
        OR p_lease_id IS NULL
        OR p_ttl IS NULL
+       OR NOT pg_catalog.isfinite(p_ttl)
        OR p_ttl <= interval '0'
     THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            'active'::bursar.lease_status,
+            0::numeric,
+            'invalid_request';
+        RETURN;
+    END IF;
+
+    BEGIN
+        v_new_expires_at := now() + p_ttl;
+    EXCEPTION
+        WHEN datetime_field_overflow THEN
+            RETURN QUERY
+            SELECT
+                NULL::uuid,
+                'active'::bursar.lease_status,
+                0::numeric,
+                'invalid_request';
+            RETURN;
+    END;
+
+    IF NOT pg_catalog.isfinite(v_new_expires_at) THEN
         RETURN QUERY
         SELECT
             NULL::uuid,
@@ -1931,7 +2140,7 @@ BEGIN
         SELECT
             v_lease.id,
             v_lease.status,
-            v_lease.reserved_amount,
+            v_lease.reserved_amount::numeric,
             CASE v_lease.status
                 WHEN 'expired' THEN 'expired_lease'
                 WHEN 'released' THEN 'released_lease'
@@ -1942,7 +2151,7 @@ BEGIN
     END IF;
 
     UPDATE bursar.credit_leases
-    SET expires_at = greatest(expires_at, now() + p_ttl)
+    SET expires_at = greatest(expires_at, v_new_expires_at)
     WHERE id = v_lease.id
     RETURNING * INTO v_lease;
 
@@ -1950,11 +2159,14 @@ BEGIN
     SELECT
         v_lease.id,
         v_lease.status,
-        v_lease.reserved_amount,
+        v_lease.reserved_amount::numeric,
         NULL::text;
 END
 $$;
 
+-- Serialize sweepers per tenant, claim expired leases with SKIP LOCKED, and
+-- aggregate allowance releases before releasing quota reservations. The advisory
+-- lock and deterministic batch order prevent cross-window deadlocks and double release.
 CREATE FUNCTION bursar.expire_leases(
     p_limit integer DEFAULT 100
 )
@@ -2049,6 +2261,9 @@ BEGIN
 END
 $$;
 
+-- Lock the tenant account before its lease and release allowance/quota capacity
+-- exactly once. Repeated calls return the existing terminal status, so release is
+-- idempotent without accepting a caller-supplied replay key.
 CREATE FUNCTION bursar.release_lease(
     p_subject_id uuid,
     p_lease_id uuid
@@ -2062,6 +2277,10 @@ DECLARE
     v_account uuid;
     v_lease bursar.credit_leases;
 BEGIN
+    IF p_subject_id IS NULL OR p_lease_id IS NULL THEN
+        RETURN 'invalid_request';
+    END IF;
+
     v_account := bursar.account_for_subject(p_subject_id);
 
     PERFORM 1

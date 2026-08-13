@@ -684,16 +684,15 @@ def test_billing_claim_stores_bounded_payload_separately(
         assert exported["object_key"] == "billing/stripe/evt-bounded-1.json"
 
 
-def test_financial_subject_pseudonymization_redacts_account_event_payload(
+def test_financial_subject_pseudonymization_redacts_attributed_event_copies(
     pg_database_url: str,
 ) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         subject_id, _ = _create_account(cursor)
         envelope = {
-            "accountId": subject_id,
             "customer": {"email": "private@example.com"},
         }
-        assert "userId" not in envelope
+        assert subject_id not in str(envelope)
 
         cursor.execute(
             """
@@ -707,7 +706,34 @@ def test_financial_subject_pseudonymization_redacts_account_event_payload(
             """,
             (Json(envelope),),
         )
-        _status, event_id, _claim_token = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+        _status, postgres_event_id, _claim_token = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+
+        cursor.execute(
+            "SELECT bursar.attribute_billing_event_subject(%s::uuid, %s::uuid)",
+            (postgres_event_id, subject_id),
+        )
+        assert cursor.fetchone() == (True,)
+
+        cursor.execute("SET LOCAL bursar.billing_payload_backend = 's3'")
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.claim_billing_event(
+                'stripe',
+                'evt-pseudonymize-outbox-envelope',
+                'customer.updated',
+                %s::jsonb
+            )
+            """,
+            (Json(envelope),),
+        )
+        _status, outbox_event_id, _claim_token = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+
+        cursor.execute(
+            "SELECT bursar.attribute_billing_event_subject(%s::uuid, %s::uuid)",
+            (outbox_event_id, subject_id),
+        )
+        assert cursor.fetchone() == (True,)
 
         cursor.execute(
             "SELECT bursar.pseudonymize_financial_subject(%s::uuid)",
@@ -724,9 +750,23 @@ def test_financial_subject_pseudonymization_redacts_account_event_payload(
              AND event.payload_received_at = payload.received_at
             WHERE event.id = %s::uuid
             """,
-            (event_id,),
+            (postgres_event_id,),
         )
         assert cursor.fetchone() == ({"pseudonymized": True},)
+
+        cursor.execute(
+            """
+            SELECT event.subject_id, outbox.payload->'envelope'
+            FROM bursar.billing_events AS event
+            JOIN bursar.event_outbox AS outbox
+              ON outbox.aggregate_type = 'billing_event'
+             AND outbox.aggregate_id = event.id
+             AND outbox.topic = 'billing.webhook_received'
+            WHERE event.id = %s::uuid
+            """,
+            (outbox_event_id,),
+        )
+        assert cursor.fetchone() == (subject_id, {"pseudonymized": True})
 
 
 def test_outbox_claim_acknowledgement_and_payload_bounds(

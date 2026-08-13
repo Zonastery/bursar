@@ -62,6 +62,11 @@ versioned SDK module separately:
 go get github.com/Zonastery/bursar/golang/v2
 ```
 
+Go consumers select ordinary module versions such as `@v2.0.3`. Because the
+module is rooted in `golang/`, maintainers publish the corresponding repository
+tag as `golang/v2.0.3`; the release workflow creates and verifies that nested
+tag from the same commit as the shared `v2.0.3` release tag.
+
 Create a tenant, then build the facade:
 
 ```bash
