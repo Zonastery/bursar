@@ -6,7 +6,25 @@ page after the Python and TypeScript packages are published successfully.
 
 ## [Unreleased]
 
-See the [comparison with 2.0.2](https://github.com/Zonastery/bursar/compare/v2.0.2...HEAD).
+See the [comparison with 2.0.3](https://github.com/Zonastery/bursar/compare/v2.0.3...HEAD).
+
+## [2.0.3] - 2026-08-15
+
+### Added
+
+- Added the Go SDK and cross-SDK contract parity and package smoke coverage.
+- Added OpenTelemetry instrumentation plus storage diagnostics, maintenance,
+  and recovery APIs to the Python and TypeScript SDKs.
+
+### Changed
+
+- Expanded billing, commerce, provider, storage, and persistence contracts
+  across the supported SDKs.
+
+### Fixed
+
+- Hardened storage runtime maintenance, partition permissions, provider event
+  mapping, and PostgreSQL integration contracts.
 
 ## [2.0.2] - 2026-08-10
 
@@ -86,6 +104,7 @@ See the [comparison with 2.0.2](https://github.com/Zonastery/bursar/compare/v2.0
 - [0.0.2](https://github.com/Zonastery/bursar/compare/v0.0.1...v0.0.2)
 - [0.0.1](https://github.com/Zonastery/bursar/releases/tag/v0.0.1)
 
+[2.0.3]: https://github.com/Zonastery/bursar/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/Zonastery/bursar/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/Zonastery/bursar/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/Zonastery/bursar/compare/v1.0.1...v2.0.0

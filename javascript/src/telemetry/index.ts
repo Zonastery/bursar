@@ -1,6 +1,6 @@
 /** Package-scoped telemetry constants shared by every instrumentation adapter. */
 export const BURSAR_INSTRUMENTATION_SCOPE = "@zonastery/bursar";
-export const BURSAR_INSTRUMENTATION_VERSION = "2.0.2";
+export const BURSAR_INSTRUMENTATION_VERSION = "2.0.3";
 
 export type TelemetryAttributeValue = string | number | boolean;
 export type TelemetryAttributes = Readonly<Record<string, TelemetryAttributeValue>>;
