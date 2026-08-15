@@ -167,12 +167,14 @@ export class BalanceRepository {
     const state =
       row.error_code == null
         ? ((await this.callproc("get_credit_state", [userId]))[0] as
-            Record<string, unknown> | undefined)
+            | Record<string, unknown>
+            | undefined)
         : undefined;
     const grant =
       row.error_code == null && decimalAmount.isPositive() && row.entry_id != null
         ? ((await this.callproc("get_credit_grant_details", [userId, row.entry_id]))[0] as
-            Record<string, unknown> | undefined)
+            | Record<string, unknown>
+            | undefined)
         : undefined;
     return safeParse(
       AddCreditsRowSchema,

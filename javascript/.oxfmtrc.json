@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "semi": true,
+  "singleQuote": false,
+  "trailingComma": "all",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "ignorePatterns": [
+    "dist/**",
+    "node_modules/**",
+    "src/generated/pricing-config.schema.json"
+  ]
+}

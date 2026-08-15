@@ -31,14 +31,14 @@ pre-commit:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"
       run: |
-        bunx --no-install prettier --check {staged_files} \
-          || { echo "↳ run: bunx --no-install prettier --write <files>  (then review & re-stage)" >&2; exit 1; }
+        bunx --no-install oxfmt --config .oxfmtrc.json --check {staged_files} \
+          || { echo "↳ run: bunx --no-install oxfmt --config .oxfmtrc.json --write <files>  (then review & re-stage)" >&2; exit 1; }
     js-lint:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"
       run: |
-        bunx --no-install eslint {staged_files} \
-          || { echo "↳ run: bunx --no-install eslint --fix <files>  (then review & re-stage)" >&2; exit 1; }
+        bunx --no-install oxlint --config .oxlintrc.json --deny-warnings {staged_files} \
+          || { echo "↳ run: bunx --no-install oxlint --config .oxlintrc.json --fix <files>  (then review & re-stage)" >&2; exit 1; }
     go-format:
       root: "."
       glob: "**/*.go"

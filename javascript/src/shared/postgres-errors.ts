@@ -7,7 +7,14 @@ import {
 } from "../errors.js";
 
 export type PostgresOperationPhase =
-  "connect" | "begin" | "configure" | "query" | "commit" | "rollback" | "close" | "pool";
+  | "connect"
+  | "begin"
+  | "configure"
+  | "query"
+  | "commit"
+  | "rollback"
+  | "close"
+  | "pool";
 
 export interface PostgresErrorContext {
   operation?: string;

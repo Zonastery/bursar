@@ -155,7 +155,10 @@ export interface ChangePlanParams {
   providerSubscriptionId: string;
   productId: string;
   prorationBillingMode:
-    "prorated_immediately" | "full_immediately" | "difference_immediately" | "do_not_bill";
+    | "prorated_immediately"
+    | "full_immediately"
+    | "difference_immediately"
+    | "do_not_bill";
   effectiveAt?: "immediately" | "next_billing_date";
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;

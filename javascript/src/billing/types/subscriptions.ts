@@ -63,7 +63,11 @@ export interface BillingSubscriptionState {
 }
 
 export type BillingSubscriptionChangeState =
-  "awaiting_payment" | "scheduled" | "applied" | "failed" | "canceled";
+  | "awaiting_payment"
+  | "scheduled"
+  | "applied"
+  | "failed"
+  | "canceled";
 
 export interface BillingSubscriptionOfferContext {
   offerId: string;
