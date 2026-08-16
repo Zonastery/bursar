@@ -2,6 +2,7 @@ import { Decimal } from "decimal.js";
 import { LRUCache } from "lru-cache";
 
 import type { NormalizedLogger } from "../shared/logger.js";
+import type { StructuredObject } from "../shared/json.js";
 import type { CreditEvent, CreditEventType } from "./events.js";
 import type { DeductionSuccess } from "./types/index.js";
 import type { LowBalanceConfig } from "./service-types.js";
@@ -9,11 +10,7 @@ import { toDecimal } from "./amount.js";
 
 const DEFAULT_MAX_TRACKED_USERS = 100_000;
 
-type EmitCreditEvent = (
-  type: CreditEventType,
-  userId: string,
-  data?: Record<string, unknown>,
-) => void;
+type EmitCreditEvent = (type: CreditEventType, userId: string, data?: StructuredObject) => void;
 
 /**
  * Owns edge-trigger state for low-balance and overdraft notifications.

@@ -1,7 +1,9 @@
+import type { PostgresParams, PostgresRow, PostgresValue } from "./json.js";
+
 export interface QueryFn {
-  (text: string, params?: unknown[]): Promise<unknown[]>;
+  (text: string, params?: PostgresParams): Promise<PostgresRow[]>;
 }
 
 export interface CallProc {
-  (name: string, params: unknown[]): Promise<unknown[]>;
+  (name: string, params: PostgresParams): Promise<PostgresValue[]>;
 }

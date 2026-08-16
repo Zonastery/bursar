@@ -1,34 +1,24 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adapters/clickhouse.js";
-import { S3BillingArchive, type S3ArchiveClient } from "../src/storage/adapters/s3.js";
+import {
+  S3BillingArchive,
+  type S3ArchiveClient,
+  type S3ClientOptions,
+} from "../src/storage/adapters/s3.js";
 import type { BillingEventPayloadExport, UsageChargeExport } from "../src/storage/ports.js";
 
 const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
-const s3Mock = vi.hoisted(() => ({
-  configurations: [] as Record<string, unknown>[],
-  send: vi.fn(),
+const s3Mock = {
+  configurations: new Array<S3ClientOptions>(),
+  send: vi.fn<S3ArchiveClient["send"]>(),
   destroy: vi.fn(),
-}));
+};
 
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: class {
-    constructor(configuration: Record<string, unknown>) {
-      s3Mock.configurations.push(configuration);
-    }
-
-    send(command: unknown) {
-      return s3Mock.send(command);
-    }
-
-    destroy() {
-      s3Mock.destroy();
-    }
-  },
-  PutObjectCommand: class {
-    constructor(readonly input: Record<string, unknown>) {}
-  },
-}));
+const testClientFactory = (options: S3ClientOptions): S3ArchiveClient => {
+  s3Mock.configurations.push(options);
+  return { send: s3Mock.send, destroy: s3Mock.destroy };
+};
 
 function billingEvent(): BillingEventPayloadExport {
   return {
@@ -79,26 +69,37 @@ function usageEvent(chargeId = "00000000-0000-0000-0000-000000000042"): UsageCha
   };
 }
 
-function clickHouseClient(
-  options: {
-    schemaRows?: Record<string, unknown>[];
-  } = {},
-): ClickHouseClient & {
-  command: ReturnType<typeof vi.fn>;
-  insert: ReturnType<typeof vi.fn>;
-  query: ReturnType<typeof vi.fn>;
-} {
+interface ClickHouseSchemaTestRow {
+  name: string;
+  type: string;
+  engine: string;
+  engine_full: string;
+  sorting_key: string;
+}
+
+interface ClickHouseTestOptions {
+  schemaRows?: ClickHouseSchemaTestRow[];
+}
+
+interface ClickHouseTestClient extends ClickHouseClient {
+  command: Mock<ClickHouseClient["command"]>;
+  insert: Mock<ClickHouseClient["insert"]>;
+  query: Mock<ClickHouseClient["query"]>;
+}
+
+function clickHouseClient(options: ClickHouseTestOptions = {}): ClickHouseTestClient {
   return {
-    command: vi.fn().mockResolvedValue(undefined),
-    insert: vi.fn().mockResolvedValue(undefined),
-    query: vi.fn().mockResolvedValue({
+    command: vi.fn<ClickHouseClient["command"]>().mockResolvedValue(undefined),
+    insert: vi.fn<ClickHouseClient["insert"]>().mockResolvedValue(undefined),
+    query: vi.fn<ClickHouseClient["query"]>().mockResolvedValue({
+      // SAFETY: The adapter requests the schema row type from this faithful test client.
       json: async <T>() => (options.schemaRows ?? []) as T,
     }),
   };
 }
 
-function compatibleSchemaRows(): Record<string, unknown>[] {
-  const columns: Record<string, string> = {
+function compatibleSchemaRows(): ClickHouseSchemaTestRow[] {
+  const columns = {
     tenant_id: "UUID",
     outbox_event_id: "UInt64",
     charge_id: "UUID",
@@ -146,6 +147,7 @@ describe("S3BillingArchive hardening", () => {
   it("uses the default credential and region chains and applies safe request options", async () => {
     const archive = new S3BillingArchive({
       bucket: "billing-archive",
+      clientFactory: testClientFactory,
       putObject: {
         ServerSideEncryption: "aws:kms",
         SSEKMSKeyId: "alias/bursar",
@@ -159,7 +161,8 @@ describe("S3BillingArchive hardening", () => {
     expect(s3Mock.configurations).toEqual([{ forcePathStyle: false }]);
     expect(s3Mock.configurations[0]).not.toHaveProperty("credentials");
     expect(s3Mock.configurations[0]).not.toHaveProperty("region");
-    const command = s3Mock.send.mock.calls[0]?.[0] as { input: Record<string, unknown> };
+    const command = s3Mock.send.mock.calls[0]?.[0];
+    if (!command) throw new Error("expected an S3 put command");
     expect(command.input).toMatchObject({
       ServerSideEncryption: "aws:kms",
       SSEKMSKeyId: "alias/bursar",
@@ -171,12 +174,32 @@ describe("S3BillingArchive hardening", () => {
     expect(s3Mock.destroy).toHaveBeenCalledOnce();
   });
 
+  it("normalizes long slash-wrapped prefixes without pathological backtracking", async () => {
+    const archive = new S3BillingArchive({
+      bucket: "billing-archive",
+      clientFactory: testClientFactory,
+      prefix: `${"/".repeat(10_000)}tenant-a${"/".repeat(10_000)}`,
+    });
+
+    await archive.archive(billingEvent());
+
+    const command = s3Mock.send.mock.calls[0]?.[0];
+    if (!command) throw new Error("expected an S3 put command");
+    expect(command.input.Key).toBe(
+      "tenant-a/tenants/00000000-0000-0000-0000-000000000001/" +
+        "billing-events/2026/07/29/00000000-0000-0000-0000-000000000011.json",
+    );
+  });
+
   it("does not destroy an injected client unless ownership is explicit", async () => {
     const client = {
       send: vi.fn().mockResolvedValue({ VersionId: "injected" }),
       destroy: vi.fn(),
     } satisfies S3ArchiveClient;
-    const archive = new S3BillingArchive({ bucket: "billing-archive", client });
+    const archive = new S3BillingArchive({
+      bucket: "billing-archive",
+      client,
+    });
 
     await archive.archive(billingEvent());
     await archive.close();
@@ -191,7 +214,13 @@ describe("S3BillingArchive hardening", () => {
       destroy: vi.fn(),
     } satisfies S3ArchiveClient;
     const clientFactory = vi.fn(() => client);
-    const archive = new S3BillingArchive({ bucket: "billing-archive", clientFactory });
+    const archive = new S3BillingArchive({
+      bucket: "billing-archive",
+      clientFactory: (options) => {
+        s3Mock.configurations.push(options);
+        return clientFactory();
+      },
+    });
 
     expect(clientFactory).not.toHaveBeenCalled();
     await archive.archive(billingEvent());
@@ -210,7 +239,10 @@ describe("S3BillingArchive hardening", () => {
       .fn<() => S3ArchiveClient | Promise<S3ArchiveClient>>()
       .mockRejectedValueOnce(new Error("temporary credential provider failure"))
       .mockResolvedValueOnce(client);
-    const archive = new S3BillingArchive({ bucket: "billing-archive", clientFactory: factory });
+    const archive = new S3BillingArchive({
+      bucket: "billing-archive",
+      clientFactory: factory,
+    });
 
     await expect(archive.archive(billingEvent())).rejects.toThrow("temporary credential");
     await expect(archive.archive(billingEvent())).resolves.toBeDefined();
@@ -218,7 +250,10 @@ describe("S3BillingArchive hardening", () => {
 
     const malformed = new S3BillingArchive({
       bucket: "billing-archive",
-      clientFactory: () => ({}) as S3ArchiveClient,
+      clientFactory: () => {
+        // SAFETY: This deliberately malformed client exercises runtime validation.
+        return {} as S3ArchiveClient;
+      },
     });
     await expect(malformed.archive(billingEvent())).rejects.toThrow(/must provide send/);
   });
@@ -238,7 +273,8 @@ describe("ClickHouseUsageStore hardening", () => {
 
     expect(client.command).not.toHaveBeenCalled();
     expect(client.insert).toHaveBeenCalledOnce();
-    const request = client.insert.mock.calls[0]?.[0] as { values: Record<string, unknown>[] };
+    const request = client.insert.mock.calls[0]?.[0];
+    if (!request) throw new Error("Expected writeUsageBatch to issue an insert");
     expect(request.values).toHaveLength(2);
     expect(request.values.map((row) => row.outbox_event_id)).toEqual(["99", "100"]);
     expect(request.values.map((row) => row.charge_id)).toEqual([first.chargeId, second.chargeId]);
@@ -257,7 +293,9 @@ describe("ClickHouseUsageStore hardening", () => {
     await first;
 
     expect(client.command).toHaveBeenCalledOnce();
-    const ddl = (client.command.mock.calls[0]?.[0] as { query: string }).query;
+    const commandCall = client.command.mock.calls[0];
+    if (!commandCall) throw new Error("Expected initializeSchema to issue a command");
+    const ddl = commandCall[0].query;
     expect(ddl).toContain("ENGINE = ReplacingMergeTree(outbox_event_id)");
     expect(ddl).not.toContain("ReplicatedReplacingMergeTree");
   });

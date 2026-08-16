@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from functools import cached_property
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from uuid import UUID
 
 import psycopg2
@@ -179,32 +179,15 @@ class PostgresStore(CreditStore):
         postgres_options: PostgresConnectionOptions | None = None,
     ) -> None:
         super().__init__()
-        if pool is None and (not isinstance(database_url, str) or not database_url.strip()):
-            raise ValueError("database_url is required when pool is not provided")
-        if pool is not None and database_url is not None:
-            raise ValueError("provide either database_url or pool, not both")
-        if pool is None:
-            assert database_url is not None
-        self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id)))
         self._provider_environment: ProviderEnvironment = provider_environment
         self._usage_backend = usage_backend
-        self._client = (
-            PostgresClient.from_pool(
-                pool,
-                tenant_id=self._tenant_id,
-                usage_backend=usage_backend,
-                provider_environment=provider_environment,
-                connection_timeout_seconds=connection_timeout_seconds,
-                statement_timeout_ms=statement_timeout_ms,
-                idle_transaction_timeout_ms=idle_transaction_timeout_ms,
-                application_name=application_name,
-                on_pool_error=on_pool_error,
-                postgres_options=postgres_options,
-            )
-            if pool is not None
-            else PostgresClient(
-                cast(str, database_url),
+        if pool is None:
+            if not isinstance(database_url, str) or not database_url.strip():
+                raise ValueError("database_url is required when pool is not provided")
+            self._database_url = database_url
+            self._client = PostgresClient(
+                database_url,
                 max_connections=max_pool_size,
                 tenant_id=self._tenant_id,
                 usage_backend=usage_backend,
@@ -216,7 +199,22 @@ class PostgresStore(CreditStore):
                 on_pool_error=on_pool_error,
                 postgres_options=postgres_options,
             )
-        )
+        else:
+            if database_url is not None:
+                raise ValueError("provide either database_url or pool, not both")
+            self._database_url = None
+            self._client = PostgresClient.from_pool(
+                pool,
+                tenant_id=self._tenant_id,
+                usage_backend=usage_backend,
+                provider_environment=provider_environment,
+                connection_timeout_seconds=connection_timeout_seconds,
+                statement_timeout_ms=statement_timeout_ms,
+                idle_transaction_timeout_ms=idle_transaction_timeout_ms,
+                application_name=application_name,
+                on_pool_error=on_pool_error,
+                postgres_options=postgres_options,
+            )
 
     @property
     def provider_environment(self) -> ProviderEnvironment:

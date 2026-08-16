@@ -828,7 +828,7 @@ class TestSubscriptionCrud:
 
 class TestEventIdempotency:
     def test_event_idempotency(self, pg_database_url: str, pg_store: object) -> None:
-        bs, _cm, sink = _make_components(pg_database_url, pg_store)
+        _bs, _cm, sink = _make_components(pg_database_url, pg_store)
         event = BillingEvent(
             provider=PROVIDER,
             event_id=EVENT_ID,
@@ -1116,7 +1116,7 @@ class TestBillingServiceLifecycle:
         assert plan2.plan_id is None
 
     def test_topup_credit_grant(self, pg_database_url: str, pg_store: object) -> None:
-        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
             BillingEvent(
@@ -1152,7 +1152,7 @@ class TestBillingServiceLifecycle:
         assert balance.balance == Decimal("2000")
 
     def test_refund_clawback_deducts_credits(self, pg_database_url: str, pg_store: object) -> None:
-        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
         uid = "00000000-0000-0000-0000-000000000005"
         payment_id = "py_refund_clawback"
 
@@ -1210,7 +1210,7 @@ class TestBillingServiceLifecycle:
         assert balance_after_refund.balance == Decimal("0")
 
     def test_subscription_pause_resume(self, pg_database_url: str, pg_store: object) -> None:
-        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
             BillingEvent(
@@ -1339,7 +1339,7 @@ class TestBillingServiceLifecycle:
         assert new_offer.offer_key == "new_offer"
 
     def test_cycle_grant_credits_granted(self, pg_database_url: str, pg_store: object) -> None:
-        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
             BillingEvent(
@@ -1377,7 +1377,7 @@ class TestBillingServiceLifecycle:
         assert balance.balance == Decimal("5000")
 
     def test_cycle_grant_replace_prior(self, pg_database_url: str, pg_store: object) -> None:
-        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
             BillingEvent(

@@ -1444,7 +1444,7 @@ class BillingService:
                     anchor = (
                         preserved_allowance_anchor
                         if isinstance(preserved_allowance_anchor, datetime)
-                        else datetime.fromisoformat(preserved_allowance_anchor.replace("Z", "+00:00"))
+                        else datetime.fromisoformat(preserved_allowance_anchor)
                     )
                     if anchor.tzinfo is None:
                         anchor = anchor.replace(tzinfo=UTC)

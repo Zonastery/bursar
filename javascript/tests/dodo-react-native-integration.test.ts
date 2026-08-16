@@ -1,21 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const sdkMocks = vi.hoisted(() => ({
-  start: vi.fn(),
-  getAbandonedSession: vi.fn(),
-  clearAbandonedSession: vi.fn(),
-  handleOpenURL: vi.fn(),
-}));
-
-vi.mock("@dodopayments/react-native-checkout", () => ({
-  DodoCheckout: sdkMocks,
-}));
+import { describe, expect, it, vi } from "vitest";
 
 import {
-  createDodoReactNativeCheckout,
+  createDodoReactNativeCheckoutCore as createDodoReactNativeCheckout,
+  type DodoReactNativeCheckoutAdapter,
+  type DodoReactNativeAbandonedSession,
   type DodoReactNativeCheckoutStore,
   type DodoReactNativePendingCheckout,
-} from "../src/providers/dodo/react-native.js";
+  type DodoReactNativeCheckoutResult,
+} from "../src/providers/dodo/react-native-core.js";
 
 function memoryStore() {
   let pending: DodoReactNativePendingCheckout | null = null;
@@ -32,23 +24,23 @@ function memoryStore() {
 }
 
 describe("Dodo React Native integration", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    sdkMocks.start.mockResolvedValue({ status: "cancelled", raw: {} });
-    sdkMocks.getAbandonedSession.mockResolvedValue(null);
-    sdkMocks.clearAbandonedSession.mockResolvedValue(undefined);
-    sdkMocks.handleOpenURL.mockResolvedValue(true);
-  });
-
   it("persists the Bursar intent and delegates presentation to the official SDK", async () => {
     const { store, current } = memoryStore();
     const onEvent = vi.fn();
     const getCheckoutStatus = vi.fn().mockResolvedValue("pending");
+    const result: DodoReactNativeCheckoutResult = { status: "cancelled", raw: {} };
+    const sdk = {
+      start: vi.fn(async () => result),
+      getAbandonedSession: vi.fn(async (): Promise<DodoReactNativeAbandonedSession | null> => null),
+      clearAbandonedSession: vi.fn(async () => undefined),
+      handleOpenURL: vi.fn(async () => true),
+    } satisfies DodoReactNativeCheckoutAdapter;
     const checkout = createDodoReactNativeCheckout({
       returnUrl: "zonastery-dev-checkout://return",
       store,
       getCheckoutStatus,
       onEvent,
+      checkout: sdk,
     });
 
     await expect(
@@ -65,7 +57,7 @@ describe("Dodo React Native integration", () => {
       intentId: "intent-1",
       startedAt: expect.any(String),
     });
-    expect(sdkMocks.start).toHaveBeenCalledWith({
+    expect(sdk.start).toHaveBeenCalledWith({
       checkoutUrl: "https://checkout.dodopayments.com/session/cks_1",
       returnUrl: "zonastery-dev-checkout://return",
       onEvent,
@@ -74,16 +66,24 @@ describe("Dodo React Native integration", () => {
       confirmationStatus: "pending",
     });
     expect(current()).not.toBeNull();
-    expect(sdkMocks.clearAbandonedSession).not.toHaveBeenCalled();
+    expect(sdk.clearAbandonedSession).not.toHaveBeenCalled();
   });
 
   it("clears both recovery records only after Bursar reports a terminal status", async () => {
     const { store, current } = memoryStore();
+    const sdk = {
+      start: vi.fn(
+        async () => ({ status: "cancelled", raw: {} }) satisfies DodoReactNativeCheckoutResult,
+      ),
+      getAbandonedSession: vi.fn(async (): Promise<DodoReactNativeAbandonedSession | null> => null),
+      clearAbandonedSession: vi.fn(async () => undefined),
+      handleOpenURL: vi.fn(async () => true),
+    } satisfies DodoReactNativeCheckoutAdapter;
     await store.setPendingCheckout({
       intentId: "intent-2",
       startedAt: "2026-08-07T00:00:00.000Z",
     });
-    sdkMocks.getAbandonedSession.mockResolvedValue({
+    sdk.getAbandonedSession.mockResolvedValue({
       sessionId: "cks_2",
       createdAt: new Date("2026-08-07T00:00:00.000Z"),
     });
@@ -92,6 +92,7 @@ describe("Dodo React Native integration", () => {
       returnUrl: "zonastery-dev-checkout://return",
       store,
       getCheckoutStatus,
+      checkout: sdk,
     });
 
     await expect(checkout.reconcile()).resolves.toMatchObject({
@@ -101,7 +102,7 @@ describe("Dodo React Native integration", () => {
     });
     expect(getCheckoutStatus).toHaveBeenCalledWith("intent-2");
     expect(current()).toBeNull();
-    expect(sdkMocks.clearAbandonedSession).toHaveBeenCalledOnce();
+    expect(sdk.clearAbandonedSession).toHaveBeenCalledOnce();
     await expect(checkout.handleOpenURL("zonastery-dev-checkout://return")).resolves.toBe(true);
   });
 });

@@ -97,6 +97,7 @@ bun run typecheck             # typecheck
 cd golang
 go test -race ./...
 go vet ./...
+go tool staticcheck ./...  # uses the version pinned in go.mod
 ```
 
 ## Code Style
@@ -129,12 +130,13 @@ bun run typecheck
 ### Go
 
 - **Formatter**: `gofmt`.
-- **Static analysis**: `go vet`.
+- **Static analysis**: `go vet` + the pinned Staticcheck tool dependency.
 
 ```bash
 cd golang
 gofmt -w $(rg --files -g '*.go')
 go vet ./...
+go tool staticcheck ./...
 ```
 
 ### Git hooks (lefthook)
@@ -147,7 +149,7 @@ go vet ./...
   and reviewable before they are re-staged.
 - **pre-push** (parallel) — `pyright` + `pytest` for Python,
   `tsc --noEmit` + `vitest run` + `knip` for JavaScript, and
-  `go vet` + `go test -race` for Go.
+  `go vet` + Staticcheck + `go test -race` for Go.
 
 Hooks are convenience only and are bypassable (`--no-verify`); **CI is the
 authoritative gate.** Install them with `lefthook install`.

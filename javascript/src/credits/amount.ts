@@ -1,4 +1,5 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 
 import type { ExactAmount, MetricsOrAmount } from "./service-types.js";
 
@@ -7,9 +8,9 @@ export function toDecimal(value: ExactAmount): Decimal {
   let amount: Decimal;
   if (value instanceof Decimal) {
     amount = value;
-  } else if (typeof value === "string" && value.trim().length > 0) {
+  } else if (z.string().min(1).safeParse(value).success) {
     try {
-      amount = new Decimal(value);
+      amount = new Decimal(z.string().parse(value));
     } catch (cause) {
       throw new TypeError("amount must be a valid decimal string", { cause });
     }
@@ -21,12 +22,12 @@ export function toDecimal(value: ExactAmount): Decimal {
 }
 
 export function isAmount(value: MetricsOrAmount): value is ExactAmount {
-  return value instanceof Decimal || typeof value === "string";
+  return value instanceof Decimal || z.string().safeParse(value).success;
 }
 
 /** Enforce the exact-money contract for untyped JavaScript callers. */
-export function rejectNativeCreditAmount(value: unknown): void {
-  if (typeof value === "number") {
+export function rejectNativeCreditAmount(value: MetricsOrAmount): void {
+  if (z.number().safeParse(value).success) {
     throw new TypeError("amount must be a Decimal or decimal string");
   }
 }

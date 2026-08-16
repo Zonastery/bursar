@@ -1,3 +1,6 @@
+import { z } from "zod";
+
+import type { JsonObject, JsonValue } from "../../shared/json.js";
 import type {
   BillingCustomerInfo,
   BillingDisputeInfo,
@@ -60,7 +63,7 @@ export interface BillingEvent {
   payment?: BillingPaymentInfo | null;
   refund?: BillingRefundInfo | null;
   dispute?: BillingDisputeInfo | null;
-  metadata?: Record<string, unknown> | null;
+  metadata?: JsonObject | null;
   raw?: unknown;
   billingEventId?: string;
 }
@@ -84,18 +87,41 @@ const PAYMENT_STATUSES = new Set(["pending", "succeeded", "failed", "canceled"])
 const DISPUTE_STATUSES = new Set(["needs_response", "under_review", "won", "lost", "closed"]);
 const ISO_INSTANT_WITH_OFFSET = /(?:Z|[+-]\d{2}:\d{2})$/;
 
-function requireObject(value: unknown, field: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+const billingEventEnvelopeSchema = z
+  .object({
+    provider: z.json().optional(),
+    eventId: z.json().optional(),
+    eventType: z.json().optional(),
+    occurredAt: z.json().optional(),
+    accountId: z.json().optional(),
+    customer: z.json().nullable().optional(),
+    subscription: z.json().nullable().optional(),
+    invoice: z.json().nullable().optional(),
+    payment: z.json().nullable().optional(),
+    refund: z.json().nullable().optional(),
+    dispute: z.json().nullable().optional(),
+    metadata: z.json().nullable().optional(),
+    raw: z.unknown().optional(),
+    billingEventId: z.json().optional(),
+  })
+  .passthrough();
+
+type BillingEventEnvelope = z.infer<typeof billingEventEnvelopeSchema>;
+type BillingValue = JsonValue | undefined;
+
+function requireObject(value: BillingValue, field: string): JsonObject {
+  const parsed = z.record(z.string(), z.json()).safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`${field} must be an object`);
   }
-  return value as Record<string, unknown>;
+  return parsed.data;
 }
 
 function rejectUnknownKeys(
-  value: Record<string, unknown>,
+  value: BillingEventEnvelope | JsonObject,
   allowed: readonly string[],
   field: string,
-) {
+): void {
   const known = new Set(allowed);
   const unknown = Object.keys(value).filter((key) => !known.has(key));
   if (unknown.length > 0) {
@@ -105,35 +131,37 @@ function rejectUnknownKeys(
   }
 }
 
-function requireNonEmptyString(value: unknown, field: string): void {
-  if (typeof value !== "string" || !value.trim()) {
+function requireNonEmptyString(value: BillingValue, field: string): void {
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success || !parsed.data.trim()) {
     throw new TypeError(`${field} must be a non-empty string`);
   }
 }
 
-function requireOptionalNonEmptyString(value: unknown, field: string): void {
+function requireOptionalNonEmptyString(value: BillingValue, field: string): void {
   if (value !== null && value !== undefined) requireNonEmptyString(value, field);
 }
 
-function requireOptionalString(value: unknown, field: string): void {
-  if (value !== null && value !== undefined && typeof value !== "string") {
+function requireOptionalString(value: BillingValue, field: string): void {
+  if (value !== null && value !== undefined && !z.string().safeParse(value).success) {
     throw new TypeError(`${field} must be a string`);
   }
 }
 
-function requireOptionalBoolean(value: unknown, field: string): void {
-  if (value !== null && value !== undefined && typeof value !== "boolean") {
+function requireOptionalBoolean(value: BillingValue, field: string): void {
+  if (value !== null && value !== undefined && !z.boolean().safeParse(value).success) {
     throw new TypeError(`${field} must be a boolean`);
   }
 }
 
-function requireOneOf(value: unknown, allowed: ReadonlySet<string>, field: string): void {
-  if (typeof value !== "string" || !allowed.has(value)) {
+function requireOneOf(value: BillingValue, allowed: ReadonlySet<string>, field: string): void {
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success || !allowed.has(parsed.data)) {
     throw new TypeError(`${field} has an unsupported value`);
   }
 }
 
-function validateProviderRef(value: unknown, field: string): void {
+function validateProviderRef(value: BillingValue, field: string): void {
   if (value === null || value === undefined) return;
   const reference = requireObject(value, field);
   const keys = ["productId", "priceId", "variantId", "lookupKey"] as const;
@@ -144,34 +172,42 @@ function validateProviderRef(value: unknown, field: string): void {
   }
 }
 
-function requireMinorUnits(value: unknown, field: string, positive = false): void {
-  if (!Number.isSafeInteger(value) || (value as number) < (positive ? 1 : 0)) {
+function requireMinorUnits(value: BillingValue, field: string, positive = false): void {
+  const parsed = z.number().safeParse(value);
+  if (!parsed.success || !Number.isSafeInteger(parsed.data) || parsed.data < (positive ? 1 : 0)) {
     throw new TypeError(
       `${field} must be a ${positive ? "positive" : "non-negative"} safe integer`,
     );
   }
 }
 
-function requireCurrency(value: unknown, field: string): void {
-  if (typeof value !== "string" || !/^[A-Z]{3}$/.test(value)) {
+function requireCurrency(value: BillingValue, field: string): void {
+  const parsed = z
+    .string()
+    .regex(/^[A-Z]{3}$/u)
+    .safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`${field} must be an uppercase three-letter currency code`);
   }
 }
 
-function requireOptionalInstant(value: unknown, field: string): void {
+function requireOptionalInstant(value: BillingValue, field: string): void {
   if (value === null || value === undefined) return;
+  const parsed = z.string().safeParse(value);
   if (
-    typeof value !== "string" ||
-    !ISO_INSTANT_WITH_OFFSET.test(value) ||
-    Number.isNaN(Date.parse(value))
+    !parsed.success ||
+    !ISO_INSTANT_WITH_OFFSET.test(parsed.data) ||
+    Number.isNaN(Date.parse(parsed.data))
   ) {
     throw new TypeError(`${field} must be an ISO 8601 instant with an offset`);
   }
 }
 
 /** Validate an event at the public ingestion boundary before claiming it. */
-export function assertBillingEvent(value: unknown): asserts value is BillingEvent {
-  const record = requireObject(value, "billing event");
+export function assertBillingEvent<T>(value: T): asserts value is T & BillingEvent {
+  const parsedEnvelope = billingEventEnvelopeSchema.safeParse(value);
+  if (!parsedEnvelope.success) throw new TypeError("billing event must be an object");
+  const record = parsedEnvelope.data;
   rejectUnknownKeys(
     record,
     [
@@ -192,28 +228,29 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
     ],
     "billing event",
   );
-  const event = record as unknown as BillingEvent;
-  requireNonEmptyString(event.provider, "billing event provider");
-  requireNonEmptyString(event.eventId, "billing event id");
-  requireOptionalNonEmptyString(event.accountId, "billing event accountId");
-  requireOptionalNonEmptyString(event.billingEventId, "billing event billingEventId");
-  if (event.metadata !== null && event.metadata !== undefined) {
-    requireObject(event.metadata, "billing event metadata");
+  requireNonEmptyString(record.provider, "billing event provider");
+  requireNonEmptyString(record.eventId, "billing event id");
+  requireOptionalNonEmptyString(record.accountId, "billing event accountId");
+  requireOptionalNonEmptyString(record.billingEventId, "billing event billingEventId");
+  if (record.metadata !== null && record.metadata !== undefined) {
+    requireObject(record.metadata, "billing event metadata");
   }
-  if (!BILLING_EVENT_TYPES.has(event.eventType)) {
-    throw new TypeError(`unsupported billing event type: ${String(event.eventType)}`);
+  const parsedEventType = z.string().safeParse(record.eventType);
+  if (!parsedEventType.success || !BILLING_EVENT_TYPES.has(parsedEventType.data)) {
+    throw new TypeError(`unsupported billing event type: ${String(record.eventType)}`);
   }
+  const eventName = parsedEventType.data;
+  const parsedOccurredAt = z.string().safeParse(record.occurredAt);
   if (
-    typeof event.occurredAt !== "string" ||
-    !ISO_INSTANT_WITH_OFFSET.test(event.occurredAt) ||
-    Number.isNaN(Date.parse(event.occurredAt))
+    !parsedOccurredAt.success ||
+    !ISO_INSTANT_WITH_OFFSET.test(parsedOccurredAt.data) ||
+    Number.isNaN(Date.parse(parsedOccurredAt.data))
   ) {
     throw new TypeError("billing event occurredAt must be an ISO 8601 instant with an offset");
   }
 
-  const eventName: string = event.eventType;
-  if (event.customer !== null && event.customer !== undefined) {
-    const customer = requireObject(event.customer, `${eventName} customer`);
+  if (record.customer !== null && record.customer !== undefined) {
+    const customer = requireObject(record.customer, `${eventName} customer`);
     rejectUnknownKeys(customer, ["providerCustomerId", "email"], `${eventName} customer`);
     requireOptionalNonEmptyString(
       customer.providerCustomerId,
@@ -226,8 +263,8 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   } else if (eventName.startsWith("customer.")) {
     throw new TypeError(`${eventName} requires customer data`);
   }
-  if (event.subscription !== null && event.subscription !== undefined) {
-    const subscription = requireObject(event.subscription, `${eventName} subscription`);
+  if (record.subscription !== null && record.subscription !== undefined) {
+    const subscription = requireObject(record.subscription, `${eventName} subscription`);
     rejectUnknownKeys(
       subscription,
       [
@@ -269,11 +306,13 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
     if (subscription.interval != null) {
       requireOneOf(subscription.interval, BILLING_INTERVALS, `${eventName} subscription.interval`);
     }
+    const intervalCount = z.number().safeParse(subscription.intervalCount);
     if (
       subscription.intervalCount !== null &&
       subscription.intervalCount !== undefined &&
-      (!Number.isSafeInteger(subscription.intervalCount) ||
-        (subscription.intervalCount as number) <= 0)
+      (!intervalCount.success ||
+        !Number.isSafeInteger(intervalCount.data) ||
+        intervalCount.data <= 0)
     ) {
       throw new TypeError(
         `${eventName} subscription.intervalCount must be a positive safe integer`,
@@ -282,8 +321,8 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   } else if (eventName.startsWith("subscription.")) {
     throw new TypeError(`${eventName} requires subscription data`);
   }
-  if (event.invoice !== null && event.invoice !== undefined) {
-    const invoice = requireObject(event.invoice, `${eventName} invoice`);
+  if (record.invoice !== null && record.invoice !== undefined) {
+    const invoice = requireObject(record.invoice, `${eventName} invoice`);
     rejectUnknownKeys(
       invoice,
       [
@@ -307,8 +346,8 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   } else if (eventName.startsWith("invoice.")) {
     throw new TypeError(`${eventName} requires invoice data`);
   }
-  if (event.payment !== null && event.payment !== undefined) {
-    const payment = requireObject(event.payment, `${eventName} payment`);
+  if (record.payment !== null && record.payment !== undefined) {
+    const payment = requireObject(record.payment, `${eventName} payment`);
     rejectUnknownKeys(
       payment,
       ["providerPaymentId", "amountMinor", "taxMinor", "currency", "refs", "purpose", "status"],
@@ -324,8 +363,8 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   } else if (eventName.startsWith("payment.")) {
     throw new TypeError(`${eventName} requires payment data`);
   }
-  if (event.refund !== null && event.refund !== undefined) {
-    const refund = requireObject(event.refund, `${eventName} refund`);
+  if (record.refund !== null && record.refund !== undefined) {
+    const refund = requireObject(record.refund, `${eventName} refund`);
     rejectUnknownKeys(
       refund,
       ["providerRefundId", "providerPaymentId", "amountMinor", "currency", "reason", "status"],
@@ -340,8 +379,8 @@ export function assertBillingEvent(value: unknown): asserts value is BillingEven
   } else if (eventName.startsWith("refund.")) {
     throw new TypeError(`${eventName} requires refund data`);
   }
-  if (event.dispute !== null && event.dispute !== undefined) {
-    const dispute = requireObject(event.dispute, `${eventName} dispute`);
+  if (record.dispute !== null && record.dispute !== undefined) {
+    const dispute = requireObject(record.dispute, `${eventName} dispute`);
     rejectUnknownKeys(
       dispute,
       ["providerDisputeId", "providerPaymentId", "status", "reason"],

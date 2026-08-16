@@ -83,66 +83,66 @@ function publicWindow(window: Window): PublicCatalogWindow {
 }
 
 function publicOffer(key: string, offer: CommerceOffer): PublicCatalogOffer {
-  return {
+  const result: PublicCatalogOffer = {
     key,
     type: offer.type,
     displayName: offer.displayName,
-    ...(offer.description ? { description: offer.description } : {}),
     sortOrder: offer.sortOrder,
     price: { ...offer.price },
-    ...(offer.type === "subscription"
-      ? {
-          billingInterval: {
-            unit: offer.billingInterval.unit,
-            count: offer.billingInterval.count,
-          },
-        }
-      : {
-          creditsPerUnit: offer.creditsPerUnit.toString(),
-          quantity: { ...offer.quantity },
-        }),
   };
+  if (offer.description) result.description = offer.description;
+  if (offer.type === "subscription") {
+    result.billingInterval = {
+      unit: offer.billingInterval.unit,
+      count: offer.billingInterval.count,
+    };
+  } else {
+    result.creditsPerUnit = offer.creditsPerUnit.toString();
+    result.quantity = { ...offer.quantity };
+  }
+  return result;
 }
 
 /** Produce a provider-secret-free, JSON-safe catalog for product surfaces. */
 export function projectPublicCatalog(config: ParsedBursarConfig): PublicCatalog {
   const offers = Object.entries(config.commerce.offers);
   const plans = Object.entries(config.plans)
-    .map(([key, plan]): PublicCatalogPlan => ({
-      key,
-      displayName: plan.displayName,
-      ...(plan.description ? { description: plan.description } : {}),
-      rank: plan.rank,
-      features: { ...plan.features },
-      ...(plan.creditAllowance
-        ? {
-            allowance: {
-              amount: plan.creditAllowance.amount.toString(),
-              priority: plan.creditAllowance.priority,
-              window: publicWindow(plan.creditAllowance.window),
+    .map(([key, plan]): PublicCatalogPlan => {
+      const publicPlan: PublicCatalogPlan = {
+        key,
+        displayName: plan.displayName,
+        rank: plan.rank,
+        features: { ...plan.features },
+        quotas: Object.fromEntries(
+          Object.entries(plan.quotas).map(([quotaKey, quota]) => [
+            quotaKey,
+            {
+              operation: quota.operation,
+              measure: quota.measure,
+              limit: quota.limit.toString(),
+              window: publicWindow(quota.window),
+              enforcement: quota.enforcement,
             },
-          }
-        : {}),
-      quotas: Object.fromEntries(
-        Object.entries(plan.quotas).map(([quotaKey, quota]) => [
-          quotaKey,
-          {
-            operation: quota.operation,
-            measure: quota.measure,
-            limit: quota.limit.toString(),
-            window: publicWindow(quota.window),
-            enforcement: quota.enforcement,
-          },
-        ]),
-      ),
-      offers: offers
-        .filter(
-          (entry): entry is [string, Extract<CommerceOffer, { type: "subscription" }>] =>
-            entry[1].type === "subscription" && entry[1].plan === key,
-        )
-        .map(([offerKey, offer]) => publicOffer(offerKey, offer))
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.key.localeCompare(b.key)),
-    }))
+          ]),
+        ),
+        offers: offers
+          .filter(
+            (entry): entry is [string, Extract<CommerceOffer, { type: "subscription" }>] =>
+              entry[1].type === "subscription" && entry[1].plan === key,
+          )
+          .map(([offerKey, offer]) => publicOffer(offerKey, offer))
+          .sort((a, b) => a.sortOrder - b.sortOrder || a.key.localeCompare(b.key)),
+      };
+      if (plan.description) publicPlan.description = plan.description;
+      if (plan.creditAllowance) {
+        publicPlan.allowance = {
+          amount: plan.creditAllowance.amount.toString(),
+          priority: plan.creditAllowance.priority,
+          window: publicWindow(plan.creditAllowance.window),
+        };
+      }
+      return publicPlan;
+    })
     .sort((a, b) => a.rank - b.rank || a.key.localeCompare(b.key));
 
   return {

@@ -1,8 +1,22 @@
 import pRetry from "p-retry";
+import { z } from "zod";
 
 import { isRetryableBursarError } from "./errors.js";
 
 const MAX_TIMER_MS = 2_147_483_647;
+
+const abortSignalSchema = z.custom<AbortSignal>(
+  (value) =>
+    z
+      .object({
+        aborted: z.boolean(),
+        addEventListener: z.function(),
+        removeEventListener: z.function(),
+        throwIfAborted: z.function(),
+      })
+      .safeParse(value).success,
+  "signal must be an AbortSignal",
+);
 
 export interface BursarRetryOptions {
   /** Total attempts, including the first call. Defaults to 3. */
@@ -54,25 +68,22 @@ export async function retryBursarOperation<T>(
   operation: () => PromiseLike<T> | T,
   options: BursarRetryOptions = {},
 ): Promise<T> {
-  if (typeof operation !== "function") throw new TypeError("operation must be a function");
-  if (options.jitter !== undefined && typeof options.jitter !== "boolean") {
+  if (!z.function().safeParse(operation).success) {
+    throw new TypeError("operation must be a function");
+  }
+  if (options.jitter !== undefined && !z.boolean().safeParse(options.jitter).success) {
     throw new TypeError("jitter must be a boolean");
   }
-  if (options.unref !== undefined && typeof options.unref !== "boolean") {
+  if (options.unref !== undefined && !z.boolean().safeParse(options.unref).success) {
     throw new TypeError("unref must be a boolean");
   }
-  if (options.shouldRetry !== undefined && typeof options.shouldRetry !== "function") {
+  if (options.shouldRetry !== undefined && !z.function().safeParse(options.shouldRetry).success) {
     throw new TypeError("shouldRetry must be a function");
   }
-  if (options.onRetry !== undefined && typeof options.onRetry !== "function") {
+  if (options.onRetry !== undefined && !z.function().safeParse(options.onRetry).success) {
     throw new TypeError("onRetry must be a function");
   }
-  if (
-    options.signal !== undefined &&
-    (typeof options.signal !== "object" ||
-      options.signal === null ||
-      typeof options.signal.throwIfAborted !== "function")
-  ) {
+  if (options.signal !== undefined && !abortSignalSchema.safeParse(options.signal).success) {
     throw new TypeError("signal must be an AbortSignal");
   }
 

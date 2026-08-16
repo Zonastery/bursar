@@ -136,7 +136,12 @@ export class BillingOfferRepository {
         details: { offerId: offer.id, catalogRevisionId: offer.catalog_revision_id },
       });
     }
-    const rawContext = contextRows[0] as Record<string, unknown>;
+    const rawContext = contextRows[0];
+    if (rawContext === undefined) {
+      throw new StoreError("BillingOfferRepository: catalog plan context is missing", {
+        details: { offerId: offer.id, catalogRevisionId: offer.catalog_revision_id },
+      });
+    }
     const offerContext = safeParse(
       OfferContextRowSchema,
       {

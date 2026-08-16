@@ -245,7 +245,8 @@ class DodoProvider:
     async def cancel_scheduled_plan_change(
         self,
         subscription_id: str,
-        provider_operation_id: str | None = None,
+        # Dodo cancels by subscription; the shared contract also carries Stripe's schedule ID.
+        provider_operation_id: str | None = None,  # noqa: ARG002
         *,
         idempotency_key: str,
     ) -> None:

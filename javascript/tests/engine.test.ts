@@ -7,7 +7,7 @@ import { ConfigError } from "../src/errors.js";
 import { baseConfig } from "./config.test.js";
 
 function mutableConfig(): BursarConfigData {
-  return structuredClone(baseConfig()) as unknown as BursarConfigData;
+  return structuredClone(baseConfig());
 }
 
 function completionPricing(config: BursarConfigData) {
@@ -104,19 +104,17 @@ describe("typed pricing engine", () => {
   });
 
   it("validates dimension types and required flags", () => {
-    const config = baseConfig() as Record<string, unknown>;
-    const operations = (config.pricing as Record<string, unknown>).operations as Record<
-      string,
-      Record<string, unknown>
-    >;
-    operations.completion = {
+    const config = mutableConfig();
+    const configPricing = config.pricing;
+    if (!configPricing) throw new Error("Expected pricing configuration");
+    configPricing.operations.completion = {
       measures: {
         input_tokens: { unit: "token" },
         output_tokens: { unit: "token" },
       },
       dimensions: {
-        model: { type: "string" },
-        premium: { type: "boolean" },
+        model: { type: "string", required: false },
+        premium: { type: "boolean", required: false },
         weight: { type: "number", required: true },
       },
     };

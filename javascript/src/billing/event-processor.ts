@@ -1,11 +1,13 @@
-import type { NormalizedLogger } from "../shared/logger.js";
+import { z } from "zod";
+
+import { boundedDiagnosticMessage, persistedDiagnosticSummary } from "../shared/diagnostics.js";
+import type { LogContext, NormalizedLogger } from "../shared/logger.js";
 import { normalizeLogger } from "../shared/logger.js";
 import type { BillingStore } from "./billing-store.js";
 import type { BillingEvent, BillingEventHandler, BillingEventResult } from "./types/index.js";
 import { assertBillingEvent, BillingEventType } from "./types/index.js";
 import { BillingEventHandlers } from "./event-handlers.js";
 import type { BillingServiceOptions } from "./service-types.js";
-import { boundedDiagnosticMessage, persistedDiagnosticSummary } from "../shared/diagnostics.js";
 
 export class BillingEventProcessor {
   private readonly eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
@@ -41,15 +43,18 @@ export class BillingEventProcessor {
       provider: event.provider,
       eventType: event.eventType,
     });
-    const claimEnvelope = { ...event } as Record<string, unknown>;
-    delete claimEnvelope["occurredAt"];
-    delete claimEnvelope["raw"];
-    delete claimEnvelope["billingEventId"];
+    const claimEnvelope = Object.fromEntries(
+      Object.entries(event).filter(
+        ([key, value]) =>
+          key !== "occurredAt" && key !== "raw" && key !== "billingEventId" && value !== undefined,
+      ),
+    );
+    const claimDocument = z.record(z.string(), z.json()).parse(claimEnvelope);
     const claim = await this.store.claimBillingEvent(
       event.provider,
       event.eventId,
       event.eventType,
-      claimEnvelope,
+      claimDocument,
     );
     this.logger.debug("[BillingService] claim status", {
       status: claim.status,
@@ -69,11 +74,14 @@ export class BillingEventProcessor {
       claim.status === "idempotency_conflict" ||
       claim.status === "max_retries_exceeded"
     ) {
-      this.logger.warn("[BillingService] permanent claim rejection", {
+      const rejectionContext: LogContext = {
         status: claim.status,
         eventId: event.eventId,
-        ...(claim.status === "invalid_request" ? {} : { billingEventId: claim.billingEventId }),
-      });
+      };
+      if (claim.status !== "invalid_request") {
+        rejectionContext.billingEventId = claim.billingEventId;
+      }
+      this.logger.warn("[BillingService] permanent claim rejection", rejectionContext);
       return { handled: false, error: claim.status };
     }
     if (claim.status === "retry") {
@@ -87,9 +95,14 @@ export class BillingEventProcessor {
         ...event,
         billingEventId: claim.billingEventId,
       });
-      this.logger.debug("[BillingService] routeEvent result", { result, eventId: event.eventId });
-    } catch (err) {
-      return this.recordBillingEventFailure(event, claim.claimToken, err);
+      this.logger.debug("[BillingService] routeEvent result", {
+        handled: result.handled,
+        action: result.action ?? null,
+        error: result.error ?? null,
+        eventId: event.eventId,
+      });
+    } catch (cause: unknown) {
+      return this.recordBillingEventFailure(event, claim.claimToken, cause);
     }
 
     if (!result.handled) {
@@ -105,8 +118,8 @@ export class BillingEventProcessor {
         event.eventId,
         claim.claimToken,
       );
-    } catch (err) {
-      return this.recordBillingEventFailure(event, claim.claimToken, err);
+    } catch (cause: unknown) {
+      return this.recordBillingEventFailure(event, claim.claimToken, cause);
     }
 
     if (!completed) {
@@ -124,13 +137,13 @@ export class BillingEventProcessor {
   private async recordBillingEventFailure(
     event: BillingEvent,
     claimToken: string,
-    error: unknown,
+    cause: unknown,
     logAsError = true,
     trustedCode = false,
   ): Promise<BillingEventResult> {
     const message = trustedCode
-      ? boundedDiagnosticMessage(error, "billing_event_processing_failed")
-      : persistedDiagnosticSummary(error, "billing_event_processing_failed");
+      ? boundedDiagnosticMessage(cause, "billing_event_processing_failed")
+      : persistedDiagnosticSummary(cause, "billing_event_processing_failed");
     const log = logAsError ? this.logger.error : this.logger.warn;
     log(`[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`, {
       error: message,
@@ -174,10 +187,12 @@ export class BillingEventProcessor {
     if (!handler) return;
     try {
       await handler(event, accountId);
-    } catch (err) {
+    } catch (cause: unknown) {
       this.logger.error(
         `[BillingService] event handler failed for ${event.provider}/${event.eventId}`,
-        { error: persistedDiagnosticSummary(err, "billing_event_callback_failed") },
+        {
+          error: persistedDiagnosticSummary(cause, "billing_event_callback_failed"),
+        },
       );
     }
   }

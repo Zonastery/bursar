@@ -856,7 +856,7 @@ async def test_checkout_rejects_unknown_catalog_offer() -> None:
 @pytest.mark.asyncio
 async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> None:
     provider = RecordingProvider()
-    commerce, billing, credits, _provider = make_harness(provider)
+    commerce, billing, _credits, _provider = make_harness(provider)
 
     with pytest.raises(UnknownOfferError):
         await commerce.create_checkout(
@@ -945,6 +945,10 @@ def test_checkout_status_maps_terminal_pending_expired_and_missing() -> None:
     assert commerce.get_checkout_status("intent-open", "subject-1").status == "pending"
     billing.checkout_intent = billing.checkout_intent.model_copy(update={"status": CheckoutIntentStatus.completed})
     assert commerce.get_checkout_status("intent-open", "subject-1").status == "succeeded"
+    billing.checkout_intent = billing.checkout_intent.model_copy(update={"status": CheckoutIntentStatus.failed})
+    assert commerce.get_checkout_status("intent-open", "subject-1").status == "failed"
+    billing.checkout_intent = billing.checkout_intent.model_copy(update={"status": CheckoutIntentStatus.expired})
+    assert commerce.get_checkout_status("intent-open", "subject-1").status == "expired"
     billing.checkout_intent = billing.checkout_intent.model_copy(
         update={
             "status": CheckoutIntentStatus.open,

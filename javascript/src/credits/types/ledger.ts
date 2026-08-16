@@ -1,4 +1,5 @@
 import type { Decimal } from "decimal.js";
+import type { JsonObject } from "../../shared/json.js";
 
 // ── Canonical ledger history ─────────────────────────────────────────
 
@@ -12,7 +13,7 @@ export interface LedgerEntry {
   operation: string;
   referenceEntryId: string | null;
   idempotencyKey: string | null;
-  metadata: Record<string, unknown> | null;
+  metadata: JsonObject | null;
   createdAt: string;
 }
 
@@ -58,7 +59,7 @@ export interface UsageCharge {
   region: string | null;
   eventAt: string;
   idempotencyKey: string;
-  metadata: Record<string, unknown> | null;
+  metadata: JsonObject | null;
   createdAt: string;
 }
 

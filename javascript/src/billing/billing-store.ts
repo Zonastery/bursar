@@ -30,6 +30,7 @@ import type {
 } from "./contracts.js";
 import type { Decimal } from "decimal.js";
 import type { ProviderEnvironment } from "../providers/environment.js";
+import type { JsonObject } from "../shared/json.js";
 
 /**
  * Abstract billing store — provider-agnostic persistence layer for
@@ -57,7 +58,7 @@ export abstract class BillingStore {
     provider: string,
     eventId: string,
     eventType: string,
-    envelope?: Record<string, unknown>,
+    envelope?: JsonObject,
   ): Promise<BillingEventClaim>;
 
   abstract completeBillingEvent(
@@ -166,7 +167,7 @@ export abstract class BillingStore {
     providerPaymentId: string,
   ): Promise<BillingPaymentRecord | null>;
 
-  abstract getActiveCatalogDocument(): Promise<Record<string, unknown> | null>;
+  abstract getActiveCatalogDocument(): Promise<JsonObject | null>;
 
   abstract pseudonymizeFinancialSubject(userId: string): Promise<boolean>;
 

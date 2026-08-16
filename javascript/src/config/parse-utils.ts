@@ -1,15 +1,40 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 
 import { ConfigError } from "../errors.js";
+import { isJsonObject, type JsonObject, type JsonValue } from "../shared/json.js";
 import type { Availability, BillingInterval, Duration, ExpiryPolicy, Window } from "./types.js";
 
 const IDENTIFIER = /^[a-z][a-z0-9_]*$/;
 const REGION = /^[A-Z]{2}(?:-[A-Z0-9]{1,3})?$/;
 
-export type JsonObject = Record<string, unknown>;
+export type { JsonObject, JsonValue } from "../shared/json.js";
 
-export function asObject(value: unknown): JsonObject {
-  return value as JsonObject;
+type ConfigValue = JsonValue | undefined;
+
+const DURATION_UNITS = ["second", "minute", "hour", "day", "week"] as const;
+const BILLING_INTERVAL_UNITS = ["day", "week", "month", "year"] as const;
+const CALENDAR_UNITS = ["day", "week", "month", "year"] as const;
+
+function requiredValue(value: ConfigValue, path: string): JsonValue {
+  if (value === undefined) semanticError(`${path} is required`);
+  return value;
+}
+
+export function asObject(value: ConfigValue, path = "value"): JsonObject {
+  const candidate = requiredValue(value, path);
+  if (!isJsonObject(candidate)) semanticError(`${path} must be an object`);
+  return candidate;
+}
+
+export function asArray(value: ConfigValue, path = "value"): JsonValue[] {
+  const candidate = requiredValue(value, path);
+  if (!Array.isArray(candidate)) semanticError(`${path} must be an array`);
+  return candidate;
+}
+
+export function asStringArray(value: ConfigValue, path = "value"): string[] {
+  return asArray(value, path).map((item, index) => asString(item, `${path}[${index}]`));
 }
 
 export function semanticError(message: string): never {
@@ -34,24 +59,55 @@ export function validateRegions(values: string[], path: string): void {
   }
 }
 
-export function asDecimal(value: unknown): Decimal {
-  return new Decimal(value as Decimal.Value);
+export function asDecimal(value: ConfigValue, path = "value"): Decimal {
+  const candidate = requiredValue(value, path);
+  const parsed = z.union([z.string(), z.number()]).safeParse(candidate);
+  if (!parsed.success) {
+    semanticError(`${path} must be a decimal string or number`);
+  }
+  try {
+    return new Decimal(parsed.data);
+  } catch {
+    semanticError(`${path} must be a valid decimal`);
+  }
 }
 
-export function asInteger(value: unknown): number {
-  return Number(value);
+export function asInteger(value: ConfigValue, path = "value"): number {
+  const candidate = requiredValue(value, path);
+  const parsed = z.number().int().safeParse(candidate);
+  if (!parsed.success) {
+    semanticError(`${path} must be an integer`);
+  }
+  return parsed.data;
 }
 
-export function asString(value: unknown): string {
-  return String(value);
+export function asString(value: ConfigValue, path = "value"): string {
+  const candidate = requiredValue(value, path);
+  const parsed = z.string().safeParse(candidate);
+  if (!parsed.success) semanticError(`${path} must be a string`);
+  return parsed.data;
 }
 
-export function asBoolean(value: unknown): boolean {
-  return Boolean(value);
+export function asBoolean(value: ConfigValue, path = "value"): boolean {
+  const candidate = requiredValue(value, path);
+  const parsed = z.boolean().safeParse(candidate);
+  if (!parsed.success) semanticError(`${path} must be a boolean`);
+  return parsed.data;
 }
 
-function asTimezone(value: unknown, path: string): string {
-  const candidate = asString(value);
+function enumValue<const T extends string>(
+  value: ConfigValue,
+  allowed: readonly T[],
+  path: string,
+): T {
+  const candidate = asString(value, path);
+  const match = allowed.find((item) => item === candidate);
+  if (match === undefined) semanticError(`${path} has an invalid value`);
+  return match;
+}
+
+function asTimezone(value: ConfigValue, path: string): string {
+  const candidate = asString(value, path);
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format();
   } catch {
@@ -60,20 +116,23 @@ function asTimezone(value: unknown, path: string): string {
   return candidate;
 }
 
-export function parseDuration(value: unknown): Duration {
-  const raw = asObject(value);
-  return { unit: raw.unit as Duration["unit"], count: asInteger(raw.count) };
-}
-
-export function parseBillingInterval(value: unknown): BillingInterval {
-  const raw = asObject(value);
+export function parseDuration(value: ConfigValue): Duration {
+  const raw = asObject(value, "duration");
   return {
-    unit: raw.unit as BillingInterval["unit"],
-    count: asInteger(raw.count ?? 1),
+    unit: enumValue(raw.unit, DURATION_UNITS, "duration.unit"),
+    count: asInteger(raw.count, "duration.count"),
   };
 }
 
-export function parseWindow(value: unknown, path: string): Window {
+export function parseBillingInterval(value: ConfigValue): BillingInterval {
+  const raw = asObject(value, "billing_interval");
+  return {
+    unit: enumValue(raw.unit, BILLING_INTERVAL_UNITS, "billing_interval.unit"),
+    count: asInteger(raw.count ?? 1, "billing_interval.count"),
+  };
+}
+
+export function parseWindow(value: ConfigValue, path: string): Window {
   const raw = asObject(value);
   if (raw.type === "rolling") {
     return { type: "rolling", duration: parseDuration(raw.duration) };
@@ -85,31 +144,37 @@ export function parseWindow(value: unknown, path: string): Window {
       timezone: asTimezone(raw.timezone ?? "UTC", `${path}.timezone`),
     };
   }
+  if (raw.type !== "calendar") semanticError(`${path}.type must be a supported window type`);
   return {
     type: "calendar",
-    unit: raw.unit as Extract<Window, { type: "calendar" }>["unit"],
-    count: asInteger(raw.count ?? 1),
+    unit: enumValue(raw.unit, CALENDAR_UNITS, `${path}.unit`),
+    count: asInteger(raw.count ?? 1, `${path}.count`),
     timezone: asTimezone(raw.timezone ?? "UTC", `${path}.timezone`),
   };
 }
 
-export function parseAvailability(value: unknown): Availability {
-  const raw = asObject(value);
-  const startsAt = raw.starts_at == null ? undefined : asString(raw.starts_at);
-  const endsAt = raw.ends_at == null ? undefined : asString(raw.ends_at);
-  const regions = (raw.regions ?? []) as string[];
+export function parseAvailability(value: ConfigValue): Availability {
+  const raw = asObject(value, "availability");
+  const startsAt =
+    raw.starts_at == null ? undefined : asString(raw.starts_at, "availability.starts_at");
+  const endsAt = raw.ends_at == null ? undefined : asString(raw.ends_at, "availability.ends_at");
+  const regions = Array.isArray(raw.regions)
+    ? raw.regions.map((region, index) => asString(region, `availability.regions[${index}]`))
+    : [];
+  if (raw.regions != null && !Array.isArray(raw.regions)) {
+    semanticError("availability.regions must be an array");
+  }
   validateRegions(regions, "availability.regions");
   if (startsAt != null && endsAt != null && Date.parse(endsAt) <= Date.parse(startsAt)) {
     semanticError("availability.ends_at must be later than starts_at");
   }
-  return {
-    ...(startsAt == null ? {} : { startsAt }),
-    ...(endsAt == null ? {} : { endsAt }),
-    regions,
-  };
+  const result: Availability = { regions };
+  if (startsAt != null) result.startsAt = startsAt;
+  if (endsAt != null) result.endsAt = endsAt;
+  return result;
 }
 
-export function parseExpiry(value: unknown, path: string): ExpiryPolicy {
+export function parseExpiry(value: ConfigValue, path: string): ExpiryPolicy {
   const raw = asObject(value);
   switch (raw.type) {
     case "after_grant":
@@ -124,7 +189,7 @@ export function parseExpiry(value: unknown, path: string): ExpiryPolicy {
       return { type: "end_of_window", window: parsed };
     }
     case "fixed_at":
-      return { type: "fixed_at", at: asString(raw.at) };
+      return { type: "fixed_at", at: asString(raw.at, `${path}.at`) };
     case "subscription_end":
       return { type: "subscription_end" };
     default:

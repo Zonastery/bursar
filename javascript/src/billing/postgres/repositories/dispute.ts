@@ -1,4 +1,5 @@
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { JsonObject } from "../../../shared/json.js";
 import { postgresUuid, requireResultField } from "../../../shared/postgres-validation.js";
 
 export class BillingDisputeRepository {
@@ -10,7 +11,7 @@ export class BillingDisputeRepository {
     paymentId: string,
     status: string,
     reason: string | null,
-    metadata: Record<string, unknown>,
+    metadata: JsonObject,
     providerUpdatedAt: string,
   ): Promise<void> {
     const rows = await this.query(

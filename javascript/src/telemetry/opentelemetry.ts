@@ -82,18 +82,18 @@ export class OpenTelemetryInstrumentation implements Instrumentation {
       span.setStatus({ code: SpanStatusCode.OK });
       this.recordMetrics(startedAt, completed);
       return result;
-    } catch (error) {
+    } catch (cause) {
       const completed = {
         ...baseAttributes,
         "bursar.outcome": "error",
-        ...telemetryErrorAttributes(error),
+        ...telemetryErrorAttributes(cause),
       };
       span.setAttributes(otelAttributes(completed));
       // Deliberately omit a description and exception event: both may include
       // the raw error message, SQL text, identifiers, or provider payloads.
       span.setStatus({ code: SpanStatusCode.ERROR });
       this.recordMetrics(startedAt, completed);
-      throw error;
+      throw cause;
     } finally {
       span.end();
     }

@@ -1,5 +1,6 @@
-import { Bursar } from "../bursar.js";
 import { z } from "zod";
+
+import { Bursar } from "../bursar.js";
 import {
   ConfigError,
   ImportError as BursarImportError,
@@ -27,6 +28,7 @@ import {
   type PostgresPool,
 } from "../shared/postgres-client.js";
 import type { QueryFn } from "../shared/postgres-types.js";
+import type { JsonObject } from "../shared/json.js";
 import { ClickHouseUsageStore, type ClickHouseUsageStoreOptions } from "./adapters/clickhouse.js";
 import { S3BillingArchive, type S3BillingArchiveOptions } from "./adapters/s3.js";
 import {
@@ -88,34 +90,39 @@ export interface BursarRuntimeStartOptions {
   maxAttempts?: number;
   /** Initial retry delay. Each retry doubles up to 5 seconds. */
   retryDelayMs?: number;
-  shouldRetry?: (error: unknown) => boolean;
+  shouldRetry?: (cause: unknown) => boolean;
   /** Maximum elapsed catalog-load retry budget. Defaults to 30 seconds. */
   maxElapsedMs?: number;
   /** Abort startup retries and pending backoff. */
   signal?: AbortSignal;
 }
 
+const abortSignalSchema = z.custom<AbortSignal>(
+  (value) =>
+    z
+      .object({
+        aborted: z.boolean(),
+        addEventListener: z.function(),
+        removeEventListener: z.function(),
+        throwIfAborted: z.function(),
+      })
+      .safeParse(value).success,
+  "signal must be an AbortSignal",
+);
+
+const shouldRetrySchema = z.custom<(cause: unknown) => boolean>(
+  (value) => z.function().safeParse(value).success,
+  "shouldRetry must be a function",
+);
+
 const runtimeStartOptionsSchema = z
   .object({
     loadCatalog: z.boolean().default(true),
     maxAttempts: z.number().finite().int().min(1).max(Number.MAX_SAFE_INTEGER).default(1),
     retryDelayMs: z.number().finite().min(0).max(5_000).default(250),
-    shouldRetry: z
-      .custom<(error: unknown) => boolean>(
-        (value) => typeof value === "function",
-        "shouldRetry must be a function",
-      )
-      .optional(),
+    shouldRetry: shouldRetrySchema.optional(),
     maxElapsedMs: z.number().finite().min(0).max(2_147_483_647).optional(),
-    signal: z
-      .custom<AbortSignal>(
-        (value) =>
-          typeof value === "object" &&
-          value !== null &&
-          typeof (value as { throwIfAborted?: unknown }).throwIfAborted === "function",
-        "signal must be an AbortSignal",
-      )
-      .optional(),
+    signal: abortSignalSchema.optional(),
   })
   .strict();
 
@@ -133,7 +140,7 @@ interface PendingUsageWrite {
   event: UsageChargeExport;
   outboxEventId: string;
   resolve: () => void;
-  reject: (error: unknown) => void;
+  reject: (error: Error) => void;
 }
 
 /** Coalesce concurrently dispatched usage events into one optional sink write. */
@@ -164,7 +171,9 @@ class UsageWriteBatcher {
       );
       for (const write of pending) write.resolve();
     } catch (error) {
-      for (const write of pending) write.reject(error);
+      const failure =
+        error instanceof Error ? error : new Error("Usage batch write failed", { cause: error });
+      for (const write of pending) write.reject(failure);
     }
   }
 }
@@ -207,10 +216,14 @@ export class BursarRuntime {
     if (options.operatorPostgres === undefined || options.operatorPostgres === null) {
       throw new TypeError("operatorPostgres is required");
     }
-    if (typeof options.postgres === "string" && !options.postgres.trim()) {
+    const postgresConnection = connectionStringValue(options.postgres);
+    const operatorPostgresConnection = connectionStringValue(options.operatorPostgres);
+    const ownsPool = postgresConnection !== null;
+    const ownsOperatorPool = operatorPostgresConnection !== null;
+    if (postgresConnection !== null && !postgresConnection.trim()) {
       throw new TypeError("postgres connection string must not be empty");
     }
-    if (typeof options.operatorPostgres === "string" && !options.operatorPostgres.trim()) {
+    if (operatorPostgresConnection !== null && !operatorPostgresConnection.trim()) {
       throw new TypeError("operatorPostgres connection string must not be empty");
     }
     if (options.postgres === options.operatorPostgres) {
@@ -218,7 +231,7 @@ export class BursarRuntime {
     }
 
     let pg: typeof import("pg") | undefined;
-    if (typeof options.postgres === "string" || typeof options.operatorPostgres === "string") {
+    if (ownsPool || ownsOperatorPool) {
       try {
         pg = await import("pg");
       } catch (cause) {
@@ -227,23 +240,26 @@ export class BursarRuntime {
         });
       }
     }
-    const ownsPool = typeof options.postgres === "string";
-    const ownsOperatorPool = typeof options.operatorPostgres === "string";
     let pool: PostgresPool | undefined;
     let operatorPool: PostgresPool | undefined;
     try {
-      pool =
-        typeof options.postgres === "string"
-          ? (new pg!.Pool(
-              postgresPoolConfig(options.postgres, options.postgresOptions),
-            ) as PostgresPool)
-          : options.postgres;
-      operatorPool =
-        typeof options.operatorPostgres === "string"
-          ? (new pg!.Pool(
-              postgresPoolConfig(options.operatorPostgres, options.postgresOptions),
-            ) as PostgresPool)
-          : options.operatorPostgres;
+      if ((ownsPool || ownsOperatorPool) && pg === undefined) {
+        throw new BursarImportError("pg is required for the Bursar runtime: npm install pg");
+      }
+      pool = ownsPool
+        ? createOwnedPool(
+            pg,
+            postgresConnection ?? requiredConnectionString(options.postgres),
+            options.postgresOptions,
+          )
+        : providedPool(options.postgres);
+      operatorPool = ownsOperatorPool
+        ? createOwnedPool(
+            pg,
+            operatorPostgresConnection ?? requiredConnectionString(options.operatorPostgres),
+            options.postgresOptions,
+          )
+        : providedPool(options.operatorPostgres);
       return new BursarRuntime(pool, ownsPool, operatorPool, ownsOperatorPool, options);
     } catch (error) {
       await Promise.allSettled([
@@ -343,9 +359,7 @@ export class BursarRuntime {
         ...(bursarOptions.creditsOptions ?? {}),
         analytics: this.clickhouse ?? undefined,
         usageStore:
-          this.clickhouse && "listUsageCharges" in this.clickhouse
-            ? (this.clickhouse as UsageChargeStore)
-            : undefined,
+          this.clickhouse && supportsUsageHistory(this.clickhouse) ? this.clickhouse : undefined,
       },
     });
 
@@ -397,9 +411,8 @@ export class BursarRuntime {
           const row = rows[0];
           if (
             !row ||
-            typeof row !== "object" ||
-            !("bursar_reachable" in row) ||
-            (row as { bursar_reachable?: unknown }).bursar_reachable !== 1
+            !z.number().int().safeParse(row.bursar_reachable).success ||
+            row.bursar_reachable !== 1
           ) {
             throw new Error("PostgreSQL reachability check returned an invalid result");
           }
@@ -421,7 +434,7 @@ export class BursarRuntime {
     }
     if (this.started) return Promise.resolve();
     if (!this.startPromise) {
-      this.startPromise = this.startRuntime(options).catch((error: unknown) => {
+      this.startPromise = this.startRuntime(options).catch((error) => {
         this.startPromise = null;
         throw error;
       });
@@ -435,8 +448,8 @@ export class BursarRuntime {
     if (startOptions.loadCatalog) {
       const shouldRetry =
         startOptions.shouldRetry ??
-        ((error: unknown) =>
-          error instanceof CatalogNotLoadedError || isRetryableBursarError(error));
+        ((cause: unknown) =>
+          cause instanceof CatalogNotLoadedError || isRetryableBursarError(cause));
       await retryBursarOperation(() => this.bursar.loadCatalog(), {
         maxAttempts: startOptions.maxAttempts,
         baseDelayMs: startOptions.retryDelayMs,
@@ -622,11 +635,8 @@ export class BursarRuntime {
       [this.tenantSlug],
     );
     const resolved = rows[0];
-    const tenantId =
-      resolved && typeof resolved === "object" && "tenant_id" in resolved
-        ? (resolved as { tenant_id?: unknown }).tenant_id
-        : undefined;
-    if (tenantId !== this.tenantId) {
+    const tenantId = z.string().safeParse(resolved?.tenant_id);
+    if (!tenantId.success || tenantId.data !== this.tenantId) {
       throw new ConfigError(
         `Bursar tenant slug '${this.tenantSlug}' resolves to a different tenant ID`,
       );
@@ -641,181 +651,170 @@ export async function createBursarRuntime(options: BursarRuntimeOptions): Promis
 function outboxStatusProvider(
   repository: PostgresStorageRepository,
 ): (limit: number) => Promise<OutboxStatusSnapshot> {
-  const stats = (
-    repository as unknown as {
-      stats: (...args: unknown[]) => unknown;
-    }
-  ).stats;
-  return async (limit) => {
-    let raw: unknown;
-    try {
-      raw = await stats.call(repository, { limit });
-    } catch (error) {
-      if (!isInputShapeError(error)) throw error;
-      raw = await stats.call(repository, limit);
-    }
-    if (!isJsonObject(raw)) throw new TypeError("outbox stats returned a malformed result");
-    return {
-      pendingCount: statsCount(raw, "pendingCount", "pending_count", "pending"),
-      processingCount: statsCount(raw, "processingCount", "processing_count", "processing"),
-      deliveredCount: statsCount(raw, "deliveredCount", "delivered_count", "delivered"),
-      deadLetterCount: statsCount(raw, "deadLetterCount", "dead_letter_count", "dead_letter"),
-      oldestPendingAt: statsTimestamp(raw, "oldestPendingAt", "oldest_pending_at"),
-    };
-  };
+  return async (limit) => repository.stats({ limit });
 }
 
-function statsCount(raw: Record<string, unknown>, ...keys: string[]): number {
-  const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new TypeError(`outbox stats field ${keys[0]} must be a non-negative integer`);
+type PostgresConnectionInput = string | PostgresPool;
+
+function isPostgresConnectionString(value: PostgresConnectionInput): value is string {
+  return z.string().safeParse(value).success;
+}
+
+function connectionStringValue(value: PostgresConnectionInput): string | null {
+  const parsed = z.string().safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function requiredConnectionString(value: PostgresConnectionInput): string {
+  const parsed = z.string().min(1).safeParse(value);
+  if (!parsed.success) {
+    throw new TypeError("an owned PostgreSQL pool requires a connection string");
   }
-  return value as number;
+  return parsed.data;
 }
 
-function statsTimestamp(raw: Record<string, unknown>, ...keys: string[]): string | null {
-  const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
-  if (value === null || value === undefined) return null;
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
-  if (typeof value === "string") return value;
-  throw new TypeError(`outbox stats field ${keys[0]} must be a timestamp string or null`);
+function createOwnedPool(
+  pg: typeof import("pg") | undefined,
+  connectionString: string,
+  options: Omit<PostgresConnectionOptions, "providerEnvironment"> | undefined,
+): PostgresPool {
+  if (pg === undefined) {
+    throw new BursarImportError("pg is required for the Bursar runtime: npm install pg");
+  }
+  // SAFETY: the runtime's PostgresPool contract is the subset used by Bursar,
+  // and the node-postgres Pool is created from the validated connection options above.
+  return new pg.Pool(postgresPoolConfig(connectionString, options)) as PostgresPool;
 }
 
-function isInputShapeError(error: unknown): boolean {
-  return (
-    error instanceof TypeError ||
-    error instanceof RangeError ||
-    (error instanceof Error && error.name === "ZodError")
-  );
+function providedPool(value: PostgresConnectionInput): PostgresPool {
+  if (isPostgresConnectionString(value)) {
+    throw new TypeError("a connection string cannot be used as an external PostgreSQL pool");
+  }
+  return value;
+}
+
+type RuntimeClickhouseStore = UsageEventSink & UsageAnalyticsStore;
+type RuntimeClickhouseHistoryStore = RuntimeClickhouseStore & UsageChargeStore;
+
+function supportsUsageHistory(
+  value: RuntimeClickhouseStore,
+): value is RuntimeClickhouseHistoryStore {
+  return z.object({ listUsageCharges: z.function() }).safeParse(value).success;
 }
 
 function normalizeTenantSlug(value: string): string {
-  if (typeof value !== "string") throw new TypeError("tenantSlug must be a string");
-  const normalized = value.trim().toLowerCase();
-  if (
-    normalized.length < 1 ||
-    normalized.length > 100 ||
-    !/^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$/.test(normalized)
-  ) {
-    throw new TypeError("tenantSlug must be a valid Bursar tenant slug");
-  }
-  return normalized;
+  const trimmed = z.string().trim().min(1).max(100).safeParse(value);
+  if (!trimmed.success) throw new TypeError("tenantSlug must be a valid Bursar tenant slug");
+  const normalized = z
+    .string()
+    .regex(/^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$/u)
+    .safeParse(trimmed.data.toLowerCase());
+  if (!normalized.success) throw new TypeError("tenantSlug must be a valid Bursar tenant slug");
+  return normalized.data;
 }
 
-function usageExportFromOutbox(payload: Record<string, unknown>): UsageChargeExport | null {
-  const requiredStrings = [
-    "tenant_id",
-    "charge_id",
-    "account_id",
-    "subject_id",
-    "operation",
-    "requested",
-    "charged",
-    "allowance_requested",
-    "allowance_covered",
-    "idempotency_key",
-    "request_digest",
-    "event_at",
-    "created_at",
-  ] as const;
-  if (requiredStrings.some((key) => !isNonEmptyString(payload[key]))) return null;
-  if (
-    !isJsonObject(payload.measures) ||
-    !isJsonObject(payload.dimensions) ||
-    !isJsonObject(payload.metadata) ||
-    !isJsonObject(payload.pricing_snapshot)
-  ) {
-    return null;
-  }
-  const optionalStrings = [
-    "feature",
-    "model",
-    "region",
-    "catalog_revision_id",
-    "plan_id",
-    "rate_card_key",
-    "ledger_entry_id",
-    "correction_of_charge_id",
-  ] as const;
-  if (optionalStrings.some((key) => !isOptionalString(payload[key]))) return null;
-  if (
-    payload.billing_disposition !== undefined &&
-    payload.billing_disposition !== "billable" &&
-    payload.billing_disposition !== "record_only"
-  ) {
-    return null;
-  }
+const outboxJsonObjectSchema = z.record(z.string(), z.json());
+
+const usageOutboxPayloadSchema = z
+  .object({
+    tenant_id: z.string().min(1),
+    charge_id: z.string().min(1),
+    account_id: z.string().min(1),
+    subject_id: z.string().min(1),
+    operation: z.string().min(1),
+    feature: z.string().nullable().optional(),
+    model: z.string().nullable().optional(),
+    region: z.string().nullable().optional(),
+    measures: outboxJsonObjectSchema,
+    dimensions: outboxJsonObjectSchema,
+    metadata: outboxJsonObjectSchema,
+    requested: z.string().min(1),
+    charged: z.string().min(1),
+    allowance_requested: z.string().min(1),
+    allowance_covered: z.string().min(1),
+    billing_disposition: z.enum(["billable", "record_only"]).optional(),
+    catalog_revision_id: z.string().nullable().optional(),
+    plan_id: z.string().nullable().optional(),
+    rate_card_key: z.string().nullable().optional(),
+    pricing_snapshot: outboxJsonObjectSchema,
+    ledger_entry_id: z.string().nullable().optional(),
+    correction_of_charge_id: z.string().nullable().optional(),
+    idempotency_key: z.string().min(1),
+    request_digest: z.string().min(1),
+    event_at: z.string().min(1),
+    created_at: z.string().min(1),
+  })
+  .passthrough();
+
+const billingOutboxPayloadSchema = z
+  .object({
+    tenant_id: z.string().min(1),
+    event_id: z.string().min(1),
+    provider: z.string().min(1),
+    provider_environment: z.string().min(1),
+    provider_event_id: z.string().min(1),
+    event_type: z.string().min(1),
+    status: z.string().min(1),
+    received_at: z.string().min(1),
+    completed_at: z.string().nullable().optional(),
+    envelope: outboxJsonObjectSchema,
+    object_key: z.string().nullable().optional(),
+    object_version: z.string().nullable().optional(),
+    archived_at: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+function usageExportFromOutbox(payload: JsonObject): UsageChargeExport | null {
+  const parsed = usageOutboxPayloadSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  const value = parsed.data;
   return {
-    tenantId: payload.tenant_id as string,
-    chargeId: payload.charge_id as string,
-    accountId: payload.account_id as string,
-    subjectId: payload.subject_id as string,
-    operation: payload.operation as string,
-    feature: (payload.feature as string | null) ?? null,
-    model: (payload.model as string | null) ?? null,
-    region: (payload.region as string | null) ?? null,
-    measures: payload.measures,
-    dimensions: payload.dimensions,
-    metadata: payload.metadata,
-    requested: payload.requested as string,
-    charged: payload.charged as string,
-    allowanceRequested: payload.allowance_requested as string,
-    allowanceCovered: payload.allowance_covered as string,
-    billingDisposition: payload.billing_disposition === "record_only" ? "record_only" : "billable",
-    catalogRevisionId: (payload.catalog_revision_id as string | null) ?? null,
-    planId: (payload.plan_id as string | null) ?? null,
-    rateCardKey: (payload.rate_card_key as string | null) ?? null,
-    pricingSnapshot: payload.pricing_snapshot,
-    ledgerEntryId: (payload.ledger_entry_id as string | null) ?? null,
-    correctionOfChargeId: (payload.correction_of_charge_id as string | null) ?? null,
-    idempotencyKey: payload.idempotency_key as string,
-    requestDigest: payload.request_digest as string,
-    eventAt: payload.event_at as string,
-    createdAt: payload.created_at as string,
+    tenantId: value.tenant_id,
+    chargeId: value.charge_id,
+    accountId: value.account_id,
+    subjectId: value.subject_id,
+    operation: value.operation,
+    feature: value.feature ?? null,
+    model: value.model ?? null,
+    region: value.region ?? null,
+    measures: value.measures,
+    dimensions: value.dimensions,
+    metadata: value.metadata,
+    requested: value.requested,
+    charged: value.charged,
+    allowanceRequested: value.allowance_requested,
+    allowanceCovered: value.allowance_covered,
+    billingDisposition: value.billing_disposition ?? "billable",
+    catalogRevisionId: value.catalog_revision_id ?? null,
+    planId: value.plan_id ?? null,
+    rateCardKey: value.rate_card_key ?? null,
+    pricingSnapshot: value.pricing_snapshot,
+    ledgerEntryId: value.ledger_entry_id ?? null,
+    correctionOfChargeId: value.correction_of_charge_id ?? null,
+    idempotencyKey: value.idempotency_key,
+    requestDigest: value.request_digest,
+    eventAt: value.event_at,
+    createdAt: value.created_at,
   };
 }
 
-function billingExportFromOutbox(
-  payload: Record<string, unknown>,
-): BillingEventPayloadExport | null {
-  const requiredStrings = [
-    "tenant_id",
-    "event_id",
-    "provider",
-    "provider_environment",
-    "provider_event_id",
-    "event_type",
-    "status",
-    "received_at",
-  ] as const;
-  if (requiredStrings.some((key) => !isNonEmptyString(payload[key]))) return null;
-  if (!isJsonObject(payload.envelope)) return null;
-  if (!isOptionalString(payload.completed_at)) return null;
+function billingExportFromOutbox(payload: JsonObject): BillingEventPayloadExport | null {
+  const parsed = billingOutboxPayloadSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  const value = parsed.data;
   return {
-    tenantId: payload.tenant_id as string,
-    eventId: payload.event_id as string,
-    provider: payload.provider as string,
-    providerEnvironment: payload.provider_environment as string,
-    providerEventId: payload.provider_event_id as string,
-    eventType: payload.event_type as string,
-    status: payload.status as string,
-    receivedAt: payload.received_at as string,
-    completedAt: payload.completed_at ? String(payload.completed_at) : null,
-    envelope: payload.envelope,
-    objectKey: (payload.object_key as string | null) ?? null,
-    objectVersion: (payload.object_version as string | null) ?? null,
-    archivedAt: (payload.archived_at as string | null) ?? null,
+    tenantId: value.tenant_id,
+    eventId: value.event_id,
+    provider: value.provider,
+    providerEnvironment: value.provider_environment,
+    providerEventId: value.provider_event_id,
+    eventType: value.event_type,
+    status: value.status,
+    receivedAt: value.received_at,
+    completedAt: value.completed_at ?? null,
+    envelope: value.envelope,
+    objectKey: value.object_key ?? null,
+    objectVersion: value.object_version ?? null,
+    archivedAt: value.archived_at ?? null,
   };
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function isOptionalString(value: unknown): value is string | null | undefined {
-  return value === null || value === undefined || typeof value === "string";
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

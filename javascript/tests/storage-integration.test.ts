@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
 import { Decimal } from "decimal.js";
 import pg from "pg";
+import { z } from "zod";
 import { PostgresClient } from "../src/shared/postgres-client.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
 import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
@@ -172,7 +173,9 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
       "SELECT payload FROM bursar.event_outbox WHERE aggregate_id = $1::uuid",
       [chargeId],
     );
-    const usageOutboxPayload = usageOutbox.rows[0]?.payload as Record<string, unknown>;
+    const usageOutboxPayload = z.record(z.string(), z.json()).parse(usageOutbox.rows[0]?.payload);
+    const eventAt = z.string().parse(usageOutboxPayload.event_at);
+    const createdAt = z.string().parse(usageOutboxPayload.created_at);
     expect(usageOutboxPayload).toEqual({
       delivery_required: false,
       tenant_id: TEST_TENANT_ID,
@@ -181,12 +184,8 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
       event_at: expect.any(String),
       created_at: expect.any(String),
     });
-    expect(new Date(String(usageOutboxPayload.event_at)).getTime()).toBe(
-      new Date(usage!.eventAt).getTime(),
-    );
-    expect(new Date(String(usageOutboxPayload.created_at)).getTime()).toBe(
-      new Date(usage!.createdAt).getTime(),
-    );
+    expect(new Date(eventAt).getTime()).toBe(new Date(usage!.eventAt).getTime());
+    expect(new Date(createdAt).getTime()).toBe(new Date(usage!.createdAt).getTime());
 
     const billingPayload = await repository.getBillingEventPayload(billingEventId);
     expect(billingPayload).toMatchObject({

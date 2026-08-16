@@ -41,11 +41,12 @@ function transactionPool(queryError?: Error, rollbackError?: Error) {
   return { pool, query, release };
 }
 
-async function rejectedValue(promise: Promise<unknown>): Promise<unknown> {
+async function rejectedValue<T>(promise: Promise<T>): Promise<Error> {
   try {
     await promise;
   } catch (error) {
-    return error;
+    if (error instanceof Error) return error;
+    throw new Error(String(error));
   }
   throw new Error("Expected promise to reject");
 }
@@ -102,6 +103,7 @@ describe("retryBursarOperation", () => {
       retryBursarOperation(async () => "ok", { baseDelayMs: 10, maxDelayMs: 5 }),
     ).rejects.toThrow("maxDelayMs must be greater than or equal to baseDelayMs");
     await expect(
+      // SAFETY: This deliberately invalid runtime option exercises validation.
       retryBursarOperation(async () => "ok", { jitter: "yes" as never }),
     ).rejects.toThrow("jitter must be a boolean");
   });
@@ -140,6 +142,7 @@ describe("Postgres reliability boundary", () => {
       postgresPoolConfig("postgresql://localhost/bursar", { statementTimeoutMs: -1 }),
     ).toThrow(RangeError);
     expect(() =>
+      // SAFETY: This deliberately invalid runtime option exercises callback validation.
       postgresPoolConfig("postgresql://localhost/bursar", { onPoolError: "log" as never }),
     ).toThrow("onPoolError must be a function");
   });
@@ -147,16 +150,22 @@ describe("Postgres reliability boundary", () => {
   it("rejects invalid runtime pool and tenancy configuration", () => {
     const { pool } = transactionPool();
 
-    expect(() => new PostgresClient(null as never)).toThrow(
-      "postgres pool must provide query(), connect(), and end() methods",
-    );
+    expect(
+      () =>
+        // SAFETY: This deliberately invalid runtime input exercises pool validation.
+        new PostgresClient(null as never),
+    ).toThrow("postgres pool must provide query(), connect(), and end() methods");
     expect(() => new PostgresClient(pool, { tenantId: "" })).toThrow("tenantId must be a UUID");
-    expect(() => new PostgresClient(pool, { usageBackend: "redis" as never })).toThrow(
-      "usageBackend must be 'postgres' or 'clickhouse'",
-    );
-    expect(() => new PostgresClient(pool, { accessRole: "owner" as never })).toThrow(
-      "accessRole must be 'bursar_client' or 'bursar_operator'",
-    );
+    expect(
+      () =>
+        // SAFETY: This deliberately invalid runtime option exercises backend validation.
+        new PostgresClient(pool, { usageBackend: "redis" as never }),
+    ).toThrow("usageBackend must be 'postgres' or 'clickhouse'");
+    expect(
+      () =>
+        // SAFETY: This deliberately invalid runtime option exercises access-role validation.
+        new PostgresClient(pool, { accessRole: "owner" as never }),
+    ).toThrow("accessRole must be 'bursar_client' or 'bursar_operator'");
   });
 
   it.each([

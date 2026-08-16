@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { PostgresRow } from "../../../shared/json.js";
 import {
   optionalRecordRow,
   postgresUuid,
@@ -25,13 +26,13 @@ const BillingPaymentRowSchema = z
     purpose: z.enum(["subscription", "credit_topup"]),
     status: z.enum(["pending", "succeeded", "failed", "canceled"]),
     provider_updated_at: z.union([z.string().datetime({ offset: true }), z.date()]),
-    metadata: z.record(z.string(), z.unknown()),
+    metadata: z.record(z.string(), z.json()),
   })
   .strict();
 export type BillingPaymentRow = z.infer<typeof BillingPaymentRowSchema>;
 export type ForRefundRow = BillingPaymentRow;
 
-function parsePaymentRow(row: Record<string, unknown>, context: string): BillingPaymentRow {
+function parsePaymentRow(row: PostgresRow, context: string): BillingPaymentRow {
   return safeParse(
     BillingPaymentRowSchema,
     {

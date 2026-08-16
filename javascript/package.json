@@ -87,7 +87,8 @@
     "test:concurrency": "vitest run tests/store-integration.test.ts tests/billing-integration.test.ts -t concurrent",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
-    "lint": "oxlint --config .oxlintrc.json --deny-warnings src/ tests/ scripts/",
+    "lint": "bun run test:anti-slop && oxlint --config .oxlintrc.json --format=agent --report-unused-disable-directives --deny-warnings src/ tests/ scripts/",
+    "test:anti-slop": "node tools/oxlint/anti-slop/tests/run-fixtures.mjs ./node_modules/.bin/oxlint",
     "format": "oxfmt --config .oxfmtrc.json --check src/ tests/ scripts/",
     "format:fix": "oxfmt --config .oxfmtrc.json --write src/ tests/ scripts/",
     "knip": "knip --exclude exports,nsExports,types,nsTypes,enumMembers,namespaceMembers",
@@ -186,6 +187,7 @@
     "@dodopayments/better-auth": "^1.6.4",
     "@dodopayments/nextjs": "^0.3.7",
     "@dodopayments/react-native-checkout": "^1.2.0",
+    "@oxlint/plugins": "1.78.0",
     "@testcontainers/postgresql": "^12.1.0",
     "@types/node": "^26.2.0",
     "@types/pg": "^8.21.0",
@@ -206,10 +208,8 @@
   },
   "knip": {
     "entry": [
-      "src/{index,cli,main}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}"
-    ],
-    "ignoreDependencies": [
-      "lefthook"
+      "src/{index,cli,main}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}",
+      "tests/types/public-api-contract.ts"
     ],
     "ignore": [
       "scripts/export-contract-results.mjs"

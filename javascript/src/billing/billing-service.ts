@@ -19,6 +19,7 @@ import { AutoRechargeService } from "./auto-recharge-service.js";
 import { BillingEventProcessor } from "./event-processor.js";
 import { BillingManagement } from "./management.js";
 import type { BillingServiceOptions } from "./service-types.js";
+import type { JsonObject } from "../shared/json.js";
 export type { BillingProvisioningPort, BillingServiceOptions } from "./service-types.js";
 
 /**
@@ -109,7 +110,7 @@ export class BillingService {
     return this.management.getAutoRechargeProfile(userId);
   }
 
-  async getActiveCatalogDocument(): Promise<Record<string, unknown> | null> {
+  async getActiveCatalogDocument(): Promise<JsonObject | null> {
     return this.management.getActiveCatalogDocument();
   }
 
@@ -145,7 +146,7 @@ export class BillingService {
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonObject;
   }): Promise<void> {
     await this.management.updateAutoRechargeAttempt(input);
   }

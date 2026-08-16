@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type BursarConfigData,
   canonicalBursarConfigDict,
   loadCatalogRollout,
   loadConfigFromDict,
@@ -9,126 +10,159 @@ import {
 import { projectPublicCatalog } from "../src/catalog.js";
 import { ConfigError } from "../src/errors.js";
 
-export const baseConfig = () => ({
-  version: 1,
-  catalog: { default_plan: "pro" },
-  pricing: {
-    operations: {
-      completion: {
-        measures: {
-          input_tokens: { unit: "token" },
-          output_tokens: { unit: "token" },
+type BaseConfig = ReturnType<typeof baseConfig>;
+
+interface TestFeatureDefinition {
+  type: string;
+  default?: boolean | number | string;
+  minimum?: number;
+  maximum?: number;
+  pattern?: string;
+  values?: string[];
+}
+
+interface TestFeatureDefinitions {
+  [key: string]: TestFeatureDefinition;
+}
+
+interface TestMatcher {
+  op: string;
+  value?: string;
+  gte?: string;
+}
+
+interface TestMatcherContainer {
+  model: TestMatcher;
+}
+
+interface MutableGiftedBucket {
+  expiry: {
+    type: string;
+    at?: string;
+  };
+}
+
+export const baseConfig = () =>
+  ({
+    version: 1,
+    catalog: { default_plan: "pro" },
+    pricing: {
+      operations: {
+        completion: {
+          measures: {
+            input_tokens: { unit: "token" },
+            output_tokens: { unit: "token" },
+          },
+          dimensions: { model: { type: "string" } },
         },
-        dimensions: { model: { type: "string" } },
+        image: {
+          measures: { images: { unit: "image" } },
+          dimensions: {},
+        },
       },
-      image: {
-        measures: { images: { unit: "image" } },
-        dimensions: {},
-      },
-    },
-    rate_cards: {
-      standard: {
-        operations: {
-          completion: {
-            rules: [
-              {
-                when: { model: { op: "prefix", value: "gpt-" } },
-                charge: {
-                  type: "per_unit",
-                  measure: "input_tokens",
-                  rate: "2.000000",
-                },
-              },
-            ],
-            unmatched: {
-              action: "charge",
-              charge: {
-                type: "sum",
-                components: [
-                  {
+      rate_cards: {
+        standard: {
+          operations: {
+            completion: {
+              rules: [
+                {
+                  when: { model: { op: "prefix", value: "gpt-" } },
+                  charge: {
                     type: "per_unit",
                     measure: "input_tokens",
-                    rate: "1.000000",
+                    rate: "2.000000",
                   },
-                  {
-                    type: "per_unit",
-                    measure: "output_tokens",
-                    rate: "1.000000",
-                  },
-                ],
+                },
+              ],
+              unmatched: {
+                action: "charge",
+                charge: {
+                  type: "sum",
+                  components: [
+                    {
+                      type: "per_unit",
+                      measure: "input_tokens",
+                      rate: "1.000000",
+                    },
+                    {
+                      type: "per_unit",
+                      measure: "output_tokens",
+                      rate: "1.000000",
+                    },
+                  ],
+                },
               },
             },
           },
         },
       },
     },
-  },
-  credits: {
-    buckets: {
-      gifted: {
-        priority: 10,
-        expiry: {
-          type: "after_grant",
-          interval: { unit: "day", count: 7 },
-          timezone: "UTC",
-        },
-      },
-      purchased: { priority: 20 },
-    },
-    default_bucket: "purchased",
-    policies: {
-      prepaid: { type: "prepaid" },
-      invoice: { type: "credit_line", limit: "500.000000" },
-    },
-  },
-  entitlements: {
-    features: {
-      tutor_chat: { type: "boolean", default: false },
-      access_level: {
-        type: "enum",
-        values: ["basic", "full"],
-        default: "basic",
-      },
-    },
-  },
-  admission: {
-    policies: {
-      interactive: {
-        max_in_flight: 5,
-        operations: { completion: { max_in_flight: 2 } },
-      },
-    },
-  },
-  plans: {
-    pro: {
-      display_name: "Pro",
-      rank: 1,
-      rate_card: "standard",
-      allowed_operations: ["completion"],
-      features: { tutor_chat: true, access_level: "full" },
-      credit_allowance: {
-        amount: "10.000000",
-        priority: 15,
-        window: { type: "calendar", unit: "month", timezone: "UTC" },
-      },
-      quotas: {
-        token_budget: {
-          operation: "completion",
-          measure: "input_tokens",
-          limit: "1000.000000",
-          window: {
-            type: "rolling",
-            duration: { unit: "day", count: 30 },
+    credits: {
+      buckets: {
+        gifted: {
+          priority: 10,
+          expiry: {
+            type: "after_grant",
+            interval: { unit: "day", count: 7 },
+            timezone: "UTC",
           },
-          enforcement: "block",
-          emit_at_percent: [80, 100],
+        },
+        purchased: { priority: 20 },
+      },
+      default_bucket: "purchased",
+      policies: {
+        prepaid: { type: "prepaid" },
+        invoice: { type: "credit_line", limit: "500.000000" },
+      },
+    },
+    entitlements: {
+      features: {
+        tutor_chat: { type: "boolean", default: false },
+        access_level: {
+          type: "enum",
+          values: ["basic", "full"],
+          default: "basic",
         },
       },
-      credit_policy: "invoice",
-      admission_policy: "interactive",
     },
-  },
-});
+    admission: {
+      policies: {
+        interactive: {
+          max_in_flight: 5,
+          operations: { completion: { max_in_flight: 2 } },
+        },
+      },
+    },
+    plans: {
+      pro: {
+        display_name: "Pro",
+        rank: 1,
+        rate_card: "standard",
+        allowed_operations: ["completion"],
+        features: { tutor_chat: true, access_level: "full" },
+        credit_allowance: {
+          amount: "10.000000",
+          priority: 15,
+          window: { type: "calendar", unit: "month", timezone: "UTC" },
+        },
+        quotas: {
+          token_budget: {
+            operation: "completion",
+            measure: "input_tokens",
+            limit: "1000.000000",
+            window: {
+              type: "rolling",
+              duration: { unit: "day", count: 30 },
+            },
+            enforcement: "block",
+            emit_at_percent: [80, 100],
+          },
+        },
+        credit_policy: "invoice",
+        admission_policy: "interactive",
+      },
+    },
+  }) satisfies BursarConfigData;
 
 describe("typed v1 config", () => {
   it.each([Number.NaN, Number.POSITIVE_INFINITY])(
@@ -142,8 +176,10 @@ describe("typed v1 config", () => {
   );
 
   it("rejects the removed catalog activation field", () => {
-    const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
-    (config as Record<string, unknown>).catalog = { activation: { mode: "on_publish" } };
+    const config = {
+      ...baseConfig(),
+      catalog: { activation: { mode: "on_publish" } },
+    };
 
     expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
   });
@@ -154,9 +190,9 @@ describe("typed v1 config", () => {
     expect(parsed.plans.pro!.creditAllowance?.priority).toBe(15);
     expect(parsed.plans.pro!.evolution.defaultRollout).toBe("immediate");
     const canonical = canonicalBursarConfigDict(baseConfig());
-    expect(
-      ((canonical.credits as Record<string, unknown>).policies as Record<string, unknown>).invoice,
-    ).toEqual({ type: "credit_line", limit: "500.000000" });
+    expect(canonical).toMatchObject({
+      credits: { policies: { invoice: { type: "credit_line", limit: "500.000000" } } },
+    });
   });
 
   it("supports new-assignments-only defaults and strict release overrides", () => {
@@ -173,6 +209,12 @@ describe("typed v1 config", () => {
     expect(validateCatalogRollout(parsed, rollout)).toEqual({
       plans: { pro: { effective: "immediate", includePinned: true } },
     });
+    expect(() =>
+      loadCatalogRollout({
+        plans: { pro: { effective: "immediate", includePinned: false } },
+        unexpected: true,
+      }),
+    ).toThrow(/unknown field/);
     expect(() =>
       validateCatalogRollout(
         parsed,
@@ -201,30 +243,32 @@ describe("typed v1 config", () => {
     expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
 
     const missingDefault = baseConfig();
+    // SAFETY: Removing catalog is the invalid input this test is designed to exercise.
     delete (missingDefault as Partial<typeof missingDefault>).catalog;
     expect(() => loadConfigFromDict(missingDefault)).toThrow(/default_plan is required/);
   });
 
   it("projects public plans and prices without provider identifiers", () => {
-    const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
-    config.catalog = {
-      default_plan: "pro",
-    };
-    config.credits = {
-      ...config.credits,
-      display: { currency: "USD", units_per_major: "1000" },
-    } as typeof config.credits;
-    config.commerce = {
-      providers: { stripe: { type: "stripe" } },
-      offers: {
-        pro_monthly: {
-          type: "subscription",
-          display_name: "Pro monthly",
-          plan: "pro",
-          billing_interval: { unit: "month", count: 1 },
-          price: { amount_minor: 1900, currency: "USD" },
-          providers: {
-            stripe: { type: "stripe_price", price_id: "price_secret" },
+    const base = baseConfig();
+    const config = {
+      ...base,
+      catalog: { default_plan: "pro" },
+      credits: {
+        ...base.credits,
+        display: { currency: "USD", units_per_major: "1000" },
+      },
+      commerce: {
+        providers: { stripe: { type: "stripe" } },
+        offers: {
+          pro_monthly: {
+            type: "subscription",
+            display_name: "Pro monthly",
+            plan: "pro",
+            billing_interval: { unit: "month", count: 1 },
+            price: { amount_minor: 1900, currency: "USD" },
+            providers: {
+              stripe: { type: "stripe_price", price_id: "price_secret" },
+            },
           },
         },
       },
@@ -261,7 +305,9 @@ describe("typed v1 config", () => {
 
   it("enforces feature types, integer bounds, and string patterns", () => {
     const config = baseConfig();
-    const featureDefinitions = config.entitlements.features as Record<string, unknown>;
+    // SAFETY: The fixture adds feature definitions that are intentionally outside the base fixture type.
+    const featureDefinitions = config.entitlements.features as TestFeatureDefinitions;
+    // SAFETY: The fixture adds plan feature keys that are intentionally outside the base fixture type.
     const planFeatures = config.plans.pro.features as Record<string, boolean | number | string>;
     featureDefinitions.agent_limit = {
       type: "integer",
@@ -299,6 +345,7 @@ describe("typed v1 config", () => {
     expect(() => loadConfigFromDict(admissionPolicy)).toThrow(/admission_policy/);
 
     const allowance = baseConfig();
+    // SAFETY: Removing default_bucket is the invalid input this test is designed to exercise.
     delete (allowance.credits as Partial<typeof allowance.credits>).default_bucket;
     expect(() => loadConfigFromDict(allowance)).toThrow(
       /credit_allowance requires credits.default_bucket/,
@@ -311,16 +358,16 @@ describe("typed v1 config", () => {
     );
 
     const missingPriority = baseConfig();
+    // SAFETY: Removing priority is the invalid input this test is designed to exercise.
     delete (missingPriority.plans.pro.credit_allowance as Partial<{ priority: number }>).priority;
     expect(() => loadConfigFromDict(missingPriority)).toThrow(/priority/);
   });
 
   it("requires matcher operators to match their dimension type", () => {
     const config = baseConfig();
-    const when = config.pricing.rate_cards.standard.operations.completion.rules[0]!.when as Record<
-      string,
-      unknown
-    >;
+    // SAFETY: The matcher fixture is intentionally mutated to an invalid operator shape.
+    const when = config.pricing.rate_cards.standard.operations.completion.rules[0]!
+      .when as TestMatcherContainer;
     when.model = {
       op: "range",
       gte: "1",
@@ -329,12 +376,26 @@ describe("typed v1 config", () => {
   });
 
   it("normalizes exact decimal strings for number-dimension matchers", () => {
-    const config = baseConfig();
-    config.pricing.operations.completion.dimensions.model.type = "number";
-    const when = config.pricing.rate_cards.standard.operations.completion.rules[0]!.when as Record<
-      string,
-      unknown
-    >;
+    const base = baseConfig();
+    const config = {
+      ...base,
+      pricing: {
+        ...base.pricing,
+        operations: {
+          ...base.pricing.operations,
+          completion: {
+            ...base.pricing.operations.completion,
+            dimensions: {
+              ...base.pricing.operations.completion.dimensions,
+              model: { type: "number" as const },
+            },
+          },
+        },
+      },
+    };
+    // SAFETY: The matcher fixture is intentionally mutated to exercise number normalization.
+    const when = config.pricing.rate_cards.standard.operations.completion.rules[0]!
+      .when as TestMatcherContainer;
     when.model = { op: "eq", value: "1.5" };
 
     const parsed = loadConfigFromDict(config);
@@ -370,16 +431,16 @@ describe("typed v1 config", () => {
   });
 
   it("requires version explicitly", () => {
-    const config: Record<string, unknown> = { ...baseConfig() };
-    delete config.version;
+    const config = baseConfig();
+    // SAFETY: Removing version is the invalid input this test is designed to exercise.
+    delete (config as Partial<BaseConfig>).version;
     expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
   });
 
   it("validates RFC 3339 timestamps declared by the JSON Schema", () => {
     const config = baseConfig();
-    const gifted = config.credits.buckets.gifted as unknown as {
-      expiry: { type: string; at: string };
-    };
+    // SAFETY: The fixture replaces the after-grant expiry with a fixed-at test shape.
+    const gifted = config.credits.buckets.gifted as MutableGiftedBucket;
     gifted.expiry = { type: "fixed_at", at: "2026-02-30T25:61:00Z" };
     expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
 

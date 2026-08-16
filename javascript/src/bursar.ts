@@ -20,6 +20,7 @@ import { CapabilityNotConfiguredError, ConfigError, CatalogNotLoadedError } from
 import { projectPublicCatalog, type PublicCatalog } from "./catalog.js";
 import type { CreditMetadata, GrantProgramAwardResult } from "./credits/types/index.js";
 import { retryBursarOperation } from "./retry.js";
+import { z } from "zod";
 export type { BillingCapability, BillingEventSink } from "./billing/contracts.js";
 export type { CommerceOptions } from "./commerce/types.js";
 
@@ -197,10 +198,10 @@ export class AccountService {
   ) {}
 
   async onAccountCreated(input: AccountCreatedInput): Promise<AccountCreatedResult> {
-    if (typeof input.accountId !== "string" || !input.accountId.trim()) {
+    if (!z.string().trim().min(1).safeParse(input.accountId).success) {
       throw new TypeError("accountId must be a non-empty string");
     }
-    if (typeof input.eventKey !== "string" || !input.eventKey.trim()) {
+    if (!z.string().trim().min(1).safeParse(input.eventKey).success) {
       throw new TypeError("eventKey must be a non-empty string");
     }
     const config = await retryBursarOperation(() => this.catalog.getConfig());
@@ -256,7 +257,7 @@ export class Bursar implements BillingEventSink {
   readonly accounts: AccountService;
 
   constructor(options: BursarOptions) {
-    if (typeof options !== "object" || options === null) {
+    if (!z.object({}).safeParse(options).success) {
       throw new TypeError("Bursar options are required");
     }
     if (options.billingStore === null) {

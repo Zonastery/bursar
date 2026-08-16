@@ -1,8 +1,9 @@
 import type { Decimal } from "decimal.js";
+import type { JsonObject } from "../../shared/json.js";
 
 export interface CatalogRevision {
   id: string;
-  config: Record<string, unknown>;
+  config: JsonObject;
   version: number;
 }
 

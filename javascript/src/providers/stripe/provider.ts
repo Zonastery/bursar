@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { z } from "zod";
 import type { CheckoutPaymentStatus, PaymentProvider } from "../types.js";
 import {
   deduplicatePaymentMethods,
@@ -27,32 +28,49 @@ import { ProviderResponseError } from "../../errors.js";
 import { requireStableKey, scopedStableKey } from "../../shared/idempotency.js";
 import { handleStripeWebhook } from "./event-mapper.js";
 
-function requireStripeText(value: unknown, operation: string, field: string): string {
-  if (typeof value !== "string" || !value.trim()) {
+function requireStripeText(
+  value: string | null | undefined,
+  operation: string,
+  field: string,
+): string {
+  const parsed = z.string().trim().min(1).safeParse(value);
+  if (!parsed.success) {
     throw new ProviderResponseError("stripe", operation, { details: { field } });
   }
-  return value;
+  return parsed.data;
 }
 
 function requireStripeInteger(
-  value: unknown,
+  value: number | null | undefined,
   operation: string,
   field: string,
   minimum = 0,
 ): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+  const parsed = z.number().safeParse(value);
+  if (!parsed.success || !Number.isSafeInteger(parsed.data) || parsed.data < minimum) {
     throw new ProviderResponseError("stripe", operation, { details: { field } });
   }
-  return value;
+  return parsed.data;
 }
 
-function requireStripeNumber(value: unknown, operation: string, field: string): number {
-  const parsed =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value)
-        ? Number(value)
-        : Number.NaN;
+function requireStripeNumber(
+  value: number | string | Stripe.Decimal | null | undefined,
+  operation: string,
+  field: string,
+): number {
+  const scalar = z.union([z.number(), z.string().regex(/^-?\d+(?:\.\d+)?$/u)]).safeParse(value);
+  const decimal = z
+    .custom<Stripe.Decimal>(
+      (candidate) => z.object({ toString: z.function() }).safeParse(candidate).success,
+    )
+    .safeParse(value);
+  let parsed = Number.NaN;
+  try {
+    if (scalar.success) parsed = Number(scalar.data);
+    else if (decimal.success) parsed = Number(decimal.data.toString());
+  } catch {
+    // Provider validation below converts hostile value coercion into a stable SDK error.
+  }
   if (!Number.isFinite(parsed)) {
     throw new ProviderResponseError("stripe", operation, { details: { field } });
   }
@@ -89,12 +107,14 @@ function requestOptions(idempotencyKey: string): Stripe.RequestOptions {
 }
 
 function expandableId(value: string | { id: string } | null | undefined): string | undefined {
-  if (!value) return undefined;
-  return typeof value === "string" ? value : value.id;
+  const stringValue = z.string().min(1).safeParse(value);
+  if (stringValue.success) return stringValue.data;
+  const objectValue = z.object({ id: z.string().min(1) }).safeParse(value);
+  return objectValue.success ? objectValue.data.id : undefined;
 }
 
-function mapPaymentIntentStatus(intent: Stripe.PaymentIntent | null): CheckoutPaymentStatus {
-  switch (intent?.status) {
+function mapPaymentIntentStatus(status: Stripe.PaymentIntent.Status | null): CheckoutPaymentStatus {
+  switch (status) {
     case "succeeded":
       return "succeeded";
     case "processing":
@@ -117,43 +137,44 @@ function mapPaymentIntentStatus(intent: Stripe.PaymentIntent | null): CheckoutPa
 function schedulePhaseParams(
   phase: Stripe.SubscriptionSchedule.Phase,
 ): Stripe.SubscriptionScheduleUpdateParams.Phase {
-  const items = phase.items.map((item) => ({
-    price: requireStripeText(expandableId(item.price), "changePlan", "schedule.phases.items.price"),
-    quantity: item.quantity,
-    ...(item.metadata ? { metadata: item.metadata } : {}),
-    ...(item.tax_rates
-      ? {
-          tax_rates: item.tax_rates.map((taxRate) =>
-            requireStripeText(
-              expandableId(taxRate),
-              "changePlan",
-              "schedule.phases.items.tax_rates",
-            ),
-          ),
-        }
-      : {}),
-  }));
+  const items = phase.items.map((item) => {
+    const itemParams: Stripe.SubscriptionScheduleUpdateParams.Phase["items"][number] = {
+      price: requireStripeText(
+        expandableId(item.price),
+        "changePlan",
+        "schedule.phases.items.price",
+      ),
+      quantity: item.quantity,
+    };
+    if (item.metadata) itemParams.metadata = item.metadata;
+    if (item.tax_rates) {
+      itemParams.tax_rates = item.tax_rates.map((taxRate) =>
+        requireStripeText(expandableId(taxRate), "changePlan", "schedule.phases.items.tax_rates"),
+      );
+    }
+    return itemParams;
+  });
   if (items.length === 0) {
     throw new ProviderResponseError("stripe", "changePlan", {
       details: { field: "schedule.phases.items" },
     });
   }
-  return {
+  const result: Stripe.SubscriptionScheduleUpdateParams.Phase = {
     items,
     start_date: phase.start_date,
     end_date: phase.end_date,
-    ...(phase.automatic_tax ? { automatic_tax: { enabled: phase.automatic_tax.enabled } } : {}),
-    ...(phase.billing_cycle_anchor ? { billing_cycle_anchor: phase.billing_cycle_anchor } : {}),
-    ...(phase.collection_method ? { collection_method: phase.collection_method } : {}),
-    ...(phase.currency ? { currency: phase.currency } : {}),
-    ...(expandableId(phase.default_payment_method)
-      ? { default_payment_method: expandableId(phase.default_payment_method) }
-      : {}),
-    ...(phase.description != null ? { description: phase.description } : {}),
-    ...(phase.metadata ? { metadata: phase.metadata } : {}),
-    ...(phase.proration_behavior ? { proration_behavior: phase.proration_behavior } : {}),
-    ...(phase.trial_end != null ? { trial_end: phase.trial_end } : {}),
   };
+  if (phase.automatic_tax) result.automatic_tax = { enabled: phase.automatic_tax.enabled };
+  if (phase.billing_cycle_anchor) result.billing_cycle_anchor = phase.billing_cycle_anchor;
+  if (phase.collection_method) result.collection_method = phase.collection_method;
+  if (phase.currency) result.currency = phase.currency;
+  const defaultPaymentMethod = expandableId(phase.default_payment_method);
+  if (defaultPaymentMethod) result.default_payment_method = defaultPaymentMethod;
+  if (phase.description != null) result.description = phase.description;
+  if (phase.metadata) result.metadata = phase.metadata;
+  if (phase.proration_behavior) result.proration_behavior = phase.proration_behavior;
+  if (phase.trial_end != null) result.trial_end = phase.trial_end;
+  return result;
 }
 
 function stripeProrationBehavior(
@@ -196,11 +217,12 @@ export class StripeProvider implements PaymentProvider {
 
     let customerId = params.customerId;
     if (!customerId) {
+      const customerParams: Stripe.CustomerCreateParams = {
+        metadata: { bursar_account_id: params.accountId },
+      };
+      if (params.email) customerParams.email = params.email;
       const customer = await stripe.customers.create(
-        {
-          ...(params.email ? { email: params.email } : {}),
-          metadata: { bursar_account_id: params.accountId },
-        },
+        customerParams,
         requestOptions(scopedStableKey(idempotencyKey, "customer")),
       );
       customerId = customer.id;
@@ -261,11 +283,22 @@ export class StripeProvider implements PaymentProvider {
       return { paymentStatus: "succeeded" };
     }
     if (session.status === "open") return { paymentStatus: "processing" };
-    const intent =
-      session.payment_intent && typeof session.payment_intent !== "string"
-        ? session.payment_intent
-        : null;
-    return { paymentStatus: mapPaymentIntentStatus(intent) };
+    const parsedIntent = z
+      .object({
+        status: z.enum([
+          "succeeded",
+          "processing",
+          "requires_action",
+          "requires_payment_method",
+          "requires_confirmation",
+          "requires_capture",
+          "canceled",
+        ]),
+      })
+      .safeParse(session.payment_intent);
+    return {
+      paymentStatus: mapPaymentIntentStatus(parsedIntent.success ? parsedIntent.data.status : null),
+    };
   }
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {
@@ -384,10 +417,7 @@ export class StripeProvider implements PaymentProvider {
     ]);
     if (customer.deleted) return [];
     const defaultPaymentMethod = customer.invoice_settings.default_payment_method;
-    const defaultId =
-      typeof defaultPaymentMethod === "string"
-        ? defaultPaymentMethod
-        : (defaultPaymentMethod?.id ?? null);
+    const defaultId = expandableId(defaultPaymentMethod) ?? null;
     return deduplicatePaymentMethods(
       methods.data.map((method) => {
         const card = method.card;
@@ -511,18 +541,16 @@ export class StripeProvider implements PaymentProvider {
           details: { field: "schedule.phases" },
         });
       }
+      const nextPhase: Stripe.SubscriptionScheduleUpdateParams.Phase = {
+        items: [{ price: params.productId, quantity: params.quantity ?? 1 }],
+        start_date: currentPhase.end_date,
+        proration_behavior: "none",
+      };
+      if (params.metadata) nextPhase.metadata = params.metadata;
       await stripe.subscriptionSchedules.update(
         schedule.id,
         {
-          phases: [
-            schedulePhaseParams(currentPhase),
-            {
-              items: [{ price: params.productId, quantity: params.quantity ?? 1 }],
-              start_date: currentPhase.end_date,
-              proration_behavior: "none",
-              ...(params.metadata ? { metadata: params.metadata } : {}),
-            },
-          ],
+          phases: [schedulePhaseParams(currentPhase), nextPhase],
           proration_behavior: "none",
         },
         requestOptions(scopedStableKey(idempotencyKey, "schedule-update")),
@@ -531,15 +559,16 @@ export class StripeProvider implements PaymentProvider {
         providerOperationId: requireStripeText(schedule.id, "changePlan", "schedule.id"),
       };
     }
+    const updateParams: Stripe.SubscriptionUpdateParams = {
+      items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
+      proration_behavior: stripeProrationBehavior(params.prorationBillingMode),
+      payment_behavior:
+        params.onPaymentFailure === "apply_change" ? "allow_incomplete" : "pending_if_incomplete",
+    };
+    if (params.metadata) updateParams.metadata = params.metadata;
     const updated = await stripe.subscriptions.update(
       params.providerSubscriptionId,
-      {
-        items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
-        proration_behavior: stripeProrationBehavior(params.prorationBillingMode),
-        payment_behavior:
-          params.onPaymentFailure === "apply_change" ? "allow_incomplete" : "pending_if_incomplete",
-        ...(params.metadata ? { metadata: params.metadata } : {}),
-      },
+      updateParams,
       requestOptions(scopedStableKey(idempotencyKey, "subscription-update")),
     );
     const latestInvoiceId = expandableId(updated.latest_invoice);
@@ -620,7 +649,7 @@ export class StripeProvider implements PaymentProvider {
           subtotal,
         };
       });
-    return {
+    const result: ChangePlanPreview = {
       totalAmount: requireStripeInteger(invoice.total, "previewChangePlan", "invoice.total"),
       settlementAmount: requireStripeInteger(
         invoice.amount_due,
@@ -633,7 +662,6 @@ export class StripeProvider implements PaymentProvider {
         params.effectiveAt === "next_billing_date"
           ? new Date(currentPeriodEnd * 1000).toISOString()
           : new Date(invoice.created * 1000).toISOString(),
-      ...(price.unit_amount === null ? {} : { recurringAmount: price.unit_amount }),
       recurringCurrency: requireStripeText(price.currency, "previewChangePlan", "price.currency"),
       nextBillingDate: new Date(currentPeriodEnd * 1000).toISOString(),
       taxAmount:
@@ -644,5 +672,7 @@ export class StripeProvider implements PaymentProvider {
           0,
         ) ?? 0,
     };
+    if (price.unit_amount !== null) result.recurringAmount = price.unit_amount;
+    return result;
   }
 }

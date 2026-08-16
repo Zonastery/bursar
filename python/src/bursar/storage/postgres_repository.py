@@ -59,8 +59,10 @@ def _json_object(value: Any, context: str) -> dict[str, Any]:
 
 def _billing_disposition(row: dict[str, Any], context: str) -> Literal["billable", "record_only"]:
     value = _required_string(row, "billing_disposition", context)
-    if value == "billable" or value == "record_only":
-        return value
+    if value == "billable":
+        return "billable"
+    if value == "record_only":
+        return "record_only"
     msg = f"{context}.billing_disposition must be billable or record_only"
     raise RuntimeError(msg)
 

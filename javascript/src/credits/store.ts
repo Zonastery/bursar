@@ -1,4 +1,5 @@
 import type { Decimal } from "decimal.js";
+import type { JsonObject } from "../shared/json.js";
 import { CapabilityNotSupportedError } from "../errors.js";
 import type {
   AddCreditsResult,
@@ -61,8 +62,8 @@ export interface OperationUsageOptions {
   feature?: string | null;
   model?: string | null;
   region?: string | null;
-  measures?: Record<string, unknown> | null;
-  dimensions?: Record<string, unknown> | null;
+  measures?: Record<string, string | number | boolean | Decimal.Value> | null;
+  dimensions?: Record<string, string | number | boolean | Decimal.Value> | null;
 }
 
 /** Options for atomically acquiring a lease. */
@@ -209,11 +210,14 @@ export abstract class CreditStore {
 
   abstract getActiveCatalog(): Promise<CatalogRevision | null>;
   abstract publishAndActivateCatalog(
-    config: BursarConfigData,
+    config: BursarConfigData | JsonObject,
     label?: string | null,
     rollout?: CatalogRollout | null,
   ): Promise<string>;
-  abstract publishCatalogDraft(config: BursarConfigData, label?: string | null): Promise<string>;
+  abstract publishCatalogDraft(
+    config: BursarConfigData | JsonObject,
+    label?: string | null,
+  ): Promise<string>;
 
   // Catalog revision history and activation.
   abstract getCatalogHistory(): Promise<CatalogRevisionSummary[]>;

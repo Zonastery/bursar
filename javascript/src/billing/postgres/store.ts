@@ -1,5 +1,6 @@
 import { Decimal } from "decimal.js";
 import { z } from "zod";
+import type { JsonObject, PostgresValue } from "../../shared/json.js";
 import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
@@ -109,7 +110,7 @@ const CheckoutIntentRowSchema = z
   .strict();
 
 function billingCreditPostingResult(
-  rows: readonly unknown[] | null | undefined,
+  rows: readonly PostgresValue[] | null | undefined,
   context: string,
 ): BillingCreditPostingResult {
   const raw = requireRecordRow(rows, context);
@@ -165,10 +166,10 @@ export class PostgresBillingStore extends BillingStore {
   private _subscriptionChange: BillingSubscriptionChangeRepository | null = null;
   constructor(options: PostgresBillingStoreOptions) {
     super();
-    if (typeof options !== "object" || options === null) {
+    if (!z.object({}).safeParse(options).success) {
       throw new TypeError("PostgresBillingStore options are required");
     }
-    if (typeof options.postgres !== "string" && options.poolConstructor !== undefined) {
+    if (!z.string().safeParse(options.postgres).success && options.poolConstructor !== undefined) {
       throw new TypeError("poolConstructor cannot be used with an existing PostgreSQL pool");
     }
     const providerEnvironment = normalizeProviderEnvironment(options.providerEnvironment);
@@ -319,7 +320,8 @@ export class PostgresBillingStore extends BillingStore {
         details: { rowCount: rows.length, checkoutIntentId: id },
       });
     }
-    const row = rows[0] as Record<string, unknown>;
+    const row = rows[0];
+    if (!row) throw new StoreError("getCheckoutIntent: expected one row");
     return this.rowToCheckoutIntent(
       safeParse(
         CheckoutIntentRowSchema,
@@ -397,7 +399,7 @@ export class PostgresBillingStore extends BillingStore {
     provider: string,
     eventId: string,
     eventType: string,
-    envelope?: Record<string, unknown>,
+    envelope?: JsonObject,
   ): Promise<BillingEventClaim> {
     const result = await this.billingEvent.claim(
       provider,
@@ -830,17 +832,17 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
-  async getActiveCatalogDocument(): Promise<Record<string, unknown> | null> {
+  async getActiveCatalogDocument(): Promise<JsonObject | null> {
     const rows = await this.queryFn("SELECT * FROM bursar.active_catalog_revision()", []);
-    if (rows.length === 0) return null;
-    if (rows.length !== 1 || typeof rows[0] !== "object" || rows[0] === null) {
-      throw new StoreError("active catalog revision returned a malformed row", {
-        details: { rowCount: rows.length },
-      });
+    const row = optionalRecordRow(rows, "PostgresBillingStore.getActiveCatalogDocument");
+    if (row === null) return null;
+    const sourceDocument = row.source_document;
+    if (sourceDocument === undefined) {
+      throw new StoreError("active catalog revision returned no source document");
     }
     return safeParse(
-      z.record(z.string(), z.unknown()),
-      (rows[0] as Record<string, unknown>).source_document,
+      z.record(z.string(), z.json()),
+      sourceDocument,
       "PostgresBillingStore.getActiveCatalogDocument",
     );
   }

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { PostgresPool } from "../src/shared/postgres-client.js";
+import type { UsageAnalyticsStore } from "../src/credits/types/index.js";
+import type { UsageEventSink } from "../src/storage/ports.js";
 import {
   RuntimeDiagnosticsTracker,
   type OutboxStatusSnapshot,
@@ -249,7 +251,7 @@ describe("Bursar runtime diagnostics", () => {
         aggregateStats: async () => {
           throw new Error("not used");
         },
-      } as never,
+      } satisfies UsageEventSink & UsageAnalyticsStore,
       outbox: false,
     });
 

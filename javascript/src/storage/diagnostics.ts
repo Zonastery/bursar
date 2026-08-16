@@ -127,10 +127,10 @@ export class RuntimeDiagnosticsTracker {
     if (this.workerConfigured) this.workerStopped = true;
   }
 
-  recordWorkerError(error: unknown): void {
+  recordWorkerError(cause: unknown): void {
     this.lastError = {
       at: new Date().toISOString(),
-      error: persistedDiagnosticSummary(error, "outbox_worker_failed"),
+      error: persistedDiagnosticSummary(cause, "outbox_worker_failed"),
     };
   }
 
@@ -146,8 +146,8 @@ export class RuntimeDiagnosticsTracker {
         result,
       };
       return result;
-    } catch (error) {
-      const message = persistedDiagnosticSummary(error, "outbox_worker_failed");
+    } catch (cause) {
+      const message = persistedDiagnosticSummary(cause, "outbox_worker_failed");
       this.lastRun = {
         source: "manual",
         status: "failed",
@@ -157,7 +157,7 @@ export class RuntimeDiagnosticsTracker {
         error: message,
       };
       this.lastError = { at: this.lastRun.completedAt, error: message };
-      throw error;
+      throw cause;
     }
   }
 
@@ -252,14 +252,14 @@ export class RuntimeDiagnosticsTracker {
         currentRevisionId: revision?.id ?? null,
         currentRevision: revision?.version ?? null,
       };
-    } catch (error) {
+    } catch (cause) {
       return {
         status: "error",
         latencyMs: Date.now() - started,
         loaded,
         currentRevisionId: null,
         currentRevision: null,
-        error: persistedDiagnosticSummary(error, "catalog_check_failed"),
+        error: persistedDiagnosticSummary(cause, "catalog_check_failed"),
       };
     }
   }
@@ -284,13 +284,13 @@ export class RuntimeDiagnosticsTracker {
         snapshot,
         limit,
       };
-    } catch (error) {
+    } catch (cause) {
       return {
         status: "error",
         latencyMs: Date.now() - started,
         snapshot: null,
         limit,
-        error: persistedDiagnosticSummary(error, "outbox_check_failed"),
+        error: persistedDiagnosticSummary(cause, "outbox_check_failed"),
       };
     }
   }
@@ -304,11 +304,11 @@ async function checkDependency(
   try {
     await operation();
     return { status: "ok", latencyMs: Date.now() - started };
-  } catch (error) {
+  } catch (cause) {
     return {
       status: "error",
       latencyMs: Date.now() - started,
-      error: persistedDiagnosticSummary(error, fallback),
+      error: persistedDiagnosticSummary(cause, fallback),
     };
   }
 }
@@ -335,7 +335,10 @@ function validateOutboxSnapshot(snapshot: OutboxStatusSnapshot): void {
       throw new TypeError(`outbox status field ${key} must be a non-negative integer`);
     }
   }
-  if (snapshot.oldestPendingAt !== null && typeof snapshot.oldestPendingAt !== "string") {
+  if (
+    snapshot.oldestPendingAt !== null &&
+    !z.string().safeParse(snapshot.oldestPendingAt).success
+  ) {
     throw new TypeError("outbox status oldestPendingAt must be a timestamp string or null");
   }
 }

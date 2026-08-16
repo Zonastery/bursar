@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import DodoPayments, { NotFoundError } from "dodopayments";
 import type Stripe from "stripe";
+import { z } from "zod";
 import { ProviderResponseError, StoreUnavailableError } from "../src/errors.js";
 import { callBillingEventSink } from "../src/providers/_shared.js";
 import type { BillingEventSink } from "../src/billing/contracts.js";
@@ -8,6 +9,17 @@ import type { DodoClient } from "../src/providers/dodo/client-contract.js";
 import { DodoProvider } from "../src/providers/dodo/provider.js";
 import { MockPaymentProvider } from "../src/providers/mock/provider.js";
 import { StripeProvider } from "../src/providers/stripe/provider.js";
+import { isExternalObject, type ExternalObject, type ExternalValue } from "../src/shared/json.js";
+
+function testDodoClient<TClient>(client: TClient): DodoClient {
+  // SAFETY: Each Dodo fixture implements exactly the provider methods exercised by its scenario.
+  return client as DodoClient;
+}
+
+function testStripeClient<TClient>(client: TClient): Stripe {
+  // SAFETY: Each Stripe fixture implements exactly the provider methods exercised by its scenario.
+  return client as Stripe;
+}
 
 const sink = {
   ingestBillingEvent: async () => ({ handled: true, action: "ok" }),
@@ -79,7 +91,7 @@ describe("payment provider adapter contracts", () => {
   });
 
   it("maps Dodo requests, idempotency, and response DTOs", async () => {
-    const calls: unknown[][] = [];
+    const calls: ExternalValue[][] = [];
     const customerCreate = vi.fn(async () => ({ customer_id: "cus_1" }));
     const updatePaymentMethod = vi.fn(async () => ({
       payment_link: "https://update-payment-method.test",
@@ -89,9 +101,9 @@ describe("payment provider adapter contracts", () => {
         unwrap: () => ({ type: "payment.succeeded", data: {} }),
       },
       checkoutSessions: {
-        create: async (...args: unknown[]) => {
+        create: async (...args: ExternalValue[]) => {
           calls.push(args);
-          if ((args[0] as Record<string, unknown>)?.confirm === true) {
+          if (isExternalObject(args[0]) && args[0].confirm === true) {
             return { session_id: "sess_auto", payment_id: "pay_auto" };
           }
           return { checkout_url: "https://checkout.test", session_id: "sess_1" };
@@ -139,9 +151,9 @@ describe("payment provider adapter contracts", () => {
               },
       },
       subscriptions: {
-        update: async (...args: unknown[]) => calls.push(args),
+        update: async (...args: ExternalValue[]) => calls.push(args),
         updatePaymentMethod,
-        changePlan: async (...args: unknown[]) => calls.push(args),
+        changePlan: async (...args: ExternalValue[]) => calls.push(args),
         previewChangePlan: async () => ({
           immediate_charge: {
             line_items: [],
@@ -150,9 +162,10 @@ describe("payment provider adapter contracts", () => {
           },
         }),
       },
-    } as unknown as DodoClient;
+    };
+    const typedClient = testDodoClient(client);
     const provider = new DodoProvider({
-      getClient: () => client,
+      getClient: () => typedClient,
       webhookKey: "k",
       setupProductId: "setup",
       eventSink: sink,
@@ -271,7 +284,7 @@ describe("payment provider adapter contracts", () => {
       checkout_url: "https://checkout.test",
       session_id: "sess_guest",
     }));
-    const client = { checkoutSessions: { create } } as unknown as DodoClient;
+    const client = testDodoClient({ checkoutSessions: { create } });
     const provider = new DodoProvider({
       getClient: () => client,
       webhookKey: "k",
@@ -306,9 +319,9 @@ describe("payment provider adapter contracts", () => {
   });
 
   it("sends explicit Dodo idempotency headers for every keyed provider mutation", async () => {
-    const checkoutCreate = vi.fn(async (...args: unknown[]) => {
-      const body = args[0] as Record<string, unknown>;
-      return body.confirm === true
+    const checkoutCreate = vi.fn(async (...args: ExternalValue[]) => {
+      const body = args[0];
+      return isExternalObject(body) && body.confirm === true
         ? { session_id: "sess_charge", payment_id: "pay_charge" }
         : { checkout_url: "https://checkout.test", session_id: "sess_checkout" };
     });
@@ -332,9 +345,10 @@ describe("payment provider adapter contracts", () => {
         cancelChangePlan,
         changePlan,
       },
-    } as unknown as DodoClient;
+    };
+    const typedClient = testDodoClient(client);
     const provider = new DodoProvider({
-      getClient: () => client,
+      getClient: () => typedClient,
       webhookKey: "k",
       eventSink: sink,
     });
@@ -438,15 +452,15 @@ describe("payment provider adapter contracts", () => {
   });
 
   it("maps Stripe checkout calls and rejects missing webhook signatures", async () => {
-    const calls: Record<string, unknown>[] = [];
-    const customerCalls: unknown[][] = [];
-    const checkoutCalls: unknown[][] = [];
-    const paymentIntentCalls: unknown[][] = [];
+    const calls: ExternalObject[] = [];
+    const customerCalls: ExternalValue[][] = [];
+    const checkoutCalls: ExternalValue[][] = [];
+    const paymentIntentCalls: ExternalValue[][] = [];
     const stripe = {
       customers: {
-        create: async (...args: unknown[]) => {
+        create: async (...args: ExternalValue[]) => {
           customerCalls.push(args);
-          calls.push(args[0] as Record<string, unknown>);
+          if (isExternalObject(args[0])) calls.push(args[0]);
           return { id: "cus_1" };
         },
         retrieve: async () => ({
@@ -468,7 +482,7 @@ describe("payment provider adapter contracts", () => {
       },
       checkout: {
         sessions: {
-          create: async (...args: unknown[]) => {
+          create: async (...args: ExternalValue[]) => {
             checkoutCalls.push(args);
             return { id: "cs_1", url: "https://checkout.test" };
           },
@@ -478,17 +492,18 @@ describe("payment provider adapter contracts", () => {
       billingPortal: { sessions: { create: async () => ({ url: "https://portal.test" }) } },
       prices: { retrieve: async () => ({ unit_amount: 500, currency: "usd" }) },
       paymentIntents: {
-        create: async (...args: unknown[]) => {
+        create: async (...args: ExternalValue[]) => {
           paymentIntentCalls.push(args);
           return { id: "pi_auto", status: "succeeded", amount: 500, currency: "usd" };
         },
       },
       invoices: { retrieve: async () => ({ hosted_invoice_url: "https://invoice.test" }) },
-      subscriptions: { update: async (...args: unknown[]) => calls.push({ args }) },
+      subscriptions: { update: async (...args: ExternalValue[]) => calls.push({ args }) },
       webhooks: { constructEvent: () => ({}) },
-    } as unknown as Stripe;
+    };
+    const typedStripe = testStripeClient(stripe);
     const provider = new StripeProvider({
-      getClient: () => stripe,
+      getClient: () => typedStripe,
       webhookSecret: "secret",
       eventSink: sink,
     });
@@ -540,7 +555,7 @@ describe("payment provider adapter contracts", () => {
     }
     const scopedKeys = customerCalls
       .slice(-2)
-      .map((call) => String((call[1] as { idempotencyKey: string }).idempotencyKey));
+      .map((call) => z.object({ idempotencyKey: z.string() }).parse(call[1]).idempotencyKey);
     expect(scopedKeys[0]).not.toBe(scopedKeys[1]);
     expect(scopedKeys.every((key) => key.length <= 255)).toBe(true);
     await expect(provider.getCheckoutSessionStatus("sess_1")).resolves.toEqual({
@@ -615,9 +630,10 @@ describe("payment provider adapter contracts", () => {
         create: scheduleCreate,
         update: scheduleUpdate,
       },
-    } as unknown as Stripe;
+    };
+    const typedStripe = testStripeClient(stripe);
     const provider = new StripeProvider({
-      getClient: () => stripe,
+      getClient: () => typedStripe,
       webhookSecret: "secret",
       eventSink: sink,
     });
@@ -692,9 +708,10 @@ describe("payment provider adapter contracts", () => {
           throw new NotFoundError(404, {}, "missing", new Headers());
         },
       },
-    } as unknown as DodoClient;
+    };
+    const typedClient = testDodoClient(client);
     const provider = new DodoProvider({
-      getClient: () => client,
+      getClient: () => typedClient,
       webhookKey: "k",
       eventSink: sink,
     });
@@ -712,9 +729,10 @@ describe("payment provider adapter contracts", () => {
           throw error;
         },
       },
-    } as unknown as DodoClient;
+    };
+    const typedClient = testDodoClient(client);
     const provider = new DodoProvider({
-      getClient: () => client,
+      getClient: () => typedClient,
       webhookKey: "k",
       eventSink: sink,
     });

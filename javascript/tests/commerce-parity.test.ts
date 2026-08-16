@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { loadConfigFromDict } from "../src/config.js";
 import {
@@ -10,25 +11,41 @@ import {
   classifySubscriptionChange,
 } from "../src/commerce/index.js";
 import { CommerceProviderRegistry } from "../src/commerce/provider-registry.js";
+import type { BillingEventSink } from "../src/billing/contracts.js";
 import type { PaymentProvider } from "../src/providers/types.js";
 
-interface ParityFixture {
-  catalog: Record<string, unknown>;
-  transitions: Array<{
-    current_plan: string;
-    current_interval: string;
-    target_offer: string;
-    classification: string;
-    effective: string | null;
-    proration: string | null;
-  }>;
-  error_codes: Record<string, string>;
-  public_contract: Record<string, string>;
-}
+const parityFixtureSchema = z
+  .object({
+    catalog: z.record(z.string(), z.json()),
+    transitions: z.array(
+      z
+        .object({
+          current_plan: z.string(),
+          current_interval: z.string(),
+          target_offer: z.string(),
+          classification: z.string(),
+          effective: z.string().nullable(),
+          proration: z.string().nullable(),
+        })
+        .strict(),
+    ),
+    error_codes: z.record(z.string(), z.string()),
+    public_contract: z.record(z.string(), z.string()),
+  })
+  .strict();
 
-const fixture = JSON.parse(
-  readFileSync(new URL("../../common/commerce-parity.json", import.meta.url), "utf8"),
-) as ParityFixture;
+const fixture = parityFixtureSchema.parse(
+  JSON.parse(readFileSync(new URL("../../common/commerce-parity.json", import.meta.url), "utf8")),
+);
+
+const eventSink: BillingEventSink = {
+  ingestBillingEvent: async () => ({ handled: true }),
+};
+
+function invalidProvider(): PaymentProvider {
+  // SAFETY: This deliberately incomplete provider exercises registry validation.
+  return { provider: "alpha" } as PaymentProvider;
+}
 
 function minimalProvider(): PaymentProvider {
   return {
@@ -99,8 +116,8 @@ describe("shared commerce parity fixture", () => {
 
   it("validates provider factories and preserves newer loads when a cleared load fails", async () => {
     const invalid = new CommerceProviderRegistry(
-      { providerEnvironment: "test", providers: { alpha: () => ({ provider: "alpha" }) as never } },
-      { providerEnvironment: "test", eventSink: {} as never },
+      { providerEnvironment: "test", providers: { alpha: () => invalidProvider() } },
+      { providerEnvironment: "test", eventSink },
     );
     await expect(invalid.get("alpha")).rejects.toThrow("did not return a valid payment provider");
 
@@ -123,7 +140,7 @@ describe("shared commerce parity fixture", () => {
           },
         },
       },
-      { providerEnvironment: "test", eventSink: {} as never },
+      { providerEnvironment: "test", eventSink },
     );
 
     const stale = registry.get("alpha");
@@ -141,14 +158,14 @@ describe("shared commerce parity fixture", () => {
       () =>
         new CommerceProviderRegistry(
           { providerEnvironment: "test", providers: {} },
-          { providerEnvironment: "test", eventSink: {} as never },
+          { providerEnvironment: "test", eventSink },
         ),
     ).toThrow("At least one payment provider must be registered");
     expect(
       () =>
         new CommerceProviderRegistry(
           { providerEnvironment: "test", providers: { " ": () => minimalProvider() } },
-          { providerEnvironment: "test", eventSink: {} as never },
+          { providerEnvironment: "test", eventSink },
         ),
     ).toThrow("Payment provider names must not be empty");
     expect(
@@ -159,7 +176,7 @@ describe("shared commerce parity fixture", () => {
             providers: { alpha: () => minimalProvider() },
             defaultProvider: " ",
           },
-          { providerEnvironment: "test", eventSink: {} as never },
+          { providerEnvironment: "test", eventSink },
         ),
     ).toThrow("Default payment provider must not be empty");
   });

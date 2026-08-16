@@ -20,6 +20,7 @@
         "@dodopayments/nextjs": "^0.3.7",
         "@dodopayments/react-native-checkout": "^1.2.0",
         "@opentelemetry/api": "^1.9.0",
+        "@oxlint/plugins": "1.78.0",
         "@testcontainers/postgresql": "^12.1.0",
         "@types/node": "^26.2.0",
         "@types/pg": "^8.21.0",
@@ -31,7 +32,7 @@
         "lefthook": "^2.1.10",
         "next": "^16.3.0",
         "oxfmt": "^0.63.0",
-        "oxlint": "^1.78.0",
+        "oxlint": "1.78.0",
         "pg": "^8.23.0",
         "stripe": "^22.4.0",
         "testcontainers": "^12.1.0",
@@ -494,6 +495,8 @@
     "@oxlint/binding-win32-ia32-msvc": ["@oxlint/binding-win32-ia32-msvc@1.78.0", "", { "os": "win32", "cpu": "ia32" }, "sha512-zcuXFVrEFHIafRfkCQT8w/Xe41o07ozl/vwHq7p94vB29xVzsB0sZGYORU1jhcYKv3Lr0J3HbJ2T4fHH5rWmvA=="],
 
     "@oxlint/binding-win32-x64-msvc": ["@oxlint/binding-win32-x64-msvc@1.78.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Sb5ocmLSuYeOuXd+CFOToGKp/gjXUEWDnvIGwhnh8aq8wY4TMmEnKnvbogSW7RdMZv77JSARduS7/gv+khYEjA=="],
+
+    "@oxlint/plugins": ["@oxlint/plugins@1.78.0", "", {}, "sha512-Ypt8KeRYw+4jUtlPirfcHWMrn5ms12VrrFPD+Mds477/7tJxG1Kcz2Yrg2nVcTQEUx/GdlhS+BUg1kmxNm04Ug=="],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 

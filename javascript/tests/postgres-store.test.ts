@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 import type { PgPool, PgPoolConstructor } from "../src/credits/postgres/store.js";
 import { PostgresStore as BasePostgresStore } from "../src/credits/postgres/store.js";
 import { PostgresBillingStore as BasePostgresBillingStore } from "../src/billing/postgres/store.js";
@@ -7,6 +8,7 @@ import { PostgresClient } from "../src/shared/postgres-client.js";
 import { StoreUnavailableError } from "../src/errors.js";
 import { LeaseRepository } from "../src/credits/postgres/repositories/lease.js";
 import { TeamRepository } from "../src/credits/postgres/repositories/team.js";
+import type { PostgresParams, PostgresRow } from "../src/shared/json.js";
 
 const D = (n: number | string) => new Decimal(n);
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
@@ -17,19 +19,26 @@ const TEST_LEDGER_ID = "00000000-0000-0000-0000-000000000005";
 const TEST_LEASE_ID = "00000000-0000-0000-0000-000000000006";
 const TEST_TEAM_ID = "00000000-0000-0000-0000-000000000007";
 
+function isTestPoolConstructor(
+  value: PgPool | PgPoolConstructor | undefined,
+): value is PgPoolConstructor {
+  return value !== undefined && z.function().safeParse(value).success;
+}
+
 class PostgresStore extends BasePostgresStore {
   constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
     super({
-      postgres: typeof poolOrCtor === "object" ? poolOrCtor : databaseUrl,
+      postgres:
+        isTestPoolConstructor(poolOrCtor) || poolOrCtor === undefined ? databaseUrl : poolOrCtor,
       tenantId: TEST_TENANT_ID,
       providerEnvironment: "test",
-      poolConstructor: typeof poolOrCtor === "function" ? poolOrCtor : undefined,
+      poolConstructor: isTestPoolConstructor(poolOrCtor) ? poolOrCtor : undefined,
     });
   }
 }
 
 class PostgresBillingStore extends BasePostgresBillingStore {
-  constructor(poolOrUrl: import("pg").Pool | string) {
+  constructor(poolOrUrl: PgPool | string) {
     super({ postgres: poolOrUrl, tenantId: TEST_TENANT_ID, providerEnvironment: "test" });
   }
 }
@@ -42,45 +51,62 @@ function mockTransactionClient(query: ReturnType<typeof vi.fn>) {
 }
 
 /** Mock pool that returns a fixed set of rows for every query. */
-function makeMockPool(rows: unknown[], subsequentRows: unknown[] = rows): PgPoolConstructor {
-  return vi.fn(function () {
-    let dataQueryCount = 0;
-    const query = vi.fn((text: string) => {
-      if (
-        text === "BEGIN" ||
-        text === "COMMIT" ||
-        text === "ROLLBACK" ||
-        text.startsWith("SET LOCAL ROLE") ||
-        text.startsWith("SELECT set_config(")
-      ) {
-        return Promise.resolve({ rows: [] });
-      }
-      const result = dataQueryCount === 0 ? rows : subsequentRows;
-      dataQueryCount += 1;
-      return Promise.resolve({ rows: result });
-    });
-    return {
-      query,
-      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
-      end: vi.fn().mockResolvedValue(undefined),
-    };
-  }) as unknown as PgPoolConstructor;
+function testPool<TPool>(pool: TPool): PgPool {
+  // SAFETY: Test pools implement the query, connect, and end methods consumed by PostgresClient.
+  return pool as PgPool;
+}
+
+function testPoolConstructor<TConstructor>(constructor: TConstructor): PgPoolConstructor {
+  // SAFETY: Test constructors return pools with the methods consumed by PostgresClient.
+  return constructor as PgPoolConstructor;
+}
+
+function makeMockPool(
+  rows: PostgresRow[],
+  subsequentRows: PostgresRow[] = rows,
+): PgPoolConstructor {
+  return testPoolConstructor(
+    vi.fn(function () {
+      let dataQueryCount = 0;
+      const query = vi.fn((text: string) => {
+        if (
+          text === "BEGIN" ||
+          text === "COMMIT" ||
+          text === "ROLLBACK" ||
+          text.startsWith("SET LOCAL ROLE") ||
+          text.startsWith("SELECT set_config(")
+        ) {
+          return Promise.resolve({ rows: [] });
+        }
+        const result = dataQueryCount === 0 ? rows : subsequentRows;
+        dataQueryCount += 1;
+        return Promise.resolve({ rows: result });
+      });
+      return {
+        query,
+        connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+        end: vi.fn().mockResolvedValue(undefined),
+      };
+    }),
+  );
 }
 
 /**
  * Mock pool that records the SQL text + params it was called with, returning a
  * caller-supplied row set. Lets us assert how the store builds RPC calls.
  */
-function makeRecordingPool(
-  rows: unknown[],
-  subsequentRows: unknown[] = rows,
-): {
+interface RecordingPoolFixture {
   ctor: PgPoolConstructor;
-  calls: Array<{ text: string; params: unknown[] }>;
-} {
-  const calls: Array<{ text: string; params: unknown[] }> = [];
+  calls: Array<{ text: string; params: PostgresParams }>;
+}
+
+function makeRecordingPool(
+  rows: PostgresRow[],
+  subsequentRows: PostgresRow[] = rows,
+): RecordingPoolFixture {
+  const calls: RecordingPoolFixture["calls"] = [];
   let dataQueryCount = 0;
-  const query = vi.fn((text: string, params?: unknown[]) => {
+  const query = vi.fn((text: string, params?: PostgresParams) => {
     if (
       text === "BEGIN" ||
       text === "COMMIT" ||
@@ -95,13 +121,15 @@ function makeRecordingPool(
     dataQueryCount += 1;
     return Promise.resolve({ rows: result });
   });
-  const ctor = vi.fn(function () {
-    return {
-      query,
-      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
-      end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as PgPool;
-  }) as unknown as PgPoolConstructor;
+  const ctor = testPoolConstructor(
+    vi.fn(function () {
+      return {
+        query,
+        connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+        end: vi.fn().mockResolvedValue(undefined),
+      };
+    }),
+  );
   return { ctor, calls };
 }
 
@@ -110,11 +138,11 @@ describe("PostgresStore", () => {
     const query = vi.fn(async (text: string, _params?: unknown[]) => ({
       rows: text === "SELECT 1 AS value" ? [{ value: 1 }] : [],
     }));
-    const pool = {
+    const pool = testPool({
       query: vi.fn(),
       connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
       end: vi.fn(),
-    } as unknown as PgPool;
+    });
     const postgres = new PostgresClient(pool, {
       tenantId: TEST_TENANT_ID,
       providerEnvironment: "sandbox",
@@ -836,11 +864,11 @@ describe("PostgresStore", () => {
         },
       ],
     });
-    const pool = {
+    const pool = testPool({
       query,
       connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as import("pg").Pool;
+    });
     const store = new PostgresBillingStore(pool);
     await expect(store.getBillingPayment("stripe", "pay_1")).resolves.toMatchObject({
       purpose: "credit_topup",
@@ -859,11 +887,11 @@ describe("PostgresStore", () => {
         },
       ],
     });
-    const pool = {
+    const pool = testPool({
       query,
       connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as import("pg").Pool;
+    });
     const store = new PostgresBillingStore(pool);
 
     const result = await store.grantBillingCredit(
@@ -891,11 +919,11 @@ describe("PostgresStore", () => {
         },
       ],
     });
-    const pool = {
+    const pool = testPool({
       query,
       connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as import("pg").Pool;
+    });
     const store = new PostgresBillingStore(pool);
 
     await expect(
@@ -967,11 +995,11 @@ describe("PostgresStore", () => {
       }
       return Promise.resolve({ rows: [] });
     });
-    const pool = {
+    const pool = testPool({
       query,
       connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as import("pg").Pool;
+    });
     const store = new PostgresBillingStore(pool);
 
     await expect(store.getUserSubscription(subjectId, ["active"])).resolves.toMatchObject({
@@ -1034,11 +1062,11 @@ describe("PostgresStore", () => {
       }
       return Promise.resolve({ rows: [] });
     });
-    const pool = {
+    const pool = testPool({
       query,
       connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as import("pg").Pool;
+    });
 
     const store = new PostgresBillingStore(pool);
     const change = await store.getOpenBillingSubscriptionChange("dodo", "provider-subscription");
@@ -1177,8 +1205,9 @@ describe("PostgresStore", () => {
       idempotencyKey: "expiring-50",
     });
     // params[5]! is p_request; p_expires_at is also passed explicitly at params[8]!.
-    const meta = JSON.parse(calls[0]!.params[5]! as string) as Record<string, unknown>;
-    expect(typeof meta.expires_at).toBe("string");
+    const requestPayload = z.string().parse(calls[0]!.params[5]);
+    const meta = z.record(z.string(), z.json()).parse(JSON.parse(requestPayload));
+    expect(z.string().safeParse(meta.expires_at).success).toBe(true);
     expect(meta.expires_at).toBe("2024-01-15T00:00:00.000Z");
     expect(calls[0]!.params[8]!).toBe("2024-01-15T00:00:00.000Z");
   });
@@ -1212,13 +1241,15 @@ describe("PostgresStore", () => {
       code: "ECONNREFUSED",
     });
     const query = vi.fn(() => Promise.reject(networkError));
-    const ctor = vi.fn(function () {
-      return {
-        query,
-        connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
-        end: vi.fn().mockResolvedValue(undefined),
-      } as unknown as import("../src/credits/postgres/store.js").PgPool;
-    }) as unknown as import("../src/credits/postgres/store.js").PgPoolConstructor;
+    const ctor = testPoolConstructor(
+      vi.fn(function () {
+        return {
+          query,
+          connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+          end: vi.fn().mockResolvedValue(undefined),
+        };
+      }),
+    );
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const failure = store.getBalance("user-1");
     await expect(failure).rejects.toBeInstanceOf(StoreUnavailableError);

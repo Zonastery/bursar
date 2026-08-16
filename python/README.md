@@ -115,8 +115,8 @@ for the full S3 and ClickHouse setup.
 cd python
 uv sync --group dev        # runtime + dev/test deps
 uv run pytest              # full suite; integration tests need Postgres
-ruff check src/ tests/
-pyright src/
+uv run ruff check src/ tests/ scripts/
+uv run pyright src/ --warnings
 ```
 
 Real-Postgres tests resolve `DATABASE_URL` when

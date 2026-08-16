@@ -1,5 +1,6 @@
 import { Decimal } from "decimal.js";
 import { quantizeMoney } from "./expr.js";
+import type { StructuredObject } from "./shared/json.js";
 
 /**
  * Granular credit cost report for a usage event.
@@ -17,7 +18,7 @@ export interface CostBreakdown {
   fixedCredits: Decimal;
   operationCredits: Decimal;
   total: Decimal;
-  breakdown: Record<string, unknown>;
+  breakdown: StructuredObject;
 }
 
 export function makeCostBreakdown(partial?: {
@@ -27,7 +28,7 @@ export function makeCostBreakdown(partial?: {
   cacheSavings?: Decimal;
   fixedCredits?: Decimal;
   operationCredits?: Decimal;
-  breakdown?: Record<string, unknown>;
+  breakdown?: StructuredObject;
 }): CostBreakdown {
   const modelCredits = quantizeMoney(partial?.modelCredits ?? new Decimal(0));
   const toolCredits = quantizeMoney(partial?.toolCredits ?? new Decimal(0));

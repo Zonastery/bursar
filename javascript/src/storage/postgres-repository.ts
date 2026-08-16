@@ -3,6 +3,12 @@ import { z } from "zod";
 import { normalizeTenantId } from "../shared/postgres-client.js";
 import { safeParse } from "../shared/postgres-validation.js";
 import type { QueryFn } from "../shared/postgres-types.js";
+import {
+  isJsonObject,
+  isPostgresRow,
+  type JsonObject,
+  type PostgresValue,
+} from "../shared/json.js";
 import type {
   BillingEventPayloadExport,
   OutboxDeadLetter,
@@ -14,9 +20,8 @@ import type {
   UsageChargeExport,
 } from "./ports.js";
 
-type Row = Record<string, unknown>;
+type Row = import("../shared/json.js").PostgresRow;
 
-const rowSchema = z.record(z.string(), z.unknown());
 const textSchema = z.string().min(1);
 const timestampSchema = z
   .union([
@@ -46,8 +51,11 @@ const outboxDeadLetterListOptionsSchema = z
   })
   .strict();
 
-function asRow(value: unknown, context: string): Row {
-  return safeParse(rowSchema, value, context);
+function asRow(value: PostgresValue | undefined, context: string): Row {
+  if (value === undefined || !isPostgresRow(value)) {
+    throw new Error(`${context}: expected a PostgreSQL object row`);
+  }
+  return value;
 }
 
 function requiredString(row: Row, key: string, context: string): string {
@@ -72,15 +80,18 @@ function optionalTimestamp(row: Row, key: string, context: string): string | nul
     : safeParse(timestampSchema, value, `${context}.${key}`);
 }
 
-function jsonObject(value: unknown, context: string): Record<string, unknown> {
-  return safeParse(rowSchema, value, context);
+function jsonObject(value: PostgresValue | undefined, context: string): JsonObject {
+  if (value === undefined || !isJsonObject(value)) {
+    throw new Error(`${context}: expected a JSON object`);
+  }
+  return value;
 }
 
 function nonnegativeInteger(row: Row, key: string, context: string): number {
   return safeParse(nonnegativeIntegerSchema, row[key], `${context}.${key}`);
 }
 
-function scalarBoolean(rows: unknown[]): boolean {
+function scalarBoolean(rows: readonly Row[]): boolean {
   if (rows.length !== 1) {
     throw new Error(`PostgreSQL boolean RPC returned ${rows.length} rows; expected one`);
   }
@@ -175,7 +186,7 @@ export class PostgresStorageRepository implements OutboxRecoveryStore {
     );
   }
 
-  async stats(): Promise<OutboxStats> {
+  async stats(_options?: { limit?: number }): Promise<OutboxStats> {
     const rows = await this.query("SELECT * FROM bursar.get_outbox_stats($1::uuid)", [
       this.tenantId,
     ]);

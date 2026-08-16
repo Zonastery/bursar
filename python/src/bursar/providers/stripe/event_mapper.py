@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -34,6 +35,11 @@ if TYPE_CHECKING:
 STRIPE_CHECKOUT_EXPAND = ("line_items",)
 
 _log = StdlibProviderLogger(logging.getLogger(__name__))
+
+StripeEventHandler = Callable[
+    [str, Any, str | None, dict[str, str], BillingEventSink, "StripeClient", ProviderLogger, str],
+    Awaitable[None],
+]
 
 
 def _value(obj: Any, key: str, default: Any = None) -> Any:
@@ -644,7 +650,7 @@ async def _handle_refund_event(
     )
 
 
-_EVENT_HANDLERS: dict[str, Any] = {
+_EVENT_HANDLERS: dict[str, StripeEventHandler] = {
     "checkout.session.completed": partial(_handle_checkout_event, outcome="completed"),
     "checkout.session.async_payment_succeeded": partial(_handle_checkout_event, outcome="succeeded"),
     "checkout.session.async_payment_failed": partial(_handle_checkout_event, outcome="failed"),

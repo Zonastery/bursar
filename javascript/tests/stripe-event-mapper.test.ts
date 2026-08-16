@@ -3,6 +3,28 @@ import type Stripe from "stripe";
 import type { BillingEventSink } from "../src/billing/contracts.js";
 import type { BillingEvent } from "../src/billing/types/index.js";
 import { handleStripeWebhook } from "../src/providers/stripe/event-mapper.js";
+import type { JsonObject } from "../src/shared/json.js";
+
+interface StripeClientFixture {
+  checkout: {
+    sessions: {
+      retrieve: (id: string) => Promise<JsonObject>;
+    };
+  };
+  subscriptions: {
+    retrieve: (id: string) => Promise<JsonObject>;
+  };
+}
+
+function testStripe<TStripe>(stripe: TStripe): Stripe {
+  // SAFETY: The mapper only calls checkout.sessions.retrieve and subscriptions.retrieve.
+  return stripe as Stripe;
+}
+
+function testStripeEvent<TEvent>(event: TEvent): Stripe.Event {
+  // SAFETY: The mapper tests provide the fields consumed by each event branch.
+  return event as Stripe.Event;
+}
 
 function subscriptionFixture() {
   return {
@@ -28,10 +50,10 @@ function subscriptionFixture() {
 }
 
 function fakeStripe(options?: {
-  checkoutRetrieve?: (id: string) => Promise<unknown>;
-  subscriptionRetrieve?: (id: string) => Promise<unknown>;
+  checkoutRetrieve?: (id: string) => Promise<JsonObject>;
+  subscriptionRetrieve?: (id: string) => Promise<JsonObject>;
 }): Stripe {
-  return {
+  const fixture: StripeClientFixture = {
     checkout: {
       sessions: {
         retrieve:
@@ -46,7 +68,8 @@ function fakeStripe(options?: {
     subscriptions: {
       retrieve: options?.subscriptionRetrieve ?? (async () => subscriptionFixture()),
     },
-  } as unknown as Stripe;
+  };
+  return testStripe(fixture);
 }
 
 function sink(): BillingEventSink & { events: BillingEvent[] } {
@@ -60,13 +83,15 @@ function sink(): BillingEventSink & { events: BillingEvent[] } {
   };
 }
 
-const event = (type: string, object: unknown) =>
-  ({
+function event(type: string, object: JsonObject): Stripe.Event {
+  const fixture = {
     id: `evt_${type}`,
     type,
     created: 1_767_225_600,
     data: { object },
-  }) as unknown as Stripe.Event;
+  };
+  return testStripeEvent(fixture);
+}
 
 describe("Stripe webhook mapper", () => {
   it("maps the official subscription lifecycle event set", async () => {

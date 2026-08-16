@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { StoreError } from "../../../errors.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
+import { isPostgresRow, type PostgresRow, type PostgresValue } from "../../../shared/json.js";
 import { optionalRecordRow, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
 const decimal = z.union([z.string().min(1), z.number().finite()] as const);
@@ -59,7 +61,7 @@ const LedgerEntryRowSchema = z
     operation: z.string(),
     reference_entry_id: z.string().nullable(),
     idempotency_key: z.string().nullable(),
-    metadata: z.record(z.string(), z.unknown()).nullable(),
+    metadata: z.record(z.string(), z.json()).nullable(),
     created_at: timestamp,
   })
   .strict();
@@ -79,7 +81,7 @@ const UsageChargeRowSchema = z
     region: z.string().nullable(),
     event_at: timestamp,
     idempotency_key: z.string(),
-    metadata: z.record(z.string(), z.unknown()).nullable(),
+    metadata: z.record(z.string(), z.json()).nullable(),
     created_at: timestamp,
   })
   .strict();
@@ -92,13 +94,20 @@ export type AggregateStatsRow = z.infer<typeof AggregateStatsRowSchema>;
 export type LedgerEntryRow = z.infer<typeof LedgerEntryRowSchema>;
 export type UsageChargeRow = z.infer<typeof UsageChargeRowSchema>;
 
+function requireAnalyticsRow(value: PostgresValue, context: string): PostgresRow {
+  if (!isPostgresRow(value)) {
+    throw new StoreError(`${context}: expected an object result row`);
+  }
+  return value;
+}
+
 export class AnalyticsRepository {
   constructor(private readonly callproc: CallProc) {}
 
   async spendByUser(start: string, end: string): Promise<SpendByUserRow[]> {
     const rows = await this.callproc("spend_by_user", [start, end]);
     return (rows ?? []).map((raw) => {
-      const row = raw as Record<string, unknown>;
+      const row = requireAnalyticsRow(raw, "AnalyticsRepository.spendByUser");
       return safeParse(
         SpendByUserRowSchema,
         { user_id: row.subject_id, total_spend: row.total_spend, entry_count: row.charge_count },
@@ -110,7 +119,7 @@ export class AnalyticsRepository {
   async spendByModel(start: string, end: string): Promise<SpendByModelRow[]> {
     const rows = await this.callproc("spend_by_model", [start, end]);
     return (rows ?? []).map((raw) => {
-      const row = raw as Record<string, unknown>;
+      const row = requireAnalyticsRow(raw, "AnalyticsRepository.spendByModel");
       return safeParse(
         SpendByModelRowSchema,
         { model: row.model, total_spend: row.total_spend, entry_count: row.charge_count },
@@ -122,7 +131,7 @@ export class AnalyticsRepository {
   async topUsers(limit: number, start: string, end: string): Promise<TopUserRow[]> {
     const rows = await this.callproc("spend_by_user", [start, end]);
     return (rows ?? []).slice(0, limit).map((raw) => {
-      const row = raw as Record<string, unknown>;
+      const row = requireAnalyticsRow(raw, "AnalyticsRepository.topUsers");
       return safeParse(
         TopUserRowSchema,
         { user_id: row.subject_id, total_spend: row.total_spend },
@@ -134,7 +143,7 @@ export class AnalyticsRepository {
   async dailySpend(start: string, end: string): Promise<DailySpendRow[]> {
     const rows = await this.callproc("daily_spend", [start, end]);
     return (rows ?? []).map((raw) => {
-      const row = raw as Record<string, unknown>;
+      const row = requireAnalyticsRow(raw, "AnalyticsRepository.dailySpend");
       return safeParse(
         DailySpendRowSchema,
         { date: row.day, total_spend: row.total_spend, entry_count: row.charge_count },

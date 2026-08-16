@@ -5,7 +5,6 @@ package bursar
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -603,8 +602,4 @@ func mergedBillingMetadata(existing *CommerceSubscription, maps ...map[string]an
 		}
 	}
 	return result
-}
-
-func billingLifecycleError(action string, event BillingEvent, cause error) error {
-	return NewStoreError(fmt.Sprintf("billing lifecycle %s failed", action), ErrorOptions{Cause: cause, Details: map[string]any{"provider": event.Provider, "event_id": event.canonicalEventID(), "event_type": event.Type}})
 }

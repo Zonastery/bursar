@@ -1,4 +1,5 @@
 import { LRUCache } from "lru-cache";
+import { z } from "zod";
 import type { NormalizedLogger } from "../shared/logger.js";
 import { normalizeLogger } from "../shared/logger.js";
 import type { BillingStore } from "./billing-store.js";
@@ -13,6 +14,7 @@ import { BillingEventType } from "./types/index.js";
 import { BillingFinancialEventHandlers } from "./financial-event-handlers.js";
 import { StoreError } from "../errors.js";
 import type { BillingProvisioningPort, BillingServiceOptions } from "./service-types.js";
+import type { JsonObject } from "../shared/json.js";
 
 interface OfferCacheValue {
   offer: BillingOfferResult | null;
@@ -120,8 +122,8 @@ export class BillingEventHandlers {
     event: BillingEvent,
     status: "completed" | "failed" | "expired",
   ): Promise<void> {
-    const intentId = event.metadata?.checkout_intent_id;
-    if (typeof intentId !== "string" || !intentId) return;
+    const intentId = z.string().safeParse(event.metadata?.checkout_intent_id).data;
+    if (!intentId) return;
     await this.store.updateCheckoutIntent(intentId, { status });
   }
 
@@ -159,7 +161,7 @@ export class BillingEventHandlers {
       null;
     if (providerPaymentId) {
       const payment = await this.store.getBillingPayment(event.provider, providerPaymentId);
-      if (typeof payment?.userId === "string") {
+      if (payment?.userId) {
         event.accountId = payment.userId;
         return payment.userId;
       }
@@ -258,7 +260,7 @@ export class BillingEventHandlers {
       plan?: string | null;
       interval?: string | null;
       intervalCount?: number | null;
-      metadata?: Record<string, unknown> | null;
+      metadata?: JsonObject | null;
       graceEndsAt?: string | null;
       graceExpiredAt?: string | null;
     },
@@ -298,7 +300,7 @@ export class BillingEventHandlers {
       interval:
         overrides?.interval ??
         sub.interval ??
-        (event.metadata?.billing_interval as string | undefined) ??
+        z.string().safeParse(event.metadata?.billing_interval).data ??
         existing?.interval ??
         null,
       intervalCount:
@@ -330,8 +332,8 @@ export class BillingEventHandlers {
       return {
         offer,
         offerId: offer.offerId,
-        offerKey: (offer?.offerKey as string | null) ?? null,
-        plan: (offer?.plan as string | null) ?? null,
+        offerKey: offer.offerKey ?? null,
+        plan: offer.plan ?? null,
       };
     }
 
@@ -345,8 +347,8 @@ export class BillingEventHandlers {
         return {
           offer: lookupOffer,
           offerId: lookupOffer.offerId,
-          offerKey: (lookupOffer?.offerKey as string | null) ?? null,
-          plan: (lookupOffer?.plan as string | null) ?? null,
+          offerKey: lookupOffer.offerKey ?? null,
+          plan: lookupOffer.plan ?? null,
         };
       }
 
@@ -421,7 +423,7 @@ export class BillingEventHandlers {
       // The partial unique index is the final arbiter under concurrent
       // webhooks. Convert its race loser into the same manual-review path as
       // the preflight check instead of retrying a permanently invalid event.
-      const code = (error as { code?: string }).code;
+      const code = z.object({ code: z.string().optional() }).safeParse(error).data?.code;
       if (code !== "23505") throw error;
       const concurrent = (await this.store.getUserSubscriptions(uid)).find(
         (candidate) =>

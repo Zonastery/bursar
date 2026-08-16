@@ -1,5 +1,6 @@
 import type { AutoRechargeService } from "./auto-recharge-service.js";
 import type { Decimal } from "decimal.js";
+import type { JsonObject } from "../shared/json.js";
 import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeAttemptState,
@@ -49,7 +50,7 @@ export interface BillingSubscriptionConflictCreate {
   duplicateSubscriptionId: string;
   existingSubscriptionId?: string | null;
   eventId?: string | null;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
 }
 
 export interface BillingPaymentUpsert {
@@ -63,7 +64,7 @@ export interface BillingPaymentUpsert {
   purpose: "subscription" | "credit_topup";
   status: "pending" | "succeeded" | "failed" | "canceled";
   providerUpdatedAt: string;
-  metadata?: Record<string, unknown> | null;
+  metadata?: JsonObject | null;
 }
 
 export interface BillingCreditGrantCreate {
@@ -85,7 +86,7 @@ export interface BillingRefundUpsert {
   reason?: string | null;
   status: "pending" | "succeeded" | "failed" | "canceled";
   providerUpdatedAt: string;
-  metadata?: Record<string, unknown> | null;
+  metadata?: JsonObject | null;
 }
 
 export interface BillingInvoiceUpsert {
@@ -99,7 +100,7 @@ export interface BillingInvoiceUpsert {
   currency: string;
   periodStart?: string | null;
   periodEnd?: string | null;
-  metadata?: Record<string, unknown> | null;
+  metadata?: JsonObject | null;
   providerUpdatedAt: string;
 }
 
@@ -109,7 +110,7 @@ export interface BillingDisputeUpsert {
   providerPaymentId: string;
   status: "needs_response" | "under_review" | "won" | "lost" | "closed";
   reason?: string | null;
-  metadata?: Record<string, unknown> | null;
+  metadata?: JsonObject | null;
   providerUpdatedAt: string;
 }
 
@@ -124,7 +125,7 @@ export interface AutoRechargeAttemptUpdate {
   providerAttemptId?: string | null;
   failureCode?: string | null;
   failureMessage?: string | null;
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
 }
 
 export interface AutoRechargeProviderPaymentUpdate {
@@ -151,7 +152,7 @@ export interface BillingCapability extends BillingEventSink {
   getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getUserPreferences(userId: string): Promise<BillingPreferences | null>;
-  getActiveCatalogDocument(): Promise<Record<string, unknown> | null>;
+  getActiveCatalogDocument(): Promise<JsonObject | null>;
   listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
   listCancellableSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
   listBillingInvoices(userId: string): Promise<BillingInvoiceRecord[]>;

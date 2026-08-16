@@ -285,14 +285,14 @@ export class AutoRechargeService {
           bursar_account_id: input.userId,
         },
       });
-    } catch (error) {
+    } catch (cause) {
       await this.billing.updateAutoRechargeAttempt({
         id: attempt.id,
         state: "unknown",
         failureCode: "provider_request_failed",
-        failureMessage: persistedDiagnosticSummary(error, "auto_recharge_provider_failed"),
+        failureMessage: persistedDiagnosticSummary(cause, "auto_recharge_provider_failed"),
       });
-      throw error;
+      throw cause;
     }
     if (charge.status === "requires_customer_action") {
       await this.billing.updateAutoRechargeAttempt({

@@ -12,7 +12,7 @@ endif
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: help test test-python test-js test-go go-format go-vet test-pg-build test-pg-up test-pg-down test-integration
+.PHONY: help test test-python test-js test-go go-format go-vet go-staticcheck test-pg-build test-pg-up test-pg-down test-integration
 .DEFAULT_GOAL := help
 
 TEST_PG_NAME ?= bursar-test-pg
@@ -93,3 +93,6 @@ go-format:                           ## Verify Go source is gofmt-formatted
 
 go-vet:                              ## Run Go's standard static analysis
 	cd golang && go vet ./...
+
+go-staticcheck:                      ## Run the pinned Staticcheck analysis
+	cd golang && go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...

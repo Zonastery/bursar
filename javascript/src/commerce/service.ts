@@ -27,6 +27,7 @@ import type {
 import { ProviderResponseError } from "../errors.js";
 import type {
   ChangePlanPreview,
+  CheckoutParams,
   PaymentMethodInfo,
   PaymentProvider,
   PreviewChangePlanParams,
@@ -35,6 +36,7 @@ import { normalizeLogger } from "../shared/logger.js";
 import { requireStableKey, scopedStableKey } from "../shared/idempotency.js";
 import { normalizeProviderEnvironment } from "../providers/environment.js";
 import { persistedDiagnosticSummary } from "../shared/diagnostics.js";
+import type { JsonValue } from "../shared/json.js";
 import {
   ActiveSubscriptionError,
   CheckoutCompletedError,
@@ -83,13 +85,13 @@ const DEFAULT_PREFERENCES = {
   invoiceReminders: false,
 } as const;
 
-function requireNonEmptyText(value: unknown, field: string): asserts value is string {
-  if (typeof value !== "string" || !value.trim()) {
+function requireNonEmptyText(value: string, field: string): asserts value is string {
+  if (!z.string().trim().min(1).safeParse(value).success) {
     throw new TypeError(`${field} must be a non-empty string`);
   }
 }
 
-function requireOptionalNonEmptyText(value: unknown, field: string): void {
+function requireOptionalNonEmptyText(value: string | null | undefined, field: string): void {
   if (value !== null && value !== undefined) requireNonEmptyText(value, field);
 }
 
@@ -106,17 +108,9 @@ function assertCreateCheckoutInput(input: CreateCheckoutInput): void {
     throw new TypeError("type must be 'subscription' or 'credit_pack'");
   }
   if (input.metadata !== undefined) {
-    if (
-      typeof input.metadata !== "object" ||
-      input.metadata === null ||
-      Array.isArray(input.metadata)
-    ) {
-      throw new TypeError("metadata must be an object of string values");
-    }
-    for (const [key, value] of Object.entries(input.metadata)) {
-      if (!key.trim() || typeof value !== "string") {
-        throw new TypeError("metadata must contain non-empty keys and string values");
-      }
+    const metadata = z.record(z.string().trim().min(1), z.string()).safeParse(input.metadata);
+    if (!metadata.success) {
+      throw new TypeError("metadata must contain non-empty keys and string values");
     }
   }
 }
@@ -180,7 +174,7 @@ const changePlanPreviewSchema = z
   .strict();
 
 function validatePlanPreview(
-  value: unknown,
+  value: ChangePlanPreview | JsonValue,
   provider: string,
   requireNextBillingDate: boolean,
 ): ChangePlanPreview {
@@ -454,7 +448,11 @@ export class CommerceService {
     const productId = externalId(reference);
     const customer = await this.billing.getCustomerByUserId(input.accountId, provider.provider);
 
-    const metadata: Record<string, string> = {
+    interface CheckoutMetadata {
+      [key: string]: string;
+    }
+
+    const metadata: CheckoutMetadata = {
       ...(input.metadata ?? {}),
       bursar_account_id: input.accountId,
     };
@@ -535,10 +533,8 @@ export class CommerceService {
       };
     }
 
-    const session = await provider.createCheckoutSession({
+    const checkoutParams: CheckoutParams = {
       accountId: input.accountId,
-      ...(customer?.providerCustomerId ? { customerId: customer.providerCustomerId } : {}),
-      ...(input.email ? { email: input.email } : {}),
       productId,
       type: resolved.offer.type === "subscription" ? "subscription" : "credit_pack",
       quantity,
@@ -546,7 +542,10 @@ export class CommerceService {
       cancelUrl: checkoutRedirectUrl(input.cancelUrl, intent.id),
       metadata: { ...metadata, checkout_intent_id: intent.id },
       idempotencyKey: input.operationKey,
-    });
+    };
+    if (customer?.providerCustomerId) checkoutParams.customerId = customer.providerCustomerId;
+    if (input.email) checkoutParams.email = input.email;
+    const session = await provider.createCheckoutSession(checkoutParams);
     // Complete every fallible local write before publishing the session on the
     // intent. If either write fails, an exact replay reaches the provider with
     // the same idempotency key and can repair the open intent.
@@ -844,7 +843,7 @@ export class CommerceService {
     if (!context.provider.previewChangePlan) {
       throw new ProviderCapabilityNotSupportedError(context.provider.provider, "previewChangePlan");
     }
-    const preview: unknown = await context.provider.previewChangePlan({
+    const preview = await context.provider.previewChangePlan({
       providerSubscriptionId: context.subscription.providerSubscriptionId,
       productId: context.targetProductId,
       ...providerPlanChangeParams(context.policy!),
@@ -1101,16 +1100,12 @@ export class CommerceService {
 
   private ledgerDocument(entry: LedgerEntry): BillingDocumentRef | null {
     const metadata = entry.metadata ?? {};
-    const normalizedProvider =
-      typeof metadata.provider === "string" ? metadata.provider : undefined;
+    const text = z.string();
+    const normalizedProvider = text.safeParse(metadata.provider).data;
     const normalizedDocumentId =
-      typeof metadata.provider_document_id === "string"
-        ? metadata.provider_document_id
-        : typeof metadata.provider_invoice_id === "string"
-          ? metadata.provider_invoice_id
-          : typeof metadata.provider_payment_id === "string"
-            ? metadata.provider_payment_id
-            : undefined;
+      text.safeParse(metadata.provider_document_id).data ??
+      text.safeParse(metadata.provider_invoice_id).data ??
+      text.safeParse(metadata.provider_payment_id).data;
     if (!normalizedDocumentId) return null;
     return {
       kind: "ledger_entry",

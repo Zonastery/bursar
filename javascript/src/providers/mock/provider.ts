@@ -18,6 +18,8 @@ import type {
 import type { BillingEventSink } from "../../bursar.js";
 import { assertBillingEvent } from "../../billing/types/index.js";
 import { requireStableKey } from "../../shared/idempotency.js";
+import type { JsonObject } from "../../shared/json.js";
+import { z } from "zod";
 
 export interface MockPaymentProviderOptions {
   eventSink: BillingEventSink;
@@ -101,9 +103,11 @@ export class MockPaymentProvider implements PaymentProvider {
   }
 
   async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
-    let payload: Record<string, unknown> | null;
+    let payload: JsonObject;
     try {
-      payload = JSON.parse(req.rawBody);
+      const parsed = z.record(z.string(), z.json()).safeParse(JSON.parse(req.rawBody));
+      if (!parsed.success) throw new TypeError("mock webhook payload must be an object");
+      payload = parsed.data;
     } catch {
       return {
         received: false,
@@ -113,17 +117,7 @@ export class MockPaymentProvider implements PaymentProvider {
         eventType: null,
       };
     }
-    if (!payload || typeof payload !== "object") {
-      return {
-        received: false,
-        retryable: false,
-        provider: this.provider,
-        eventId: null,
-        eventType: null,
-      };
-    }
-
-    const event: unknown = { ...payload, provider: this.provider };
+    const event = { ...payload, provider: this.provider };
     assertBillingEvent(event);
     await this.sink.ingestBillingEvent(event);
     return {

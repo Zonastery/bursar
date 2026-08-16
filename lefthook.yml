@@ -89,6 +89,10 @@ pre-push:
       root: "golang/"
       glob: "{*.go,**/*.go,go.mod,go.sum}"
       run: go vet ./...
+    go-staticcheck:
+      root: "golang/"
+      glob: "{*.go,**/*.go,go.mod,go.sum}"
+      run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
     go-test:
       root: "golang/"
       glob: "{*.go,**/*.go,go.mod,go.sum}"

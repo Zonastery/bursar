@@ -60,22 +60,22 @@ where = ["src"]
 
 [project.optional-dependencies]
 stripe = [
-    "stripe>=15.4.0,<16",
+    "stripe>=15.5.0,<16",
 ]
 dodo = [
-    "dodopayments[webhooks]>=1.111.0,<2",
+    "dodopayments[webhooks]>=1.112.0,<2",
 ]
 postgres = [
     "psycopg2-binary>=2.9.12",
 ]
 s3 = [
-    "boto3>=1.43.66,<2",
+    "boto3>=1.43.72,<2",
 ]
 google-adk = [
-    "google-adk>=2.6.3,<2.7.0",
+    "google-adk>=2.7.0,<2.8.0",
 ]
 opentelemetry = [
-    "opentelemetry-api>=1.42.1,<2",
+    "opentelemetry-api>=1.43.0,<2",
 ]
 test = [
     "pytest>=9.1.1",
@@ -83,18 +83,18 @@ test = [
     "pytest-timeout>=2.4.0",
     "pytest-repeat>=0.9.4",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.16.1",
+    "ruff>=0.16.3",
     "pyright>=1.1.411",
     "testcontainers[postgres]>=4.15.0",
-    "hypothesis>=6.165.2",
+    "hypothesis>=6.165.9",
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
-    "stripe>=15.4.0,<16",
-    "dodopayments[webhooks]>=1.111.0,<2",
-    "boto3>=1.43.66,<2",
-    "google-adk>=2.6.3,<2.7.0",
-    "opentelemetry-api>=1.42.1,<2",
+    "stripe>=15.5.0,<16",
+    "dodopayments[webhooks]>=1.112.0,<2",
+    "boto3>=1.43.72,<2",
+    "google-adk>=2.7.0,<2.8.0",
+    "opentelemetry-api>=1.43.0,<2",
 ]
 
 [tool.setuptools.package-data]
@@ -105,15 +105,75 @@ target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "ASYNC", "RUF100", "SIM", "RET", "C901"]
+# Keep the blocking baseline stable; preview rules must be opted into by exact code.
+preview = false
+explicit-preview-rules = true
+select = [
+    "ANN001",
+    "ANN002",
+    "ANN003",
+    "ANN201",
+    "ANN202",
+    "ANN204",
+    "ANN205",
+    "ANN206",
+    "ARG",
+    "ASYNC",
+    "B",
+    "C4",
+    "C901",
+    "DTZ",
+    "E",
+    "ERA",
+    "F",
+    "FLY",
+    "FURB162",
+    "I",
+    "ICN",
+    "LOG",
+    "N",
+    "PGH",
+    "PIE",
+    "PLR1714",
+    "PT011",
+    "PT012",
+    "PT015",
+    "PT017",
+    "RET",
+    "RUF012",
+    "RUF013",
+    "RUF021",
+    "RUF032",
+    "RUF043",
+    "RUF059",
+    "RUF061",
+    "RUF100",
+    "RUF101",
+    "RUF102",
+    "RUF103",
+    "RUF104",
+    "S",
+    "SIM",
+    "T10",
+    "T20",
+    "UP",
+    "W",
+]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["UP006"]
-"**/test_*.py" = ["SIM", "RET", "N"]
-"scripts/*" = ["E501"]
+"**/test_*.py" = ["ANN", "ARG", "N", "RET", "S101", "S106", "SIM"]
+# These files intentionally emit user-facing command output.
+"scripts/*" = ["E501", "T201"]
+"src/bursar/__main__.py" = ["T201"]
+# Optional store capabilities keep their public keyword-compatible signatures
+# while their default implementations fail with CapabilityNotSupportedError.
+"src/bursar/credits/store.py" = ["ARG002"]
+# The in-memory provider deliberately preserves provider protocol signatures.
+"src/bursar/providers/mock/provider.py" = ["ARG002"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -123,12 +183,12 @@ indent-style = "space"
 # Match the package's minimum supported Python version.
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
-useLibraryCodeForTypes = false
 venvPath = "."
 venv = ".venv"
 exclude = ["**/__pycache__", "**/.venv/**", "**/.pytest_cache/**"]
-reportMissingImports = "none"
-reportMissingModuleSource = "none"
+useLibraryCodeForTypes = true
+reportMissingImports = "error"
+reportMissingModuleSource = "warning"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -169,16 +229,16 @@ test-deps = [
     "pytest-timeout>=2.4.0",
     "pytest-repeat>=0.9.4",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.16.1",
+    "ruff>=0.16.3",
     "pyright>=1.1.411",
     "testcontainers[postgres]>=4.15.0",
-    "hypothesis>=6.165.2",
+    "hypothesis>=6.165.9",
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
-    "stripe>=15.4.0,<16",
-    "dodopayments[webhooks]>=1.111.0,<2",
-    "boto3>=1.43.66,<2",
-    "google-adk>=2.6.3,<2.7.0",
-    "opentelemetry-api>=1.42.1,<2",
+    "stripe>=15.5.0,<16",
+    "dodopayments[webhooks]>=1.112.0,<2",
+    "boto3>=1.43.72,<2",
+    "google-adk>=2.7.0,<2.8.0",
+    "opentelemetry-api>=1.43.0,<2",
 ]

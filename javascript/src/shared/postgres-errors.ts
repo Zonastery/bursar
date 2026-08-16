@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import {
   type BursarError,
   isBursarError,
@@ -48,24 +50,20 @@ const RETRYABLE_NETWORK_CODES = new Set([
   "ETIMEDOUT",
 ]);
 
-function errorProperty(error: unknown, property: string): unknown {
-  if (typeof error !== "object" || error === null) return undefined;
+function errorCode(cause: unknown): string | undefined {
   try {
-    return (error as Record<string, unknown>)[property];
+    const parsed = z.object({ code: z.string().optional() }).safeParse(cause);
+    const code = parsed.success ? parsed.data.code : undefined;
+    return code && code.length > 0 ? code.toUpperCase() : undefined;
   } catch {
     return undefined;
   }
 }
 
-function errorCode(error: unknown): string | undefined {
-  const code = errorProperty(error, "code");
-  return typeof code === "string" && code.length > 0 ? code.toUpperCase() : undefined;
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
+function errorMessage(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
   try {
-    return String(error);
+    return String(cause);
   } catch {
     return "Unknown PostgreSQL failure";
   }
@@ -75,9 +73,9 @@ function isSqlState(code: string | undefined): code is string {
   return code != null && !RETRYABLE_NETWORK_CODES.has(code) && /^[0-9A-Z]{5}$/.test(code);
 }
 
-function isTimeout(error: unknown, code: string | undefined): boolean {
+function isTimeout(cause: unknown, code: string | undefined): boolean {
   if (code === "57014" || code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT") return true;
-  const message = errorMessage(error);
+  const message = errorMessage(cause);
   return (
     message === "Query read timeout" ||
     message === "timeout expired" ||
@@ -87,50 +85,50 @@ function isTimeout(error: unknown, code: string | undefined): boolean {
   );
 }
 
-function isUnavailable(error: unknown, code: string | undefined): boolean {
+function isUnavailable(cause: unknown, code: string | undefined): boolean {
   if (code?.startsWith("08")) return true;
   if (code && (RETRYABLE_SQLSTATES.has(code) || RETRYABLE_NETWORK_CODES.has(code))) return true;
   return /^Connection terminated (?:unexpectedly|due to connection timeout)/i.test(
-    errorMessage(error),
+    errorMessage(cause),
   );
 }
 
-function hasIndeterminateOutcome(error: unknown, code: string | undefined): boolean {
+function hasIndeterminateOutcome(cause: unknown, code: string | undefined): boolean {
   if (code && RETRYABLE_NETWORK_CODES.has(code)) return true;
   if (code?.startsWith("08")) return true;
-  if (code === undefined && errorMessage(error) === "Query read timeout") return true;
+  if (code === undefined && errorMessage(cause) === "Query read timeout") return true;
   return /^Connection terminated (?:unexpectedly|due to connection timeout)/i.test(
-    errorMessage(error),
+    errorMessage(cause),
   );
 }
 
 /** Convert pg/network failures into the SDK's stable, cause-preserving taxonomy. */
 export function normalizePostgresError(
-  error: unknown,
+  cause: unknown,
   context: PostgresErrorContext = {},
 ): BursarError {
-  if (isBursarError(error)) return error;
+  if (isBursarError(cause)) return cause;
 
-  const code = errorCode(error);
+  const code = errorCode(cause);
   const operation = context.operation ?? "operation";
   const details = {
     datastore: "postgresql",
     operation,
-    ...(context.phase ? { phase: context.phase } : {}),
-    ...(isSqlState(code) ? { sqlState: code } : {}),
-    ...(code && !isSqlState(code) ? { networkCode: code } : {}),
-    ...(context.rollbackFailed ? { rollbackFailed: true } : {}),
   };
+  if (context.phase) Object.assign(details, { phase: context.phase });
+  if (isSqlState(code)) Object.assign(details, { sqlState: code });
+  if (code && !isSqlState(code)) Object.assign(details, { networkCode: code });
+  if (context.rollbackFailed) Object.assign(details, { rollbackFailed: true });
   const options = {
-    cause: error,
+    cause,
     details,
-    indeterminate: (context.indeterminate ?? false) && hasIndeterminateOutcome(error, code),
+    indeterminate: (context.indeterminate ?? false) && hasIndeterminateOutcome(cause, code),
   };
 
-  if (isTimeout(error, code)) {
+  if (isTimeout(cause, code)) {
     return new StoreTimeoutError(`PostgreSQL ${operation} timed out`, options);
   }
-  if (isUnavailable(error, code)) {
+  if (isUnavailable(cause, code)) {
     return new StoreUnavailableError(`PostgreSQL ${operation} is temporarily unavailable`, options);
   }
   return new StoreError(`PostgreSQL ${operation} failed`, options);

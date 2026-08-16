@@ -6,6 +6,7 @@
  */
 import type { BillingEventSink } from "../../src/billing/contracts.js";
 import { handleDodoBillingEvent } from "../../src/providers/dodo/event-mapper.js";
+import type { ExternalObject } from "../../src/shared/json.js";
 
 export const DODO_JS_DATE = "Sat Jul 18 2026 05:15:24 GMT+0000 (Coordinated Universal Time)";
 export const DODO_ISO_DATE = "2026-07-18T05:15:24.000Z";
@@ -16,7 +17,7 @@ export function dodoEventId(eventType: string, objectId: string): string {
 
 export async function mapDodoEvent(
   eventType: string,
-  data: Record<string, unknown>,
+  data: ExternalObject,
   userId: string | null,
   metadata: Record<string, string>,
   sink: BillingEventSink,

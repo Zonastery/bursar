@@ -1,17 +1,30 @@
 import {
+  asArray,
   asDecimal,
   asInteger,
   asObject,
   asString,
+  asStringArray,
   parseAvailability,
   parseExpiry,
   semanticError,
   validateIdentifiers,
   validateRegions,
 } from "./parse-utils.js";
+import type { JsonValue } from "../shared/json.js";
 import type { CreditPolicy, CreditsConfig, GrantProgram } from "./types.js";
+import { z } from "zod";
 
-export function parseCredits(value: unknown): CreditsConfig {
+const grantTriggerSchema = z.enum([
+  "account_created",
+  "referral_completed",
+  "promo_code_redeemed",
+  "manual",
+]);
+const recipientSchema = z.enum(["subject", "referrer"]);
+const idempotencyScopeSchema = z.enum(["subject", "event"]);
+
+export function parseCredits(value: JsonValue): CreditsConfig {
   const raw = asObject(value);
   const bucketsRaw = asObject(raw.buckets ?? {});
   const policiesRaw = asObject(raw.policies ?? {});
@@ -55,28 +68,37 @@ export function parseCredits(value: unknown): CreditsConfig {
   const grantPrograms: Record<string, GrantProgram> = {};
   for (const [key, input] of Object.entries(programsRaw)) {
     const program = asObject(input);
-    const awards = (program.awards as unknown[]).map((awardInput) => {
-      const award = asObject(awardInput);
-      const bucket = asString(award.bucket);
-      if (!buckets[bucket]) {
-        semanticError(`grant program '${key}' references unknown bucket '${bucket}'`);
-      }
-      const parsedExpiry =
-        award.expiry == null
-          ? undefined
-          : parseExpiry(award.expiry, `credits.grant_programs.${key}`);
-      if (parsedExpiry?.type === "subscription_end") {
-        semanticError(`grant program '${key}' cannot use subscription_end expiry`);
-      }
-      return {
-        recipient: (award.recipient ?? "subject") as "subject" | "referrer",
-        amount: asDecimal(award.amount),
-        bucket,
-        ...(parsedExpiry ? { expiry: parsedExpiry } : {}),
-      };
-    });
+    const awards = asArray(program.awards, `credits.grant_programs.${key}.awards`).map(
+      (awardInput) => {
+        const award = asObject(awardInput);
+        const bucket = asString(award.bucket);
+        if (!buckets[bucket]) {
+          semanticError(`grant program '${key}' references unknown bucket '${bucket}'`);
+        }
+        const parsedExpiry =
+          award.expiry == null
+            ? undefined
+            : parseExpiry(award.expiry, `credits.grant_programs.${key}`);
+        if (parsedExpiry?.type === "subscription_end") {
+          semanticError(`grant program '${key}' cannot use subscription_end expiry`);
+        }
+        const parsedAward: GrantProgram["awards"][number] = {
+          recipient: recipientSchema.parse(award.recipient ?? "subject"),
+          amount: asDecimal(award.amount),
+          bucket,
+        };
+        if (parsedExpiry) parsedAward.expiry = parsedExpiry;
+        return parsedAward;
+      },
+    );
     const eligibilityRaw = asObject(program.eligibility ?? {});
-    const eligibilityRegions = (eligibilityRaw.regions ?? []) as string[];
+    const eligibilityRegions =
+      eligibilityRaw.regions == null
+        ? []
+        : asStringArray(
+            eligibilityRaw.regions,
+            `credits.grant_programs.${key}.eligibility.regions`,
+          );
     validateRegions(eligibilityRegions, `credits.grant_programs.${key}.eligibility.regions`);
     if (
       program.trigger !== "referral_completed" &&
@@ -84,33 +106,39 @@ export function parseCredits(value: unknown): CreditsConfig {
     ) {
       semanticError(`grant program '${key}' referrer awards require referral_completed`);
     }
-    grantPrograms[key] = {
-      trigger: program.trigger as GrantProgram["trigger"],
+    const parsedProgram: GrantProgram = {
+      trigger: grantTriggerSchema.parse(program.trigger),
       awards,
-      ...(program.availability == null
-        ? {}
-        : { availability: parseAvailability(program.availability) }),
       eligibility: {
-        plans: (eligibilityRaw.plans ?? []) as string[],
+        plans:
+          eligibilityRaw.plans == null
+            ? []
+            : asStringArray(
+                eligibilityRaw.plans,
+                `credits.grant_programs.${key}.eligibility.plans`,
+              ),
         regions: eligibilityRegions,
       },
       maxAwardsPerSubject: asInteger(program.max_awards_per_subject ?? 1),
-      idempotencyScope: (program.idempotency_scope ?? "subject") as "subject" | "event",
+      idempotencyScope: idempotencyScopeSchema.parse(program.idempotency_scope ?? "subject"),
     };
+    if (program.availability != null) {
+      parsedProgram.availability = parseAvailability(program.availability);
+    }
+    grantPrograms[key] = parsedProgram;
   }
 
-  return {
+  const result: CreditsConfig = {
     buckets,
-    ...(defaultBucket == null ? {} : { defaultBucket }),
     policies,
     grantPrograms,
-    ...(displayRaw
-      ? {
-          display: {
-            currency: asString(displayRaw.currency).toUpperCase(),
-            unitsPerMajor: asDecimal(displayRaw.units_per_major),
-          },
-        }
-      : {}),
   };
+  if (defaultBucket != null) result.defaultBucket = defaultBucket;
+  if (displayRaw) {
+    result.display = {
+      currency: asString(displayRaw.currency).toUpperCase(),
+      unitsPerMajor: asDecimal(displayRaw.units_per_major),
+    };
+  }
+  return result;
 }

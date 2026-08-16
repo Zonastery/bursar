@@ -7,12 +7,35 @@ import {
 import { BillingEventHandlers } from "../src/billing/event-handlers.js";
 import { BillingEventProcessor } from "../src/billing/event-processor.js";
 import { BillingEventRepository } from "../src/billing/postgres/repositories/event.js";
-import type { BillingEvent, BillingEventClaim } from "../src/billing/types/index.js";
+import type {
+  BillingEvent,
+  BillingEventClaim,
+  BillingPaymentInfo,
+  BillingSubscriptionInfo,
+} from "../src/billing/types/index.js";
 import { BillingEventType } from "../src/billing/types/index.js";
 import { StoreError } from "../src/errors.js";
+import type { JsonObject } from "../src/shared/json.js";
 
 const CLAIM_TOKEN = "00000000-0000-0000-0000-000000000003";
 const BILLING_EVENT_ID = "00000000-0000-0000-0000-000000000004";
+
+function testStore(value: Partial<BillingStore>): BillingStore {
+  // SAFETY: Each fixture implements the BillingStore methods exercised by its scenario.
+  return value as BillingStore;
+}
+
+interface InvalidEventFields {
+  unexpected?: boolean;
+  payment?: JsonObject;
+  subscription?: JsonObject;
+}
+interface InvalidBillingEventCandidate extends BillingEvent {
+  payment: BillingPaymentInfo & JsonObject;
+  subscription: BillingSubscriptionInfo & JsonObject;
+  unexpected?: boolean;
+}
+type InvalidEventFixture = [description: string, invalid: InvalidEventFields];
 
 function claimedStore() {
   const claimBillingEvent = vi.fn<BillingStore["claimBillingEvent"]>().mockResolvedValue({
@@ -38,36 +61,37 @@ function event(eventId: string, eventType: BillingEventType): BillingEvent {
 }
 
 describe("BillingEventProcessor lifecycle acknowledgements", () => {
-  it.each([
+  it.each<InvalidEventFixture>([
     ["unknown top-level fields", { unexpected: true }],
     ["invalid nested statuses", { payment: { status: "mystery" } }],
     ["coerced nested booleans", { subscription: { cancelAtPeriodEnd: "false" } }],
   ])("rejects %s before claiming the event", async (_description, invalid) => {
     const store = claimedStore();
-    const processor = new BillingEventProcessor(store as unknown as BillingStore);
-    const changes = invalid as Record<string, unknown>;
-    const payment = {
+    const processor = new BillingEventProcessor(testStore(store));
+    const payment: BillingPaymentInfo & JsonObject = {
       providerPaymentId: "pay_1",
       amountMinor: 100,
       taxMinor: 0,
       currency: "USD",
       purpose: "credit_topup",
       status: "succeeded",
-      ...(changes.payment as object | undefined),
     };
-    const subscription = {
+    if (invalid.payment) Object.assign(payment, invalid.payment);
+    const subscription: BillingSubscriptionInfo & JsonObject = {
       providerSubscriptionId: "sub_1",
-      ...(changes.subscription as object | undefined),
     };
+    if (invalid.subscription) Object.assign(subscription, invalid.subscription);
+    const candidate: InvalidBillingEventCandidate = {
+      provider: "stripe",
+      eventId: "evt_invalid",
+      eventType: BillingEventType.PAYMENT_SUCCEEDED,
+      occurredAt: "2026-08-05T00:00:00Z",
+      payment,
+      subscription,
+    };
+    if (invalid.unexpected === true) candidate.unexpected = true;
 
-    await expect(
-      processor.ingestBillingEvent({
-        ...event("evt_invalid", BillingEventType.PAYMENT_SUCCEEDED),
-        payment,
-        subscription,
-        ...(changes.unexpected === true ? { unexpected: true } : {}),
-      } as unknown as BillingEvent),
-    ).rejects.toThrow(TypeError);
+    await expect(processor.ingestBillingEvent(candidate)).rejects.toThrow(TypeError);
     expect(store.claimBillingEvent).not.toHaveBeenCalled();
   });
 
@@ -81,7 +105,7 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
     async (claim, expectedError) => {
       const store = claimedStore();
       store.claimBillingEvent.mockResolvedValue(claim);
-      const processor = new BillingEventProcessor(store as unknown as BillingStore);
+      const processor = new BillingEventProcessor(testStore(store));
 
       const result = await processor.ingestBillingEvent({
         ...event(`evt_${expectedError}`, BillingEventType.INVOICE_CREATED),
@@ -103,7 +127,7 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
   it("reports and requeues a rejected completion", async () => {
     const store = claimedStore();
     store.completeBillingEvent.mockResolvedValue(false);
-    const processor = new BillingEventProcessor(store as unknown as BillingStore);
+    const processor = new BillingEventProcessor(testStore(store));
 
     const result = await processor.ingestBillingEvent({
       ...event("evt_completion_rejected", BillingEventType.INVOICE_UPCOMING),
@@ -127,7 +151,7 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
 
   it("fails an unhandled event instead of completing it", async () => {
     const store = claimedStore();
-    const processor = new BillingEventProcessor(store as unknown as BillingStore);
+    const processor = new BillingEventProcessor(testStore(store));
 
     const result = await processor.ingestBillingEvent({
       ...event("evt_unhandled", BillingEventType.INVOICE_CREATED),
@@ -155,7 +179,7 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
     async (rawMessage) => {
       const store = claimedStore();
       store.upsertBillingCustomer.mockRejectedValue(new Error(rawMessage));
-      const processor = new BillingEventProcessor(store as unknown as BillingStore);
+      const processor = new BillingEventProcessor(testStore(store));
 
       const result = await processor.ingestBillingEvent({
         ...event("evt_failure_message", BillingEventType.CUSTOMER_CREATED),
@@ -246,9 +270,9 @@ describe("subscription plan-change provisioning", () => {
       getOpenBillingSubscriptionChange: vi.fn().mockResolvedValue({ id: "change-1" }),
       updateBillingSubscriptionChange,
       upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
-    } as unknown as BillingStore;
+    };
 
-    const handlers = new BillingEventHandlers(store, {
+    const handlers = new BillingEventHandlers(testStore(store), {
       autoSelectEntitlementSource: false,
       provisioning: {
         getUserPlan,
@@ -294,9 +318,9 @@ describe("subscription plan-change provisioning", () => {
       }),
       getOpenBillingSubscriptionChange: vi.fn().mockResolvedValue(null),
       upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
-    } as unknown as BillingStore;
+    };
 
-    const handlers = new BillingEventHandlers(store, {
+    const handlers = new BillingEventHandlers(testStore(store), {
       autoSelectEntitlementSource: false,
       provisioning: {
         getUserPlan: vi.fn().mockResolvedValue(null),
@@ -322,7 +346,7 @@ describe("subscription plan-change provisioning", () => {
 
     expect(setUserPlan).toHaveBeenCalledTimes(1);
     const assignedAt = setUserPlan.mock.calls[0]?.[2];
-    expect(assignedAt).toBeInstanceOf(Date);
-    expect((assignedAt as Date).getTime()).toBeLessThanOrEqual(Date.now());
+    if (!(assignedAt instanceof Date)) throw new Error("expected a Date assignment anchor");
+    expect(assignedAt.getTime()).toBeLessThanOrEqual(Date.now());
   });
 });

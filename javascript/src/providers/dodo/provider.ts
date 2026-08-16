@@ -1,5 +1,6 @@
 import { NotFoundError } from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
+import { z } from "zod";
 import type { CheckoutPaymentStatus, PaymentProvider } from "../types.js";
 import {
   deduplicatePaymentMethods,
@@ -27,8 +28,13 @@ import type { BillingEventSink } from "../../bursar.js";
 import { ProviderResponseError } from "../../errors.js";
 import { persistedDiagnosticSummary } from "../../shared/diagnostics.js";
 import { requireStableKey } from "../../shared/idempotency.js";
-import type { DodoClient, DodoWebhookPayload } from "./client-contract.js";
+import type { DodoClient, DodoWebhookEnvelope, DodoWebhookPayload } from "./client-contract.js";
 import { dodoBillingEventId, handleDodoBillingEvent } from "./event-mapper.js";
+import { isExternalObject, type ExternalValue } from "../../shared/json.js";
+
+type DodoCustomerCreateParams = Parameters<DodoClient["customers"]["create"]>[0];
+type DodoChangePlanParams = Parameters<DodoClient["subscriptions"]["changePlan"]>[1];
+type DodoPreviewChangePlanParams = Parameters<DodoClient["subscriptions"]["previewChangePlan"]>[1];
 
 export interface DodoWebhookProcessorOptions {
   eventSink: BillingEventSink;
@@ -49,6 +55,10 @@ const BURSAR_METADATA_KEYS = new Set([
   "checkout_intent_id",
 ]);
 
+interface DodoMetadata {
+  [key: string]: string;
+}
+
 // Dodo's SDK exposes RequestOptions.idempotencyKey, but its client does not
 // configure the internal header name. Send the API header
 // explicitly so retries reach Dodo with the caller-stable operation key.
@@ -62,46 +72,41 @@ function dodoIdempotencyOptions(key: string) {
   };
 }
 
-function normalizeMetadata(value: unknown): Record<string, string> {
+function normalizeMetadata(value: ExternalValue): DodoMetadata {
   if (value === null || value === undefined) return {};
-  if (typeof value !== "object" || Array.isArray(value)) {
+  const parsed = z
+    .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+    .safeParse(value);
+  if (!parsed.success) {
     throw new TypeError("Dodo webhook metadata must be an object");
   }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => {
-      if (
-        (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") ||
-        (typeof item === "number" && !Number.isFinite(item))
-      ) {
-        throw new TypeError(`Dodo webhook metadata.${key} must be a scalar value`);
-      }
-      if (BURSAR_METADATA_KEYS.has(key) && typeof item !== "string") {
-        throw new TypeError(`Dodo webhook metadata.${key} must be a string`);
-      }
-      return [key, String(item)];
-    }),
-  );
+  const metadata: DodoMetadata = {};
+  for (const [key, item] of Object.entries(parsed.data)) {
+    const stringItem = z.string().safeParse(item);
+    if (BURSAR_METADATA_KEYS.has(key) && !stringItem.success) {
+      throw new TypeError(`Dodo webhook metadata.${key} must be a string`);
+    }
+    metadata[key] = String(item);
+  }
+  return metadata;
 }
 
-function requireProviderText(value: unknown, operation: string, field: string): string {
-  if (typeof value !== "string" || !value.trim()) {
+function requireProviderText(value: ExternalValue, operation: string, field: string): string {
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success || !parsed.data.trim()) {
     throw new ProviderResponseError("dodo", operation, { details: { field } });
   }
-  return value;
+  return parsed.data;
 }
 
 function requireProviderInteger(
-  value: unknown,
+  value: ExternalValue,
   operation: string,
   field: string,
   options: { min?: number; max?: number } = {},
 ): number {
-  const parsed =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && /^\d+$/.test(value)
-        ? Number(value)
-        : Number.NaN;
+  const parsedValue = z.union([z.number(), z.string().regex(/^\d+$/u)]).safeParse(value);
+  const parsed = parsedValue.success ? Number(parsedValue.data) : Number.NaN;
   if (
     !Number.isSafeInteger(parsed) ||
     parsed < (options.min ?? 0) ||
@@ -126,11 +131,11 @@ export class DodoWebhookProcessor {
     this.logger = normalizeProviderLogger(options.logger);
   }
 
-  async handle(payload: DodoWebhookPayload): Promise<WebhookResult> {
-    if (typeof payload.data !== "object" || payload.data === null || Array.isArray(payload.data)) {
+  async handle<TData>(payload: DodoWebhookEnvelope<TData>): Promise<WebhookResult> {
+    if (!isExternalObject(payload.data)) {
       throw new TypeError("Dodo webhook data must be an object");
     }
-    const data = payload.data as Record<string, unknown>;
+    const data = payload.data;
     const type = payload.type;
     const metadata = normalizeMetadata(data.metadata);
     const accountId = metadata.bursar_account_id ?? null;
@@ -156,10 +161,8 @@ export class DodoProvider implements PaymentProvider {
   constructor(options: DodoProviderOptions) {
     if (!options.webhookKey.trim()) throw new TypeError("webhookKey must not be empty");
     this.getClient = options.getClient;
-    this.config = {
-      webhookKey: options.webhookKey,
-      ...(options.setupProductId ? { setupProductId: options.setupProductId } : {}),
-    };
+    this.config = { webhookKey: options.webhookKey };
+    if (options.setupProductId) this.config.setupProductId = options.setupProductId;
     this.logger = normalizeProviderLogger(options.logger);
     this.webhookProcessor = new DodoWebhookProcessor(options);
   }
@@ -190,8 +193,8 @@ export class DodoProvider implements PaymentProvider {
       return_url: params.returnUrl,
       cancel_url: params.cancelUrl,
       metadata: { ...params.metadata, bursar_account_id: params.accountId },
-      ...(params.email ? { feature_flags: { allow_customer_editing_email: false } } : {}),
     };
+    if (params.email) body.feature_flags = { allow_customer_editing_email: false };
     const session = await client.checkoutSessions.create(body, requestOptions);
     return {
       url: requireProviderText(session.checkout_url, "createCheckoutSession", "checkout_url"),
@@ -246,12 +249,12 @@ export class DodoProvider implements PaymentProvider {
       };
     }
 
-    return this.handleVerifiedWebhook(payload);
+    return this.handleVerifiedWebhook<DodoWebhookPayload["data"]>(payload);
   }
 
   /** Process a payload already verified and parsed by an official Dodo adapter. */
-  async handleVerifiedWebhook(payload: DodoWebhookPayload): Promise<WebhookResult> {
-    return this.webhookProcessor.handle(payload);
+  async handleVerifiedWebhook<TData>(payload: DodoWebhookEnvelope<TData>): Promise<WebhookResult> {
+    return this.webhookProcessor.handle<TData>(payload);
   }
 
   async cancelSubscription(subscriptionId: string, idempotencyKey: string): Promise<void> {
@@ -449,14 +452,9 @@ export class DodoProvider implements PaymentProvider {
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
     const client = this.getClient();
     const requestOptions = dodoIdempotencyOptions(params.idempotencyKey);
-    const customer = await client.customers.create(
-      {
-        email: params.email,
-        name: params.name,
-        ...(params.metadata ? { metadata: params.metadata } : {}),
-      },
-      requestOptions,
-    );
+    const body: DodoCustomerCreateParams = { email: params.email, name: params.name };
+    if (params.metadata) body.metadata = params.metadata;
+    const customer = await client.customers.create(body, requestOptions);
     return {
       customerId: requireProviderText(customer.customer_id, "createCustomer", "customer_id"),
     };
@@ -475,29 +473,30 @@ export class DodoProvider implements PaymentProvider {
   async changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string }> {
     const requestOptions = dodoIdempotencyOptions(params.idempotencyKey);
     const client = this.getClient();
-    await client.subscriptions.changePlan(
-      params.providerSubscriptionId,
-      {
-        product_id: params.productId,
-        proration_billing_mode: params.prorationBillingMode,
-        quantity: params.quantity ?? 1,
-        ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
-        ...(params.onPaymentFailure ? { on_payment_failure: params.onPaymentFailure } : {}),
-        ...(params.metadata ? { metadata: params.metadata } : {}),
-      },
-      requestOptions,
-    );
+    const body: DodoChangePlanParams = {
+      product_id: params.productId,
+      proration_billing_mode: params.prorationBillingMode,
+      quantity: params.quantity ?? 1,
+    };
+    if (params.effectiveAt) body.effective_at = params.effectiveAt;
+    if (params.onPaymentFailure) body.on_payment_failure = params.onPaymentFailure;
+    if (params.metadata) body.metadata = params.metadata;
+    await client.subscriptions.changePlan(params.providerSubscriptionId, body, requestOptions);
     return {};
   }
 
   async previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
     const client = this.getClient();
-    const response = await client.subscriptions.previewChangePlan(params.providerSubscriptionId, {
+    const body: DodoPreviewChangePlanParams = {
       product_id: params.productId,
       proration_billing_mode: params.prorationBillingMode,
       quantity: params.quantity ?? 1,
-      ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
-    });
+    };
+    if (params.effectiveAt) body.effective_at = params.effectiveAt;
+    const response = await client.subscriptions.previewChangePlan(
+      params.providerSubscriptionId,
+      body,
+    );
 
     const lineItems: ChangePlanLineItem[] = [];
     for (const item of response.immediate_charge.line_items) {

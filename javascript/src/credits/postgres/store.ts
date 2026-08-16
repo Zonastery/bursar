@@ -1,4 +1,6 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
+
 import { StoreClosedError, StoreError } from "../../errors.js";
 import {
   canonicalBursarConfigDict,
@@ -15,6 +17,7 @@ import {
   type PostgresPool,
   type PostgresPoolConstructor,
 } from "../../shared/postgres-client.js";
+import type { JsonObject, PostgresParams, PostgresValue } from "../../shared/json.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -23,6 +26,7 @@ import type {
   AvailableResult,
   BalanceResult,
   CheckFeatureResult,
+  CreditMetadata,
   CreateTeamResult,
   DailySpendRow,
   DeductionResult,
@@ -92,11 +96,12 @@ const DEFAULT_LEASE_TTL_SECONDS = 600;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 
-function requireText(value: unknown, context: string): string {
-  if (typeof value !== "string" || value.length === 0) {
+function requireText(value: PostgresValue | undefined, context: string): string {
+  const parsed = z.string().min(1).safeParse(value);
+  if (!parsed.success) {
     throw new StoreError(`${context} returned a missing or invalid identifier`);
   }
-  return value;
+  return parsed.data;
 }
 
 export type PgPool = PostgresPool;
@@ -186,10 +191,10 @@ export class PostgresStore extends CreditStore {
 
   constructor(options: PostgresStoreOptions) {
     super();
-    if (typeof options !== "object" || options === null) {
+    if (!z.object({}).safeParse(options).success) {
       throw new TypeError("PostgresStore options are required");
     }
-    if (typeof options.postgres !== "string" && options.poolConstructor !== undefined) {
+    if (options.poolConstructor !== undefined && !z.string().safeParse(options.postgres).success) {
       throw new TypeError("poolConstructor cannot be used with an existing PostgreSQL pool");
     }
     this.providerEnvironment = options.providerEnvironment;
@@ -209,7 +214,7 @@ export class PostgresStore extends CreditStore {
     });
   }
 
-  private async query(text: string, params?: unknown[]): Promise<unknown[]> {
+  private async query(text: string, params?: PostgresParams) {
     return this.postgres.query(text, params);
   }
 
@@ -228,18 +233,20 @@ export class PostgresStore extends CreditStore {
     "unassign_plan",
   ]);
 
-  private async callproc(name: string, params: unknown[]): Promise<unknown[]> {
+  private async callproc(name: string, params: PostgresParams): Promise<PostgresValue[]> {
     if (!PostgresStore.RPC_NAME_RE.test(name)) {
       throw new StoreError(`Invalid RPC name: ${name}`);
     }
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
     const rows = await this.query(`SELECT * FROM bursar.${name}(${placeholders})`, params);
     if (PostgresStore.SCALAR_RPC_NAMES.has(name) && rows.length === 1) {
-      const row = rows[0] as Record<string, unknown>;
+      const row = rows[0];
+      if (row === undefined) return rows;
       const keys = Object.keys(row);
       const key = keys[0];
       if (keys.length === 1 && key !== undefined) {
-        return [row[key]];
+        const value = row[key];
+        if (value !== undefined) return [value];
       }
     }
     return rows;
@@ -263,7 +270,7 @@ export class PostgresStore extends CreditStore {
     options: AddCreditsOptions,
   ): Promise<AddCreditsResult> {
     const stableKey = requireStableKey(options?.idempotencyKey);
-    const meta: Record<string, unknown> = { ...(options?.metadata ?? {}) };
+    const meta: CreditMetadata = { ...(options?.metadata ?? {}) };
     if (options?.expiresAt) {
       meta.expires_at = options.expiresAt.toISOString();
     }
@@ -298,7 +305,8 @@ export class PostgresStore extends CreditStore {
     const idempotencyKey = requireStableKey(options?.idempotencyKey);
     const operation =
       options?.operation ??
-      (typeof options?.metadata?.operation === "string" ? options.metadata.operation : "usage");
+      z.string().min(1).safeParse(options?.metadata?.operation).data ??
+      "usage";
     const model = options?.model ?? null;
     const region = options?.region ?? null;
     const metadata = options?.metadata ?? {};
@@ -569,7 +577,7 @@ export class PostgresStore extends CreditStore {
   }
 
   async publishAndActivateCatalog(
-    config: BursarConfigData,
+    config: BursarConfigData | JsonObject,
     label?: string | null,
     rollout?: CatalogRollout | null,
   ): Promise<string> {
@@ -586,7 +594,10 @@ export class PostgresStore extends CreditStore {
     return row.id;
   }
 
-  async publishCatalogDraft(config: BursarConfigData, label?: string | null): Promise<string> {
+  async publishCatalogDraft(
+    config: BursarConfigData | JsonObject,
+    label?: string | null,
+  ): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
     const row = await this.catalogRepo.publishCatalogDraft(
       JSON.stringify(canonical),
@@ -615,10 +626,7 @@ export class PostgresStore extends CreditStore {
     const target = await this.getCatalogRevision(version);
     const parsedRollout = loadCatalogRollout(rollout ?? {});
     if (target != null) {
-      validateCatalogRollout(
-        loadConfigFromDict(target.config as Record<string, unknown>),
-        parsedRollout,
-      );
+      validateCatalogRollout(loadConfigFromDict(target.config), parsedRollout);
     }
     const row = await this.catalogRepo.activateCatalogRevision(
       version,
@@ -947,7 +955,9 @@ export class PostgresStore extends CreditStore {
     const cursor = options?.cursor ?? null;
     const entryTypes = usageOnly
       ? ["usage"]
-      : ((options as ListLedgerEntriesOptions | undefined)?.entryTypes ?? null);
+      : options && "entryTypes" in options
+        ? (options.entryTypes ?? null)
+        : null;
     const rows = await this.analyticsRepo.listLedgerEntries(
       userId,
       entryTypes,
@@ -1073,13 +1083,10 @@ export class PostgresStore extends CreditStore {
     amount: Decimal,
     options: DeductTeamOptions,
   ): Promise<TeamDeductionResult> {
-    const meta: Record<string, unknown> = { ...(options?.metadata ?? {}) };
+    const meta: CreditMetadata = { ...(options?.metadata ?? {}) };
     const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
     meta.idempotency_key = effectiveIdempotencyKey;
-    const operation =
-      typeof meta.operation === "string" && meta.operation.length > 0
-        ? meta.operation
-        : "team_usage";
+    const operation = z.string().min(1).safeParse(meta.operation).data ?? "team_usage";
     const row = await this.teamRepo.deductTeam(
       teamId,
       userId,

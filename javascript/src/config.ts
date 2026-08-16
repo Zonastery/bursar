@@ -1,6 +1,7 @@
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 
 import schema from "./generated/pricing-config.schema.json" with { type: "json" };
 import { ConfigError } from "./errors.js";
@@ -10,11 +11,11 @@ import { parseCredits } from "./config/parse-credits.js";
 import { parsePlans } from "./config/parse-plans.js";
 import { parsePricing } from "./config/parse-pricing.js";
 import { asObject, identifier, semanticError, type JsonObject } from "./config/parse-utils.js";
+import type { JsonValue } from "./shared/json.js";
 import type {
   BursarConfigData,
   CatalogRollout,
   ParsedBursarConfig,
-  PlanRolloutStrategy,
   SubscriptionOffer,
 } from "./config/types.js";
 
@@ -29,7 +30,7 @@ const ajv = new Ajv2020({
   strictNumbers: true,
 });
 addFormats(ajv, { mode: "full" });
-const validateStructure = ajv.compile(schema);
+const validateStructure = ajv.compile<BursarConfigData>(schema);
 
 function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
   if (!errors?.length) return "configuration does not match the Bursar schema";
@@ -38,9 +39,7 @@ function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
     .join("; ");
 }
 
-export function loadConfigFromDict(
-  data: BursarConfigData | Record<string, unknown>,
-): ParsedBursarConfig {
+export function loadConfigFromDict<T extends object>(data: T): ParsedBursarConfig {
   if (!validateStructure(data)) {
     throw new ConfigError(
       formatAjvErrors(validateStructure.errors),
@@ -48,9 +47,9 @@ export function loadConfigFromDict(
     );
   }
 
-  const raw = data as JsonObject;
+  const raw = asObject(z.record(z.string(), z.json()).parse(data), "config");
   const pricing = raw.pricing == null ? undefined : parsePricing(raw.pricing);
-  const credits = parseCredits(raw.credits);
+  const credits = parseCredits(asObject(raw.credits, "credits"));
   const entitlements = parseEntitlements(raw.entitlements);
   const admission = parseAdmission(raw.admission);
 
@@ -95,58 +94,70 @@ export function loadConfigFromDict(
   if (Object.keys(plans).length > 0 && defaultPlan == null) {
     semanticError("catalog.default_plan is required when plans are configured");
   }
-  return {
+  const result: ParsedBursarConfig = {
     version: 1,
-    catalog: {
-      ...(defaultPlan == null ? {} : { defaultPlan }),
-    },
-    ...(pricing == null ? {} : { pricing }),
+    catalog: {},
     credits,
     entitlements,
     admission,
     plans,
     commerce,
   };
+  if (defaultPlan != null) result.catalog.defaultPlan = defaultPlan;
+  if (pricing != null) result.pricing = pricing;
+  return result;
 }
 
-function toSnakeCase(value: unknown): unknown {
+type SnakeCaseObject = JsonObject | BursarConfigData | ParsedBursarConfig | CatalogRollout;
+type SnakeCaseValue = JsonValue | Decimal | SnakeCaseObject;
+
+function isSnakeCaseObject(value: SnakeCaseValue): value is SnakeCaseObject {
+  return Object.prototype.toString.call(value) === "[object Object]";
+}
+
+function toSnakeCase(value: SnakeCaseValue): JsonValue {
   if (value instanceof Decimal) return value.toFixed(6);
-  if (Array.isArray(value)) return value.map(toSnakeCase);
-  if (typeof value !== "object" || value === null) return value;
-  return Object.fromEntries(
-    Object.entries(value as JsonObject)
-      .filter(([, child]) => child !== undefined)
-      .map(([key, child]) => [
-        key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
-        toSnakeCase(child),
-      ]),
-  );
+  const primitive = z.union([z.string(), z.number(), z.boolean(), z.null()]).safeParse(value);
+  if (primitive.success) return primitive.data;
+  if (Array.isArray(value)) return value.map((child) => toSnakeCase(child));
+  if (!isSnakeCaseObject(value))
+    throw new ConfigError("configuration contains an unsupported value");
+  const result: JsonObject = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (child === undefined) continue;
+    result[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)] = toSnakeCase(child);
+  }
+  return result;
 }
 
-export function canonicalBursarConfigDict(
-  data: BursarConfigData | Record<string, unknown>,
-): BursarConfigData & Record<string, unknown> {
-  return toSnakeCase(loadConfigFromDict(data)) as BursarConfigData & Record<string, unknown>;
+function canonicalConfig(data: ParsedBursarConfig): BursarConfigData {
+  const canonical = asObject(toSnakeCase(data), "canonical config");
+  if (!validateStructure(canonical)) {
+    throw new ConfigError(
+      `canonical configuration is invalid: ${formatAjvErrors(validateStructure.errors)}`,
+      validateStructure.errors ?? [],
+    );
+  }
+  return canonical;
+}
+
+export function canonicalBursarConfigDict<T extends object>(data: T): BursarConfigData {
+  return canonicalConfig(loadConfigFromDict(data));
 }
 
 /** Serialize an already parsed configuration without re-validating camelCase fields as raw input. */
-export function canonicalParsedBursarConfigDict(
-  data: ParsedBursarConfig,
-): BursarConfigData & Record<string, unknown> {
-  return toSnakeCase(data) as BursarConfigData & Record<string, unknown>;
+export function canonicalParsedBursarConfigDict(data: ParsedBursarConfig): BursarConfigData {
+  return canonicalConfig(data);
 }
 
-const ROLLOUT_STRATEGIES = new Set<PlanRolloutStrategy>([
-  "immediate",
-  "next_renewal",
-  "new_assignments_only",
-]);
+const rolloutStrategySchema = z.enum(["immediate", "next_renewal", "new_assignments_only"]);
 
-function requirePlainObject(value: unknown, path: string): JsonObject {
-  if (value == null || Array.isArray(value) || typeof value !== "object") {
+function requirePlainObject(value: JsonValue | undefined, path: string): JsonObject {
+  if (value == null || Array.isArray(value)) {
     throw new ConfigError(`${path} must be an object`);
   }
-  return value as JsonObject;
+  const candidate = asObject(value, path);
+  return candidate;
 }
 
 function rejectUnknownKeys(value: JsonObject, allowed: readonly string[], path: string): void {
@@ -156,9 +167,26 @@ function rejectUnknownKeys(value: JsonObject, allowed: readonly string[], path: 
   }
 }
 
+const parsedCatalogRolloutSchema = z
+  .object({
+    plans: z.record(
+      z.string(),
+      z.object({
+        effective: z.enum(["immediate", "next_renewal", "new_assignments_only"]),
+        includePinned: z.boolean(),
+      }),
+    ),
+  })
+  .strict();
+
 /** Parse a one-release catalog rollout manifest. */
-export function loadCatalogRollout(data: unknown = {}): CatalogRollout {
-  const raw = requirePlainObject(data, "rollout");
+export function loadCatalogRollout<T>(data?: T): CatalogRollout {
+  const candidate = data === undefined ? {} : data;
+  const parsed = parsedCatalogRolloutSchema.safeParse(candidate);
+  if (parsed.success) return parsed.data;
+  const jsonValue = z.json().safeParse(candidate);
+  if (!jsonValue.success) throw new ConfigError("rollout must be a JSON object");
+  const raw = requirePlainObject(jsonValue.data, "rollout");
   rejectUnknownKeys(raw, ["plans"], "rollout");
   const plansRaw = raw.plans == null ? {} : requirePlainObject(raw.plans, "rollout.plans");
   const plans: CatalogRollout["plans"] = {};
@@ -171,7 +199,8 @@ export function loadCatalogRollout(data: unknown = {}): CatalogRollout {
       ["effective", "include_pinned", "includePinned"],
       `rollout.plans.${planKey}`,
     );
-    if (!ROLLOUT_STRATEGIES.has(plan.effective as PlanRolloutStrategy)) {
+    const effective = rolloutStrategySchema.safeParse(plan.effective);
+    if (!effective.success) {
       throw new ConfigError(
         `rollout.plans.${planKey}.effective must be immediate, next_renewal, or new_assignments_only`,
       );
@@ -182,21 +211,22 @@ export function loadCatalogRollout(data: unknown = {}): CatalogRollout {
       );
     }
     const includePinned = plan.include_pinned ?? plan.includePinned;
-    if (includePinned != null && typeof includePinned !== "boolean") {
+    const parsedIncludePinned =
+      includePinned == null
+        ? { success: true as const, data: false }
+        : z.boolean().safeParse(includePinned);
+    if (!parsedIncludePinned.success) {
       throw new ConfigError(`rollout.plans.${planKey}.include_pinned must be boolean`);
     }
-    plans[planKey] = {
-      effective: plan.effective as PlanRolloutStrategy,
-      includePinned: includePinned === true,
-    };
+    plans[planKey] = { effective: effective.data, includePinned: parsedIncludePinned.data };
   }
 
   return { plans };
 }
 
 /** Serialize a rollout manifest for the catalog activation RPC. */
-export function canonicalCatalogRolloutDict(data: unknown = {}): Record<string, unknown> {
-  return toSnakeCase(loadCatalogRollout(data)) as Record<string, unknown>;
+export function canonicalCatalogRolloutDict<T>(data?: T): JsonObject {
+  return asObject(toSnakeCase(loadCatalogRollout(data)), "canonical rollout");
 }
 
 /** Validate rollout references and renewal timing against its target catalog. */

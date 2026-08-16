@@ -342,18 +342,6 @@ func beginInstrumented(ctx context.Context, instrumentation Instrumentation, ope
 	return context.WithValue(startedContext, activeTelemetryOperationKey{}, operation), finish
 }
 
-func runInstrumented(ctx context.Context, instrumentation Instrumentation, operation string, attributes TelemetryAttributes, run func(context.Context) error) (err error) {
-	ctx, finish := beginInstrumented(ctx, instrumentation, operation, attributes)
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			finish(errInstrumentedOperationPanicked)
-			panic(recovered)
-		}
-		finish(err)
-	}()
-	return run(ctx)
-}
-
 func runInstrumentedValue[T any](ctx context.Context, instrumentation Instrumentation, operation string, attributes TelemetryAttributes, run func(context.Context) (T, error)) (result T, err error) {
 	ctx, finish := beginInstrumented(ctx, instrumentation, operation, attributes)
 	defer func() {

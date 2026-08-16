@@ -47,16 +47,3 @@ func (m UsageMetrics) Validate() error {
 	}
 	return nil
 }
-
-func cloneMetrics(metrics UsageMetrics) UsageMetrics {
-	cloned := UsageMetrics{Operation: metrics.Operation}
-	if metrics.Measures != nil {
-		cloned.Measures = make(map[string]decimal.Decimal, len(metrics.Measures))
-		for key, value := range metrics.Measures {
-			cloned.Measures[key] = value
-		}
-	}
-	cloned.Dimensions = cloneAnyMap(metrics.Dimensions)
-	cloned.Metadata = cloneAnyMap(metrics.Metadata)
-	return cloned
-}

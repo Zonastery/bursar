@@ -1,8 +1,10 @@
 import pRetry from "p-retry";
+import { z } from "zod";
 
 import type { BillingEvent, BillingEventResult } from "../billing/index.js";
 import type { BillingEventSink } from "../bursar.js";
 import { BursarError, StoreUnavailableError } from "../errors.js";
+import type { ExternalValue } from "../shared/json.js";
 
 class BillingClaimBusyError extends Error {
   override readonly name = "BillingClaimBusyError";
@@ -16,33 +18,33 @@ const ACKNOWLEDGED_BILLING_EVENT_ERRORS = new Set([
   "max_retries_exceeded",
 ]);
 
-export function requireProviderString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
+type ProviderValue = ExternalValue;
+
+export function requireProviderString(value: ProviderValue, field: string): string {
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success || parsed.data.trim().length === 0) {
     throw new TypeError(`${field} must be a non-empty string`);
   }
-  return value.trim();
+  return parsed.data.trim();
 }
 
-export function optionalProviderString(value: unknown, field: string): string | undefined {
+export function optionalProviderString(value: ProviderValue, field: string): string | undefined {
   if (value === null || value === undefined) return undefined;
   return requireProviderString(value, field);
 }
 
-export function optionalProviderBoolean(value: unknown, field: string): boolean | undefined {
+export function optionalProviderBoolean(value: ProviderValue, field: string): boolean | undefined {
   if (value === null || value === undefined) return undefined;
-  if (typeof value !== "boolean") {
+  const parsed = z.boolean().safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`${field} must be a boolean`);
   }
-  return value;
+  return parsed.data;
 }
 
-export function requireMinorUnits(value: unknown, field: string, positive = false): number {
-  const amount =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && /^\d+$/.test(value)
-        ? Number(value)
-        : Number.NaN;
+export function requireMinorUnits(value: ProviderValue, field: string, positive = false): number {
+  const parsed = z.union([z.number(), z.string().regex(/^\d+$/u)]).safeParse(value);
+  const amount = parsed.success ? Number(parsed.data) : Number.NaN;
   if (!Number.isSafeInteger(amount) || amount < (positive ? 1 : 0)) {
     throw new TypeError(
       `${field} must be a ${positive ? "positive" : "non-negative"} safe integer`,
@@ -51,11 +53,15 @@ export function requireMinorUnits(value: unknown, field: string, positive = fals
   return amount;
 }
 
-export function requireCurrency(value: unknown, field: string): string {
-  if (typeof value !== "string" || !/^[A-Za-z]{3}$/.test(value)) {
+export function requireCurrency(value: ProviderValue, field: string): string {
+  const parsed = z
+    .string()
+    .regex(/^[A-Za-z]{3}$/u)
+    .safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`${field} must be a three-letter currency code`);
   }
-  return value.toUpperCase();
+  return parsed.data.toUpperCase();
 }
 
 /**

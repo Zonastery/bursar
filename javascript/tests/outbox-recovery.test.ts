@@ -81,7 +81,7 @@ const handler = (handle: (outboxEvent: OutboxEvent) => Promise<void> | void) => 
 
 describe("OutboxWorker correctness", () => {
   it("requires claim renewal support at construction", () => {
-    const store = new FakeStore([]) as OutboxStore;
+    const store = new FakeStore([]);
     Object.defineProperty(store, "renew", { value: undefined });
     expect(() => new OutboxWorker(store, [handler(vi.fn())])).toThrow(/claim renewal/);
   });

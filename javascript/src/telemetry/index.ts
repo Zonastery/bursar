@@ -1,9 +1,19 @@
 /** Package-scoped telemetry constants shared by every instrumentation adapter. */
+import { z } from "zod";
+
+import { diagnosticErrorCode, diagnosticErrorType } from "../shared/diagnostics.js";
+
 export const BURSAR_INSTRUMENTATION_SCOPE = "@zonastery/bursar";
 export const BURSAR_INSTRUMENTATION_VERSION = "2.0.3";
 
 export type TelemetryAttributeValue = string | number | boolean;
-export type TelemetryAttributes = Readonly<Record<string, TelemetryAttributeValue>>;
+export interface TelemetryAttributes {
+  readonly [key: string]: TelemetryAttributeValue;
+}
+
+export interface SanitizedTelemetryAttributes {
+  [key: string]: TelemetryAttributeValue;
+}
 
 const ALLOWED_ATTRIBUTE_KEYS = new Set([
   "bursar.operation",
@@ -15,9 +25,10 @@ const ALLOWED_ATTRIBUTE_KEYS = new Set([
 ]);
 const MAX_ATTRIBUTE_LENGTH = 64;
 
-function normalizeToken(value: unknown, fallback?: string): string | undefined {
-  if (typeof value !== "string") return fallback;
-  const normalized = value
+function normalizeToken<T>(value: T, fallback?: string): string | undefined {
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success) return fallback;
+  const normalized = parsed.data
     .trim()
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[^a-zA-Z0-9._-]+/g, "_")
@@ -34,18 +45,20 @@ function normalizeToken(value: unknown, fallback?: string): string | undefined {
  * normalized to stable tokens so identifiers, metadata, and raw payloads
  * cannot accidentally pass through this boundary.
  */
-export function sanitizeTelemetryAttributes(
-  attributes: Readonly<Record<string, unknown>> = {},
-): Record<string, TelemetryAttributeValue> {
-  const sanitized: Record<string, TelemetryAttributeValue> = {};
-  for (const [key, value] of Object.entries(attributes)) {
+export function sanitizeTelemetryAttributes<T extends object>(
+  attributes?: T,
+): SanitizedTelemetryAttributes {
+  const sanitized: SanitizedTelemetryAttributes = {};
+  for (const [key, value] of Object.entries(attributes ?? {})) {
     if (!ALLOWED_ATTRIBUTE_KEYS.has(key)) continue;
-    if (typeof value === "boolean") {
-      sanitized[key] = value;
+    const booleanValue = z.boolean().safeParse(value);
+    if (booleanValue.success) {
+      sanitized[key] = booleanValue.data;
       continue;
     }
-    if (typeof value === "number" && Number.isFinite(value)) {
-      sanitized[key] = value;
+    const numberValue = z.number().finite().safeParse(value);
+    if (numberValue.success) {
+      sanitized[key] = numberValue.data;
       continue;
     }
     const normalized = normalizeToken(value);
@@ -55,24 +68,22 @@ export function sanitizeTelemetryAttributes(
 }
 
 /** Build the safe base attributes for one Bursar operation. */
-export function telemetryOperationAttributes(
+export function telemetryOperationAttributes<T extends object>(
   operation: string,
-  attributes: Readonly<Record<string, unknown>> = {},
-): Record<string, TelemetryAttributeValue> {
-  return {
-    ...sanitizeTelemetryAttributes(attributes),
-    "bursar.operation": normalizeToken(operation, "unknown")!,
-  };
+  attributes?: T,
+): SanitizedTelemetryAttributes {
+  const result: SanitizedTelemetryAttributes = sanitizeTelemetryAttributes(attributes);
+  result["bursar.operation"] = normalizeToken(operation, "unknown") ?? "unknown";
+  return result;
 }
 
 /** Normalize an error without reading or recording its message or details. */
-export function telemetryErrorAttributes(error: unknown): Record<string, string> {
-  const type = normalizeToken(diagnosticErrorType(error), "unknown_error")!;
-  const code = normalizeToken(diagnosticErrorCode(error));
-  return {
-    "error.type": type,
-    ...(code === undefined ? {} : { "error.code": code }),
-  };
+export function telemetryErrorAttributes(cause: unknown): SanitizedTelemetryAttributes {
+  const type = normalizeToken(diagnosticErrorType(cause), "unknown_error") ?? "unknown_error";
+  const code = normalizeToken(diagnosticErrorCode(cause));
+  const result: SanitizedTelemetryAttributes = { "error.type": type };
+  if (code !== undefined) result["error.code"] = code;
+  return result;
 }
 
 /** Vendor-neutral contract used by Bursar's core runtime. */
@@ -104,7 +115,7 @@ const instrumentationRegistrations: Array<{
 }> = [];
 
 function assertInstrumentation(value: Instrumentation): void {
-  if (typeof value !== "object" || value === null || typeof value.run !== "function") {
+  if (!z.object({ run: z.function() }).safeParse(value).success) {
     throw new TypeError("instrumentation must provide run()");
   }
 }
@@ -143,4 +154,3 @@ function refreshDefaultInstrumentation(): void {
   defaultInstrumentation =
     instrumentationRegistrations.at(-1)?.instrumentation ?? NOOP_INSTRUMENTATION;
 }
-import { diagnosticErrorCode, diagnosticErrorType } from "../shared/diagnostics.js";

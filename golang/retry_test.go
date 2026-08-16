@@ -179,6 +179,7 @@ func TestRetryBursarOperationValidatesConfiguration(t *testing.T) {
 
 func TestRetryBursarOperationRejectsNilInputsAndMultipleOptions(t *testing.T) {
 	valid := immediateRetryOptions(1)
+	//lint:ignore SA1012 this deliberately verifies that nil contexts fail closed.
 	if _, err := RetryBursarOperation[int](nil, func(context.Context) (int, error) { return 1, nil }); err == nil {
 		t.Fatal("nil context error = nil")
 	}

@@ -1,8 +1,16 @@
+import type { StructuredValue } from "./json.js";
+
+export type LogContextValue = StructuredValue | Date | Error;
+
+export interface LogContext {
+  [key: string]: LogContextValue;
+}
+
 export interface Logger {
-  debug?: (message: string, context?: Record<string, unknown>) => void;
-  info?: (message: string, context?: Record<string, unknown>) => void;
-  warn?: (message: string, context?: Record<string, unknown>) => void;
-  error?: (message: string, context?: Record<string, unknown>) => void;
+  debug?: (message: string, context?: LogContext) => void;
+  info?: (message: string, context?: LogContext) => void;
+  warn?: (message: string, context?: LogContext) => void;
+  error?: (message: string, context?: LogContext) => void;
 }
 
 export type NormalizedLogger = Required<Logger>;

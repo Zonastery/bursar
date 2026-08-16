@@ -161,6 +161,16 @@ function catalog() {
   };
 }
 
+function testBillingCapability<TCapability>(capability: TCapability): Mocked<BillingCapability> {
+  // SAFETY: The commerce fixture implements the BillingCapability methods used by this suite.
+  return capability as Mocked<BillingCapability>;
+}
+
+function testCommerceCredits<TCredits>(credits: TCredits): Mocked<CommerceCredits> {
+  // SAFETY: The commerce fixture implements the CommerceCredits methods used by this suite.
+  return credits as Mocked<CommerceCredits>;
+}
+
 function provider(name = "alpha"): PaymentProvider {
   return {
     provider: name,
@@ -217,7 +227,7 @@ function harness(input?: {
 }) {
   const alpha = input?.alpha ?? provider("alpha");
   const beta = input?.beta ?? provider("beta");
-  const billing = {
+  const billingFixture = {
     autoRecharge: {
       getStatus: vi.fn(async () => null),
       enable: vi.fn(async () => null),
@@ -275,8 +285,9 @@ function harness(input?: {
       offerKey: lookupKey,
     })),
     getAutoRechargeProfile: vi.fn(async () => null),
-  } as unknown as Mocked<BillingCapability>;
-  const credits = {
+  };
+  const billing = testBillingCapability(billingFixture);
+  const creditsFixture = {
     getBalance: vi.fn(async () => ({
       balance: new Decimal(25),
       lifetimePurchased: new Decimal(100),
@@ -316,7 +327,8 @@ function harness(input?: {
     listUsageEntries: vi.fn(async () => ({ items: [], hasMore: false })),
     listUsageCharges: vi.fn(async () => ({ items: [], nextCursor: null })),
     getLedgerEntry: vi.fn(async () => null),
-  } as unknown as Mocked<CommerceCredits>;
+  };
+  const credits = testCommerceCredits(creditsFixture);
   const sink: BillingEventSink = {
     ingestBillingEvent: vi.fn(async () => ({ handled: true, action: "test" })),
   };

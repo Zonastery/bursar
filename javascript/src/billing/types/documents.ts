@@ -1,5 +1,6 @@
 import type { Decimal } from "decimal.js";
 import type { ProviderRef } from "./common.js";
+import type { JsonObject } from "../../shared/json.js";
 
 export interface BillingCustomerInfo {
   providerCustomerId?: string | null;
@@ -44,7 +45,7 @@ export interface BillingPaymentRecord {
   purpose: "subscription" | "credit_topup";
   status: "pending" | "succeeded" | "failed" | "canceled";
   providerUpdatedAt: string;
-  metadata: Record<string, unknown>;
+  metadata: JsonObject;
 }
 
 /** Result of posting a billing grant or refund to the credit ledger. */

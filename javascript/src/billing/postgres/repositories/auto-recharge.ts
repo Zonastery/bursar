@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Decimal } from "decimal.js";
 import { StoreError } from "../../../errors.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { JsonObject, PostgresRow } from "../../../shared/json.js";
 import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeAttemptState,
@@ -90,7 +91,7 @@ const AttemptRowSchema = z
       .nullable(),
     failure_code: z.string().min(1).nullable(),
     failure_message: z.string().min(1).nullable(),
-    metadata: z.record(z.string(), z.unknown()),
+    metadata: z.record(z.string(), z.json()),
     created_at: timestamp,
     updated_at: timestamp,
   })
@@ -110,7 +111,72 @@ const AttemptRowSchema = z
     }
   });
 
-function projectProfile(row: Record<string, unknown>): Record<string, unknown> {
+type AttemptTransitionPath = readonly BillingAutoRechargeAttemptState[];
+
+function attemptTransitions(
+  entries: ReadonlyArray<readonly [BillingAutoRechargeAttemptState, AttemptTransitionPath]>,
+): ReadonlyMap<BillingAutoRechargeAttemptState, AttemptTransitionPath> {
+  return new Map(entries);
+}
+
+const ATTEMPT_TRANSITION_PATHS = new Map<
+  BillingAutoRechargeAttemptState,
+  ReadonlyMap<BillingAutoRechargeAttemptState, AttemptTransitionPath>
+>([
+  [
+    "claimed",
+    attemptTransitions([
+      ["submitted", ["submitted"]],
+      ["processing", ["submitted", "processing"]],
+      ["succeeded", ["submitted", "processing", "succeeded"]],
+      ["failed", ["submitted", "processing", "failed"]],
+      ["unknown", ["submitted", "processing", "unknown"]],
+      ["action_required", ["submitted", "action_required"]],
+    ]),
+  ],
+  [
+    "submitted",
+    attemptTransitions([
+      ["submitted", []],
+      ["processing", ["processing"]],
+      ["succeeded", ["processing", "succeeded"]],
+      ["failed", ["processing", "failed"]],
+      ["unknown", ["processing", "unknown"]],
+      ["action_required", ["action_required"]],
+    ]),
+  ],
+  [
+    "processing",
+    attemptTransitions([
+      ["processing", []],
+      ["succeeded", ["succeeded"]],
+      ["failed", ["failed"]],
+      ["unknown", ["unknown"]],
+      ["action_required", ["action_required"]],
+    ]),
+  ],
+  [
+    "unknown",
+    attemptTransitions([
+      ["unknown", []],
+      ["processing", ["processing"]],
+      ["succeeded", ["succeeded"]],
+      ["failed", ["failed"]],
+      ["action_required", ["action_required"]],
+    ]),
+  ],
+  [
+    "action_required",
+    attemptTransitions([
+      ["action_required", []],
+      ["processing", ["processing"]],
+      ["succeeded", ["succeeded"]],
+      ["failed", ["failed"]],
+    ]),
+  ],
+]);
+
+function projectProfile(row: PostgresRow) {
   return {
     subject_id: row.subject_id,
     enabled: row.enabled,
@@ -129,7 +195,7 @@ function projectProfile(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function projectAttempt(row: Record<string, unknown>): Record<string, unknown> {
+function projectAttempt(row: PostgresRow) {
   return {
     id: row.id,
     subject_id: row.subject_id,
@@ -151,7 +217,7 @@ function projectAttempt(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function profileFromRow(row: Record<string, unknown>): BillingAutoRechargeProfile {
+function profileFromRow(row: PostgresRow): BillingAutoRechargeProfile {
   const parsed = safeParse(
     ProfileRowSchema,
     projectProfile(row),
@@ -175,7 +241,7 @@ function profileFromRow(row: Record<string, unknown>): BillingAutoRechargeProfil
   };
 }
 
-function attemptFromRow(row: Record<string, unknown>): BillingAutoRechargeAttempt {
+function attemptFromRow(row: PostgresRow): BillingAutoRechargeAttempt {
   const parsed = safeParse(
     AttemptRowSchema,
     projectAttempt(row),
@@ -263,7 +329,7 @@ export class BillingAutoRechargeRepository {
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonObject;
   }): Promise<void> {
     const failureMessage = optionalBoundedDiagnosticMessage(input.failureMessage);
     const currentRows = await this.query(
@@ -284,50 +350,7 @@ export class BillingAutoRechargeRepository {
       currentRow.state,
       "BillingAutoRechargeRepository.advanceAttempt.current.state",
     );
-    const paths: Partial<
-      Record<
-        BillingAutoRechargeAttemptState,
-        Partial<Record<BillingAutoRechargeAttemptState, BillingAutoRechargeAttemptState[]>>
-      >
-    > = {
-      claimed: {
-        submitted: ["submitted"],
-        processing: ["submitted", "processing"],
-        succeeded: ["submitted", "processing", "succeeded"],
-        failed: ["submitted", "processing", "failed"],
-        unknown: ["submitted", "processing", "unknown"],
-        action_required: ["submitted", "action_required"],
-      },
-      submitted: {
-        submitted: [],
-        processing: ["processing"],
-        succeeded: ["processing", "succeeded"],
-        failed: ["processing", "failed"],
-        unknown: ["processing", "unknown"],
-        action_required: ["action_required"],
-      },
-      processing: {
-        processing: [],
-        succeeded: ["succeeded"],
-        failed: ["failed"],
-        unknown: ["unknown"],
-        action_required: ["action_required"],
-      },
-      unknown: {
-        unknown: [],
-        processing: ["processing"],
-        succeeded: ["succeeded"],
-        failed: ["failed"],
-        action_required: ["action_required"],
-      },
-      action_required: {
-        action_required: [],
-        processing: ["processing"],
-        succeeded: ["succeeded"],
-        failed: ["failed"],
-      },
-    };
-    const path = paths[current]?.[input.state];
+    const path = ATTEMPT_TRANSITION_PATHS.get(current)?.get(input.state);
     if (!path) {
       throw new StoreError(`auto-recharge attempt transition rejected: ${input.id}`, {
         details: { attemptId: input.id, currentState: current, requestedState: input.state },
@@ -373,7 +396,7 @@ export class BillingAutoRechargeRepository {
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonObject;
   }): Promise<void> {
     return this.advanceAttempt(input);
   }

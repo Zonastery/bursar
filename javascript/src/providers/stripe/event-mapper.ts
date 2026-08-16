@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { z } from "zod";
 import type { BillingEventSink } from "../../bursar.js";
 import type {
   BillingCustomerInfo,
@@ -6,7 +7,6 @@ import type {
   BillingPaymentInfo,
   ProviderRef,
   BillingSubscriptionInfo,
-  BillingSubscriptionStatus,
 } from "../../billing/types/index.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import { persistedDiagnosticSummary } from "../../shared/diagnostics.js";
@@ -25,6 +25,18 @@ const STRIPE_SUBSCRIPTION_LIFECYCLE_EVENTS = {
   "customer.subscription.resumed": "subscription.resumed",
   "customer.subscription.trial_will_end": "subscription.trial_will_end",
 } as const;
+
+const billingSubscriptionStatusSchema = z.enum([
+  "incomplete",
+  "incomplete_expired",
+  "trialing",
+  "active",
+  "past_due",
+  "canceled",
+  "unpaid",
+  "paused",
+  "expired",
+]);
 
 function timestamp(value: number | null | undefined): string | null {
   return value == null ? null : new Date(value * 1000).toISOString();
@@ -50,7 +62,7 @@ function subscriptionRefs(subscription: Stripe.Subscription) {
   if (!price) return undefined;
   return {
     priceId: price.id,
-    productId: typeof price.product === "string" ? price.product : price.product?.id,
+    productId: expandableId(price.product),
   };
 }
 
@@ -58,9 +70,13 @@ function subscriptionInfo(
   subscription: Stripe.Subscription,
   refs: ProviderRef | undefined = subscriptionRefs(subscription),
 ): BillingSubscriptionInfo {
+  const status = billingSubscriptionStatusSchema.safeParse(subscription.status);
+  if (!status.success) {
+    throw new Error(`Stripe returned an unsupported subscription status '${subscription.status}'`);
+  }
   return {
     providerSubscriptionId: subscription.id,
-    status: subscription.status as BillingSubscriptionStatus,
+    status: status.data,
     cancelAtPeriodEnd: subscription.cancel_at_period_end,
     periodStart: buildStart(subscription),
     periodEnd: buildEnd(subscription),
@@ -80,8 +96,10 @@ function buildStartFromInvoice(invoice: Stripe.Invoice): string | null {
 }
 
 function expandableId(value: string | { id: string } | null | undefined): string | null {
-  if (!value) return null;
-  return typeof value === "string" ? value : value.id;
+  const stringValue = z.string().min(1).safeParse(value);
+  if (stringValue.success) return stringValue.data;
+  const objectValue = z.object({ id: z.string().min(1) }).safeParse(value);
+  return objectValue.success ? objectValue.data.id : null;
 }
 
 function customerId(
@@ -91,11 +109,15 @@ function customerId(
 }
 
 function checkoutCustomer(session: Stripe.Checkout.Session): BillingCustomerInfo | undefined {
-  const customer =
-    session.customer && typeof session.customer !== "string" ? session.customer : null;
+  const customer = z
+    .object({
+      deleted: z.boolean().optional(),
+      email: z.string().nullable().optional(),
+    })
+    .safeParse(session.customer);
   const providerCustomerId = customerId(session.customer);
   const email =
-    (customer && !customer.deleted ? customer.email : null) ??
+    (customer.success && customer.data.deleted !== true ? (customer.data.email ?? null) : null) ??
     session.customer_details?.email ??
     null;
   return providerCustomerId || email ? { providerCustomerId, email } : undefined;
@@ -146,7 +168,7 @@ function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
   return expandableId(invoice.parent?.subscription_details?.subscription);
 }
 
-function invoiceMetadata(invoice: Stripe.Invoice): Record<string, string> {
+function invoiceMetadata(invoice: Stripe.Invoice) {
   return {
     ...(invoice.parent?.subscription_details?.metadata ?? {}),
     ...(invoice.metadata ?? {}),
@@ -204,7 +226,7 @@ export async function handleStripeWebhook(
       case "checkout.session.completed":
       case "checkout.session.async_payment_succeeded":
       case "checkout.session.async_payment_failed": {
-        const session = event.data.object as Stripe.Checkout.Session;
+        const session = event.data.object;
         const failed = event.type === "checkout.session.async_payment_failed";
 
         if (event.type === "checkout.session.completed" && session.payment_status === "unpaid") {
@@ -274,7 +296,7 @@ export async function handleStripeWebhook(
       }
 
       case "checkout.session.expired": {
-        const session = event.data.object as Stripe.Checkout.Session;
+        const session = event.data.object;
         const metadata = checkoutMetadata(session);
         await callBillingEventSink(sink, {
           provider: "stripe",
@@ -292,7 +314,7 @@ export async function handleStripeWebhook(
       case "customer.subscription.paused":
       case "customer.subscription.resumed":
       case "customer.subscription.trial_will_end": {
-        const subscription = event.data.object as Stripe.Subscription;
+        const subscription = event.data.object;
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
@@ -309,7 +331,7 @@ export async function handleStripeWebhook(
       }
 
       case "customer.subscription.updated": {
-        const subscription = event.data.object as Stripe.Subscription;
+        const subscription = event.data.object;
         const eventType =
           subscription.status === "canceled"
             ? "subscription.canceled"
@@ -333,7 +355,7 @@ export async function handleStripeWebhook(
       }
 
       case "customer.subscription.deleted": {
-        const subscription = event.data.object as Stripe.Subscription;
+        const subscription = event.data.object;
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
@@ -356,7 +378,7 @@ export async function handleStripeWebhook(
       case "payment_intent.succeeded":
       case "payment_intent.payment_failed":
       case "payment_intent.canceled": {
-        const intent = event.data.object as Stripe.PaymentIntent;
+        const intent = event.data.object;
         const metadata = intent.metadata ?? {};
         if (!metadata.auto_recharge_attempt_id) break;
         const succeeded = event.type === "payment_intent.succeeded";
@@ -388,7 +410,7 @@ export async function handleStripeWebhook(
       case "charge.dispute.created":
       case "charge.dispute.updated":
       case "charge.dispute.closed": {
-        const dispute = event.data.object as Stripe.Dispute;
+        const dispute = event.data.object;
         const providerPaymentId =
           expandableId(dispute.payment_intent) ?? expandableId(dispute.charge);
         await callBillingEventSink(sink, {
@@ -412,7 +434,7 @@ export async function handleStripeWebhook(
       }
 
       case "invoice.paid": {
-        const invoice = event.data.object as Stripe.Invoice;
+        const invoice = event.data.object;
         const subscriptionId = invoiceSubscriptionId(invoice);
         if (!subscriptionId) {
           log.debug("invoice.paid: no subscription reference", { invoiceId: invoice.id });
@@ -453,7 +475,7 @@ export async function handleStripeWebhook(
       }
 
       case "invoice.payment_failed": {
-        const invoice = event.data.object as Stripe.Invoice;
+        const invoice = event.data.object;
         const subscriptionId = invoiceSubscriptionId(invoice);
         if (!subscriptionId) {
           log.debug("invoice.payment_failed: no subscription reference", { invoiceId: invoice.id });
@@ -488,7 +510,7 @@ export async function handleStripeWebhook(
       case "refund.created":
       case "refund.updated":
       case "refund.failed": {
-        const refund = event.data.object as Stripe.Refund;
+        const refund = event.data.object;
         const status =
           refund.status === "succeeded" ||
           refund.status === "failed" ||

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { StoreError } from "../../../errors.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
+import type { JsonObject, PostgresRow } from "../../../shared/json.js";
 import {
   optionalRecordRow,
   pgBoolean,
@@ -11,7 +12,7 @@ import {
 const CatalogRevisionRowSchema = z
   .object({
     id: z.string().min(1),
-    config: z.record(z.string(), z.unknown()),
+    config: z.record(z.string(), z.json()),
     version: z.coerce.number().int().positive(),
     label: z.string().nullable(),
     active: pgBoolean,
@@ -31,7 +32,7 @@ export type CatalogRevisionRow = z.infer<typeof CatalogRevisionRowSchema>;
 export class CatalogRepository {
   constructor(private readonly callproc: CallProc) {}
 
-  private parseRevision(row: Record<string, unknown>, context: string): CatalogRevisionRow {
+  private parseRevision(row: PostgresRow, context: string): CatalogRevisionRow {
     return safeParse(
       CatalogRevisionRowSchema,
       {
@@ -57,7 +58,7 @@ export class CatalogRepository {
   async publishAndActivateCatalog(
     config: string,
     label: string | null,
-    rollout: Record<string, unknown>,
+    rollout: JsonObject,
   ): Promise<CatalogRevisionRow> {
     return this.publishRevision(config, label, true, rollout);
   }
@@ -70,7 +71,7 @@ export class CatalogRepository {
     config: string,
     label: string | null,
     activate = false,
-    rollout: Record<string, unknown> = { plans: {} },
+    rollout: JsonObject = { plans: {} },
   ): Promise<CatalogRevisionRow> {
     const published = safeParse(
       PublishedRevisionSchema,
@@ -98,13 +99,11 @@ export class CatalogRepository {
   async getCatalogHistory(): Promise<CatalogRevisionRow[]> {
     const rows = await this.callproc("list_catalog_revisions", [500]);
     return (rows ?? []).map((row) => {
-      if (typeof row !== "object" || row === null || Array.isArray(row)) {
+      const parsedRow = optionalRecordRow([row], "CatalogRepository.getCatalogHistory");
+      if (parsedRow === null) {
         throw new StoreError("CatalogRepository.getCatalogHistory returned a non-object row");
       }
-      return this.parseRevision(
-        row as Record<string, unknown>,
-        "CatalogRepository.getCatalogHistory",
-      );
+      return this.parseRevision(parsedRow, "CatalogRepository.getCatalogHistory");
     });
   }
 
@@ -115,10 +114,7 @@ export class CatalogRepository {
     return this.parseRevision(row, "CatalogRepository.getCatalogRevision");
   }
 
-  async activateCatalogRevision(
-    version: number,
-    rollout: Record<string, unknown>,
-  ): Promise<CatalogRevisionRow> {
+  async activateCatalogRevision(version: number, rollout: JsonObject): Promise<CatalogRevisionRow> {
     const rows = await this.callproc("activate_catalog_revision", [version, rollout]);
     const row = optionalRecordRow(rows, "CatalogRepository.activateCatalogRevision");
     if (row === null || Object.values(row).every((value) => value === null)) {
