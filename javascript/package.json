@@ -213,6 +213,9 @@
     ],
     "ignore": [
       "scripts/export-contract-results.mjs"
+    ],
+    "ignoreDependencies": [
+      "lefthook"
     ]
   }
 }

@@ -1,4 +1,3 @@
-import type { PutObjectCommand, PutObjectCommandOutput } from "@aws-sdk/client-s3";
 import { z } from "zod";
 
 import type {
@@ -20,8 +19,30 @@ export interface S3ClientOptions {
   credentials?: S3Credentials;
 }
 
+/** The portion of an AWS PutObjectCommand needed by the archive boundary.
+ *
+ * Keep this structural contract local so consumers that inject a client do not
+ * need to install the optional AWS SDK peer just to type-check this adapter.
+ */
+export interface S3ArchiveCommand {
+  readonly input: S3ArchiveCommandInput;
+}
+
+export interface S3ArchiveCommandInput {
+  readonly Bucket?: string;
+  readonly Key?: string;
+  /** AWS SDK streaming bodies vary by runtime and stay opaque at this boundary. */
+  readonly Body?: string | object;
+  readonly ContentType?: string;
+  readonly Metadata?: Readonly<Record<string, string>>;
+}
+
+export interface S3ArchiveCommandResult {
+  readonly VersionId?: string;
+}
+
 export interface S3ArchiveClient {
-  send(command: PutObjectCommand): Promise<Pick<PutObjectCommandOutput, "VersionId">>;
+  send(command: S3ArchiveCommand): Promise<S3ArchiveCommandResult>;
   destroy?(): void;
 }
 
@@ -88,7 +109,13 @@ function requireNonEmpty(value: string, name: string): string {
 
 function normalizePrefix(prefix: string | undefined): string {
   const value = prefix ?? "bursar";
-  return value.replace(/^\/+/, "").replace(/\/+$/, "");
+  let start = 0;
+  while (start < value.length && value[start] === "/") start += 1;
+
+  let end = value.length;
+  while (end > start && value[end - 1] === "/") end -= 1;
+
+  return value.slice(start, end);
 }
 
 /** Archives received billing webhook envelopes under deterministic keys. */
