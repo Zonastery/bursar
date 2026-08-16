@@ -58,6 +58,7 @@ from bursar.commerce.types import (
     CancelAllSubscriptionsResult,
     CancelSubscriptionResult,
     CheckoutStatusResult,
+    CommerceCheckoutStatus,
     CommerceOptions,
     CommerceProviderFactoryContext,
     CommerceSectionAvailability,
@@ -133,6 +134,12 @@ _DEFAULT_PREFERENCES = {
     "usage_alerts": True,
     "invoice_reminders": False,
 }
+
+
+def _require_capability[Capability](value: Capability | None, message: str) -> Capability:
+    if value is None:
+        raise CoreBillingDataUnavailableError(message)
+    return value
 
 
 class _CommerceAutoRechargePort(Protocol):
@@ -537,7 +544,7 @@ class CommerceService:
             json.dumps(digest_value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
         ).hexdigest()
 
-        def create_intent():
+        def create_intent() -> CheckoutIntent:
             return self.billing.create_or_get_checkout_intent(
                 CheckoutIntentCreate(
                     subject_id=input.subject_id,
@@ -639,18 +646,21 @@ class CommerceService:
             raise CommerceResourceNotFoundError("Checkout intent not found")
         status = _status_value(intent.status)
         expired = status == "open" and datetime.fromisoformat(intent.expires_at) <= datetime.now(UTC)
-        mapped = (
-            "expired"
-            if expired
-            else "pending"
-            if status == "open"
-            else "succeeded"
-            if status == "completed"
-            else status
-        )
+        if expired:
+            mapped: CommerceCheckoutStatus = "expired"
+        elif status == "open":
+            mapped = "pending"
+        elif status == "completed":
+            mapped = "succeeded"
+        elif status == "failed":
+            mapped = "failed"
+        elif status == "expired":
+            mapped = "expired"
+        else:
+            raise ValueError(f"Unsupported checkout intent status: {status}")
         return CheckoutStatusResult(
             intent_id=intent.id,
-            status=cast(Any, mapped),
+            status=mapped,
         )
 
     async def cancel_subscription(
@@ -1082,8 +1092,11 @@ class CommerceService:
         cancellation_was_reactivated = False
         try:
             if subscription.cancel_at_period_end:
-                assert reactivation_provider is not None
-                await reactivation_provider.reactivate_subscription(
+                reactivation = _require_capability(
+                    reactivation_provider,
+                    "Subscription reactivation capability disappeared during plan change",
+                )
+                await reactivation.reactivate_subscription(
                     subscription.provider_subscription_id,
                     scope_stable_key(operation_key, "keep", field="operation_key"),
                 )
@@ -1115,8 +1128,11 @@ class CommerceService:
             failure: Exception = exc
             if cancellation_was_reactivated:
                 try:
-                    assert cancellation_provider is not None
-                    await cancellation_provider.cancel_subscription(
+                    cancellation = _require_capability(
+                        cancellation_provider,
+                        "Subscription cancellation capability disappeared during plan change compensation",
+                    )
+                    await cancellation.cancel_subscription(
                         subscription.provider_subscription_id,
                         scope_stable_key(operation_key, "restore-cancellation", field="operation_key"),
                     )
@@ -1233,23 +1249,21 @@ class CommerceService:
     def _preferences(
         self,
         account_id: str,
-        current: Any,
-    ):
+        current: BillingPreferences | None,
+    ) -> BillingPreferences:
         values = {
             **_DEFAULT_PREFERENCES,
             **self.options.preference_defaults.model_dump(exclude_none=True),
         }
         if current is not None:
             values.update(current.model_dump(exclude={"user_id"}))
-        from bursar.billing.types import BillingPreferences
-
         return BillingPreferences(user_id=account_id, **values)
 
     def update_preferences(
         self,
         account_id: str,
         patch: dict[str, bool],
-    ):
+    ) -> BillingPreferences:
         current = self.billing.get_user_preferences(account_id)
         next_preferences = self._preferences(account_id, current)
         next_preferences = next_preferences.model_copy(update=patch)

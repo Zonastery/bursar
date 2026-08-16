@@ -80,16 +80,17 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "bun run clean && tsc && bun run check:browser",
     "check:browser": "bun build tests/browser-entry-smoke.ts --target=browser --outfile=dist/.browser-entry-smoke.js --reject-unresolved && node -e \"require('node:fs').rmSync('dist/.browser-entry-smoke.js', { force: true })\"",
-    "generate:config-types": "json2ts -i src/generated/pricing-config.schema.json -o src/generated/pricing-config.types.ts --unknownAny && prettier --write src/generated/pricing-config.types.ts",
+    "generate:config-types": "json2ts -i src/generated/pricing-config.schema.json -o src/generated/pricing-config.types.ts --unknownAny && oxfmt --config .oxfmtrc.json --write src/generated/pricing-config.types.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run --maxWorkers=1",
     "test:providers": "vitest --config vitest.providers.config.ts run --coverage",
     "test:concurrency": "vitest run tests/store-integration.test.ts tests/billing-integration.test.ts -t concurrent",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
-    "lint": "eslint src/ tests/ --max-warnings=0",
-    "format": "prettier --check src/ tests/",
-    "format:fix": "prettier --write src/ tests/",
+    "lint": "bun run test:anti-slop && oxlint --config .oxlintrc.json --format=agent --report-unused-disable-directives --deny-warnings src/ tests/ scripts/",
+    "test:anti-slop": "node tools/oxlint/anti-slop/tests/run-fixtures.mjs ./node_modules/.bin/oxlint",
+    "format": "oxfmt --config .oxfmtrc.json --check src/ tests/ scripts/",
+    "format:fix": "oxfmt --config .oxfmtrc.json --write src/ tests/ scripts/",
     "knip": "knip --exclude exports,nsExports,types,nsTypes,enumMembers,namespaceMembers",
     "prepublishOnly": "bun run build && vitest run"
   },
@@ -186,36 +187,35 @@
     "@dodopayments/better-auth": "^1.6.4",
     "@dodopayments/nextjs": "^0.3.7",
     "@dodopayments/react-native-checkout": "^1.2.0",
-    "@eslint/js": "^10.0.1",
+    "@oxlint/plugins": "1.78.0",
     "@testcontainers/postgresql": "^12.1.0",
     "@types/node": "^26.2.0",
     "@types/pg": "^8.21.0",
     "@vitest/coverage-v8": "^4.1.10",
     "better-auth": "^1.6.26",
     "dodopayments": "^2.45.1",
-    "eslint": "^10.8.1",
-    "globals": "^17.9.0",
     "json-schema-to-typescript": "^15.0.4",
     "knip": "^6.32.0",
     "lefthook": "^2.1.10",
     "next": "^16.3.0",
+    "oxfmt": "^0.63.0",
+    "oxlint": "^1.78.0",
     "pg": "^8.23.0",
-    "prettier": "^3.9.6",
     "stripe": "^22.4.0",
     "testcontainers": "^12.1.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
   },
   "knip": {
     "entry": [
-      "src/{index,cli,main}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}"
-    ],
-    "ignoreDependencies": [
-      "lefthook"
+      "src/{index,cli,main}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}",
+      "tests/types/public-api-contract.ts"
     ],
     "ignore": [
       "scripts/export-contract-results.mjs"
+    ],
+    "ignoreDependencies": [
+      "lefthook"
     ]
   }
 }

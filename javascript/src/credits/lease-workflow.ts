@@ -1,4 +1,5 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 import { retryBursarOperation } from "../retry.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEventType } from "./events.js";
@@ -18,6 +19,7 @@ import type {
   SettleOptions,
 } from "./service-types.js";
 import type { CreditStore } from "./store.js";
+import type { StructuredObject } from "../shared/json.js";
 import type {
   AllowanceResult,
   BillingMode,
@@ -40,11 +42,7 @@ export class CreditLeaseWorkflow {
     private readonly overdraftFloor: Decimal | null,
     private readonly defaultMaxConcurrent: number | null,
     private readonly defaultTtl: number,
-    private readonly emit: (
-      type: CreditEventType,
-      userId: string,
-      data?: Record<string, unknown>,
-    ) => void,
+    private readonly emit: (type: CreditEventType, userId: string, data?: StructuredObject) => void,
     private readonly emitQuotaEvents: (userId: string, idempotencyKey: string) => Promise<void>,
     private readonly maybeLazyExpire: (userId: string) => Promise<void>,
     private readonly afterDeduction: (userId: string, result: DeductionSuccess) => Promise<void>,
@@ -132,7 +130,7 @@ export class CreditLeaseWorkflow {
     const feature = options.feature ?? null;
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
     const dimensions = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.dimensions ?? {}) };
-    const region = typeof dimensions.region === "string" ? dimensions.region : null;
+    const region = z.string().safeParse(dimensions.region).data ?? null;
 
     const result = await this.store.createLease(userId, amount, operationType, {
       idempotencyKey: leaseIdempotencyKey,
@@ -202,10 +200,10 @@ export class CreditLeaseWorkflow {
     const { amount, model } = await this.costOf(metricsOrAmount, userId, leaseId);
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
     const dimensions = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.dimensions ?? {}) };
-    const region = typeof dimensions.region === "string" ? dimensions.region : null;
+    const region = z.string().safeParse(dimensions.region).data ?? null;
 
     // Build ledger metadata with caller fields first and protected system fields last.
-    const txMeta: Record<string, unknown> = {};
+    const txMeta: CreditMetadata = {};
     if (isAmount(metricsOrAmount)) {
       if (options?.metadata) {
         for (const [k, v] of Object.entries(options.metadata)) {
@@ -233,7 +231,7 @@ export class CreditLeaseWorkflow {
       region,
       measures,
       dimensions,
-      metadata: txMeta as CreditMetadata,
+      metadata: txMeta,
     });
 
     if (result.error !== null) {

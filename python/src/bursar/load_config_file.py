@@ -76,7 +76,8 @@ def load_config_text(content: str, *, is_yaml: bool, source: str | Path = "<stri
 
     if is_yaml:
         try:
-            parsed = yaml.load(content, Loader=_StrictYamlLoader)
+            # This loader subclasses SafeLoader solely to add duplicate-key rejection.
+            parsed = yaml.load(content, Loader=_StrictYamlLoader)  # noqa: S506
         except yaml.YAMLError as exc:
             raise ConfigError(f"Invalid YAML in {source}: {exc}") from exc
     else:

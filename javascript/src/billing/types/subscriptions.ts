@@ -1,4 +1,5 @@
 import type { BillingOfferInterval, ProviderRef } from "./common.js";
+import type { JsonObject } from "../../shared/json.js";
 
 export type BillingSubscriptionStatus =
   | "incomplete"
@@ -59,11 +60,15 @@ export interface BillingSubscriptionState {
   cancelAtPeriodEnd: boolean;
   interval?: string | null;
   intervalCount?: number | null;
-  metadata?: Record<string, unknown> | null;
+  metadata?: JsonObject | null;
 }
 
 export type BillingSubscriptionChangeState =
-  "awaiting_payment" | "scheduled" | "applied" | "failed" | "canceled";
+  | "awaiting_payment"
+  | "scheduled"
+  | "applied"
+  | "failed"
+  | "canceled";
 
 export interface BillingSubscriptionOfferContext {
   offerId: string;

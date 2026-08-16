@@ -4,7 +4,8 @@ import type { CallProc } from "../../../shared/postgres-types.js";
 import {
   pgBoolean,
   postgresUuid,
-  requireRow,
+  requireRecordRow,
+  optionalRecordRow,
   safeParse,
 } from "../../../shared/postgres-validation.js";
 
@@ -128,7 +129,7 @@ export class BalanceRepository {
   async getBalance(userId: string): Promise<BalanceRow | null> {
     const rows = await this.callproc("get_credit_state", [userId]);
     if (!rows || rows.length === 0) return null;
-    const row = requireRow(rows, "BalanceRepository.getBalance") as Record<string, unknown>;
+    const row = requireRecordRow(rows, "BalanceRepository.getBalance");
     return safeParse(
       BalanceRowSchema,
       {
@@ -163,16 +164,20 @@ export class BalanceRepository {
       expiresAt,
       "0",
     ]);
-    const row = requireRow(rows, "BalanceRepository.addCredits") as Record<string, unknown>;
+    const row = requireRecordRow(rows, "BalanceRepository.addCredits");
     const state =
       row.error_code == null
-        ? ((await this.callproc("get_credit_state", [userId]))[0] as
-            Record<string, unknown> | undefined)
+        ? optionalRecordRow(
+            await this.callproc("get_credit_state", [userId]),
+            "BalanceRepository.addCredits.state",
+          )
         : undefined;
     const grant =
       row.error_code == null && decimalAmount.isPositive() && row.entry_id != null
-        ? ((await this.callproc("get_credit_grant_details", [userId, row.entry_id]))[0] as
-            Record<string, unknown> | undefined)
+        ? optionalRecordRow(
+            await this.callproc("get_credit_grant_details", [userId, row.entry_id]),
+            "BalanceRepository.addCredits.grant",
+          )
         : undefined;
     return safeParse(
       AddCreditsRowSchema,
@@ -196,7 +201,7 @@ export class BalanceRepository {
     if (!rows || rows.length === 0) {
       return null;
     }
-    const row = requireRow(rows, "BalanceRepository.getAvailable") as Record<string, unknown>;
+    const row = requireRecordRow(rows, "BalanceRepository.getAvailable");
     return safeParse(
       AvailableRowSchema,
       {

@@ -1,5 +1,7 @@
 import { validateExpression } from "../expr.js";
+import { z } from "zod";
 import {
+  asArray,
   asBoolean,
   asDecimal,
   asObject,
@@ -8,6 +10,7 @@ import {
   semanticError,
   validateIdentifiers,
 } from "./parse-utils.js";
+import type { JsonValue } from "../shared/json.js";
 import type {
   Charge,
   DimensionDefinition,
@@ -20,27 +23,31 @@ import type {
   RateCard,
 } from "./types.js";
 
+const roundingSchema = z.enum(["ceil", "floor", "nearest"]);
+const dimensionTypeSchema = z.enum(["string", "number", "boolean"]);
+
 function parseMatcherScalar(
-  value: unknown,
+  value: JsonValue | undefined,
   definition: DimensionDefinition,
   path: string,
 ): MatcherScalar {
   if (definition.type === "boolean") {
-    if (typeof value !== "boolean") semanticError(`${path} matcher values must be booleans`);
-    return value;
+    const parsed = z.boolean().safeParse(value);
+    if (!parsed.success) semanticError(`${path} matcher values must be booleans`);
+    return parsed.data;
   }
   if (definition.type === "number") {
-    if (typeof value !== "number" && typeof value !== "string") {
-      semanticError(`${path} matcher values must be decimal strings or numbers`);
-    }
-    return asDecimal(value);
+    const parsed = z.union([z.number(), z.string()]).safeParse(value);
+    if (!parsed.success) semanticError(`${path} matcher values must be decimal strings or numbers`);
+    return asDecimal(parsed.data, path);
   }
-  if (typeof value !== "string") semanticError(`${path} matcher values must be strings`);
-  return value;
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success) semanticError(`${path} matcher values must be strings`);
+  return parsed.data;
 }
 
 function parseMatcher(
-  value: unknown,
+  value: JsonValue,
   definition: DimensionDefinition,
   path: string,
 ): DimensionMatcher {
@@ -50,7 +57,9 @@ function parseMatcher(
     case "not_in":
       return {
         op: raw.op,
-        values: (raw.values as unknown[]).map((item) => parseMatcherScalar(item, definition, path)),
+        values: asArray(raw.values, `${path}.values`).map((item) =>
+          parseMatcherScalar(item, definition, path),
+        ),
       };
     case "prefix":
       if (definition.type !== "string") {
@@ -61,13 +70,11 @@ function parseMatcher(
       if (definition.type !== "number") {
         semanticError(`${path} range matcher requires a number dimension`);
       }
-      const parsed = {
-        op: "range",
-        ...(raw.gt == null ? {} : { gt: asDecimal(raw.gt) }),
-        ...(raw.gte == null ? {} : { gte: asDecimal(raw.gte) }),
-        ...(raw.lt == null ? {} : { lt: asDecimal(raw.lt) }),
-        ...(raw.lte == null ? {} : { lte: asDecimal(raw.lte) }),
-      } as const;
+      const parsed: Extract<DimensionMatcher, { op: "range" }> = { op: "range" };
+      if (raw.gt != null) parsed.gt = asDecimal(raw.gt);
+      if (raw.gte != null) parsed.gte = asDecimal(raw.gte);
+      if (raw.lt != null) parsed.lt = asDecimal(raw.lt);
+      if (raw.lte != null) parsed.lte = asDecimal(raw.lte);
       if (parsed.gt == null && parsed.gte == null && parsed.lt == null && parsed.lte == null) {
         semanticError(`${path} range matcher requires at least one bound`);
       }
@@ -89,13 +96,12 @@ function parseMatcher(
   }
 }
 
-function parseTiers(value: unknown): GraduatedTier[] {
-  const tiers = (value as unknown[]).map((item) => {
+function parseTiers(value: JsonValue | undefined): GraduatedTier[] {
+  const tiers = asArray(value, "pricing.tiers").map((item) => {
     const tier = asObject(item);
-    return {
-      ...(tier.up_to == null ? {} : { upTo: asDecimal(tier.up_to) }),
-      rate: asDecimal(tier.rate),
-    };
+    const parsedTier: GraduatedTier = { rate: asDecimal(tier.rate) };
+    if (tier.up_to != null) parsedTier.upTo = asDecimal(tier.up_to);
+    return parsedTier;
   });
   if (tiers.at(-1)?.upTo != null || tiers.slice(0, -1).some((tier) => tier.upTo == null)) {
     semanticError("graduated and volume tiers must end with exactly one open-ended tier");
@@ -112,7 +118,7 @@ function parseTiers(value: unknown): GraduatedTier[] {
   return tiers;
 }
 
-function parseCharge(value: unknown): Charge {
+function parseCharge(value: JsonValue): Charge {
   const raw = asObject(value);
   switch (raw.type) {
     case "flat":
@@ -130,7 +136,7 @@ function parseCharge(value: unknown): Charge {
         measure: asString(raw.measure),
         units: asDecimal(raw.units),
         amount: asDecimal(raw.amount),
-        rounding: (raw.rounding ?? "ceil") as "ceil" | "floor" | "nearest",
+        rounding: roundingSchema.parse(raw.rounding ?? "ceil"),
       };
     case "graduated":
     case "volume":
@@ -142,7 +148,10 @@ function parseCharge(value: unknown): Charge {
     case "expression":
       return { type: "expression", formula: asString(raw.formula) };
     case "sum":
-      return { type: "sum", components: (raw.components as unknown[]).map(parseCharge) };
+      return {
+        type: "sum",
+        components: asArray(raw.components, "pricing.sum.components").map(parseCharge),
+      };
     default:
       return semanticError(`unsupported charge type '${asString(raw.type)}'`);
   }
@@ -194,7 +203,7 @@ function validateRateCardInheritance(rateCards: Record<string, RateCard>): void 
   Object.keys(rateCards).forEach(visit);
 }
 
-export function parsePricing(value: unknown): PricingConfig {
+export function parsePricing(value: JsonValue): PricingConfig {
   const raw = asObject(value);
   const operationsRaw = asObject(raw.operations);
   const cardsRaw = asObject(raw.rate_cards);
@@ -236,7 +245,7 @@ export function parsePricing(value: unknown): PricingConfig {
           return [
             key,
             {
-              type: item.type as DimensionDefinition["type"],
+              type: dimensionTypeSchema.parse(item.type),
               required: asBoolean(item.required ?? true),
             },
           ];
@@ -256,55 +265,61 @@ export function parsePricing(value: unknown): PricingConfig {
         semanticError(`rate card '${cardKey}' references unknown operation '${operationKey}'`);
       }
       const operationPriceRaw = asObject(operationInput);
-      const rules = ((operationPriceRaw.rules ?? []) as unknown[]).map((ruleInput, index) => {
-        const ruleRaw = asObject(ruleInput);
-        const whenRaw = asObject(ruleRaw.when);
-        const unknownDimensions = Object.keys(whenRaw).filter(
-          (name) => !definition.dimensions[name],
-        );
-        if (unknownDimensions.length) {
-          semanticError(
-            `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}] matches undeclared dimensions ${unknownDimensions.join(", ")}`,
+      const rules = asArray(operationPriceRaw.rules ?? [], "pricing.rules").map(
+        (ruleInput, index) => {
+          const ruleRaw = asObject(ruleInput);
+          const whenRaw = asObject(ruleRaw.when);
+          const unknownDimensions = Object.keys(whenRaw).filter(
+            (name) => !definition.dimensions[name],
           );
-        }
-        const parsedCharge = parseCharge(ruleRaw.charge);
-        validateCharge(parsedCharge, definition, operationKey);
-        return {
-          when: Object.fromEntries(
-            Object.entries(whenRaw).map(([key, item]) => {
-              const dimension = definition.dimensions[key];
-              if (!dimension) {
-                semanticError(
-                  `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}] matches undeclared dimension '${key}'`,
-                );
-              }
-              return [
-                key,
-                parseMatcher(
-                  item,
-                  dimension,
-                  `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].when.${key}`,
-                ),
-              ];
-            }),
-          ),
-          charge: parsedCharge,
-        };
-      });
+          if (unknownDimensions.length) {
+            semanticError(
+              `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}] matches undeclared dimensions ${unknownDimensions.join(", ")}`,
+            );
+          }
+          const parsedCharge = parseCharge(
+            asObject(
+              ruleRaw.charge,
+              `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].charge`,
+            ),
+          );
+          validateCharge(parsedCharge, definition, operationKey);
+          return {
+            when: Object.fromEntries(
+              Object.entries(whenRaw).map(([key, item]) => {
+                const dimension = definition.dimensions[key];
+                if (!dimension) {
+                  semanticError(
+                    `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}] matches undeclared dimension '${key}'`,
+                  );
+                }
+                return [
+                  key,
+                  parseMatcher(
+                    item,
+                    dimension,
+                    `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].when.${key}`,
+                  ),
+                ];
+              }),
+            ),
+            charge: parsedCharge,
+          };
+        },
+      );
       const unmatchedRaw = asObject(operationPriceRaw.unmatched);
       const unmatched =
         unmatchedRaw.action === "charge"
-          ? ({ action: "charge", charge: parseCharge(unmatchedRaw.charge) } as const)
+          ? ({ action: "charge", charge: parseCharge(asObject(unmatchedRaw.charge)) } as const)
           : ({ action: "reject" } as const);
       if (unmatched.action === "charge") {
         validateCharge(unmatched.charge, definition, operationKey);
       }
       operationPrices[operationKey] = { rules, unmatched };
     }
-    rateCards[cardKey] = {
-      ...(rawCard.extends == null ? {} : { extends: asString(rawCard.extends) }),
-      operations: operationPrices,
-    };
+    const rateCard: RateCard = { operations: operationPrices };
+    if (rawCard.extends != null) rateCard.extends = asString(rawCard.extends);
+    rateCards[cardKey] = rateCard;
   }
 
   validateRateCardInheritance(rateCards);

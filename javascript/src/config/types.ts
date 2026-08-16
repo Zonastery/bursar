@@ -192,7 +192,9 @@ export interface PlanDefinition {
 }
 
 export type ProviderDefinition =
-  { type: "stripe" } | { type: "dodo" } | { type: "custom"; adapter: string };
+  | { type: "stripe" }
+  | { type: "dodo" }
+  | { type: "custom"; adapter: string };
 
 export type ProviderReference =
   | { type: "stripe_price"; priceId: string }
@@ -261,7 +263,10 @@ export interface CommerceConfig {
 }
 
 export type SubscriptionChangeClassification =
-  "upgrade" | "downgrade" | "lateral" | "cadence_change";
+  | "upgrade"
+  | "downgrade"
+  | "lateral"
+  | "cadence_change";
 
 export interface SubscriptionChangePolicy {
   effective: "immediate" | "renewal";

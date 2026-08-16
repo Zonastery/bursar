@@ -159,7 +159,7 @@ def test_replayable_mutations_require_bounded_trimmed_idempotency_keys(
 
     with pytest.raises(ValueError, match="trimmed non-empty string of at most 255 characters"):
         credits.add_credits("user-1", 1, idempotency_key=idempotency_key)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="trimmed non-empty string of at most 255 characters"):
         ReserveOptions(idempotency_key=idempotency_key)
 
     store.add_credits.assert_not_called()

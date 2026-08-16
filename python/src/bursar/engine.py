@@ -22,6 +22,7 @@ from bursar.config import (
     PerUnitCharge,
     PrefixMatcher,
     PriceRule,
+    PricingConfig,
     RangeMatcher,
     SumCharge,
     VolumeCharge,
@@ -42,7 +43,7 @@ def _q(value: Decimal) -> Decimal:
 class PricingEngine:
     """Calculate exact credit costs from typed catalog charge rules."""
 
-    def __init__(self, config: BursarConfig):
+    def __init__(self, config: BursarConfig) -> None:
         self._config = config
 
     @classmethod
@@ -54,9 +55,7 @@ class PricingEngine:
         return self._config.model_dump(mode="json", exclude_none=True)
 
     def calculate(self, metrics: UsageMetrics, *, rate_card: str | None = None) -> CostBreakdown:
-        pricing = self._config.pricing
-        if pricing is None:
-            raise ConfigError("usage pricing not configured")
+        pricing = self._require_pricing()
         operation_name = metrics.operation
         definition = pricing.operations.get(operation_name)
         if definition is None:
@@ -127,9 +126,14 @@ class PricingEngine:
         plan = self._config.plans.get(plan_id)
         return None if plan is None else plan.rate_card
 
+    def _require_pricing(self) -> PricingConfig:
+        pricing = self._config.pricing
+        if pricing is None:
+            raise ConfigError("usage pricing not configured")
+        return pricing
+
     def _resolve_rate_card(self, requested: str | None) -> str:
-        assert self._config.pricing is not None
-        cards = self._config.pricing.rate_cards
+        cards = self._require_pricing().rate_cards
         if requested is not None:
             if requested not in cards:
                 raise ConfigError(f"unknown rate card '{requested}'")
@@ -139,8 +143,7 @@ class PricingEngine:
         raise ConfigError("rate_card is required when more than one rate card is configured")
 
     def _operation_pricing(self, card_key: str, operation: str) -> OperationPricing:
-        assert self._config.pricing is not None
-        card = self._config.pricing.rate_cards[card_key]
+        card = self._require_pricing().rate_cards[card_key]
         if operation in card.operations:
             return card.operations[operation]
         if card.extends is None:

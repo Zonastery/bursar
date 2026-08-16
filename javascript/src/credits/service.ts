@@ -1,4 +1,5 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 import {
   CapReachedError,
   ConfigError,
@@ -60,6 +61,7 @@ import { toDecimal } from "./amount.js";
 import { CreditLeaseWorkflow } from "./lease-workflow.js";
 import { requireStableKey } from "../shared/idempotency.js";
 import { getDefaultInstrumentation, type Instrumentation } from "../telemetry/index.js";
+import type { StructuredObject } from "../shared/json.js";
 import type {
   AddCreditsOptions,
   BeginBilledOperationOptions,
@@ -326,7 +328,7 @@ export class CreditsService {
   }
 
   /** Emit a credit lifecycle event. No-op if no emitter is configured. */
-  private emit(type: CreditEventType, userId: string, data?: Record<string, unknown>): void {
+  private emit(type: CreditEventType, userId: string, data?: StructuredObject): void {
     this.emitter?.emit({ type, timestamp: new Date(), userId, data });
   }
 
@@ -426,7 +428,7 @@ export class CreditsService {
     this.emit("credits.plan_changed", userId, {
       userId,
       planKey,
-      planAssignedAt: result.planAssignedAt,
+      planAssignedAt: result.planAssignedAt?.toISOString() ?? null,
       assignmentState: result.assignmentState,
       timestamp: new Date().toISOString(),
     });
@@ -733,6 +735,8 @@ export class CreditsService {
     const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
     const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
+    const model = z.string().safeParse(metrics.dimensions?.model).data ?? null;
+    const region = z.string().safeParse(metrics.dimensions?.region).data ?? null;
 
     // 1) Calculate cost as an exact Decimal, never truncated.
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
@@ -740,7 +744,7 @@ export class CreditsService {
 
     // Build ledger metadata: caller fields FIRST, system fields LAST so the
     // protected system fields win.
-    const meta: Record<string, unknown> = {};
+    const meta: CreditMetadata = {};
     if (options.metadata) {
       for (const [k, v] of Object.entries(options.metadata)) {
         if (v != null) meta[k] = v;
@@ -756,11 +760,11 @@ export class CreditsService {
       idempotencyKey: effectiveIdempotencyKey,
       operation: metrics.operation,
       feature: options.feature ?? null,
-      model: typeof metrics.dimensions?.model === "string" ? metrics.dimensions.model : null,
-      region: typeof metrics.dimensions?.region === "string" ? metrics.dimensions.region : null,
+      model,
+      region,
       measures: { ...(metrics.measures ?? {}) },
       dimensions: { ...(metrics.dimensions ?? {}) },
-      metadata: meta as CreditMetadata,
+      metadata: meta,
     };
 
     // 2) Atomic charge. This records zero-cost usage too, so authorization,
@@ -822,8 +826,10 @@ export class CreditsService {
     const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
     const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
+    const model = z.string().safeParse(metrics.dimensions?.model).data ?? null;
+    const region = z.string().safeParse(metrics.dimensions?.region).data ?? null;
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
-    const meta: Record<string, unknown> = {};
+    const meta: CreditMetadata = {};
     if (options.metadata) {
       for (const [key, value] of Object.entries(options.metadata)) {
         if (value != null) meta[key] = value;
@@ -838,11 +844,11 @@ export class CreditsService {
     const result = await this.store.recordUsage(userId, metrics.operation, breakdown.total, {
       idempotencyKey: effectiveIdempotencyKey,
       operation: metrics.operation,
-      model: typeof metrics.dimensions?.model === "string" ? metrics.dimensions.model : null,
-      region: typeof metrics.dimensions?.region === "string" ? metrics.dimensions.region : null,
+      model,
+      region,
       measures: { ...(metrics.measures ?? {}) },
       dimensions: { ...(metrics.dimensions ?? {}) },
-      metadata: meta as CreditMetadata,
+      metadata: meta,
     });
     if (result.error !== null) {
       throw new StoreError(`Usage record failed: ${result.error}`);

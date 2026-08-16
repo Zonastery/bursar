@@ -1,17 +1,22 @@
+import { z } from "zod";
+
 import type { CommerceOffer } from "../config/types.js";
 import type { PaymentProvider } from "../providers/types.js";
 import { ProviderSelectionError } from "./errors.js";
 import type { CommerceOptions, CommerceProviderFactoryContext } from "./types.js";
 
-function isPaymentProvider(value: unknown): value is PaymentProvider {
-  if (typeof value !== "object" || value == null) return false;
-  const candidate = value as Partial<PaymentProvider>;
-  return (
-    typeof candidate.provider === "string" &&
-    candidate.provider.trim().length > 0 &&
-    typeof candidate.createCheckoutSession === "function" &&
-    typeof candidate.handleWebhook === "function"
-  );
+const paymentProviderSchema = z.object({
+  provider: z.string().trim().min(1),
+  createCheckoutSession: z.function(),
+  handleWebhook: z.function(),
+});
+
+function isPaymentProvider<T>(value: T): value is T & PaymentProvider {
+  try {
+    return paymentProviderSchema.safeParse(value).success;
+  } catch {
+    return false;
+  }
 }
 
 export class CommerceProviderRegistry {
@@ -70,7 +75,7 @@ export class CommerceProviderRegistry {
           }
           return provider;
         })
-        .catch((error: unknown) => {
+        .catch((error) => {
           if (this.instances.get(providerName) === created) {
             this.instances.delete(providerName);
           }

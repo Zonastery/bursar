@@ -1,11 +1,14 @@
-import type { BillingSubscriptionStatus } from "../../billing/index.js";
+import type { BillingEvent, BillingSubscriptionStatus } from "../../billing/index.js";
+import { z } from "zod";
 import type { BillingEventSink } from "../../bursar.js";
 import type {
   BillingPaymentInfo,
   BillingRefundInfo,
   BillingDisputeInfo,
+  BillingSubscriptionInfo,
 } from "../../billing/types/index.js";
-import type { DodoWebhookPayload } from "./client-contract.js";
+import type { DodoWebhookEnvelope } from "./client-contract.js";
+import { isExternalObject, type ExternalObject, type ExternalValue } from "../../shared/json.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import {
   callBillingEventSink,
@@ -26,17 +29,20 @@ const DISPUTE_CLOSED_TYPES = new Set([
   "dispute.expired",
 ]);
 const DISPUTE_OPEN_TYPES = new Set(["dispute.opened", "dispute.challenged"]);
+type DodoDateInput = ExternalValue;
 
-const DODO_SUBSCRIPTION_STATUS: Readonly<Record<string, BillingSubscriptionStatus>> = {
-  pending: "incomplete",
-  trialing: "trialing",
-  active: "active",
-  paused: "paused",
-  on_hold: "past_due",
-  cancelled: "canceled",
-  failed: "past_due",
-  expired: "expired",
-};
+const DODO_DATE_ZONE_SUFFIX = /(?:Z|[+-]\d{2}:?\d{2}|GMT(?:[+-]\d{4})?)$/i;
+
+const DODO_SUBSCRIPTION_STATUS = new Map<string, BillingSubscriptionStatus>([
+  ["pending", "incomplete"],
+  ["trialing", "trialing"],
+  ["active", "active"],
+  ["paused", "paused"],
+  ["on_hold", "past_due"],
+  ["cancelled", "canceled"],
+  ["failed", "past_due"],
+  ["expired", "expired"],
+]);
 
 function disputeStatus(
   type: string,
@@ -57,7 +63,7 @@ function disputeStatus(
 }
 
 function normalizeInterval(
-  value: unknown,
+  value: ExternalValue,
   field: string,
 ): "day" | "week" | "month" | "year" | undefined {
   if (value === null || value === undefined) return undefined;
@@ -69,34 +75,39 @@ function normalizeInterval(
 }
 
 /** Dodo sometimes sends dates in JS toString() format (e.g. "Sat Jul 18 2026 05:15:24 GMT+0000..."). Normalize to ISO 8601. */
-export function normalizeDate(raw: unknown): string | null {
+export function normalizeDate(raw: DodoDateInput): string | null {
   if (!raw) return null;
   if (raw instanceof Date) {
     return Number.isNaN(raw.getTime()) ? null : raw.toISOString();
   }
-  const value = String(raw).trim();
-  if (!/(?:Z|[+-]\d{2}:?\d{2}|GMT(?:[+-]\d{4})?)(?:\s*\([^)]*\))?$/i.test(value)) {
-    return null;
-  }
-  const d = new Date(value);
+  const parsedRaw = z.string().safeParse(raw);
+  if (!parsedRaw.success) return null;
+  const value = parsedRaw.data.trim();
+  const dateText = stripDateAnnotation(value);
+  if (!DODO_DATE_ZONE_SUFFIX.test(dateText)) return null;
+  const d = new Date(dateText);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
-function requireDate(raw: unknown, field: string): string {
-  if (typeof raw !== "string" && !(raw instanceof Date)) {
-    throw new TypeError(`${field} must be a valid instant`);
-  }
+function stripDateAnnotation(value: string): string {
+  if (!value.endsWith(")")) return value;
+  const opening = value.lastIndexOf("(");
+  if (opening < 0 || value.indexOf(")", opening) !== value.length - 1) return value;
+  return value.slice(0, opening).trimEnd();
+}
+
+function requireDate(raw: DodoDateInput, field: string): string {
   const normalized = normalizeDate(raw);
   if (!normalized) throw new TypeError(`${field} must be a valid instant`);
   return normalized;
 }
 
-function optionalDate(raw: unknown, field: string): string | null {
+function optionalDate(raw: DodoDateInput, field: string): string | null {
   if (raw === null || raw === undefined) return null;
   return requireDate(raw, field);
 }
 
-export function dodoBillingEventId(payload: DodoWebhookPayload): string {
+export function dodoBillingEventId<TData>(payload: DodoWebhookEnvelope<TData>): string {
   const data = objectValue(payload.data);
   if (!data) throw new TypeError("Dodo webhook data must be an object");
   const resourceKey = payload.type.startsWith("payment.")
@@ -114,23 +125,22 @@ export function dodoBillingEventId(payload: DodoWebhookPayload): string {
   return `dodo:${payload.type}:${objectId}:${occurredAt}`;
 }
 
-function objectValue(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
+function objectValue<T>(value: T): (T & ExternalObject) | undefined {
+  return isExternalObject(value) ? value : undefined;
 }
 
-function optionalObject(value: unknown, field: string): Record<string, unknown> | undefined {
+function optionalObject(value: ExternalValue, field: string): ExternalObject | undefined {
   if (value === null || value === undefined) return undefined;
   return requireObject(value, field);
 }
 
-function requireObject(value: unknown, field: string): Record<string, unknown> {
+function requireObject(value: ExternalValue, field: string): ExternalObject {
   const object = objectValue(value);
   if (!object) throw new TypeError(`${field} must be an object`);
   return object;
 }
 
-function customerFields(data: Record<string, unknown>) {
+function customerFields(data: ExternalObject) {
   const customer = optionalObject(data.customer, "Dodo customer");
   return {
     providerCustomerId:
@@ -140,7 +150,7 @@ function customerFields(data: Record<string, unknown>) {
   };
 }
 
-function productId(data: Record<string, unknown>): string | undefined {
+function productId(data: ExternalObject): string | undefined {
   const direct = optionalProviderString(data.product_id, "Dodo product_id");
   if (direct) return direct;
 
@@ -159,18 +169,33 @@ function productId(data: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-function subscriptionRefs(data: Record<string, unknown>, metadata: Record<string, string>) {
+function subscriptionRefs(data: ExternalObject, metadata: Record<string, string>) {
   const providerProductId = productId(data);
   if (providerProductId) return { productId: providerProductId };
   const lookupKey = metadata.plan_slug?.trim();
   return lookupKey ? { lookupKey } : undefined;
 }
 
-function subscriptionId(data: Record<string, unknown>): string {
+function optionalSubscriptionRefs(data: ExternalObject, metadata: Record<string, string>) {
+  const refs = subscriptionRefs(data, metadata);
+  return refs ? { refs } : {};
+}
+
+function subscriptionId(data: ExternalObject): string {
   return requireProviderString(data.subscription_id, "Dodo subscription.subscription_id");
 }
 
-function subscriptionFields(data: Record<string, unknown>, metadata: Record<string, string>) {
+interface DodoSubscriptionFields {
+  interval?: "day" | "week" | "month" | "year";
+  intervalCount?: number;
+  periodStart?: string;
+  cancelAtPeriodEnd?: boolean;
+}
+
+function subscriptionFields(
+  data: ExternalObject,
+  metadata: Record<string, string>,
+): DodoSubscriptionFields {
   const interval =
     normalizeInterval(
       data.payment_frequency_interval,
@@ -198,27 +223,27 @@ function subscriptionFields(data: Record<string, unknown>, metadata: Record<stri
     data.cancel_at_next_billing_date,
     "Dodo subscription.cancel_at_next_billing_date",
   );
-  return {
-    ...(interval ? { interval } : {}),
-    ...(intervalCount !== undefined ? { intervalCount } : {}),
-    ...(periodStart ? { periodStart } : {}),
-    ...(cancelAtPeriodEnd !== undefined ? { cancelAtPeriodEnd } : {}),
-  };
+  const result: DodoSubscriptionFields = {};
+  if (interval) result.interval = interval;
+  if (intervalCount !== undefined) result.intervalCount = intervalCount;
+  if (periodStart) result.periodStart = periodStart;
+  if (cancelAtPeriodEnd !== undefined) result.cancelAtPeriodEnd = cancelAtPeriodEnd;
+  return result;
 }
 
 function subscriptionStatus(
-  value: unknown,
+  value: ExternalValue,
   logger: ReturnType<typeof normalizeProviderLogger>,
 ): BillingSubscriptionStatus | null {
   if (value === null || value === undefined) return null;
   const raw = requireProviderString(value, "Dodo subscription.status");
-  const status = DODO_SUBSCRIPTION_STATUS[raw];
+  const status = DODO_SUBSCRIPTION_STATUS.get(raw);
   if (!status) logger.warn("Unsupported Dodo subscription status", { status: raw });
   return status ?? null;
 }
 
-export async function handleDodoBillingEvent(
-  payload: DodoWebhookPayload,
+export async function handleDodoBillingEvent<TData>(
+  payload: DodoWebhookEnvelope<TData>,
   accountId: string | null,
   metadata: Record<string, string>,
   sink: BillingEventSink,
@@ -230,15 +255,17 @@ export async function handleDodoBillingEvent(
   const type = payload.type;
   const customerInfo = customerFields(data);
 
-  function baseEvent() {
-    return {
-      provider: "dodo" as const,
+  function baseEvent(eventType: BillingEvent["eventType"]): BillingEvent {
+    const event: BillingEvent = {
+      provider: "dodo",
       eventId: dodoBillingEventId(payload),
+      eventType,
       occurredAt: requireDate(payload.timestamp, "Dodo webhook timestamp"),
-      ...(accountId ? { accountId } : {}),
-      ...(customerInfo.providerCustomerId ? { customer: customerInfo } : {}),
-      ...(Object.keys(metadata).length ? { metadata } : {}),
     };
+    if (accountId) event.accountId = accountId;
+    if (customerInfo.providerCustomerId) event.customer = customerInfo;
+    if (Object.keys(metadata).length) event.metadata = metadata;
+    return event;
   }
 
   switch (type) {
@@ -253,19 +280,19 @@ export async function handleDodoBillingEvent(
         hasAccountId: Boolean(accountId),
         refs,
       });
+      const subscription: BillingSubscriptionInfo = {
+        providerSubscriptionId: subId,
+        status:
+          data.status === null || data.status === undefined
+            ? "active"
+            : subscriptionStatus(data.status, log),
+        periodEnd: optionalDate(data.next_billing_date, "Dodo subscription.next_billing_date"),
+        ...subscriptionFields(data, metadata),
+      };
+      if (refs) subscription.refs = refs;
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.created",
-        subscription: {
-          providerSubscriptionId: subId,
-          status:
-            data.status === null || data.status === undefined
-              ? "active"
-              : subscriptionStatus(data.status, log),
-          periodEnd: optionalDate(data.next_billing_date, "Dodo subscription.next_billing_date"),
-          ...subscriptionFields(data, metadata),
-          refs,
-        },
+        ...baseEvent("subscription.created"),
+        subscription,
       });
       return;
     }
@@ -274,14 +301,13 @@ export async function handleDodoBillingEvent(
       const subId = subscriptionId(data);
 
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.renewed",
+        ...baseEvent("subscription.renewed"),
         subscription: {
           providerSubscriptionId: subId,
           status: "active",
           periodEnd: optionalDate(data.next_billing_date, "Dodo subscription.next_billing_date"),
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -290,13 +316,12 @@ export async function handleDodoBillingEvent(
     case "subscription.cancelled": {
       const subId = subscriptionId(data);
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.canceled",
+        ...baseEvent("subscription.canceled"),
         subscription: {
           providerSubscriptionId: subId,
           status: "canceled",
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -305,13 +330,12 @@ export async function handleDodoBillingEvent(
     case "subscription.expired": {
       const subId = subscriptionId(data);
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.expired",
+        ...baseEvent("subscription.expired"),
         subscription: {
           providerSubscriptionId: subId,
           status: "expired",
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -320,13 +344,12 @@ export async function handleDodoBillingEvent(
     case "subscription.failed": {
       const subId = subscriptionId(data);
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.updated",
+        ...baseEvent("subscription.updated"),
         subscription: {
           providerSubscriptionId: subId,
           status: "past_due",
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -335,13 +358,12 @@ export async function handleDodoBillingEvent(
     case "subscription.on_hold": {
       const subId = subscriptionId(data);
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.updated",
+        ...baseEvent("subscription.updated"),
         subscription: {
           providerSubscriptionId: subId,
           status: "past_due",
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -350,13 +372,12 @@ export async function handleDodoBillingEvent(
     case "subscription.paused": {
       const subId = subscriptionId(data);
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.paused",
+        ...baseEvent("subscription.paused"),
         subscription: {
           providerSubscriptionId: subId,
           status: "paused",
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -365,30 +386,28 @@ export async function handleDodoBillingEvent(
     case "subscription.updated": {
       const subId = subscriptionId(data);
       const periodEnd = optionalDate(data.next_billing_date, "Dodo subscription.next_billing_date");
-      await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.updated",
-        subscription: {
-          providerSubscriptionId: subId,
-          status: subscriptionStatus(data.status, log),
-          ...(periodEnd ? { periodEnd } : {}),
-          ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
-        },
-      });
+      const subscription: BillingSubscriptionInfo = {
+        providerSubscriptionId: subId,
+        status: subscriptionStatus(data.status, log),
+        ...subscriptionFields(data, metadata),
+        ...optionalSubscriptionRefs(data, metadata),
+      };
+      if (periodEnd) subscription.periodEnd = periodEnd;
+      const event = baseEvent("subscription.updated");
+      event.subscription = subscription;
+      await callBillingEventSink(sink, event);
       return;
     }
 
     case "subscription.plan_changed": {
       const subId = subscriptionId(data);
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "subscription.plan_changed",
+        ...baseEvent("subscription.plan_changed"),
         subscription: {
           providerSubscriptionId: subId,
           status: "active",
           ...subscriptionFields(data, metadata),
-          refs: subscriptionRefs(data, metadata),
+          ...optionalSubscriptionRefs(data, metadata),
         },
       });
       return;
@@ -408,31 +427,26 @@ export async function handleDodoBillingEvent(
         currency: requireCurrency(data.settlement_currency, "Dodo payment.settlement_currency"),
         purpose: subscriptionId ? "subscription" : "credit_topup",
         status: "succeeded",
-        refs: providerProductId ? { productId: providerProductId } : undefined,
       };
+      if (providerProductId) payment.refs = { productId: providerProductId };
 
-      await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "payment.succeeded",
-        ...(accountId ? { accountId } : {}),
-        ...(subscriptionId
-          ? {
-              subscription: {
-                providerSubscriptionId: subscriptionId,
-                status:
-                  data.subscription_status === null || data.subscription_status === undefined
-                    ? "active"
-                    : subscriptionStatus(data.subscription_status, log),
-                periodStart: optionalDate(
-                  data.previous_billing_date,
-                  "Dodo payment.previous_billing_date",
-                ),
-                periodEnd: optionalDate(data.next_billing_date, "Dodo payment.next_billing_date"),
-              },
-            }
-          : {}),
-        payment,
-      });
+      const event = baseEvent("payment.succeeded");
+      if (subscriptionId) {
+        event.subscription = {
+          providerSubscriptionId: subscriptionId,
+          status:
+            data.subscription_status === null || data.subscription_status === undefined
+              ? "active"
+              : subscriptionStatus(data.subscription_status, log),
+          periodStart: optionalDate(
+            data.previous_billing_date,
+            "Dodo payment.previous_billing_date",
+          ),
+          periodEnd: optionalDate(data.next_billing_date, "Dodo payment.next_billing_date"),
+        };
+      }
+      event.payment = payment;
+      await callBillingEventSink(sink, event);
       return;
     }
 
@@ -441,21 +455,18 @@ export async function handleDodoBillingEvent(
       const subId = optionalProviderString(data.subscription_id, "Dodo payment.subscription_id");
       const paymentId = requireProviderString(data.payment_id, "Dodo payment.payment_id");
       const providerProductId = productId(data);
-      await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: "payment.failed",
-        ...(accountId ? { accountId } : {}),
-        subscription: subId ? { providerSubscriptionId: subId } : undefined,
-        payment: {
-          providerPaymentId: paymentId,
-          amountMinor: requireMinorUnits(data.total_amount, "Dodo payment.total_amount"),
-          taxMinor: requireMinorUnits(data.tax ?? 0, "Dodo payment.tax"),
-          currency: requireCurrency(data.currency, "Dodo payment.currency"),
-          purpose: subId ? ("subscription" as const) : ("credit_topup" as const),
-          status: type === "payment.cancelled" ? ("canceled" as const) : ("failed" as const),
-          refs: providerProductId ? { productId: providerProductId } : undefined,
-        },
-      });
+      const event = baseEvent("payment.failed");
+      event.subscription = subId ? { providerSubscriptionId: subId } : undefined;
+      event.payment = {
+        providerPaymentId: paymentId,
+        amountMinor: requireMinorUnits(data.total_amount, "Dodo payment.total_amount"),
+        taxMinor: requireMinorUnits(data.tax ?? 0, "Dodo payment.tax"),
+        currency: requireCurrency(data.currency, "Dodo payment.currency"),
+        purpose: subId ? "subscription" : "credit_topup",
+        status: type === "payment.cancelled" ? "canceled" : "failed",
+      };
+      if (providerProductId) event.payment.refs = { productId: providerProductId };
+      await callBillingEventSink(sink, event);
       return;
     }
 
@@ -474,8 +485,7 @@ export async function handleDodoBillingEvent(
         status: type === "refund.succeeded" ? "succeeded" : "failed",
       };
       await callBillingEventSink(sink, {
-        ...baseEvent(),
-        eventType: type === "refund.succeeded" ? "refund.created" : "refund.failed",
+        ...baseEvent(type === "refund.succeeded" ? "refund.created" : "refund.failed"),
         refund,
       });
       return;
@@ -494,8 +504,7 @@ export async function handleDodoBillingEvent(
         };
         const eventType = DISPUTE_CLOSED_TYPES.has(type) ? "dispute.closed" : "dispute.created";
         await callBillingEventSink(sink, {
-          ...baseEvent(),
-          eventType,
+          ...baseEvent(eventType),
           dispute,
         });
         return;

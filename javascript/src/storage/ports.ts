@@ -1,3 +1,5 @@
+import type { JsonObject } from "../shared/json.js";
+
 export interface OutboxEvent {
   eventId: string;
   tenantId: string;
@@ -5,7 +7,7 @@ export interface OutboxEvent {
   aggregateType: string;
   aggregateId: string;
   payloadVersion: number;
-  payload: Record<string, unknown>;
+  payload: JsonObject;
   claimToken: string;
   attemptCount: number;
   createdAt: string;
@@ -63,7 +65,7 @@ export interface OutboxDeadLetterPage {
 }
 
 export interface OutboxRecoveryStore extends OutboxStore {
-  stats(): Promise<OutboxStats>;
+  stats(options?: { limit?: number }): Promise<OutboxStats>;
   listDeadLetters(options?: OutboxDeadLetterListOptions): Promise<OutboxDeadLetterPage>;
   requeue(eventId: string): Promise<boolean>;
 }
@@ -82,9 +84,9 @@ export interface UsageChargeExport {
   feature: string | null;
   model: string | null;
   region: string | null;
-  measures: Record<string, unknown>;
-  dimensions: Record<string, unknown>;
-  metadata: Record<string, unknown>;
+  measures: JsonObject;
+  dimensions: JsonObject;
+  metadata: JsonObject;
   requested: string;
   charged: string;
   allowanceRequested: string;
@@ -93,7 +95,7 @@ export interface UsageChargeExport {
   catalogRevisionId: string | null;
   planId: string | null;
   rateCardKey: string | null;
-  pricingSnapshot: Record<string, unknown>;
+  pricingSnapshot: JsonObject;
   ledgerEntryId: string | null;
   correctionOfChargeId: string | null;
   idempotencyKey: string;
@@ -112,7 +114,7 @@ export interface BillingEventPayloadExport {
   status: string;
   receivedAt: string;
   completedAt: string | null;
-  envelope: Record<string, unknown> | null;
+  envelope: JsonObject | null;
   objectKey: string | null;
   objectVersion: string | null;
   archivedAt: string | null;

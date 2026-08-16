@@ -57,7 +57,7 @@ def sanitize_telemetry_attributes(
     for key, value in (attributes or {}).items():
         if key not in _ALLOWED_ATTRIBUTE_KEYS:
             continue
-        if isinstance(value, bool) or isinstance(value, (int, float)) and isfinite(value):
+        if isinstance(value, bool) or (isinstance(value, (int, float)) and isfinite(value)):
             sanitized[key] = value
         else:
             normalized = _normalize_token(value)

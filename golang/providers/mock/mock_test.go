@@ -16,25 +16,18 @@ func TestProviderImplementsPortableCapabilities(t *testing.T) {
 	if provider.ProviderEnvironment() != bursar.ProviderEnvironmentTest {
 		t.Fatalf("unexpected environment: %q", provider.ProviderEnvironment())
 	}
-	var paymentProvider bursar.PaymentProvider = provider
-	for _, supported := range []bool{
-		paymentProvider != nil,
-		interface{}(provider).(bursar.CustomerPortalProvider) != nil,
-		interface{}(provider).(bursar.PaymentMethodPortalProvider) != nil,
-		interface{}(provider).(bursar.CustomerProvider) != nil,
-		interface{}(provider).(bursar.SubscriptionProvider) != nil,
-		interface{}(provider).(bursar.InvoiceProvider) != nil,
-		interface{}(provider).(bursar.PaymentMethodsProvider) != nil,
-		interface{}(provider).(bursar.SavedPaymentPreviewProvider) != nil,
-		interface{}(provider).(bursar.SavedPaymentChargeProvider) != nil,
-		interface{}(provider).(bursar.PlanChangePreviewProvider) != nil,
-		interface{}(provider).(bursar.PlanChangeProvider) != nil,
-		interface{}(provider).(bursar.ScheduledPlanChangeCancellationProvider) != nil,
-	} {
-		if !supported {
-			t.Fatal("missing portable capability")
-		}
-	}
+	var _ bursar.PaymentProvider = provider
+	var _ bursar.CustomerPortalProvider = provider
+	var _ bursar.PaymentMethodPortalProvider = provider
+	var _ bursar.CustomerProvider = provider
+	var _ bursar.SubscriptionProvider = provider
+	var _ bursar.InvoiceProvider = provider
+	var _ bursar.PaymentMethodsProvider = provider
+	var _ bursar.SavedPaymentPreviewProvider = provider
+	var _ bursar.SavedPaymentChargeProvider = provider
+	var _ bursar.PlanChangePreviewProvider = provider
+	var _ bursar.PlanChangeProvider = provider
+	var _ bursar.ScheduledPlanChangeCancellationProvider = provider
 }
 
 func TestDeterministicIdempotentCustomerChargeAndPlanChange(t *testing.T) {

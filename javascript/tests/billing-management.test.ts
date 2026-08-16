@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { BillingStore } from "../src/billing/billing-store.js";
 import { BillingManagement } from "../src/billing/management.js";
 
+function testBillingStore<TStore>(store: TStore): BillingStore {
+  // SAFETY: This fixture implements the BillingStore method exercised by this test.
+  return store as BillingStore;
+}
+
 describe("BillingManagement", () => {
   it("returns provider-aware cancellable subscriptions while preserving the ID-only API", async () => {
     const getUserSubscriptions = vi.fn().mockResolvedValue([
@@ -42,9 +47,11 @@ describe("BillingManagement", () => {
         status: "canceled",
       },
     ]);
-    const management = new BillingManagement({
-      getUserSubscriptions,
-    } as unknown as BillingStore);
+    const management = new BillingManagement(
+      testBillingStore({
+        getUserSubscriptions,
+      }),
+    );
 
     await expect(management.listCancellableSubscriptions("user-1")).resolves.toEqual([
       expect.objectContaining({ provider: "dodo", providerSubscriptionId: "sub-dodo" }),

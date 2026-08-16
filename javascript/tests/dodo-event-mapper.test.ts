@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { normalizeDate } from "../src/providers/dodo/event-mapper.js";
 import type { BillingEventSink } from "../src/bursar.js";
+import { assertBillingEvent, type BillingEvent } from "../src/billing/types/index.js";
+import type { ExternalObject } from "../src/shared/json.js";
 import {
   DODO_JS_DATE,
   DODO_ISO_DATE,
@@ -31,6 +33,13 @@ function makeSink() {
   return { ingestBillingEvent } satisfies BillingEventSink;
 }
 
+function recordedEvent(sink: ReturnType<typeof makeSink>, index = 0): BillingEvent {
+  const value: BillingEvent | undefined = sink.ingestBillingEvent.mock.calls[index]?.[0];
+  if (value === undefined) throw new Error("Expected a recorded billing event");
+  assertBillingEvent(value);
+  return value;
+}
+
 // ── normalizeDate unit tests ──────────────────────────────────────────
 
 describe("normalizeDate", () => {
@@ -49,6 +58,13 @@ describe("normalizeDate", () => {
   it("passes through valid ISO 8601 unchanged", () => {
     expect(normalizeDate("2026-07-18T05:15:24.000Z")).toBe("2026-07-18T05:15:24.000Z");
     expect(normalizeDate("2026-07-18T00:00:00Z")).toBe("2026-07-18T00:00:00.000Z");
+    expect(normalizeDate("2026-07-18T02:00:00+02:00")).toBe("2026-07-18T00:00:00.000Z");
+    expect(normalizeDate("2026-07-18T02:00:00+0200")).toBe("2026-07-18T00:00:00.000Z");
+  });
+
+  it("rejects a long malformed suffix without pathological backtracking", () => {
+    const malformed = `Sat Jul 18 2026 05:15:24 GMT${" ".repeat(10_000)}${"(".repeat(10_000)}`;
+    expect(normalizeDate(malformed)).toBeNull();
   });
 
   it("returns null for null input", () => {
@@ -127,10 +143,9 @@ describe("canonical event IDs", () => {
       {},
       sink,
     );
-    const calls = sink.ingestBillingEvent.mock.calls;
-    expect(calls).toHaveLength(2);
-    expect(calls[0]![0]!.eventId).toBe(dodoEventId("subscription.active", "sub_alpha"));
-    expect(calls[1]![0]!.eventId).toBe(dodoEventId("subscription.active", "sub_beta"));
+    expect(sink.ingestBillingEvent).toHaveBeenCalledTimes(2);
+    expect(recordedEvent(sink, 0).eventId).toBe(dodoEventId("subscription.active", "sub_alpha"));
+    expect(recordedEvent(sink, 1).eventId).toBe(dodoEventId("subscription.active", "sub_beta"));
   });
 
   it("rejects a customer ID as the subscription identifier", async () => {
@@ -159,7 +174,7 @@ describe("date normalization through event mapper", () => {
   it("converts JS Date.toString() dates to ISO 8601 for subscription.active → subscription.created", async () => {
     const sink = makeSink();
     await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", {}, sink);
-    const call = sink.ingestBillingEvent.mock.calls[0]![0]!;
+    const call = recordedEvent(sink);
     if (!call.subscription) throw new Error("Expected subscription event data");
     expect(call.subscription.periodStart).toBe(DODO_ISO_DATE);
     // next_billing_date in fixture is August — verify it's different from periodStart
@@ -198,7 +213,7 @@ describe("date normalization through event mapper", () => {
       {},
       sink,
     );
-    const call = sink.ingestBillingEvent.mock.calls[0]![0]!;
+    const call = recordedEvent(sink);
     if (!call.subscription) throw new Error("Expected subscription event data");
     expect(call.subscription.periodStart).toBeUndefined();
     // periodEnd is passed explicitly — check it's null
@@ -500,7 +515,7 @@ describe("ref resolution", () => {
 
   it("uses the official payment product_cart for refs", async () => {
     const sink = makeSink();
-    const payment: Record<string, unknown> = { ...DODO_PAYMENT_SUCCEEDED };
+    const payment: ExternalObject = { ...DODO_PAYMENT_SUCCEEDED };
     delete payment.product_id;
     delete payment.subscription_id;
     await mapDodoEvent(
@@ -554,7 +569,7 @@ describe("ref resolution", () => {
     const sink = makeSink();
     const payload = { subscription_id: "sub_no_refs", status: "active" };
     await mapDodoEvent("subscription.active", payload, "user_1", {}, sink);
-    const call = sink.ingestBillingEvent.mock.calls[0]![0]!;
+    const call = recordedEvent(sink);
     if (!call.subscription) throw new Error("Expected subscription event data");
     expect(call.subscription.refs).toBeUndefined();
   });

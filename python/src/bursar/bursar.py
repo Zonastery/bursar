@@ -54,6 +54,7 @@ from bursar.credits.service_types import (
     ExactAmount,
     GrantSubscriptionCycleOptions,
     MetricsOrAmount,
+    PostDeductionContext,
     ReserveOptions,
     RunBilledOptions,
     SettleOptions,
@@ -676,7 +677,7 @@ class Bursar:
         commerce = self.commerce
         if commerce is not None:
 
-            async def process_auto_recharge(context) -> None:
+            async def process_auto_recharge(context: PostDeductionContext) -> None:
                 await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id=context.user_id))
 
             credits.add_post_deduction_hook(process_auto_recharge)

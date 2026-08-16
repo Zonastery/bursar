@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { persistedDiagnosticSummary } from "../shared/diagnostics.js";
+import { isJsonObject, type JsonObject, type PostgresParams } from "../shared/json.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 
 export type MaintenanceTaskStatus = "completed" | "skipped" | "unsupported" | "failed";
@@ -167,8 +168,8 @@ export class BursarOperatorMaintenance {
         (parsed.now ?? new Date()).toISOString(),
       ]);
       return storageMaintenanceResult(payload);
-    } catch (error) {
-      return failedStorageMaintenance(error);
+    } catch (cause) {
+      return failedStorageMaintenance(cause);
     }
   }
 
@@ -184,7 +185,7 @@ export class BursarOperatorMaintenance {
         (parsed.now ?? new Date()).toISOString(),
       ]);
       return partitionMaintenanceResult(parent, payload);
-    } catch (error) {
+    } catch (cause) {
       return {
         status: "failed",
         parentTable: parent,
@@ -194,7 +195,7 @@ export class BursarOperatorMaintenance {
         partitionLockTimeouts: 0,
         defaultPartitionHasRows: false,
         hasMore: true,
-        error: persistedDiagnosticSummary(error, "partition_maintenance_failed"),
+        error: persistedDiagnosticSummary(cause, "partition_maintenance_failed"),
       };
     }
   }
@@ -217,25 +218,26 @@ async function runTask(
       limit: reportedLimit,
       hasMore: count === reportedLimit,
     };
-  } catch (error) {
+  } catch (cause) {
     return {
       status: "failed",
       count: 0,
       limit: reportedLimit,
       hasMore: true,
-      error: persistedDiagnosticSummary(error, "maintenance_task_failed"),
+      error: persistedDiagnosticSummary(cause, "maintenance_task_failed"),
     };
   }
 }
 
 function unavailableTask(limit: number, reason?: string): MaintenanceTaskResult {
-  return {
+  const result: MaintenanceTaskResult = {
     status: reason ? "skipped" : "unsupported",
     count: 0,
     limit,
     hasMore: false,
-    ...(reason ? { reason } : {}),
   };
+  if (reason) result.reason = reason;
+  return result;
 }
 
 async function callJsonFunction(
@@ -244,25 +246,26 @@ async function callJsonFunction(
     | "run_storage_maintenance"
     | "maybe_run_storage_maintenance"
     | "run_storage_partition_maintenance",
-  params: unknown[],
-): Promise<Record<string, unknown>> {
+  params: PostgresParams,
+): Promise<JsonObject> {
   const placeholders = params.map((_, index) => `$${index + 1}`).join(", ");
   const rows = await query(
     `SELECT bursar.${functionName}(${placeholders}) AS maintenance_result`,
     params,
   );
   const row = rows[0];
-  if (!isRecord(row)) throw new TypeError("maintenance RPC returned no result");
+  if (row === undefined) throw new TypeError("maintenance RPC returned no result");
   const raw = row.maintenance_result;
-  if (isRecord(raw)) return raw;
-  if (typeof raw === "string") {
-    const parsed: unknown = JSON.parse(raw);
-    if (isRecord(parsed)) return parsed;
+  if (raw !== undefined && isJsonObject(raw)) return raw;
+  const text = z.string().safeParse(raw);
+  if (text.success) {
+    const parsed = z.json().safeParse(JSON.parse(text.data));
+    if (parsed.success && isJsonObject(parsed.data)) return parsed.data;
   }
   throw new TypeError("maintenance RPC returned a malformed result");
 }
 
-function storageMaintenanceResult(payload: Record<string, unknown>): StorageMaintenanceResult {
+function storageMaintenanceResult(payload: JsonObject): StorageMaintenanceResult {
   const status = payload.status;
   if (status === "busy") {
     return { ...emptyStorageMaintenanceCounts(), status, hasMore: true };
@@ -298,7 +301,7 @@ function storageMaintenanceResult(payload: Record<string, unknown>): StorageMain
 
 function partitionMaintenanceResult(
   parentTable: StoragePartition,
-  payload: Record<string, unknown>,
+  payload: JsonObject,
 ): PartitionMaintenanceResult {
   if (payload.status === "busy") {
     return {
@@ -330,12 +333,12 @@ function partitionMaintenanceResult(
   };
 }
 
-function failedStorageMaintenance(error: unknown): StorageMaintenanceResult {
+function failedStorageMaintenance(cause: unknown): StorageMaintenanceResult {
   return {
     ...emptyStorageMaintenanceCounts(),
     status: "failed",
     hasMore: true,
-    error: persistedDiagnosticSummary(error, "storage_maintenance_failed"),
+    error: persistedDiagnosticSummary(cause, "storage_maintenance_failed"),
   };
 }
 
@@ -359,35 +362,40 @@ function emptyStorageMaintenanceCounts(): Omit<
   };
 }
 
-function nonNegativeInteger(payload: Record<string, unknown>, key: string): number {
+function nonNegativeInteger(payload: JsonObject, key: string): number {
   const value = payload[key];
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+  const parsed = z.number().int().nonnegative().safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`maintenance RPC field ${key} must be a non-negative integer`);
   }
-  return value as number;
+  return parsed.data;
 }
 
-function booleanField(payload: Record<string, unknown>, key: string): boolean {
+function booleanField(payload: JsonObject, key: string): boolean {
   const value = payload[key];
-  if (typeof value !== "boolean") {
+  const parsed = z.boolean().safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`maintenance RPC field ${key} must be a boolean`);
   }
-  return value;
+  return parsed.data;
 }
 
-function optionalTimestamp<K extends "lastMaintenanceAt" | "nextMaintenanceAt">(
-  payload: Record<string, unknown>,
+interface MaintenanceTimestampPatch {
+  lastMaintenanceAt?: string;
+  nextMaintenanceAt?: string;
+}
+
+function optionalTimestamp(
+  payload: JsonObject,
   key: string,
-  outputKey: K,
-): Partial<Record<K, string>> {
+  outputKey: keyof MaintenanceTimestampPatch,
+): MaintenanceTimestampPatch {
   const value = payload[key];
   if (value === undefined || value === null) return {};
-  if (typeof value !== "string") {
+  const parsed = z.string().safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`maintenance RPC field ${key} must be a timestamp string`);
   }
-  return { [outputKey]: value } as Partial<Record<K, string>>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (outputKey === "lastMaintenanceAt") return { lastMaintenanceAt: parsed.data };
+  return { nextMaintenanceAt: parsed.data };
 }

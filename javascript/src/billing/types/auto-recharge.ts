@@ -1,10 +1,17 @@
 import type { Decimal } from "decimal.js";
+import type { JsonObject } from "../../shared/json.js";
 
 export const AUTO_RECHARGE_STATES = ["disabled", "active", "paused"] as const;
 export type BillingAutoRechargeState = (typeof AUTO_RECHARGE_STATES)[number];
 
 export type BillingAutoRechargeAttemptState =
-  "claimed" | "submitted" | "processing" | "unknown" | "succeeded" | "failed" | "action_required";
+  | "claimed"
+  | "submitted"
+  | "processing"
+  | "unknown"
+  | "succeeded"
+  | "failed"
+  | "action_required";
 
 export interface BillingAutoRechargeProfile {
   userId: string;
@@ -38,7 +45,7 @@ export interface BillingAutoRechargeAttempt {
   currency: string | null;
   failureCode: string | null;
   failureMessage: string | null;
-  metadata: Record<string, unknown>;
+  metadata: JsonObject;
   createdAt: string;
   updatedAt: string;
 }

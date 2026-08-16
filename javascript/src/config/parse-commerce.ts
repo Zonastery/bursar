@@ -3,6 +3,7 @@ import {
   asInteger,
   asObject,
   asString,
+  asStringArray,
   parseAvailability,
   parseBillingInterval,
   parseDuration,
@@ -11,22 +12,30 @@ import {
   semanticError,
   validateIdentifiers,
 } from "./parse-utils.js";
+import type { JsonValue } from "../shared/json.js";
 import type {
   AutoRechargeGuardrails,
   CommerceConfig,
   CommerceOffer,
   CreditsConfig,
   OfferCommon,
-  OfferPrice,
   ProviderDefinition,
   ProviderReference,
   SubscriptionChangeClassification,
   SubscriptionChangePolicy,
   TopupOffer,
-  Window,
 } from "./types.js";
+import { z } from "zod";
 
-function parseProviderReference(value: unknown): ProviderReference {
+const customObjectKindSchema = z.enum(["subscription", "one_time"]);
+const taxBehaviorSchema = z.enum(["inclusive", "exclusive", "unspecified"]);
+const renewalSchema = z.enum(["replace_previous", "accumulate"]);
+const lotBehaviorSchema = z.enum(["separate_lots", "merge_and_refresh"]);
+const changeEffectiveSchema = z.enum(["immediate", "renewal"]);
+const changeProrationSchema = z.enum(["none", "prorated"]);
+const changePaymentFailureSchema = z.enum(["prevent_change", "apply_change"]);
+
+function parseProviderReference(value: JsonValue): ProviderReference {
   const raw = asObject(value);
   if (raw.type === "stripe_price") {
     return { type: "stripe_price", priceId: asString(raw.price_id) };
@@ -36,7 +45,7 @@ function parseProviderReference(value: unknown): ProviderReference {
   }
   return {
     type: "custom_object",
-    objectKind: raw.object_kind as "subscription" | "one_time",
+    objectKind: customObjectKindSchema.parse(raw.object_kind),
     externalId: asString(raw.external_id),
   };
 }
@@ -83,22 +92,24 @@ function validateIntegerRange(
   }
 }
 
-export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceConfig {
+export function parseCommerce(
+  value: JsonValue | undefined,
+  credits: CreditsConfig,
+): CommerceConfig {
   const raw = asObject(value ?? {});
   const providersRaw = asObject(raw.providers ?? {});
   const offersRaw = asObject(raw.offers ?? {});
   validateIdentifiers(providersRaw, "commerce.providers");
   validateIdentifiers(offersRaw, "commerce.offers");
 
-  const providers = Object.fromEntries(
+  const providers: CommerceConfig["providers"] = Object.fromEntries(
     Object.entries(providersRaw).map(([key, input]) => {
       const provider = asObject(input);
-      return [
-        key,
+      const parsedProvider: ProviderDefinition =
         provider.type === "custom"
-          ? ({ type: "custom", adapter: asString(provider.adapter) } as const)
-          : ({ type: provider.type } as ProviderDefinition),
-      ];
+          ? { type: "custom", adapter: asString(provider.adapter) }
+          : { type: provider.type === "stripe" ? "stripe" : "dodo" };
+      return [key, parsedProvider];
     }),
   );
 
@@ -127,22 +138,19 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
 
     const common: OfferCommon = {
       displayName: asString(offer.display_name),
-      ...(offer.description == null ? {} : { description: asString(offer.description) }),
       sortOrder: asInteger(offer.sort_order ?? 0),
-      ...(offer.availability == null
-        ? {}
-        : { availability: parseAvailability(offer.availability) }),
       price: {
         amountMinor: asInteger(asObject(offer.price).amount_minor),
         currency: validateCurrency(
           asString(asObject(offer.price).currency),
           `commerce.offers.${offerKey}.price.currency`,
         ),
-        taxBehavior: (asObject(offer.price).tax_behavior ??
-          "unspecified") as OfferPrice["taxBehavior"],
+        taxBehavior: taxBehaviorSchema.parse(asObject(offer.price).tax_behavior ?? "unspecified"),
       },
       providers: references,
     };
+    if (offer.description != null) common.description = asString(offer.description);
+    if (offer.availability != null) common.availability = parseAvailability(offer.availability);
 
     if (offer.type === "subscription") {
       const cycleRaw = offer.cycle_grant == null ? undefined : asObject(offer.cycle_grant);
@@ -152,7 +160,7 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
           : {
               amount: asDecimal(cycleRaw.amount),
               bucket: asString(cycleRaw.bucket),
-              renewal: cycleRaw.renewal as "replace_previous" | "accumulate",
+              renewal: renewalSchema.parse(cycleRaw.renewal),
               expiry: parseExpiry(
                 cycleRaw.expiry ?? { type: "subscription_end" },
                 `commerce.offers.${offerKey}.cycle_grant.expiry`,
@@ -161,14 +169,15 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
       if (cycleGrant != null && !credits.buckets[cycleGrant.bucket]) {
         semanticError(`commerce.offers.${offerKey}.cycle_grant references unknown bucket`);
       }
-      offers[offerKey] = {
+      const subscriptionOffer: Extract<CommerceOffer, { type: "subscription" }> = {
         ...common,
         type: "subscription",
         plan: asString(offer.plan),
         billingInterval: parseBillingInterval(offer.billing_interval),
-        ...(offer.trial == null ? {} : { trial: parseBillingInterval(offer.trial) }),
-        ...(cycleGrant == null ? {} : { cycleGrant }),
       };
+      if (offer.trial != null) subscriptionOffer.trial = parseBillingInterval(offer.trial);
+      if (cycleGrant != null) subscriptionOffer.cycleGrant = cycleGrant;
+      offers[offerKey] = subscriptionOffer;
       continue;
     }
 
@@ -190,26 +199,28 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
     if (parsedExpiry?.type === "subscription_end") {
       semanticError(`commerce.offers.${offerKey} top-up cannot use subscription_end expiry`);
     }
-    offers[offerKey] = {
+    const topupOffer: TopupOffer = {
       ...common,
       type: "topup",
       creditsPerUnit: asDecimal(offer.credits_per_unit),
       quantity: parsedQuantity,
       bucket,
-      ...(parsedExpiry == null ? {} : { expiry: parsedExpiry }),
-      lotBehavior: (offer.lot_behavior ?? "separate_lots") as TopupOffer["lotBehavior"],
+      lotBehavior: lotBehaviorSchema.parse(offer.lot_behavior ?? "separate_lots"),
     };
+    if (parsedExpiry != null) topupOffer.expiry = parsedExpiry;
+    offers[offerKey] = topupOffer;
   }
 
   const subscriptionChanges = parseSubscriptionChanges(raw.subscription_changes);
   const autoRecharge =
     raw.auto_recharge == null ? undefined : parseAutoRecharge(raw.auto_recharge, offers);
-  return {
+  const result: CommerceConfig = {
     providers,
     offers,
-    ...(subscriptionChanges == null ? {} : { subscriptionChanges }),
-    ...(autoRecharge == null ? {} : { autoRecharge }),
   };
+  if (subscriptionChanges != null) result.subscriptionChanges = subscriptionChanges;
+  if (autoRecharge != null) result.autoRecharge = autoRecharge;
+  return result;
 }
 
 const SUBSCRIPTION_CHANGE_CLASSIFICATIONS = [
@@ -220,7 +231,7 @@ const SUBSCRIPTION_CHANGE_CLASSIFICATIONS = [
 ] as const satisfies readonly SubscriptionChangeClassification[];
 
 function parseSubscriptionChanges(
-  value: unknown,
+  value: JsonValue | undefined,
 ): CommerceConfig["subscriptionChanges"] | undefined {
   if (value == null) return undefined;
   const raw = asObject(value);
@@ -229,25 +240,26 @@ function parseSubscriptionChanges(
     if (raw[classification] == null) continue;
     const policy = asObject(raw[classification]);
     result[classification] = {
-      effective: asString(policy.effective) as SubscriptionChangePolicy["effective"],
-      proration: asString(policy.proration) as SubscriptionChangePolicy["proration"],
-      paymentFailure: asString(
-        policy.payment_failure ?? "prevent_change",
-      ) as SubscriptionChangePolicy["paymentFailure"],
+      effective: changeEffectiveSchema.parse(policy.effective),
+      proration: changeProrationSchema.parse(policy.proration),
+      paymentFailure: changePaymentFailureSchema.parse(policy.payment_failure ?? "prevent_change"),
     };
   }
   return result;
 }
 
 function parseAutoRecharge(
-  value: unknown,
+  value: JsonValue,
   offers: Record<string, CommerceOffer>,
 ): AutoRechargeGuardrails {
   const auto = asObject(value);
   const threshold = asObject(auto.balance_below);
   const quantity = asObject(auto.quantity);
   const limits = asObject(auto.limits);
-  const eligibleTopups = auto.eligible_topups as string[];
+  const eligibleTopups = asStringArray(
+    auto.eligible_topups,
+    "commerce.auto_recharge.eligible_topups",
+  );
   const currencies = new Set(
     eligibleTopups.map((key) => {
       const offer = offers[key];
@@ -277,7 +289,10 @@ function parseAutoRecharge(
     semanticError("commerce.auto_recharge.balance_below requires minimum <= default <= maximum");
   }
   for (const key of eligibleTopups) {
-    const offer = offers[key] as TopupOffer;
+    const offer = offers[key];
+    if (offer?.type !== "topup") {
+      semanticError(`commerce.auto_recharge references non-top-up offer '${key}'`);
+    }
     if (
       parsedQuantity.minimum < offer.quantity.minimum ||
       parsedQuantity.maximum > offer.quantity.maximum
@@ -288,6 +303,10 @@ function parseAutoRecharge(
   const parsedRearmAbove = asDecimal(auto.rearm_above);
   if (parsedRearmAbove.lte(parsedMaximum)) {
     semanticError("commerce.auto_recharge.rearm_above must exceed balance_below.maximum");
+  }
+  const window = parseWindow(limits.window, "commerce.auto_recharge.limits.window");
+  if (window.type !== "calendar" && window.type !== "rolling") {
+    semanticError("commerce.auto_recharge.limits.window must be calendar or rolling");
   }
   return {
     eligibleTopups,
@@ -300,10 +319,7 @@ function parseAutoRecharge(
     quantity: parsedQuantity,
     limits: {
       maxPurchases: asInteger(limits.max_purchases),
-      window: parseWindow(limits.window, "commerce.auto_recharge.limits.window") as Extract<
-        Window,
-        { type: "calendar" | "rolling" }
-      >,
+      window,
       maxChargeMinor: asInteger(limits.max_charge_minor),
       cooldown: parseDuration(limits.cooldown),
       maxConsecutiveFailures: asInteger(limits.max_consecutive_failures ?? 3),

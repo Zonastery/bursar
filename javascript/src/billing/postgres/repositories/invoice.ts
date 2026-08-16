@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { JsonObject } from "../../../shared/json.js";
 import type { BillingInvoiceRecord } from "../../types/index.js";
 import {
   postgresUuid,
@@ -38,21 +39,17 @@ export class BillingInvoiceRepository {
   async listForUser(userId: string): Promise<BillingInvoiceRecord[]> {
     const rows = await this.query(`SELECT * FROM bursar.list_billing_invoices($1::uuid)`, [userId]);
     return rows.map((row) => {
-      if (typeof row !== "object" || row === null || Array.isArray(row)) {
-        throw new TypeError("BillingInvoiceRepository.listForUser expected an object row");
-      }
-      const raw = row as Record<string, unknown>;
       const parsed = safeParse(
         InvoiceRowSchema,
         {
-          provider: raw.provider,
-          provider_invoice_id: raw.provider_invoice_id,
-          status: raw.status,
-          amount_paid_minor: raw.amount_paid_minor,
-          amount_due_minor: raw.amount_due_minor,
-          currency: raw.currency,
-          period_start: raw.period_start,
-          period_end: raw.period_end,
+          provider: row.provider,
+          provider_invoice_id: row.provider_invoice_id,
+          status: row.status,
+          amount_paid_minor: row.amount_paid_minor,
+          amount_due_minor: row.amount_due_minor,
+          currency: row.currency,
+          period_start: row.period_start,
+          period_end: row.period_end,
         },
         "BillingInvoiceRepository.listForUser",
       );
@@ -80,7 +77,7 @@ export class BillingInvoiceRepository {
     currency: string,
     periodStart: string | null,
     periodEnd: string | null,
-    metadata: Record<string, unknown>,
+    metadata: JsonObject,
     providerUpdatedAt: string,
   ): Promise<void> {
     const rows = await this.query(

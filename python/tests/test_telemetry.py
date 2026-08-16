@@ -344,12 +344,8 @@ def test_credit_operations_match_the_shared_javascript_python_contract() -> None
         lambda: credits.settle("private-user", "private-lease", Decimal(1)),
     ]
     for operation in operations:
-        try:
+        with pytest.raises(RuntimeError, match="stop after entering operation"):
             operation()
-        except Exception:
-            pass
-        else:  # pragma: no cover - every callback intentionally fails
-            pytest.fail("instrumented operation unexpectedly succeeded")
 
     observed = sorted(operation for operation, _attributes in instrumentation.operations)
     assert observed == sorted(operation for operation in EXPECTED_OPERATIONS if operation.startswith("credits."))

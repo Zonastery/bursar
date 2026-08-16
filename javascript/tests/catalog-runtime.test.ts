@@ -55,11 +55,16 @@ const CONFIG = {
   },
 } satisfies BursarConfigData;
 
+function testStore(value: Partial<CreditStore>): CreditStore {
+  // SAFETY: Each fixture implements the CreditStore methods exercised by its scenario.
+  return value as CreditStore;
+}
+
 describe("CatalogRuntime lease pricing", () => {
   it("installs a published catalog only after persistence succeeds", async () => {
     const original = PricingEngine.fromDict(CONFIG);
     const publishAndActivateCatalog = vi.fn().mockResolvedValue("revision-2");
-    const store = { publishAndActivateCatalog } as unknown as CreditStore;
+    const store = testStore({ publishAndActivateCatalog });
     const runtime = new CatalogRuntime(store, original, noopLogger, 0);
 
     await expect(runtime.publishAndActivate(CONFIG, "release-2")).resolves.toBe("revision-2");
@@ -70,9 +75,9 @@ describe("CatalogRuntime lease pricing", () => {
 
   it("keeps the committed catalog when publication fails", async () => {
     const original = PricingEngine.fromDict(CONFIG);
-    const store = {
+    const store = testStore({
       publishAndActivateCatalog: vi.fn().mockRejectedValue(new Error("write failed")),
-    } as unknown as CreditStore;
+    });
     const runtime = new CatalogRuntime(store, original, noopLogger, 0);
 
     await expect(runtime.publishAndActivate(CONFIG)).rejects.toThrow("write failed");
@@ -87,7 +92,7 @@ describe("CatalogRuntime lease pricing", () => {
       config: typeof CONFIG;
     }>();
     const getActiveCatalog = vi.fn(() => response.promise);
-    const store = { getActiveCatalog } as unknown as CreditStore;
+    const store = testStore({ getActiveCatalog });
     const runtime = new CatalogRuntime(store, PricingEngine.fromDict(CONFIG), noopLogger, 1);
     await new Promise((resolve) => setTimeout(resolve, 5));
 
@@ -117,11 +122,11 @@ describe("CatalogRuntime lease pricing", () => {
       config: CONFIG,
     });
     const getUserPlan = vi.fn().mockResolvedValue({ rateCard: "current" });
-    const store = {
+    const store = testStore({
       getLeasePricingContext,
       getCatalogRevision,
       getUserPlan,
-    } as unknown as CreditStore;
+    });
     const runtime = new CatalogRuntime(store, null, noopLogger, 0);
 
     const result = await runtime.costOf(
@@ -137,9 +142,9 @@ describe("CatalogRuntime lease pricing", () => {
   });
 
   it("rejects metric settlement when the subject-owned lease is missing", async () => {
-    const store = {
+    const store = testStore({
       getLeasePricingContext: vi.fn().mockResolvedValue(null),
-    } as unknown as CreditStore;
+    });
     const runtime = new CatalogRuntime(store, null, noopLogger, 0);
 
     await expect(

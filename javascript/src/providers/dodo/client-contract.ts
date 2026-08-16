@@ -16,6 +16,7 @@ type DodoPlanChangePreview = Awaited<
 type DodoPaymentMethodUpdate = Awaited<
   ReturnType<DodoPayments["subscriptions"]["updatePaymentMethod"]>
 >;
+type DodoSubscription = Awaited<ReturnType<DodoPayments["subscriptions"]["update"]>>;
 type DodoCustomer = Awaited<ReturnType<DodoPayments["customers"]["create"]>>;
 type DodoCustomerPortalSession = Awaited<
   ReturnType<DodoPayments["customers"]["customerPortal"]["create"]>
@@ -31,18 +32,17 @@ type DodoSdkWebhookPayload = ReturnType<DodoPayments["webhooks"]["unwrap"]>;
 /**
  * Payload returned by an official Dodo adapter after signature verification.
  *
- * Dodo's core, Next.js, and Better Auth packages expose equivalent webhook
- * envelopes but can carry incompatible nested SDK types. Keep the envelope
- * SDK-derived and treat only the resource payload as untrusted input; Bursar's
- * mapper validates every field it consumes.
+ * This stays SDK-derived so an actual `DodoPayments` client is structurally
+ * assignable to `DodoClient` without casts or weakened return types.
  */
-export type DodoWebhookPayload = Partial<
-  Omit<DodoSdkWebhookPayload, "data" | "timestamp" | "type">
-> & {
-  data: unknown;
+export type DodoWebhookPayload = DodoSdkWebhookPayload;
+
+/** Common verified envelope shared by Dodo's framework-specific adapters. */
+export interface DodoWebhookEnvelope<TData> {
+  data: TData;
   timestamp: string | Date;
   type: string;
-};
+}
 
 export interface DodoClient {
   webhooks: {
@@ -85,12 +85,12 @@ export interface DodoClient {
     cancelChangePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["cancelChangePlan"]>[0],
       options?: DodoMutationRequestOptions,
-    ): Promise<unknown>;
+    ): Promise<void>;
     changePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["changePlan"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["changePlan"]>[1],
       options?: DodoMutationRequestOptions,
-    ): Promise<unknown>;
+    ): Promise<void>;
     previewChangePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["previewChangePlan"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["previewChangePlan"]>[1],
@@ -99,7 +99,7 @@ export interface DodoClient {
       subscriptionId: Parameters<DodoPayments["subscriptions"]["update"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["update"]>[1],
       options?: DodoMutationRequestOptions,
-    ): Promise<unknown>;
+    ): Promise<DodoSubscription>;
     updatePaymentMethod(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["updatePaymentMethod"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["updatePaymentMethod"]>[1],

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { PostgresValue } from "../../../shared/json.js";
 import {
   pgBoolean,
   postgresUuid,
@@ -57,7 +58,7 @@ const BillingEventRowSchema = z
 
 export type BillingEventRow = z.infer<typeof BillingEventRowSchema>;
 
-function booleanResult(rows: unknown[], key: string, context: string): boolean {
+function booleanResult(rows: PostgresValue[], key: string, context: string): boolean {
   return requireResultField(rows, key, pgBoolean, context);
 }
 

@@ -1,5 +1,6 @@
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { BillingStore } from "./billing-store.js";
+import type { JsonObject } from "../shared/json.js";
 import type {
   BillingEvent,
   BillingEventResult,
@@ -90,7 +91,7 @@ export class BillingFinancialEventHandlers {
 
     let paymentId: string | null = null;
     if (uid) {
-      const paymentMetadata: Record<string, unknown> | null =
+      const paymentMetadata: JsonObject | null =
         topupConfig && event.payment.purpose === "credit_topup"
           ? { credits_per_unit: topupConfig.creditsPerUnit.toString() }
           : null;

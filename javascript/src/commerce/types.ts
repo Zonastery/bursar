@@ -139,7 +139,11 @@ export interface CancelAllSubscriptionsResult {
 }
 
 export type PlanChangeClassification =
-  "unchanged" | "upgrade" | "downgrade" | "lateral" | "cadence_change";
+  | "unchanged"
+  | "upgrade"
+  | "downgrade"
+  | "lateral"
+  | "cadence_change";
 
 interface PlanChangePreviewResultBase {
   planId: string;

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { Decimal } from "decimal.js";
-import type { PostgresPool } from "../src/shared/postgres-client.js";
+import { z } from "zod";
+import { isPostgresPool, type PostgresPool } from "../src/shared/postgres-client.js";
 import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adapters/clickhouse.js";
-import { S3BillingArchive } from "../src/storage/adapters/s3.js";
+import { S3BillingArchive, type S3ArchiveClient } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
 import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
@@ -21,26 +22,21 @@ type RuntimeTestOptions = Omit<BursarRuntimeOptions, "providerEnvironment" | "op
 function createBursarRuntime(options: RuntimeTestOptions) {
   const operatorPostgres =
     options.operatorPostgres ??
-    (typeof options.postgres === "string"
+    (!isPostgresPool(options.postgres)
       ? "postgresql://operator@localhost/bursar"
       : new Proxy(options.postgres, {}));
   return createRuntime({ ...options, operatorPostgres, providerEnvironment: "test" });
 }
 
-const s3Mock = vi.hoisted(() => ({
-  send: vi.fn(),
+const s3Mock = {
+  send: vi.fn<S3ArchiveClient["send"]>(),
   destroy: vi.fn(),
-}));
+};
 
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: class {
-    readonly send = s3Mock.send;
-    readonly destroy = s3Mock.destroy;
-  },
-  PutObjectCommand: class {
-    constructor(readonly input: Record<string, unknown>) {}
-  },
-}));
+const s3ClientFactory = (): S3ArchiveClient => ({
+  send: s3Mock.send,
+  destroy: s3Mock.destroy,
+});
 
 const outboxEvent: OutboxEvent = {
   eventId: "42",
@@ -195,6 +191,7 @@ describe("S3BillingArchive", () => {
     s3Mock.send.mockResolvedValue({ VersionId: "v1" });
     const archive = new S3BillingArchive({
       bucket: "billing-archive",
+      clientFactory: s3ClientFactory,
       region: "us-east-1",
       credentials: {
         accessKeyId: "access-key",
@@ -226,15 +223,12 @@ describe("S3BillingArchive", () => {
       versionId: "v1",
     });
 
-    const command = s3Mock.send.mock.calls[0]?.[0] as {
-      input: Record<string, unknown>;
-    };
+    const command = s3Mock.send.mock.calls[0]?.[0];
+    if (!command?.input?.Body) throw new Error("expected an S3 archive command body");
     expect(command.input.Bucket).toBe("billing-archive");
     expect(command.input.ContentType).toBe("application/json");
-    const saved = JSON.parse(new TextDecoder().decode(command.input.Body as Uint8Array)) as Record<
-      string,
-      unknown
-    >;
+    const body = z.instanceof(Uint8Array).parse(command.input.Body);
+    const saved = z.record(z.string(), z.json()).parse(JSON.parse(new TextDecoder().decode(body)));
     expect(saved.envelope).toEqual({ id: "evt_1", data: { amount: 1200 } });
 
     await expect(
@@ -286,6 +280,7 @@ describe("ClickHouseUsageStore", () => {
     const insert = vi.fn().mockResolvedValue(undefined);
     const query = vi.fn().mockResolvedValue({
       json: async <T>() =>
+        // SAFETY: The ClickHouse adapter requests this concrete analytics row shape.
         [
           { key: "00000000-0000-0000-0000-000000000007", total_spend: "12.5", entry_count: "2" },
         ] as T,
@@ -366,6 +361,7 @@ describe("ClickHouseUsageStore", () => {
   it("preserves UTC and microsecond precision in usage-history cursors", async () => {
     const query = vi.fn().mockResolvedValue({
       json: async <T>() =>
+        // SAFETY: The ClickHouse adapter requests this concrete usage-history row shape.
         [
           {
             usage_id: "00000000-0000-0000-0000-000000000042",
@@ -439,6 +435,7 @@ describe("ClickHouseUsageStore", () => {
   it("rejects malformed ClickHouse history timestamps", async () => {
     const query = vi.fn().mockResolvedValue({
       json: async <T>() =>
+        // SAFETY: The ClickHouse adapter requests this concrete malformed row shape.
         [
           {
             usage_id: "00000000-0000-0000-0000-000000000042",
@@ -476,6 +473,7 @@ describe("ClickHouseUsageStore", () => {
   it("rejects syntactically valid but impossible ClickHouse timestamps", async () => {
     const query = vi.fn().mockResolvedValue({
       json: async <T>() =>
+        // SAFETY: The ClickHouse adapter requests this concrete malformed row shape.
         [
           {
             usage_id: "00000000-0000-0000-0000-000000000042",
@@ -520,6 +518,7 @@ describe("BursarRuntime", () => {
     };
 
     await expect(
+      // SAFETY: This intentionally incomplete runtime input exercises provider-environment validation.
       createRuntime({
         postgres: pool,
         operatorPostgres: new Proxy(pool, {}),
@@ -536,6 +535,7 @@ describe("BursarRuntime", () => {
     };
 
     await expect(
+      // SAFETY: This intentionally incomplete runtime input exercises composition-root validation.
       createRuntime({
         postgres: pool,
         tenantId: TEST_TENANT_ID,
@@ -543,6 +543,7 @@ describe("BursarRuntime", () => {
       } as never),
     ).rejects.toThrow("operatorPostgres is required");
     await expect(
+      // SAFETY: This intentionally nested option exercises composition-root ownership validation.
       createBursarRuntime({
         postgres: pool,
         tenantId: TEST_TENANT_ID,
@@ -610,6 +611,7 @@ describe("BursarRuntime", () => {
       insert: vi.fn().mockResolvedValue(undefined),
       query: vi.fn().mockResolvedValue({
         json: async <T>() =>
+          // SAFETY: The ClickHouse adapter requests this concrete spend row shape.
           [
             { key: "00000000-0000-0000-0000-000000000009", total_spend: "4", entry_count: "1" },
           ] as T,

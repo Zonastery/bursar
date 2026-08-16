@@ -66,7 +66,10 @@ export type {
 } from "./storage/adapters/clickhouse.js";
 export { S3BillingArchive } from "./storage/adapters/s3.js";
 export type {
+  S3ArchiveCommand,
+  S3ArchiveCommandInput,
   S3ArchiveClient,
+  S3ArchiveCommandResult,
   S3ArchiveClientFactory,
   S3BillingArchiveOptions,
   S3Credentials,

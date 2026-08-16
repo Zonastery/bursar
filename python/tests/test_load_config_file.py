@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -33,9 +34,9 @@ def test_loads_yaml_file() -> None:
         os.unlink(path)
 
 
-def test_raises_on_missing_file() -> None:
+def test_raises_on_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="Config file not found"):
-        load_config_file("/tmp/nope_bursar_test.json")
+        load_config_file(tmp_path / "missing.json")
 
 
 def test_raises_on_directory_path() -> None:

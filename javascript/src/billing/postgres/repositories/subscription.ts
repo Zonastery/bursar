@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { BillingSubscriptionState } from "../../types/subscriptions.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { JsonObject, PostgresRow } from "../../../shared/json.js";
 import { StoreError } from "../../../errors.js";
 import {
   optionalRecordRow,
@@ -46,7 +47,7 @@ const PersistedSubscriptionRowSchema = z
     grace_expired_at: timestamp.nullable(),
     provider_updated_at: timestamp,
     cancel_at_period_end: pgBoolean,
-    metadata: z.record(z.string(), z.unknown()),
+    metadata: z.record(z.string(), z.json()),
   })
   .strict();
 const CatalogReferenceSchema = z
@@ -88,19 +89,25 @@ const SubscriptionRowSchema = z
     cancel_at_period_end: pgBoolean,
     interval: z.enum(["day", "week", "month", "year"]),
     interval_count: z.number().int().positive(),
-    metadata: z.record(z.string(), z.unknown()),
+    metadata: z.record(z.string(), z.json()),
   })
   .strict();
 
 export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 type PersistedSubscriptionRow = z.infer<typeof PersistedSubscriptionRowSchema>;
+type EnrichedSubscriptionRow = PersistedSubscriptionRow & {
+  offer_key: string;
+  plan_id: string;
+  plan_key: string;
+  billing_unit: "day" | "week" | "month" | "year";
+  billing_count: number;
+  plan: string;
+  interval: "day" | "week" | "month" | "year";
+  interval_count: number;
+};
 
-function record(value: unknown, context: string): Record<string, unknown> {
-  return safeParse(z.record(z.string(), z.unknown()), value, context);
-}
-
-function persistedSubscription(row: unknown, context: string): PersistedSubscriptionRow {
-  const value = record(row, context);
+function persistedSubscription(row: PostgresRow, context: string): PersistedSubscriptionRow {
+  const value = row;
   return safeParse(
     PersistedSubscriptionRowSchema,
     {
@@ -209,8 +216,8 @@ export class BillingSubscriptionRepository {
     requireResultField(rows, "id", postgresUuid, "BillingSubscriptionRepository.upsert");
   }
 
-  private map(row: unknown): SubscriptionRow {
-    const r = record(row, "BillingSubscriptionRepository.map");
+  private map(row: EnrichedSubscriptionRow): SubscriptionRow {
+    const r = row;
     return safeParse(
       SubscriptionRowSchema,
       {
@@ -243,7 +250,7 @@ export class BillingSubscriptionRepository {
 
   private async withOfferContext(
     value: PersistedSubscriptionRow,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<EnrichedSubscriptionRow> {
     const reference = safeParse(
       CatalogReferenceSchema,
       { offer_id: value.offer_id, catalog_revision_id: value.catalog_revision_id },
@@ -366,7 +373,7 @@ export class BillingSubscriptionRepository {
     duplicateSubscriptionId: string;
     existingSubscriptionId?: string | null;
     eventId?: string | null;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonObject;
   }): Promise<string> {
     const rows = await this.query(
       `SELECT bursar.record_subscription_conflict(

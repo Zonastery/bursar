@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import stripe as stripe_mod
 
@@ -45,6 +45,11 @@ from bursar.shared.numbers import MAX_SAFE_INTEGER
 if TYPE_CHECKING:
     from stripe.params import CustomerCreateParams, SubscriptionScheduleUpdateParams, SubscriptionUpdateParams
     from stripe.params.checkout import SessionCreateParams
+
+
+@runtime_checkable
+class _StripeRecursiveMapping(Protocol):
+    def to_dict_recursive(self) -> Mapping[str, Any]: ...
 
 
 def _require_stripe_text(value: object, operation: str, field: str) -> str:
@@ -108,14 +113,17 @@ def _stripe_val(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _stripe_dict(obj: Any) -> dict:
+def _stripe_dict(obj: object) -> dict[str, Any]:
     if obj is None:
         return {}
-    if isinstance(obj, dict):
-        return obj
-    if hasattr(obj, "to_dict_recursive"):
-        return obj.to_dict_recursive()
-    return {k: _stripe_val(obj, k) for k in dir(obj) if not k.startswith("_")}
+    if isinstance(obj, Mapping):
+        return dict(obj)
+    if isinstance(obj, stripe_mod.StripeObject):
+        return obj.to_dict(recursive=True)
+    if isinstance(obj, _StripeRecursiveMapping):
+        mapped = obj.to_dict_recursive()
+        return dict(mapped) if isinstance(mapped, Mapping) else {}
+    return {}
 
 
 def _scoped_idempotency_key(key: str, scope: str) -> str:
@@ -401,7 +409,8 @@ class StripeProvider:
 
     async def cancel_scheduled_plan_change(
         self,
-        subscription_id: str,
+        # Stripe cancels by schedule ID; keep the subscription ID for protocol compatibility.
+        subscription_id: str,  # noqa: ARG002
         provider_operation_id: str | None = None,
         *,
         idempotency_key: str,

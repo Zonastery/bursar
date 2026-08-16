@@ -1,6 +1,7 @@
 import { NotFoundError } from "dodopayments";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { BillingEventSink } from "../src/billing/contracts.js";
+import { assertBillingEvent, type BillingEvent } from "../src/billing/types/index.js";
 import type { DodoClient } from "../src/providers/dodo/client-contract.js";
 import { DodoProvider } from "../src/providers/dodo/provider.js";
 import type { WebhookRequest } from "../src/providers/types.js";
@@ -21,14 +22,26 @@ const mockLogger = {
 const WEBHOOK_KEY = "test_wh_key_12345";
 const ACCOUNT_ID = "team-account-1";
 
+function testDodoClient<TClient>(client: TClient): DodoClient {
+  // SAFETY: Each webhook fixture implements only the Dodo method exercised by its test.
+  return client as DodoClient;
+}
+
 function webhookProvider(unwrap: DodoClient["webhooks"]["unwrap"]): DodoProvider {
-  const client = { webhooks: { unwrap } } as unknown as DodoClient;
+  const client = testDodoClient({ webhooks: { unwrap } });
   return new DodoProvider({
     getClient: () => client,
     webhookKey: WEBHOOK_KEY,
     eventSink: mockSink,
     logger: mockLogger,
   });
+}
+
+function recordedEvent(index = 0): BillingEvent {
+  const value: BillingEvent | undefined = ingestBillingEvent.mock.calls[index]?.[0];
+  if (value === undefined) throw new Error("Expected a recorded billing event");
+  assertBillingEvent(value);
+  return value;
 }
 
 describe("DodoProvider webhook signature verification", () => {
@@ -99,9 +112,9 @@ describe("DodoProvider webhook signature verification", () => {
       headers: { "webhook-signature": "verified-by-unwrap" },
     });
 
-    const event = ingestBillingEvent.mock.calls[0]?.[0];
-    expect(event?.accountId).toBeUndefined();
-    expect(event?.subscription?.refs).toBeUndefined();
+    const event = recordedEvent();
+    expect(event.accountId).toBeUndefined();
+    expect(event.subscription?.refs).toBeUndefined();
   });
 
   it("processes an already verified payload without invoking SDK verification", async () => {
@@ -215,7 +228,7 @@ describe("DodoProvider webhook signature verification", () => {
       .fn()
       .mockResolvedValueOnce({ payment_status: "requires_customer_action" })
       .mockRejectedValueOnce(new NotFoundError(404, {}, "not found", new Headers()));
-    const client = { checkoutSessions: { retrieve } } as unknown as DodoClient;
+    const client = testDodoClient({ checkoutSessions: { retrieve } });
     const provider = new DodoProvider({
       getClient: () => client,
       webhookKey: WEBHOOK_KEY,

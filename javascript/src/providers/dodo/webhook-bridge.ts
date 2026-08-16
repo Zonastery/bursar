@@ -1,6 +1,6 @@
 import type { BillingEventSink } from "../../billing/contracts.js";
 import type { ProviderLogger, WebhookResult } from "../types.js";
-import type { DodoWebhookPayload } from "./client-contract.js";
+import type { DodoWebhookEnvelope } from "./client-contract.js";
 import { DodoWebhookProcessor } from "./provider.js";
 
 export interface DodoWebhookBridgeOptions {
@@ -9,7 +9,9 @@ export interface DodoWebhookBridgeOptions {
   logger?: ProviderLogger | null;
 }
 
-export type DodoVerifiedWebhookHandler = (payload: DodoWebhookPayload) => Promise<WebhookResult>;
+export interface DodoVerifiedWebhookHandler {
+  <TData>(payload: DodoWebhookEnvelope<TData>): Promise<WebhookResult>;
+}
 
 /**
  * Create a framework-neutral callback for official Dodo webhook adapters.
@@ -29,5 +31,5 @@ export function createDodoWebhookBridge(
     eventSink: lazySink,
     logger: options.logger,
   });
-  return (payload) => processor.handle(payload);
+  return <TData>(payload: DodoWebhookEnvelope<TData>) => processor.handle<TData>(payload);
 }

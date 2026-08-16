@@ -50,7 +50,14 @@ export interface BoolOpNode {
 }
 
 export type Node =
-  NumNode | IdentNode | BinOpNode | UnaryNode | CallNode | TernaryNode | CompareNode | BoolOpNode;
+  | NumNode
+  | IdentNode
+  | BinOpNode
+  | UnaryNode
+  | CallNode
+  | TernaryNode
+  | CompareNode
+  | BoolOpNode;
 
 export function children(node: Node): Node[] {
   switch (node.type) {

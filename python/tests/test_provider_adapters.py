@@ -5,18 +5,18 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 from dodopayments import AsyncDodoPayments
-from stripe import StripeClient
+from stripe import StripeClient, StripeObject
 
 from bursar.billing.types import BillingEvent, BillingEventResult, BillingEventType, BillingInvoiceInfo
 from bursar.errors import StoreUnavailableError
 from bursar.providers._shared import call_billing_event_sink
 from bursar.providers.dodo.provider import DodoProvider
 from bursar.providers.mock.provider import MockPaymentProvider
-from bursar.providers.stripe.provider import StripeProvider, _scoped_idempotency_key
+from bursar.providers.stripe.provider import StripeProvider, _scoped_idempotency_key, _stripe_dict
 from bursar.providers.types import (
     ChangePlanLineItem,
     ChangePlanParams,
@@ -60,6 +60,23 @@ class Sink:
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         del event
         return BillingEventResult(handled=True, action="ok")
+
+
+def test_stripe_dict_preserves_mappings_and_fails_closed_for_unmapped_objects() -> None:
+    assert _stripe_dict({"metadata": {"account": "u1"}}) == {"metadata": {"account": "u1"}}
+    stripe_object = StripeObject.construct_from({"metadata": {"account": "u1"}}, "sk_test")
+    assert _stripe_dict(stripe_object) == {"metadata": {"account": "u1"}}
+
+    class RecursiveMapping:
+        def to_dict_recursive(self) -> dict[str, dict[str, str]]:
+            return {"metadata": {"account": "u1"}}
+
+    assert _stripe_dict(RecursiveMapping()) == {"metadata": {"account": "u1"}}
+
+    class UnmappedObject:
+        metadata: ClassVar[dict[str, str]] = {"account": "should-not-be-read"}
+
+    assert _stripe_dict(UnmappedObject()) == {}
 
 
 def test_billing_sink_retries_a_busy_claim() -> None:

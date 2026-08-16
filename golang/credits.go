@@ -476,11 +476,7 @@ func (s *CreditsService) Settle(ctx context.Context, userID, leaseID string, amo
 		if _, err := requireStableKey(options.IdempotencyKey, "settle idempotency key"); err != nil {
 			return DeductionResult{}, err
 		}
-		result, err := s.store.SettleLease(ctx, userID, leaseID, QuantizeMoney(amount), SettleLeaseOptions{
-			OperationUsageOptions: options.OperationUsageOptions,
-			IdempotencyKey:        options.IdempotencyKey,
-			Metadata:              options.Metadata,
-		})
+		result, err := s.store.SettleLease(ctx, userID, leaseID, QuantizeMoney(amount), SettleLeaseOptions(options))
 		if err != nil {
 			return DeductionResult{}, err
 		}

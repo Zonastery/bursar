@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Protocol, cast
+from typing import Any, ClassVar, Literal, Protocol, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
@@ -105,10 +105,17 @@ def _optional_uuid(value: str | None) -> UUID | None:
     return UUID(value) if value is not None else None
 
 
+_SpendDimension = Literal["subject", "model"]
+_SPEND_KEY_EXPRESSIONS: dict[_SpendDimension, str] = {
+    "subject": "subject_id",
+    "model": "coalesce(model, 'unknown')",
+}
+
+
 class ClickHouseUsageStore:
     """Idempotent ClickHouse projection and usage analytics read port."""
 
-    _INSERT_COLUMNS = (
+    _INSERT_COLUMNS: ClassVar[tuple[str, ...]] = (
         "tenant_id",
         "outbox_event_id",
         "charge_id",
@@ -137,7 +144,7 @@ class ClickHouseUsageStore:
         "event_at",
         "created_at",
     )
-    _EXPECTED_SCHEMA_COLUMNS: dict[str, tuple[str, ...]] = {
+    _EXPECTED_SCHEMA_COLUMNS: ClassVar[dict[str, tuple[str, ...]]] = {
         "tenant_id": ("UUID",),
         "outbox_event_id": ("UInt64",),
         "charge_id": ("UUID",),
@@ -311,7 +318,7 @@ class ClickHouseUsageStore:
                 total_spend=Decimal(str(row["total_spend"])),
                 entry_count=int(row["entry_count"]),
             )
-            for row in self._spend_rows("subject_id", start, end)
+            for row in self._spend_rows("subject", start, end)
         ]
 
     def spend_by_model(self, start: datetime, end: datetime) -> list[SpendByModelRow]:
@@ -321,7 +328,7 @@ class ClickHouseUsageStore:
                 total_spend=Decimal(str(row["total_spend"])),
                 entry_count=int(row["entry_count"]),
             )
-            for row in self._spend_rows("coalesce(model, 'unknown')", start, end)
+            for row in self._spend_rows("model", start, end)
         ]
 
     def top_users(
@@ -338,11 +345,12 @@ class ClickHouseUsageStore:
                 user_id=str(row["key"]),
                 total_spend=Decimal(str(row["total_spend"])),
             )
-            for row in self._spend_rows("subject_id", start, end, limit)
+            for row in self._spend_rows("subject", start, end, limit)
         ]
 
     def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]:
         _validate_range(start, end)
+        # The table name passed to this query was allowlisted and identifier-quoted during construction.
         rows = self._query_rows(
             f"""
             SELECT
@@ -356,7 +364,7 @@ class ClickHouseUsageStore:
               AND event_at < parseDateTime64BestEffort({{end:String}})
             GROUP BY key
             ORDER BY key
-            """,
+            """,  # noqa: S608
             start,
             end,
         )
@@ -372,6 +380,7 @@ class ClickHouseUsageStore:
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats:
         _validate_range(start, end)
         with ThreadPoolExecutor(max_workers=3) as executor:
+            # The table name was allowlisted and identifier-quoted during construction.
             totals_future = executor.submit(
                 self._query_rows,
                 f"""
@@ -383,18 +392,18 @@ class ClickHouseUsageStore:
                   AND billing_disposition = 'billable'
                   AND event_at >= parseDateTime64BestEffort({{start:String}})
                   AND event_at < parseDateTime64BestEffort({{end:String}})
-                """,
+                """,  # noqa: S608
                 start,
                 end,
             )
             models_future = executor.submit(
                 self._spend_rows,
-                "coalesce(model, 'unknown')",
+                "model",
                 start,
                 end,
                 1,
             )
-            users_future = executor.submit(self._spend_rows, "subject_id", start, end, 1)
+            users_future = executor.submit(self._spend_rows, "subject", start, end, 1)
             totals = totals_future.result()
             models = models_future.result()
             users = users_future.result()
@@ -452,6 +461,7 @@ class ClickHouseUsageStore:
             parameters["cursor_event_at"] = cursor.event_at
             parameters["cursor_usage_id"] = cursor.usage_id
 
+        # Predicates are selected from fixed strings above; values remain bound ClickHouse parameters.
         rows = self._query_rows_with_parameters(
             f"""
             SELECT
@@ -474,7 +484,7 @@ class ClickHouseUsageStore:
             WHERE {" AND ".join(predicates)}
             ORDER BY event_at DESC, charge_id DESC
             LIMIT {limit + 1}
-            """,
+            """,  # noqa: S608
             parameters,
         )
         has_more = len(rows) > limit
@@ -547,13 +557,15 @@ class ClickHouseUsageStore:
 
     def _spend_rows(
         self,
-        key_expression: str,
+        dimension: _SpendDimension,
         start: datetime,
         end: datetime,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         _validate_range(start, end)
+        key_expression = _SPEND_KEY_EXPRESSIONS[dimension]
         limit_sql = "" if limit is None else f"\nLIMIT {limit}"
+        # Both the grouping expression and table identifier come from closed, validated sets.
         return self._query_rows(
             f"""
             SELECT
@@ -567,7 +579,7 @@ class ClickHouseUsageStore:
               AND event_at < parseDateTime64BestEffort({{end:String}})
             GROUP BY key
             ORDER BY sum(charged) DESC, key{limit_sql}
-            """,
+            """,  # noqa: S608
             start,
             end,
         )

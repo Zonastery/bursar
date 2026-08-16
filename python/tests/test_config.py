@@ -172,7 +172,7 @@ def test_plans_require_an_explicit_signup_default() -> None:
     data = base_config()
     data.pop("catalog")
 
-    with pytest.raises(ConfigError, match="catalog.default_plan is required"):
+    with pytest.raises(ConfigError, match=r"catalog\.default_plan is required"):
         load_config_from_dict(data)
 
 
@@ -261,15 +261,15 @@ def test_feature_values_enforce_declared_types_and_constraints() -> None:
         }
     )
 
-    with pytest.raises(ConfigError, match="tutor_chat.*boolean"):
+    with pytest.raises(ConfigError, match=r"tutor_chat.*boolean"):
         load_config_from_dict(data)
 
     data["plans"]["pro"]["features"]["tutor_chat"] = True
-    with pytest.raises(ConfigError, match="agent_limit.*maximum"):
+    with pytest.raises(ConfigError, match=r"agent_limit.*maximum"):
         load_config_from_dict(data)
 
     data["plans"]["pro"]["features"]["agent_limit"] = 5
-    with pytest.raises(ConfigError, match="support_tier.*pattern"):
+    with pytest.raises(ConfigError, match=r"support_tier.*pattern"):
         load_config_from_dict(data)
 
 
@@ -297,7 +297,7 @@ def test_duplicate_bucket_priorities_are_rejected() -> None:
 def test_allowance_priority_must_not_conflict_with_a_bucket() -> None:
     data = base_config()
     data["plans"]["pro"]["credit_allowance"]["priority"] = 10
-    with pytest.raises(ConfigError, match="credit_allowance.priority conflicts"):
+    with pytest.raises(ConfigError, match=r"credit_allowance\.priority conflicts"):
         load_config_from_dict(data)
 
 
@@ -328,7 +328,7 @@ def test_default_bucket_and_plan_policy_references_are_validated() -> None:
 def test_credit_allowance_requires_a_default_bucket() -> None:
     data = base_config()
     data["credits"].pop("default_bucket")
-    with pytest.raises(ConfigError, match="credit_allowance requires credits.default_bucket"):
+    with pytest.raises(ConfigError, match=r"credit_allowance requires credits\.default_bucket"):
         load_config_from_dict(data)
 
 

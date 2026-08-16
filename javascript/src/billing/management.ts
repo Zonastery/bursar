@@ -14,6 +14,7 @@ import type {
   CheckoutIntent,
 } from "./types/index.js";
 import { SUBSCRIPTION_STATUS } from "./types/index.js";
+import type { JsonObject } from "../shared/json.js";
 
 /**
  * Public billing reads and commands that delegate directly to BillingStore.
@@ -92,7 +93,7 @@ export class BillingManagement {
     return this.store.getAutoRechargeProfile(userId);
   }
 
-  async getActiveCatalogDocument(): Promise<Record<string, unknown> | null> {
+  async getActiveCatalogDocument(): Promise<JsonObject | null> {
     return this.store.getActiveCatalogDocument();
   }
 
@@ -143,7 +144,7 @@ export class BillingManagement {
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonObject;
   }): Promise<void> {
     return this.store.updateAutoRechargeAttempt(input);
   }

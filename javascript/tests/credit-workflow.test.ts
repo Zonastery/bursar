@@ -4,9 +4,13 @@ import { describe, expect, it, vi } from "vitest";
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
 import type { PricingEngine } from "../src/engine.js";
+import type { DeductionResult, LeaseResult } from "../src/credits/types/index.js";
 import { LeaseExpiredError, LeaseNotFoundError, QuotaExceededError } from "../src/errors.js";
 
-const leaseResult = (overrides: Record<string, unknown> = {}) => ({
+type LeaseSuccess = Extract<LeaseResult, { error: null }>;
+type DeductionSuccess = Extract<DeductionResult, { error: null }>;
+
+const leaseResult = (overrides: Partial<LeaseSuccess> = {}): LeaseSuccess => ({
   leaseId: "lease-1",
   userId: "user-1",
   amount: new Decimal(10),
@@ -19,7 +23,7 @@ const leaseResult = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const deductionResult = (overrides: Record<string, unknown> = {}) => ({
+const deductionResult = (overrides: Partial<DeductionSuccess> = {}): DeductionSuccess => ({
   entryId: "entry-1",
   usageChargeId: "usage-1",
   userId: "user-1",
@@ -33,10 +37,22 @@ const deductionResult = (overrides: Record<string, unknown> = {}) => ({
 });
 
 function makeService(
-  store: Record<string, unknown>,
+  store: Partial<CreditStore>,
   options?: ConstructorParameters<typeof CreditsService>[3],
 ) {
-  return new CreditsService(store as unknown as CreditStore, null, null, options ?? null);
+  // SAFETY: Each test fixture implements the CreditStore methods exercised by its scenario.
+  const testStore = store as CreditStore;
+  return new CreditsService(testStore, null, null, options ?? null);
+}
+
+function testCreditStore<TStore>(store: TStore): CreditStore {
+  // SAFETY: Each fixture implements only the CreditStore methods used by its scenario.
+  return store as CreditStore;
+}
+
+function testPricingEngine<TEngine>(engine: TEngine): PricingEngine {
+  // SAFETY: Each fixture implements only the PricingEngine methods used by its scenario.
+  return engine as PricingEngine;
 }
 
 describe("credit lease workflow", () => {
@@ -49,15 +65,14 @@ describe("credit lease workflow", () => {
       error: null,
     });
     const engine = { calculate: vi.fn().mockReturnValue({ total: new Decimal(12) }) };
-    const service = new CreditsService(
-      {
-        getUserPlan: vi.fn().mockResolvedValue({ rateCard: "standard" }),
-        recordUsage,
-      } as unknown as CreditStore,
-      engine as unknown as PricingEngine,
-      null,
-      null,
-    );
+    // SAFETY: This fixture supplies the store and engine methods used by recordUsage.
+    const testStore = testCreditStore({
+      getUserPlan: vi.fn().mockResolvedValue({ rateCard: "standard" }),
+      recordUsage,
+    });
+    // SAFETY: The pricing fixture returns the exact breakdown shape this scenario exercises.
+    const testEngine = testPricingEngine(engine);
+    const service = new CreditsService(testStore, testEngine, null, null);
 
     const result = await service.recordUsage(
       "user-1",
@@ -217,21 +232,18 @@ describe("credit lease workflow", () => {
       },
     };
     const settleLease = vi.fn().mockResolvedValue(deductionResult({ idempotent: true }));
-    const service = new CreditsService(
-      {
-        getLeasePricingContext: vi.fn().mockResolvedValue({
-          catalogVersion: 1,
-          rateCard: null,
-          planKey: null,
-        }),
-        getCatalogRevision: vi.fn().mockResolvedValue({ config }),
-        settleLease,
-        listQuotaEvents: vi.fn().mockResolvedValue([]),
-      } as unknown as CreditStore,
-      null,
-      null,
-      null,
-    );
+    // SAFETY: This fixture supplies the store methods used by settle.
+    const testStore = testCreditStore({
+      getLeasePricingContext: vi.fn().mockResolvedValue({
+        catalogVersion: 1,
+        rateCard: null,
+        planKey: null,
+      }),
+      getCatalogRevision: vi.fn().mockResolvedValue({ config }),
+      settleLease,
+      listQuotaEvents: vi.fn().mockResolvedValue([]),
+    });
+    const service = new CreditsService(testStore, null, null, null);
 
     await expect(
       service.settle("user-1", "lease-1", new Decimal(1), { idempotencyKey: " " }),
@@ -252,7 +264,8 @@ describe("credit lease workflow", () => {
     );
 
     expect(settleLease).toHaveBeenCalledTimes(1);
-    const args = settleLease.mock.calls[0] as [string, string, Decimal, Record<string, unknown>];
+    const args = settleLease.mock.calls[0];
+    if (!args) throw new Error("expected settleLease to be called");
     expect(args[0]).toBe("user-1");
     expect(args[1]).toBe("lease-1");
     expect(args[2].eq(new Decimal(4))).toBe(true);

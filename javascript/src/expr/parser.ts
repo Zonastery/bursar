@@ -1,15 +1,5 @@
 import { ExpressionError } from "../errors.js";
-import type {
-  BinOpNode,
-  BoolOpNode,
-  CallNode,
-  CompareNode,
-  IdentNode,
-  Node,
-  NumNode,
-  TernaryNode,
-  UnaryNode,
-} from "./ast.js";
+import type { Node } from "./ast.js";
 import { ALLOWED_FUNCTIONS } from "./language.js";
 import { tokenize, type Token, type TokenType } from "./tokenizer.js";
 
@@ -71,7 +61,7 @@ export class ExpressionParser {
       cond: condition,
       then: expression,
       else: this.booleanExpression(),
-    } as TernaryNode;
+    };
   }
 
   private comparison(): Node {
@@ -82,14 +72,14 @@ export class ExpressionParser {
       if (!this.match("in")) {
         throw new ExpressionError("expected 'in' after 'not'");
       }
-      node = { type: "comparison", op: "not in", left, right: this.addition() } as CompareNode;
+      node = { type: "comparison", op: "not in", left, right: this.addition() };
     } else if (this.match("==", "!=", "<", "<=", ">", ">=", "in")) {
       node = {
         type: "comparison",
         op: this.previous().value,
         left,
         right: this.addition(),
-      } as CompareNode;
+      };
     } else {
       return left;
     }
@@ -110,7 +100,7 @@ export class ExpressionParser {
         op: this.previous().value,
         left,
         right: this.multiplication(),
-      } as BinOpNode;
+      };
     }
     return left;
   }
@@ -123,7 +113,7 @@ export class ExpressionParser {
         op: this.previous().value,
         left,
         right: this.unary(),
-      } as BinOpNode;
+      };
     }
     if (this.check("**")) {
       throw new ExpressionError(
@@ -139,7 +129,7 @@ export class ExpressionParser {
       type: "unary",
       op: "not",
       operand: this.notExpression(),
-    } as UnaryNode;
+    };
   }
 
   private andExpression(): Node {
@@ -150,7 +140,7 @@ export class ExpressionParser {
         op: "and",
         left,
         right: this.notExpression(),
-      } as BoolOpNode;
+      };
     }
     return left;
   }
@@ -163,7 +153,7 @@ export class ExpressionParser {
         op: "or",
         left,
         right: this.andExpression(),
-      } as BoolOpNode;
+      };
     }
     return left;
   }
@@ -174,7 +164,7 @@ export class ExpressionParser {
       type: "unary",
       op: this.previous().value,
       operand: this.unary(),
-    } as UnaryNode;
+    };
   }
 
   private primary(): Node {
@@ -184,18 +174,18 @@ export class ExpressionParser {
       );
     }
     if (this.match("number")) {
-      return { type: "number", value: this.previous().value } as NumNode;
+      return { type: "number", value: this.previous().value };
     }
     if (this.match("identifier")) {
       const name = this.previous().value;
-      if (!this.match("(")) return { type: "identifier", name } as IdentNode;
+      if (!this.match("(")) return { type: "identifier", name };
       if (!ALLOWED_FUNCTIONS.has(name)) {
         throw new ExpressionError(`disallowed function: ${name}`);
       }
-      return { type: "call", name, args: this.callArguments() } as CallNode;
+      return { type: "call", name, args: this.callArguments() };
     }
     if (this.match("if") && this.match("(")) {
-      return { type: "call", name: "if", args: this.callArguments() } as CallNode;
+      return { type: "call", name: "if", args: this.callArguments() };
     }
     if (this.match("(")) {
       const expression = this.parse();

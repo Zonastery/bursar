@@ -15,18 +15,20 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { loadConfigFromDict } from "../src/config.js";
 import { ConfigError } from "../src/errors.js";
+import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturePath = resolve(__dirname, "../../tests/parity/config_validation_cases.json");
 
-interface ConfigCase {
-  name: string;
-  expect: "accept" | "reject";
-  reason?: string;
-  config: Record<string, unknown>;
-}
-
-const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as { cases: ConfigCase[] };
+const configCaseSchema = z.object({
+  name: z.string(),
+  expect: z.enum(["accept", "reject"]),
+  reason: z.string().optional(),
+  config: z.record(z.string(), z.json()),
+});
+const fixture = z
+  .object({ cases: z.array(configCaseSchema) })
+  .parse(JSON.parse(readFileSync(fixturePath, "utf8")));
 
 describe("parity fixture — config_validation_cases", () => {
   for (const c of fixture.cases) {

@@ -387,7 +387,7 @@ def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
     print(f"Tenant {created_id} bootstrapped successfully ({outcome}).")
 
 
-def _cmd_config_get(args: argparse.Namespace) -> None:
+def _cmd_config_get(_args: argparse.Namespace) -> None:
     with _store_from_env() as store:
         result = _retry_store_operation(store.get_active_catalog, what="get active catalog")
     if result is None:
@@ -396,7 +396,7 @@ def _cmd_config_get(args: argparse.Namespace) -> None:
     print(json.dumps(result.model_dump(mode="json"), indent=2))
 
 
-def _cmd_config_list(args: argparse.Namespace) -> None:
+def _cmd_config_list(_args: argparse.Namespace) -> None:
     with _store_from_env() as store:
         rows = _retry_store_operation(store.get_catalog_history, what="list catalog revisions")
     if not rows:

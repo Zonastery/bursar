@@ -1463,8 +1463,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   it("get active pricing config", async () => {
     const { bs } = await makePgComponents(pool);
     const config = await bs.getActiveCatalogDocument();
-    expect(config).not.toBeNull();
-    expect((config as Record<string, unknown>)?.version).toBe(1);
+    expect(config).toMatchObject({ version: 1 });
   });
 
   // ── Manager public API ──────────────────────────────────────────────────

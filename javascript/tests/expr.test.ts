@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 import {
   evaluateExpression,
   validateExpression as validateSdkExpression,
@@ -697,16 +698,16 @@ describe("malformed number literals (H11)", () => {
 // byte-identical 6dp decimal strings or both raise for expect_error.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturePath = resolve(__dirname, "../../tests/parity/expression_cases.json");
-interface ExprCase {
-  name: string;
-  expr: string;
-  vars: Record<string, number>;
-  expected?: string;
-  expect_error?: boolean;
-}
-const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
-  expression_cases: ExprCase[];
-};
+const exprCaseSchema = z.object({
+  name: z.string(),
+  expr: z.string(),
+  vars: z.record(z.string(), z.number()),
+  expected: z.string().optional(),
+  expect_error: z.boolean().optional(),
+});
+const fixture = z
+  .object({ expression_cases: z.array(exprCaseSchema) })
+  .parse(JSON.parse(readFileSync(fixturePath, "utf8")));
 
 describe("parity fixture — expression_cases", () => {
   for (const c of fixture.expression_cases) {

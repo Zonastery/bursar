@@ -1,4 +1,5 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 import type {
   AggregateStats,
   DailySpendRow,
@@ -13,9 +14,16 @@ import type {
 } from "../../credits/types/index.js";
 import type { UsageChargeExport, UsageEventSink } from "../ports.js";
 import { normalizeTenantId } from "../../shared/postgres-client.js";
+import type { JsonObject } from "../../shared/json.js";
 
 export interface ClickHouseQueryResult {
   json<T>(): Promise<T>;
+}
+
+type ClickHouseValue = string | number | boolean | null | undefined | Decimal | JsonObject | Date;
+
+export interface ClickHouseRow {
+  [key: string]: ClickHouseValue;
 }
 
 /**
@@ -23,15 +31,15 @@ export interface ClickHouseQueryResult {
  * need to install that package.
  */
 export interface ClickHouseClient {
-  command(options: { query: string }): Promise<unknown>;
+  command(options: { query: string }): Promise<object | void>;
   insert(options: {
     table: string;
-    values: Record<string, unknown>[];
+    values: ClickHouseRow[];
     format: "JSONEachRow";
-  }): Promise<unknown>;
+  }): Promise<object | void>;
   query(options: {
     query: string;
-    query_params?: Record<string, unknown>;
+    query_params?: ClickHouseRow;
     format: "JSONEachRow";
   }): Promise<ClickHouseQueryResult>;
 }
@@ -54,7 +62,7 @@ interface ClickHouseSchemaRow {
   sorting_key: string;
 }
 
-const EXPECTED_SCHEMA_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+const EXPECTED_SCHEMA_COLUMNS = {
   tenant_id: ["UUID"],
   outbox_event_id: ["UInt64"],
   charge_id: ["UUID"],
@@ -82,7 +90,7 @@ const EXPECTED_SCHEMA_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   request_digest: ["String"],
   event_at: ["DateTime64(6,'UTC')"],
   created_at: ["DateTime64(6,'UTC')"],
-};
+} satisfies Readonly<Record<string, readonly string[]>>;
 
 interface SpendRow {
   key: string;
@@ -197,7 +205,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
   /** Explicitly create Bursar's standalone projection schema. */
   initializeSchema(): Promise<void> {
     if (!this.initializePromise) {
-      this.initializePromise = this.createProjectionTable().catch((error: unknown) => {
+      this.initializePromise = this.createProjectionTable().catch((error) => {
         this.initializePromise = null;
         throw error;
       });
@@ -364,7 +372,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       throw new RangeError("limit must be between 1 and 200");
     }
     const predicates = ["tenant_id = {tenantId:UUID}", "subject_id = {subjectId:UUID}"];
-    const params: Record<string, unknown> = { tenantId: this.tenantId, subjectId: userId };
+    const params: ClickHouseRow = { tenantId: this.tenantId, subjectId: userId };
     if (options.fromDate) {
       predicates.push("event_at >= parseDateTime64BestEffort({fromDate:String})");
       params.fromDate = options.fromDate.toISOString();
@@ -475,7 +483,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     });
   }
 
-  private projectUsage(event: UsageChargeExport, outboxEventId: string): Record<string, unknown> {
+  private projectUsage(event: UsageChargeExport, outboxEventId: string): ClickHouseRow {
     if (event.tenantId !== this.tenantId) {
       throw new Error("Usage event tenantId does not match ClickHouse store tenantId");
     }
@@ -534,7 +542,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     );
   }
 
-  private analyticsParams(start: Date, end: Date): Record<string, unknown> {
+  private analyticsParams(start: Date, end: Date): ClickHouseRow {
     return {
       tenantId: this.tenantId,
       start: start.toISOString(),
@@ -542,7 +550,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     };
   }
 
-  private async queryRows<T>(query: string, params: Record<string, unknown>): Promise<T[]> {
+  private async queryRows<T>(query: string, params: ClickHouseRow): Promise<T[]> {
     await this.initialize();
     const result = await this.client.query({
       query,
@@ -567,17 +575,17 @@ interface UsageRow {
   region: string | null;
   event_at: string;
   idempotency_key: string;
-  metadata: string | Record<string, unknown> | null;
+  metadata: string | JsonObject | null;
   created_at: string;
 }
 
-function parseJsonObject(
-  value: string | Record<string, unknown> | null,
-): Record<string, unknown> | null {
+function parseJsonObject(value: string | JsonObject | null): JsonObject | null {
   if (value === null) return null;
-  if (typeof value === "object") return value;
-  const parsed: unknown = JSON.parse(value);
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
-    : null;
+  const serialized = z.string().safeParse(value);
+  if (serialized.success) {
+    const parsed = z.record(z.string(), z.json()).safeParse(JSON.parse(serialized.data));
+    return parsed.success ? parsed.data : null;
+  }
+  const objectValue = z.record(z.string(), z.json()).safeParse(value);
+  return objectValue.success ? objectValue.data : null;
 }

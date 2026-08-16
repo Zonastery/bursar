@@ -1,5 +1,6 @@
 import { Decimal } from "decimal.js";
 import { LRUCache } from "lru-cache";
+import { z } from "zod";
 import {
   canonicalBursarConfigDict,
   type BursarConfigData,
@@ -69,7 +70,7 @@ export class CatalogRuntime {
       this.logger.warn("[CatalogService] no active catalog revision in store");
       throw new CatalogNotLoadedError("No active catalog revision is available");
     }
-    return PricingEngineClass.fromDict(active.config as Record<string, unknown>);
+    return PricingEngineClass.fromDict(active.config);
   }
 
   async refreshIfStale(): Promise<void> {
@@ -131,10 +132,7 @@ export class CatalogRuntime {
     });
     return {
       amount: breakdown.total,
-      model:
-        typeof metricsOrAmount.dimensions?.model === "string"
-          ? metricsOrAmount.dimensions.model
-          : null,
+      model: z.string().safeParse(metricsOrAmount.dimensions?.model).data ?? null,
     };
   }
 
@@ -168,7 +166,7 @@ export class CatalogRuntime {
       );
     }
 
-    const engine = PricingEngineClass.fromDict(config.config as Record<string, unknown>);
+    const engine = PricingEngineClass.fromDict(config.config);
     this.versionEngines.set(catalogVersion, engine);
     return engine;
   }

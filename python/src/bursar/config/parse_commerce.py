@@ -24,12 +24,9 @@ def _validate_commerce(commerce: CommerceConfig) -> CommerceConfig:
             if provider is None:
                 raise ValueError(f"commerce.offers.{offer_key} references unknown provider '{provider_key}'")
             compatible = (
-                isinstance(provider, StripeProvider)
-                and isinstance(reference, StripePriceReference)
-                or isinstance(provider, DodoProvider)
-                and isinstance(reference, DodoProductReference)
-                or isinstance(provider, CustomProvider)
-                and isinstance(reference, CustomObjectReference)
+                (isinstance(provider, StripeProvider) and isinstance(reference, StripePriceReference))
+                or (isinstance(provider, DodoProvider) and isinstance(reference, DodoProductReference))
+                or (isinstance(provider, CustomProvider) and isinstance(reference, CustomObjectReference))
             )
             if not compatible:
                 raise ValueError(

@@ -26,7 +26,7 @@ export interface OutboxWorkerOptions {
   retryDelaySeconds?: number;
   maxRetryDelaySeconds?: number;
   attemptLimit?: number;
-  onError?: (error: unknown) => void | Promise<void>;
+  onError?: (cause: unknown) => void | Promise<void>;
   onEventOutcome?: (outcome: OutboxEventOutcome) => void | Promise<void>;
 }
 
@@ -48,14 +48,14 @@ const outboxWorkerOptionsSchema = z
     maxRetryDelaySeconds: z.number().finite().int().min(1).max(86_400).default(3_600),
     attemptLimit: z.number().finite().int().min(1).max(100).default(10),
     onError: z
-      .custom<(error: unknown) => void | Promise<void>>(
-        (value) => typeof value === "function",
+      .custom<(cause: unknown) => void | Promise<void>>(
+        (value) => z.function().safeParse(value).success,
         "onError must be a function",
       )
       .optional(),
     onEventOutcome: z
       .custom<(outcome: OutboxEventOutcome) => void | Promise<void>>(
-        (value) => typeof value === "function",
+        (value) => z.function().safeParse(value).success,
         "onEventOutcome must be a function",
       )
       .optional(),
@@ -70,7 +70,7 @@ type NormalizedWorkerOptions = Omit<
   z.infer<typeof outboxWorkerOptionsSchema>,
   "onError" | "onEventOutcome"
 > & {
-  onError: ((error: unknown) => void | Promise<void>) | null;
+  onError: ((cause: unknown) => void | Promise<void>) | null;
   onEventOutcome: ((outcome: OutboxEventOutcome) => void | Promise<void>) | null;
 };
 
@@ -105,7 +105,7 @@ export class OutboxWorker {
     options: OutboxWorkerOptions = {},
   ) {
     if (handlers.length === 0) throw new TypeError("OutboxWorker requires at least one handler");
-    if (typeof store.renew !== "function") {
+    if (!z.function().safeParse(store.renew).success) {
       throw new TypeError("OutboxWorker store must support claim renewal");
     }
     const parsedOptions = outboxWorkerOptionsSchema.parse(options);
@@ -158,15 +158,15 @@ export class OutboxWorker {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
       void this.runOnce()
-        .catch((error: unknown) => this.reportError(error))
+        .catch((cause) => this.reportError(cause))
         .finally(() => this.schedule(this.options.pollIntervalMs));
     }, delayMs);
     this.timer.unref?.();
   }
 
-  private reportError(error: unknown): void {
+  private reportError(cause: unknown): void {
     try {
-      const result = this.options.onError?.(error);
+      const result = this.options.onError?.(cause);
       if (result) void Promise.resolve(result).catch(() => {});
     } catch {
       // Observability callbacks must never stop the delivery loop.
@@ -215,13 +215,13 @@ export class OutboxWorker {
   private async dispatchEvent(event: OutboxEvent): Promise<OutboxEventOutcomeStatus> {
     const startedAt = Date.now();
     const heartbeat = this.startHeartbeat(event);
-    let deliveryFailure: { error: unknown } | null = null;
+    let deliveryFailure: { cause: unknown } | null = null;
     try {
       const handlers = this.handlers.get(event.topic);
       if (!handlers?.length) throw new Error(`No handler for outbox topic ${event.topic}`);
       await Promise.all(handlers.map((handler) => handler.handle(event)));
-    } catch (error) {
-      deliveryFailure = { error };
+    } catch (cause) {
+      deliveryFailure = { cause };
     }
 
     const heartbeatResult = await heartbeat.stop();
@@ -229,7 +229,7 @@ export class OutboxWorker {
       return this.claimLost(event, "heartbeat", heartbeatResult.summary, startedAt);
     }
     if (deliveryFailure) {
-      return this.failDelivery(event, deliveryFailure.error, startedAt);
+      return this.failDelivery(event, deliveryFailure.cause, startedAt);
     }
 
     try {
@@ -241,11 +241,11 @@ export class OutboxWorker {
           startedAt,
         );
       }
-    } catch (error) {
+    } catch (cause) {
       return this.claimLost(
         event,
         "complete",
-        persistedDiagnosticSummary(error, "outbox_claim_lost"),
+        persistedDiagnosticSummary(cause, "outbox_claim_lost"),
         startedAt,
       );
     }
@@ -265,10 +265,10 @@ export class OutboxWorker {
 
   private async failDelivery(
     event: OutboxEvent,
-    error: unknown,
+    cause: unknown,
     startedAt: number,
   ): Promise<OutboxEventOutcomeStatus> {
-    const summary = persistedDiagnosticSummary(error, "outbox_delivery_failed");
+    const summary = persistedDiagnosticSummary(cause, "outbox_delivery_failed");
     const exponentialDelay =
       this.options.retryDelaySeconds * 2 ** Math.max(event.attemptCount - 1, 0);
     const retryDelay = Math.min(exponentialDelay, this.options.maxRetryDelaySeconds);
@@ -277,11 +277,11 @@ export class OutboxWorker {
       if (!(await this.store.fail(event, summary, retryDelay, this.options.attemptLimit))) {
         return this.claimLost(event, "fail", summary, startedAt);
       }
-    } catch (failureError) {
+    } catch (cause) {
       return this.claimLost(
         event,
         "fail",
-        persistedDiagnosticSummary(failureError, "outbox_claim_lost"),
+        persistedDiagnosticSummary(cause, "outbox_claim_lost"),
         startedAt,
       );
     }
@@ -326,9 +326,9 @@ export class OutboxWorker {
     let claimLost = false;
     let heartbeatSummary: string | null = null;
 
-    const loseClaim = (error: unknown): void => {
+    const loseClaim = (cause: unknown): void => {
       claimLost = true;
-      heartbeatSummary = persistedDiagnosticSummary(error, "outbox_claim_lost");
+      heartbeatSummary = persistedDiagnosticSummary(cause, "outbox_claim_lost");
       if (timer) clearTimeout(timer);
       timer = null;
     };
@@ -343,7 +343,7 @@ export class OutboxWorker {
               loseClaim("outbox_claim_lost");
             }
           })
-          .catch((error: unknown) => loseClaim(error))
+          .catch((cause) => loseClaim(cause))
           .finally(() => {
             pending = null;
             schedule();

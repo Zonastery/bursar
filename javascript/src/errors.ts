@@ -1,3 +1,7 @@
+import { z } from "zod";
+
+import type { StructuredValue } from "./shared/json.js";
+
 /**
  * Transport-neutral failure categories for SaaS application boundaries.
  *
@@ -16,7 +20,9 @@ export type BursarErrorCategory =
   | "internal";
 
 /** Structured, non-secret context that is safe to attach to an SDK error. */
-export type BursarErrorDetails = Readonly<Record<string, unknown>>;
+export interface BursarErrorDetails {
+  readonly [key: string]: StructuredValue;
+}
 
 /** Options shared by all Bursar errors. */
 export interface BursarErrorOptions extends ErrorOptions {
@@ -62,8 +68,9 @@ export const BURSAR_ERROR_CODES = [
 export type BursarErrorCode = (typeof BURSAR_ERROR_CODES)[number];
 const BURSAR_ERROR_CODE_SET = new Set<string>(BURSAR_ERROR_CODES);
 
-export function isBursarErrorCode(value: unknown): value is BursarErrorCode {
-  return typeof value === "string" && BURSAR_ERROR_CODE_SET.has(value);
+export function isBursarErrorCode(cause: unknown): cause is BursarErrorCode {
+  const parsed = z.string().safeParse(cause);
+  return parsed.success && BURSAR_ERROR_CODE_SET.has(parsed.data);
 }
 
 export interface SerializedBursarError {
@@ -95,14 +102,15 @@ export class BursarError extends Error {
 
   /** A predictable representation for logs and protocol adapters. */
   toJSON(): SerializedBursarError {
-    return {
+    const result: SerializedBursarError = {
       name: this.name,
       message: this.message,
       code: this.code,
       category: this.category,
       retryable: this.retryable,
-      ...(this.details ? { details: this.details } : {}),
     };
+    if (this.details) result.details = this.details;
+    return result;
   }
 }
 
@@ -339,18 +347,18 @@ export class CapabilityNotConfiguredError extends BursarError {
  * Cross-package-copy-safe check for an SDK error. `instanceof` alone fails
  * when an application installs two copies of the package.
  */
-export function isBursarError(error: unknown): error is BursarError {
-  if (error instanceof BursarError) return true;
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as Record<PropertyKey, unknown>)[BURSAR_ERROR_BRAND] === true
-  );
+export function isBursarError(cause: unknown): cause is BursarError {
+  if (cause instanceof BursarError) return true;
+  try {
+    return Object.getOwnPropertyDescriptor(Object(cause), BURSAR_ERROR_BRAND)?.value === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Return whether retrying the failed Bursar operation can be useful. */
-export function isRetryableBursarError(error: unknown): boolean {
-  return isBursarError(error) && error.retryable;
+export function isRetryableBursarError(cause: unknown): boolean {
+  return isBursarError(cause) && cause.retryable;
 }
 
 /** Project a Bursar failure category to its conventional HTTP status. */

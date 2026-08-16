@@ -5,8 +5,9 @@ import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
 import { requireStableKey, scopedStableKey } from "../src/shared/idempotency.js";
 
-function service(store: Record<string, unknown>): CreditsService {
-  return new CreditsService(store as unknown as CreditStore);
+function service(store: Partial<CreditStore>): CreditsService {
+  // SAFETY: Each fixture implements the CreditStore methods exercised by its scenario.
+  return new CreditsService(store as CreditStore);
 }
 
 describe("CreditsService public amount validation", () => {
@@ -83,6 +84,7 @@ describe("CreditsService public amount validation", () => {
     const credits = service({ addCredits });
 
     await expect(
+      // SAFETY: This deliberately invalid runtime value exercises amount validation.
       credits.addCredits("user-1", true as never, { idempotencyKey: "add-boolean" }),
     ).rejects.toThrow(/Decimal or decimal string/);
     expect(addCredits).not.toHaveBeenCalled();
@@ -92,6 +94,7 @@ describe("CreditsService public amount validation", () => {
     const addCredits = vi.fn();
     const credits = service({ addCredits });
 
+    // SAFETY: This deliberately invalid runtime value exercises required-key validation.
     await expect(credits.addCredits("user-1", "1", undefined as never)).rejects.toThrow(
       /idempotencyKey/,
     );
@@ -103,6 +106,7 @@ describe("CreditsService public amount validation", () => {
     const credits = service({ addCredits });
 
     await expect(
+      // SAFETY: This deliberately invalid runtime value exercises exact-money validation.
       credits.addCredits("user-1", 0.1 as never, { idempotencyKey: "add-number" }),
     ).rejects.toThrow(/Decimal or decimal string/);
     expect(addCredits).not.toHaveBeenCalled();
@@ -113,6 +117,7 @@ describe("CreditsService public amount validation", () => {
     const credits = service({ getUserPlan });
 
     await expect(
+      // SAFETY: This deliberately invalid runtime value exercises exact-money validation.
       credits.reserve("user-1", 0.1 as never, { idempotencyKey: "reserve-number" }),
     ).rejects.toThrow(/Decimal or decimal string/);
     expect(getUserPlan).not.toHaveBeenCalled();

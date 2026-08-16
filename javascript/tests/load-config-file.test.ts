@@ -4,15 +4,16 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { ConfigError } from "../src/errors.js";
 import { PricingEngine } from "../src/engine.js";
+import { isJsonObject, type JsonObject } from "../src/shared/json.js";
 
 const tmpDir = join(tmpdir(), "bursar-js-test-" + Date.now());
 
-function objectField(value: Record<string, unknown>, key: string): Record<string, unknown> {
+function objectField(value: JsonObject, key: string): JsonObject {
   const field = value[key];
-  if (field == null || typeof field !== "object" || Array.isArray(field)) {
+  if (!isJsonObject(field)) {
     throw new TypeError(`Expected '${key}' to be an object`);
   }
-  return field as Record<string, unknown>;
+  return field;
 }
 
 beforeAll(() => {

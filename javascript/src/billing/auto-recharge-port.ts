@@ -5,10 +5,11 @@ import type {
   BillingCustomerRecord,
   BillingTopupResult,
 } from "./types/index.js";
+import type { JsonObject } from "../shared/json.js";
 
 /** Narrow billing capability required by AutoRechargeService. */
 export interface AutoRechargeBillingPort {
-  getActiveCatalogDocument(): Promise<Record<string, unknown> | null>;
+  getActiveCatalogDocument(): Promise<JsonObject | null>;
   resolveTopup(
     provider: string,
     productId?: string | null,
@@ -34,7 +35,7 @@ export interface AutoRechargeBillingPort {
     providerAttemptId?: string | null;
     failureCode?: string | null;
     failureMessage?: string | null;
-    metadata?: Record<string, unknown>;
+    metadata?: JsonObject;
   }): Promise<void>;
   /** Count attempts since an exact instant. */
   countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number>;

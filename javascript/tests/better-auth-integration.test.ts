@@ -1,9 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { Bursar } from "../src/bursar.js";
 import { bursarBetterAuth, type BetterAuthBursarUser } from "../src/integrations/better-auth.js";
 import { dodoBetterAuthCustomer } from "../src/providers/dodo/better-auth.js";
 
-function betterAuthUser(overrides: Record<string, unknown> = {}): BetterAuthBursarUser {
+type BursarFacade = Pick<Bursar, "accounts" | "requireBilling">;
+
+interface InitializedBursarPlugin {
+  options: {
+    databaseHooks: {
+      user: {
+        create: { after(user: BetterAuthBursarUser): Promise<void> };
+        update: { after(user: BetterAuthBursarUser): Promise<void> };
+      };
+    };
+  };
+}
+
+function betterAuthUser(
+  overrides: Partial<Pick<BetterAuthBursarUser, "dodoCustomerId">> = {},
+): BetterAuthBursarUser {
   return {
     id: "user-1",
     name: "Ada Lovelace",
@@ -13,6 +29,16 @@ function betterAuthUser(overrides: Record<string, unknown> = {}): BetterAuthBurs
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     ...overrides,
   };
+}
+
+function testBursarFacade<TFacade>(facade: TFacade): BursarFacade {
+  // SAFETY: This fixture implements the accounts and billing methods exercised by the hook test.
+  return facade as BursarFacade;
+}
+
+function initializedBursarPlugin<TValue>(value: TValue): InitializedBursarPlugin {
+  // SAFETY: The Bursar plugin returns the database hook shape asserted by this test.
+  return value as InitializedBursarPlugin;
 }
 
 describe("bursarBetterAuth", () => {
@@ -26,22 +52,14 @@ describe("bursarBetterAuth", () => {
     const upsertCustomer = vi.fn().mockResolvedValue(undefined);
     const plugin = bursarBetterAuth({
       getBursar: async () =>
-        ({
+        testBursarFacade({
           accounts: { onAccountCreated },
           requireBilling: () => ({ upsertCustomer }),
-        }) as never,
+        }),
       resolveProviderCustomer: dodoBetterAuthCustomer,
     });
-    const initialized = (await plugin.init?.({} as never)) as {
-      options: {
-        databaseHooks: {
-          user: {
-            create: { after(user: BetterAuthBursarUser): Promise<void> };
-            update: { after(user: BetterAuthBursarUser): Promise<void> };
-          };
-        };
-      };
-    };
+    // SAFETY: This isolated test does not execute the Better Auth context; the Bursar plugin ignores it.
+    const initialized = initializedBursarPlugin(await plugin.init?.({} as never));
     const user = betterAuthUser({ dodoCustomerId: "cus_official_adapter" });
 
     await initialized.options.databaseHooks.user.create.after(user);

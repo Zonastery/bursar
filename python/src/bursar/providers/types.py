@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
@@ -51,7 +52,7 @@ class _NormalizedProviderLogger:
     """
 
     def __init__(self, logger: Any = None) -> None:
-        def method(name: str):
+        def method(name: str) -> Callable[..., object]:
             candidate = getattr(logger, name, None)
             return candidate if callable(candidate) else _noop
 
@@ -112,7 +113,7 @@ def _normalize_currency(value: str) -> str:
 
 def _normalize_instant(value: str) -> str:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise ValueError("instant must be an ISO-8601 timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from bursar.billing.auto_recharge_service import (
@@ -69,7 +71,7 @@ if TYPE_CHECKING:
     from bursar.billing.postgres.store import PostgresBillingStore
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> type[PostgresBillingStore]:
     """Lazy-import PostgresBillingStore — psycopg2 optional unless used."""
     if name == "PostgresBillingStore":
         from bursar.billing.postgres.store import PostgresBillingStore

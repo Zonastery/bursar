@@ -2,7 +2,10 @@ import type { BetterAuthPlugin, User } from "better-auth";
 
 import type { AccountCreatedInput, Bursar } from "../bursar.js";
 
-export type BetterAuthBursarUser = User & Record<string, unknown>;
+export interface BetterAuthBursarUser extends User {
+  /** Optional customer identifier added by a provider Better Auth plugin. */
+  dodoCustomerId?: string | null;
+}
 
 export interface BetterAuthProviderCustomer {
   provider: string;
@@ -54,24 +57,25 @@ export function bursarBetterAuth(options: BursarBetterAuthOptions): BetterAuthPl
             user: {
               create: {
                 after: async (user) => {
-                  const bursarUser = user as BetterAuthBursarUser;
+                  const bursarUser: BetterAuthBursarUser = user;
                   const bursar = await options.getBursar();
                   const region = options.getRegion?.(bursarUser);
                   const metadata = await options.getAccountMetadata?.(bursarUser);
-                  await bursar.accounts.onAccountCreated({
+                  const accountInput: AccountCreatedInput = {
                     accountId: bursarUser.id,
                     eventKey:
                       options.accountEventKey?.(bursarUser) ??
                       `better-auth:user.created:${bursarUser.id}`,
-                    ...(region == null ? {} : { region }),
-                    ...(metadata == null ? {} : { metadata }),
-                  });
+                  };
+                  if (region != null) accountInput.region = region;
+                  if (metadata != null) accountInput.metadata = metadata;
+                  await bursar.accounts.onAccountCreated(accountInput);
                   await syncProviderCustomer(bursarUser);
                 },
               },
               update: {
                 after: async (user) => {
-                  await syncProviderCustomer(user as BetterAuthBursarUser);
+                  await syncProviderCustomer(user);
                 },
               },
             },

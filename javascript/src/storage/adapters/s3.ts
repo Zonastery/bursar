@@ -1,21 +1,54 @@
+import { z } from "zod";
+
 import type {
   BillingEventPayloadExport,
   BillingPayloadArchive,
   BillingPayloadArchiveResult,
 } from "../ports.js";
+
 export interface S3Credentials {
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken?: string;
 }
 
-/** Structural S3 client surface accepted by the archive adapter. */
+export interface S3ClientOptions {
+  region?: string;
+  endpoint?: string;
+  forcePathStyle: boolean;
+  credentials?: S3Credentials;
+}
+
+/** The portion of an AWS PutObjectCommand needed by the archive boundary.
+ *
+ * Keep this structural contract local so consumers that inject a client do not
+ * need to install the optional AWS SDK peer just to type-check this adapter.
+ */
+export interface S3ArchiveCommand {
+  readonly input: S3ArchiveCommandInput;
+}
+
+export interface S3ArchiveCommandInput {
+  readonly Bucket?: string;
+  readonly Key?: string;
+  /** AWS SDK streaming bodies vary by runtime and stay opaque at this boundary. */
+  readonly Body?: string | object;
+  readonly ContentType?: string;
+  readonly Metadata?: Readonly<Record<string, string>>;
+}
+
+export interface S3ArchiveCommandResult {
+  readonly VersionId?: string;
+}
+
 export interface S3ArchiveClient {
-  send(command: unknown): Promise<{ VersionId?: string }>;
+  send(command: S3ArchiveCommand): Promise<S3ArchiveCommandResult>;
   destroy?(): void;
 }
 
-export type S3ArchiveClientFactory = () => S3ArchiveClient | Promise<S3ArchiveClient>;
+export type S3ArchiveClientFactory = (
+  options: S3ClientOptions,
+) => S3ArchiveClient | Promise<S3ArchiveClient>;
 
 /**
  * Safe per-object controls. Bucket policy, ACLs, object-lock policy, and object
@@ -75,7 +108,14 @@ function requireNonEmpty(value: string, name: string): string {
 }
 
 function normalizePrefix(prefix: string | undefined): string {
-  return (prefix ?? "bursar").replace(/^\/+|\/+$/g, "");
+  const value = prefix ?? "bursar";
+  let start = 0;
+  while (start < value.length && value[start] === "/") start += 1;
+
+  let end = value.length;
+  while (end > start && value[end - 1] === "/") end -= 1;
+
+  return value.slice(start, end);
 }
 
 /** Archives received billing webhook envelopes under deterministic keys. */
@@ -83,6 +123,7 @@ export class S3BillingArchive implements BillingPayloadArchive {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly clientFactory: S3ArchiveClientFactory;
+  private readonly clientOptions: S3ClientOptions;
   private readonly ownsClient: boolean;
   private readonly putObject: Readonly<S3PutObjectOptions>;
   private clientPromise: Promise<S3ArchiveClient> | null = null;
@@ -96,42 +137,44 @@ export class S3BillingArchive implements BillingPayloadArchive {
     this.ownsClient = options.ownsClient ?? options.client === undefined;
     this.putObject = { ...options.putObject };
 
-    if (options.client) {
-      this.clientFactory = () => options.client as S3ArchiveClient;
+    const region = options.region ? requireNonEmpty(options.region, "S3 region") : undefined;
+    const endpoint = options.endpoint
+      ? requireNonEmpty(options.endpoint, "S3 endpoint")
+      : undefined;
+    let credentials: S3Credentials | undefined;
+    if (options.credentials) {
+      credentials = {
+        accessKeyId: requireNonEmpty(options.credentials.accessKeyId, "S3 access key ID"),
+        secretAccessKey: requireNonEmpty(
+          options.credentials.secretAccessKey,
+          "S3 secret access key",
+        ),
+      };
+      if (options.credentials.sessionToken) {
+        credentials.sessionToken = requireNonEmpty(
+          options.credentials.sessionToken,
+          "S3 session token",
+        );
+      }
+    }
+    this.clientOptions = {
+      forcePathStyle: options.forcePathStyle ?? false,
+    };
+    if (region) this.clientOptions.region = region;
+    if (endpoint) this.clientOptions.endpoint = endpoint;
+    if (credentials) this.clientOptions.credentials = credentials;
+    const providedClient = options.client;
+    if (providedClient) {
+      this.clientFactory = () => providedClient;
       return;
     }
     if (options.clientFactory) {
       this.clientFactory = options.clientFactory;
       return;
     }
-
-    const region = options.region ? requireNonEmpty(options.region, "S3 region") : undefined;
-    const endpoint = options.endpoint
-      ? requireNonEmpty(options.endpoint, "S3 endpoint")
-      : undefined;
-    const credentials = options.credentials
-      ? {
-          accessKeyId: requireNonEmpty(options.credentials.accessKeyId, "S3 access key ID"),
-          secretAccessKey: requireNonEmpty(
-            options.credentials.secretAccessKey,
-            "S3 secret access key",
-          ),
-          ...(options.credentials.sessionToken
-            ? {
-                sessionToken: requireNonEmpty(options.credentials.sessionToken, "S3 session token"),
-              }
-            : {}),
-        }
-      : undefined;
-    const forcePathStyle = options.forcePathStyle ?? false;
     this.clientFactory = async () => {
       const { S3Client } = await import("@aws-sdk/client-s3");
-      return new S3Client({
-        ...(region ? { region } : {}),
-        ...(endpoint ? { endpoint } : {}),
-        forcePathStyle,
-        ...(credentials ? { credentials } : {}),
-      });
+      return new S3Client(this.clientOptions);
     };
   }
 
@@ -155,36 +198,37 @@ export class S3BillingArchive implements BillingPayloadArchive {
     ]
       .filter(Boolean)
       .join("/");
-    const { PutObjectCommand } = await import("@aws-sdk/client-s3");
-    const client = await this.getClient();
-    const result = await client.send(
-      new PutObjectCommand({
-        ...this.putObject,
-        Bucket: this.bucket,
-        Key: key,
-        Body: new TextEncoder().encode(
-          JSON.stringify({
-            schema: "bursar.billing-event-envelope.v1",
-            tenantId: event.tenantId,
-            eventId: event.eventId,
-            provider: event.provider,
-            providerEnvironment: event.providerEnvironment,
-            providerEventId: event.providerEventId,
-            eventType: event.eventType,
-            receivedAt: event.receivedAt,
-            completedAt: event.completedAt,
-            envelope: event.envelope,
-          }),
-        ),
-        ContentType: "application/json",
-        Metadata: {
-          "bursar-tenant-id": event.tenantId,
-          "bursar-event-id": event.eventId,
-          "bursar-provider": event.provider,
-          "bursar-environment": event.providerEnvironment,
-        },
-      }),
-    );
+    const [{ PutObjectCommand }, client] = await Promise.all([
+      import("@aws-sdk/client-s3"),
+      this.getClient(),
+    ]);
+    const command = new PutObjectCommand({
+      ...this.putObject,
+      Bucket: this.bucket,
+      Key: key,
+      Body: new TextEncoder().encode(
+        JSON.stringify({
+          schema: "bursar.billing-event-envelope.v1",
+          tenantId: event.tenantId,
+          eventId: event.eventId,
+          provider: event.provider,
+          providerEnvironment: event.providerEnvironment,
+          providerEventId: event.providerEventId,
+          eventType: event.eventType,
+          receivedAt: event.receivedAt,
+          completedAt: event.completedAt,
+          envelope: event.envelope,
+        }),
+      ),
+      ContentType: "application/json",
+      Metadata: {
+        "bursar-tenant-id": event.tenantId,
+        "bursar-event-id": event.eventId,
+        "bursar-provider": event.provider,
+        "bursar-environment": event.providerEnvironment,
+      },
+    });
+    const result = await client.send(command);
     return { key, versionId: result.VersionId ?? null };
   }
 
@@ -198,19 +242,17 @@ export class S3BillingArchive implements BillingPayloadArchive {
   private getClient(): Promise<S3ArchiveClient> {
     if (!this.clientPromise) {
       this.clientPromise = Promise.resolve()
-        .then(this.clientFactory)
+        .then(() => this.clientFactory(this.clientOptions))
         .then((client) => {
-          if (
-            typeof client !== "object" ||
-            client === null ||
-            typeof client.send !== "function" ||
-            (client.destroy !== undefined && typeof client.destroy !== "function")
-          ) {
+          const parsed = z
+            .object({ send: z.function(), destroy: z.function().optional() })
+            .safeParse(client);
+          if (!parsed.success) {
             throw new TypeError("S3 client must provide send() and an optional destroy()");
           }
           return client;
         })
-        .catch((error: unknown) => {
+        .catch((error) => {
           this.clientPromise = null;
           throw error;
         });

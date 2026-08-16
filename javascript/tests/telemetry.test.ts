@@ -11,6 +11,7 @@ import {
 } from "@opentelemetry/api";
 import { Decimal } from "decimal.js";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
@@ -32,33 +33,53 @@ import {
   OpenTelemetryInstrumentation,
 } from "../src/telemetry/opentelemetry.js";
 
-const expectedOperations = JSON.parse(
-  readFileSync(new URL("../../tests/parity/telemetry_operations.json", import.meta.url), "utf8"),
-) as string[];
+const expectedOperations = z
+  .array(z.string())
+  .parse(
+    JSON.parse(
+      readFileSync(
+        new URL("../../tests/parity/telemetry_operations.json", import.meta.url),
+        "utf8",
+      ),
+    ),
+  );
+
+interface RecordingOperation {
+  operation: string;
+  attributes?: TelemetryAttributes;
+}
 
 class RecordingInstrumentation implements Instrumentation {
-  readonly operations: Array<{ operation: string; attributes?: TelemetryAttributes }> = [];
+  readonly operations: RecordingOperation[] = [];
 
   async run<T>(
     operation: string,
     attributes: TelemetryAttributes | undefined,
     callback: () => Promise<T>,
   ): Promise<T> {
-    this.operations.push({ operation, ...(attributes === undefined ? {} : { attributes }) });
+    const entry: RecordingOperation = { operation };
+    if (attributes !== undefined) entry.attributes = attributes;
+    this.operations.push(entry);
     return callback();
   }
+}
+
+function testMeter<TMeter>(meter: TMeter): Meter {
+  // SAFETY: The adapter only calls the counter and histogram factories implemented by this double.
+  return meter as Meter;
 }
 
 function makeOpenTelemetryDoubles() {
   const captured = {
     active: false,
     spanName: "",
-    spanAttributes: {} as Record<string, unknown>,
-    statusCodes: [] as number[],
+    spanAttributes: {},
+    statusCodes: new Array<number>(),
     ended: 0,
-    counter: [] as Array<{ value: number; attributes?: Attributes }>,
-    histogram: [] as Array<{ value: number; attributes?: Attributes }>,
+    counter: new Array<{ value: number; attributes?: Attributes }>(),
+    histogram: new Array<{ value: number; attributes?: Attributes }>(),
   };
+  // SAFETY: The adapter only calls the three Span methods implemented by this recording double.
   const span = {
     setAttributes(attributes: Attributes) {
       Object.assign(captured.spanAttributes, attributes);
@@ -71,7 +92,8 @@ function makeOpenTelemetryDoubles() {
     end() {
       captured.ended += 1;
     },
-  } as unknown as Span;
+  } as Span;
+  // SAFETY: The adapter only calls startActiveSpan, which this recording double implements.
   const tracer = {
     async startActiveSpan<T>(
       name: string,
@@ -87,8 +109,8 @@ function makeOpenTelemetryDoubles() {
         captured.active = false;
       }
     },
-  } as unknown as Tracer;
-  const meter = {
+  } as Tracer;
+  const meter = testMeter({
     createCounter() {
       return {
         add(value: number, attributes?: Attributes) {
@@ -103,7 +125,7 @@ function makeOpenTelemetryDoubles() {
         },
       };
     },
-  } as unknown as Meter;
+  });
   return { captured, meter, tracer };
 }
 
@@ -164,9 +186,12 @@ describe("vendor-neutral telemetry", () => {
   it("keeps the instrumentation version synchronized with package.json", () => {
     const packageJson = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as { name: string; version: string };
-    expect(BURSAR_INSTRUMENTATION_SCOPE).toBe(packageJson.name);
-    expect(BURSAR_INSTRUMENTATION_VERSION).toBe(packageJson.version);
+    );
+    const parsedPackageJson = z
+      .object({ name: z.string(), version: z.string() })
+      .parse(packageJson);
+    expect(BURSAR_INSTRUMENTATION_SCOPE).toBe(parsedPackageJson.name);
+    expect(BURSAR_INSTRUMENTATION_VERSION).toBe(parsedPackageJson.version);
   });
 });
 
@@ -248,11 +273,12 @@ describe("OpenTelemetry API adapter", () => {
 describe("instrumented Bursar boundaries", () => {
   it("distinguishes PostgreSQL query and RPC boundaries without SQL attributes", async () => {
     const instrumentation = new RecordingInstrumentation();
+    // SAFETY: PostgresClient only uses the query, connect, and end methods implemented by this double.
     const pool = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
       connect: vi.fn(),
       end: vi.fn(),
-    } as unknown as PostgresPool;
+    } as PostgresPool;
     const client = new PostgresClient(pool, { instrumentation });
 
     await client.query("SELECT 1");
@@ -271,6 +297,7 @@ describe("instrumented Bursar boundaries", () => {
   it("uses the shared operation contract for explicit credit instrumentation", async () => {
     const instrumentation = new RecordingInstrumentation();
     const failure = new Error("stop after entering operation");
+    // SAFETY: The proxy intentionally throws for every store operation in this instrumentation test.
     const throwingStore = new Proxy(
       {},
       {
@@ -280,7 +307,7 @@ describe("instrumented Bursar boundaries", () => {
       },
     ) as CreditStore;
     const credits = new CreditsService(throwingStore, null, null, { instrumentation });
-    const ignoreFailure = async (callback: () => Promise<unknown>) => {
+    const ignoreFailure = async <T>(callback: () => Promise<T>): Promise<void> => {
       await expect(callback()).rejects.toBeInstanceOf(Error);
     };
 
@@ -295,7 +322,12 @@ describe("instrumented Bursar boundaries", () => {
       credits.addCredits("private-user", new Decimal(1), { idempotencyKey: "private-key" }),
     );
     await ignoreFailure(() =>
-      credits.executeGrantProgram({} as Parameters<CreditsService["executeGrantProgram"]>[0]),
+      credits.executeGrantProgram({
+        trigger: "manual",
+        programKey: "private-program",
+        subjectId: "private-user",
+        eventKey: "private-key",
+      }),
     );
     await ignoreFailure(() =>
       credits.grantSubscriptionCycle("private-user", new Decimal(1), {

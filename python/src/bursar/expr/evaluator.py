@@ -162,7 +162,8 @@ def evaluate(expr: str, variables: dict[str, Any]) -> Decimal:
         with localcontext() as ctx:
             ctx.traps[DivisionByZero] = True
             ctx.traps[InvalidOperation] = True
-            result = eval(code, namespace)
+            # Parsing, AST validation, rewriting, and the locked namespace above are the evaluator's security boundary.
+            result = eval(code, namespace)  # noqa: S307
     except ZeroDivisionError as e:
         raise ExpressionError("division or modulo by zero") from e
     except (OverflowError, InvalidOperation, TypeError) as e:
@@ -186,7 +187,7 @@ def validate(expr: str, known_variables: set[str]) -> None:
     Raises:
         ExpressionError: If the expression contains disallowed constructs.
     """
-    tree, processed = parse(expr)
+    tree, _processed = parse(expr)
 
     variables_seen: set[str] = set()
     for node in ast.walk(tree):

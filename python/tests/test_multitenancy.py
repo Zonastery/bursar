@@ -222,16 +222,13 @@ def test_migrations_accept_a_set_only_least_privilege_client(
 def test_provider_environment_fails_closed_without_transaction_context(
     pg_database_url: str,
 ) -> None:
-    with (
-        psycopg2.connect(pg_database_url) as connection,
-        connection.cursor() as cursor,
-        pytest.raises(
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.provider_environment', '', true)")
+        with pytest.raises(
             psycopg2.errors.InvalidParameterValue,
             match="bursar provider environment is required",
-        ),
-    ):
-        cursor.execute("SELECT set_config('bursar.provider_environment', '', true)")
-        cursor.execute("SELECT bursar.current_provider_environment()")
+        ):
+            cursor.execute("SELECT bursar.current_provider_environment()")
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT set_config('bursar.provider_environment', 'sandbox', true)")

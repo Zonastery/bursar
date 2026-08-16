@@ -6,7 +6,7 @@ import asyncio
 import contextvars
 from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from bursar.bursar import CreditsCapability
@@ -31,6 +31,9 @@ except ImportError as error:  # pragma: no cover - exercised by packaging, not a
     from bursar.errors import BursarImportError
 
     raise BursarImportError("Google ADK support requires 'bursar[google-adk]'") from error
+
+if TYPE_CHECKING:
+    from google.adk.models.llm_response import LlmResponse
 
 
 SubjectResolver = Callable[[Any], str | None]
@@ -135,7 +138,7 @@ class BursarPlugin(BasePlugin):
         if user_id and state is not None:
             await self._settle_ready_leases(state, user_id)
 
-    async def before_model_callback(self, *, callback_context: Any, llm_request: Any):
+    async def before_model_callback(self, *, callback_context: Any, llm_request: Any) -> LlmResponse | None:
         """Reserve a lease before provider transport begins."""
 
         try:
@@ -302,7 +305,7 @@ class BursarPlugin(BasePlugin):
         values.setdefault("reference_id", invocation_id)
         return CreditMetadata.model_validate(values)
 
-    def _admission_denied(self, error: BaseException | None):
+    def _admission_denied(self, error: BaseException | None) -> LlmResponse:
         try:
             message = self._admission_message(error)
         except Exception as message_error:

@@ -1,10 +1,11 @@
 import type { Decimal } from "decimal.js";
+import type { StructuredValue } from "../../shared/json.js";
 
 export type BillingMode = "strict" | "overdraft";
 
 export interface CreditMetadata {
   operation?: string | null;
-  measures?: Record<string, unknown> | null;
+  measures?: Record<string, string | number | boolean | Decimal.Value> | null;
   dimensions?: Record<string, string | number | boolean | Decimal.Value> | null;
   breakdownTotal?: string | null;
   referenceType?: string | null;
@@ -13,7 +14,7 @@ export interface CreditMetadata {
   providerRequestId?: string | null;
   traceId?: string | null;
   spanId?: string | null;
-  [key: string]: unknown;
+  [key: string]: StructuredValue;
 }
 
 export interface BucketDefinition {
@@ -91,8 +92,8 @@ export interface DeductWithAllowanceOptions {
   feature?: string | null;
   model?: string | null;
   region?: string | null;
-  measures?: Record<string, unknown> | null;
-  dimensions?: Record<string, unknown> | null;
+  measures?: Record<string, string | number | boolean | Decimal.Value> | null;
+  dimensions?: Record<string, string | number | boolean | Decimal.Value> | null;
   metadata?: CreditMetadata | null;
 }
 

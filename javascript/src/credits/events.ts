@@ -1,3 +1,5 @@
+import type { StructuredObject } from "../shared/json.js";
+
 /**
  * Typed event emitter for credit lifecycle events.
  *
@@ -53,7 +55,7 @@ export interface CreditEvent {
   type: CreditEventType;
   timestamp: Date;
   userId: string;
-  data?: Record<string, unknown>;
+  data?: StructuredObject;
 }
 
 type EventHandler = (event: CreditEvent) => void | PromiseLike<void>;
@@ -91,8 +93,8 @@ export class CreditEventEmitter {
       try {
         const out = handler(event);
         // Swallow rejections from async handlers so they never become unhandled.
-        if (out != null && typeof out.then === "function") {
-          void Promise.resolve(out).catch((err: unknown) => {
+        if (out != null) {
+          void Promise.resolve(out).catch((err) => {
             console.error(`[CreditEventEmitter] async handler error for event ${event.type}:`, err);
           });
         }

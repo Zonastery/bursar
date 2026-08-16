@@ -8,6 +8,7 @@ import type {
 import { StoreError } from "../../../errors.js";
 import { optionalBoundedDiagnosticMessage } from "../../../shared/diagnostics.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import type { PostgresRow } from "../../../shared/json.js";
 import {
   optionalRecordRow,
   pgBoolean,
@@ -89,7 +90,7 @@ const OfferContextRowSchema = z
 
 type OfferContextRow = z.infer<typeof OfferContextRowSchema>;
 
-function projectChange(row: Record<string, unknown>): Record<string, unknown> {
+function projectChange(row: PostgresRow) {
   return {
     id: row.id,
     subscription_id: row.subscription_id,
@@ -107,7 +108,7 @@ function projectChange(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function projectContext(row: Record<string, unknown>): Record<string, unknown> {
+function projectContext(row: PostgresRow) {
   return {
     side: row.side,
     offer_id: row.offer_id,
@@ -216,7 +217,7 @@ export class BillingSubscriptionChangeRepository {
   }
 
   private async parseOptional(
-    rows: readonly unknown[],
+    rows: readonly PostgresRow[],
     context: string,
   ): Promise<BillingSubscriptionChange | null> {
     const raw = optionalRecordRow(rows, context);
@@ -267,15 +268,9 @@ export class BillingSubscriptionChangeRepository {
         details: { subscriptionChangeId: row.id, rowCount: rows.length },
       });
     }
-    const parsed = rows.map((candidate, index) => {
-      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
-        throw new StoreError(`${context}: malformed subscription-change offer context`, {
-          details: { subscriptionChangeId: row.id, index },
-        });
-      }
-      const record = candidate as Record<string, unknown>;
-      return safeParse(OfferContextRowSchema, projectContext(record), `${context}.context`);
-    });
+    const parsed = rows.map((candidate) =>
+      safeParse(OfferContextRowSchema, projectContext(candidate), `${context}.context`),
+    );
     const bySide = new Map(parsed.map((candidate) => [candidate.side, candidate]));
     const from = bySide.get("from");
     const to = bySide.get("to");

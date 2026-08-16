@@ -112,7 +112,7 @@ class _AttemptRow(_RowModel):
         return self
 
 
-def _validate_row(model: type[_ProfileRow] | type[_AttemptRow], row: dict[str, Any], context: str):
+def _validate_row[T: _RowModel](model: type[T], row: dict[str, Any], context: str) -> T:
     try:
         return model.model_validate(row)
     except ValueError as error:
@@ -144,7 +144,6 @@ def _profile_from_row(row: dict[str, Any]) -> BillingAutoRechargeProfile:
         },
         "BillingAutoRechargeRepository.profile",
     )
-    assert isinstance(parsed, _ProfileRow)
     return BillingAutoRechargeProfile(
         user_id=str(parsed.subject_id),
         enabled=parsed.enabled,
@@ -187,7 +186,6 @@ def _attempt_from_row(row: dict[str, Any]) -> BillingAutoRechargeAttempt:
         },
         "BillingAutoRechargeRepository.attempt",
     )
-    assert isinstance(parsed, _AttemptRow)
     return BillingAutoRechargeAttempt(
         id=str(parsed.id),
         user_id=str(parsed.subject_id),

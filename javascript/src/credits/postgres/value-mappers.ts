@@ -1,22 +1,25 @@
 import { Decimal } from "decimal.js";
 
 import { StoreError } from "../../errors.js";
+import { isJsonObject, type JsonObject, type PostgresValue } from "../../shared/json.js";
 import type { LedgerEntryRow, UsageChargeRow } from "./repositories/analytics.js";
 import type { CatalogRevision, LedgerEntry, UsageCharge } from "../types/index.js";
 
 export const ZERO = new Decimal(0);
 
-export function decimalValue(value: unknown): Decimal {
-  if (value === null || value === undefined || typeof value === "boolean") {
+export function decimalValue(value: PostgresValue | undefined): Decimal {
+  if (
+    value === null ||
+    value === undefined ||
+    value instanceof Date ||
+    value instanceof Uint8Array
+  ) {
     throw new StoreError("PostgreSQL returned a missing or invalid Decimal value", {
-      details: { valueType: typeof value },
+      details: { valueType: "non-scalar" },
     });
   }
   try {
-    const parsed =
-      value instanceof Decimal
-        ? value
-        : new Decimal(typeof value === "string" ? value : String(value));
+    const parsed = value instanceof Decimal ? value : new Decimal(String(value));
     if (!parsed.isFinite()) {
       throw new Error("Decimal value must be finite");
     }
@@ -24,7 +27,7 @@ export function decimalValue(value: unknown): Decimal {
   } catch (cause) {
     throw new StoreError(`Failed to parse Decimal value: ${String(value)}`, {
       cause,
-      details: { valueType: typeof value },
+      details: { valueType: "invalid" },
     });
   }
 }
@@ -33,19 +36,14 @@ export function decimalParameter(value: Decimal): string {
   return value.toString();
 }
 
-export function decimalRecord(raw: unknown): Record<string, Decimal> | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  return Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>).map(([key, value]) => [
-      key,
-      decimalValue(value),
-    ]),
-  );
+export function decimalRecord(raw: PostgresValue | undefined): Record<string, Decimal> | null {
+  if (raw === null || raw === undefined || !isJsonObject(raw)) return null;
+  return Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, decimalValue(value)]));
 }
 
 export function normalizeCatalogRevision(row: {
   id: string;
-  config: Record<string, unknown>;
+  config: JsonObject;
   version: number;
 }): CatalogRevision {
   return {

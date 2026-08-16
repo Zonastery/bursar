@@ -3,6 +3,7 @@ import type { CallProc } from "../../../shared/postgres-types.js";
 import {
   optionalRecordRow,
   postgresUuid,
+  requireRecordRow,
   requireRow,
   safeParse,
 } from "../../../shared/postgres-validation.js";
@@ -302,10 +303,7 @@ export class DeductionRepository {
   /** Revoke credits by transaction type. */
   async revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeRow> {
     const rows = await this.callproc("revoke_subject_credits_by_operation", [userId, entryType]);
-    const row = requireRow(rows, "DeductionRepository.revokeCreditsByEntryType") as Record<
-      string,
-      unknown
-    >;
+    const row = requireRecordRow(rows, "DeductionRepository.revokeCreditsByEntryType");
     return safeParse(
       RevokeRowSchema,
       {

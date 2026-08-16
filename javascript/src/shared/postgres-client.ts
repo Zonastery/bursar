@@ -1,11 +1,14 @@
+import { z } from "zod";
+
 import { type BursarError, ImportError as BursarImportError, StoreClosedError } from "../errors.js";
+import { getDefaultInstrumentation, type Instrumentation } from "../telemetry/index.js";
 import {
   normalizeProviderEnvironment,
   type ProviderEnvironment,
 } from "../providers/environment.js";
 import { normalizePostgresError, type PostgresOperationPhase } from "./postgres-errors.js";
 import type { QueryFn } from "./postgres-types.js";
-import { getDefaultInstrumentation, type Instrumentation } from "../telemetry/index.js";
+import type { PostgresParams, PostgresRow } from "./json.js";
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
@@ -25,14 +28,14 @@ export interface PostgresPoolConfig {
 }
 
 export interface PostgresPool {
-  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  query(text: string, params?: PostgresParams): Promise<{ rows: PostgresRow[] }>;
   connect(): Promise<PostgresPoolClient>;
   end(): Promise<void>;
-  on?(event: "error", listener: (error: Error) => void): unknown;
+  on?(event: "error", listener: (error: Error) => void): void;
 }
 
 export interface PostgresPoolClient {
-  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  query(text: string, params?: PostgresParams): Promise<{ rows: PostgresRow[] }>;
   release(error?: Error | boolean): void;
 }
 
@@ -40,17 +43,18 @@ export interface PostgresPoolConstructor {
   new (config: PostgresPoolConfig): PostgresPool;
 }
 
-function assertPostgresPool(value: unknown): asserts value is PostgresPool {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    typeof (value as Partial<PostgresPool>).query !== "function" ||
-    typeof (value as Partial<PostgresPool>).connect !== "function" ||
-    typeof (value as Partial<PostgresPool>).end !== "function" ||
-    ((value as Partial<PostgresPool>).on !== undefined &&
-      typeof (value as Partial<PostgresPool>).on !== "function")
-  ) {
-    throw new TypeError("postgres pool must provide query(), connect(), and end() methods");
+const postgresPoolSchema = z.object({
+  query: z.function(),
+  connect: z.function(),
+  end: z.function(),
+  on: z.function().optional(),
+});
+
+export function isPostgresPool<T>(value: T): value is T & PostgresPool {
+  try {
+    return postgresPoolSchema.safeParse(value).success;
+  } catch {
+    return false;
   }
 }
 
@@ -117,18 +121,17 @@ function integerOption(
 function normalizeConnectionOptions(
   options: PostgresConnectionOptions,
 ): NormalizedPostgresConnectionOptions {
-  if (options.applicationName !== undefined && typeof options.applicationName !== "string") {
+  if (
+    options.applicationName !== undefined &&
+    !z.string().safeParse(options.applicationName).success
+  ) {
     throw new TypeError("applicationName must be a string");
   }
-  if (options.onPoolError !== undefined && typeof options.onPoolError !== "function") {
+  if (options.onPoolError !== undefined && !z.function().safeParse(options.onPoolError).success) {
     throw new TypeError("onPoolError must be a function");
   }
   const instrumentation = options.instrumentation ?? getDefaultInstrumentation();
-  if (
-    typeof instrumentation !== "object" ||
-    instrumentation === null ||
-    typeof instrumentation.run !== "function"
-  ) {
+  if (!z.object({ run: z.function() }).safeParse(instrumentation).success) {
     throw new TypeError("instrumentation must provide run()");
   }
   const applicationName = options.applicationName?.trim() || "bursar-js";
@@ -174,27 +177,29 @@ export function postgresPoolConfig(
   connectionString: string,
   options: PostgresConnectionOptions = {},
 ): PostgresPoolConfig {
-  if (typeof connectionString !== "string") {
+  const parsedConnectionString = z.string().safeParse(connectionString);
+  if (!parsedConnectionString.success) {
     throw new TypeError("postgres connection string must be a string");
   }
-  if (!connectionString.trim()) throw new TypeError("postgres connection string must not be empty");
+  if (!parsedConnectionString.data.trim()) {
+    throw new TypeError("postgres connection string must not be empty");
+  }
   const normalized = normalizeConnectionOptions(options);
   const queryTimeout =
     normalized.statementTimeoutMs === 0
       ? 0
       : Math.min(normalized.statementTimeoutMs + CLIENT_TIMEOUT_GRACE_MS, MAX_POSTGRES_TIMEOUT_MS);
-  return {
-    connectionString,
+  const config: PostgresPoolConfig = {
+    connectionString: parsedConnectionString.data,
     connectionTimeoutMillis: normalized.connectionTimeoutMs,
     statement_timeout: normalized.statementTimeoutMs,
     query_timeout: queryTimeout,
     idle_in_transaction_session_timeout: normalized.idleTransactionTimeoutMs,
     application_name: normalized.applicationName,
-    ...(normalized.idleTimeoutMs !== undefined
-      ? { idleTimeoutMillis: normalized.idleTimeoutMs }
-      : {}),
-    ...(normalized.maxConnections !== undefined ? { max: normalized.maxConnections } : {}),
   };
+  if (normalized.idleTimeoutMs !== undefined) config.idleTimeoutMillis = normalized.idleTimeoutMs;
+  if (normalized.maxConnections !== undefined) config.max = normalized.maxConnections;
+  return config;
 }
 
 type PoolErrorObserver = (error: BursarError) => void;
@@ -228,8 +233,8 @@ function observePool(pool: PostgresPool, onPoolError: PoolErrorObserver | undefi
   const observers = new Map<PoolErrorObserver, number>();
   if (onPoolError) observers.set(onPoolError, 1);
   poolObservers.set(pool, observers);
-  pool.on("error", (error) => {
-    const normalized = normalizePostgresError(error, { operation: "pool", phase: "pool" });
+  pool.on("error", (cause) => {
+    const normalized = normalizePostgresError(cause, { operation: "pool", phase: "pool" });
     for (const observer of observers.keys()) notifyPoolError(observer, normalized);
   });
   return () => {
@@ -264,11 +269,18 @@ export class PostgresClient {
   private closed = false;
 
   constructor(poolOrUrl: PostgresPool | string, options: PostgresClientOptions = {}) {
-    if (typeof poolOrUrl !== "string") assertPostgresPool(poolOrUrl);
-    if (options.poolConstructor !== undefined && typeof options.poolConstructor !== "function") {
+    const suppliedPool = isPostgresPool(poolOrUrl);
+    const parsedDatabaseUrl = z.string().safeParse(poolOrUrl);
+    if (!suppliedPool && !parsedDatabaseUrl.success) {
+      throw new TypeError("postgres pool must provide query(), connect(), and end() methods");
+    }
+    if (
+      options.poolConstructor !== undefined &&
+      !z.function().safeParse(options.poolConstructor).success
+    ) {
       throw new TypeError("poolConstructor must be a constructor");
     }
-    if (options.closedError !== undefined && typeof options.closedError !== "function") {
+    if (options.closedError !== undefined && !z.function().safeParse(options.closedError).success) {
       throw new TypeError("closedError must be a function");
     }
     if (
@@ -293,13 +305,14 @@ export class PostgresClient {
       throw new TypeError("billingPayloadBackend must be 'postgres' or 's3'");
     }
     this.connectionOptions = normalizeConnectionOptions(options);
-    this.databaseUrl = typeof poolOrUrl === "string" ? poolOrUrl : null;
+    const databaseUrl = parsedDatabaseUrl.success ? parsedDatabaseUrl.data : null;
+    this.databaseUrl = suppliedPool ? null : databaseUrl;
     if (this.databaseUrl !== null && !this.databaseUrl.trim()) {
       throw new TypeError("postgres connection string must not be empty");
     }
-    this.pool = typeof poolOrUrl === "string" ? null : poolOrUrl;
+    this.pool = suppliedPool ? poolOrUrl : null;
     this.poolConstructor = options.poolConstructor ?? null;
-    this.ownsPool = typeof poolOrUrl === "string";
+    this.ownsPool = !suppliedPool;
     this.closedError =
       options.closedError ?? (() => new StoreClosedError("PostgreSQL client has been closed"));
     this.tenantId = options.tenantId === undefined ? null : normalizeTenantId(options.tenantId);
@@ -312,7 +325,7 @@ export class PostgresClient {
     }
   }
 
-  readonly query: QueryFn = (text: string, params?: unknown[]) =>
+  readonly query: QueryFn = (text: string, params?: PostgresParams) =>
     this.connectionOptions.instrumentation.run(
       postgresTelemetryOperation(text),
       { "bursar.backend": "postgres" },
@@ -320,16 +333,19 @@ export class PostgresClient {
         let pool: PostgresPool;
         try {
           pool = await this.getPool();
-        } catch (error) {
-          if (this.closed) throw error;
-          throw normalizePostgresError(error, { operation: "query", phase: "connect" });
+        } catch (cause) {
+          if (this.closed) throw cause;
+          throw normalizePostgresError(cause, {
+            operation: "query",
+            phase: "connect",
+          });
         }
 
         if (!this.tenantId && !this.accessRole) {
           try {
             return (await pool.query(text, params)).rows;
-          } catch (error) {
-            throw normalizePostgresError(error, {
+          } catch (cause) {
+            throw normalizePostgresError(cause, {
               operation: "query",
               phase: "query",
               indeterminate: true,
@@ -340,8 +356,11 @@ export class PostgresClient {
         let client: PostgresPoolClient;
         try {
           client = await pool.connect();
-        } catch (error) {
-          throw normalizePostgresError(error, { operation: "query", phase: "connect" });
+        } catch (cause) {
+          throw normalizePostgresError(cause, {
+            operation: "query",
+            phase: "connect",
+          });
         }
 
         let phase: PostgresOperationPhase = "begin";
@@ -356,7 +375,7 @@ export class PostgresClient {
             `set_config('statement_timeout', $1, true)`,
             `set_config('idle_in_transaction_session_timeout', $2, true)`,
           ];
-          const values: unknown[] = [
+          const values: PostgresParams = [
             String(this.connectionOptions.statementTimeoutMs),
             String(this.connectionOptions.idleTransactionTimeoutMs),
           ];
@@ -381,7 +400,7 @@ export class PostgresClient {
           await client.query("COMMIT");
           transactionStarted = false;
           return result.rows;
-        } catch (error) {
+        } catch (cause) {
           const failedPhase = phase;
           let rollbackFailed = false;
           if (transactionStarted) {
@@ -397,7 +416,7 @@ export class PostgresClient {
                   : new Error("PostgreSQL rollback failed", { cause: rollbackError });
             }
           }
-          const normalized = normalizePostgresError(error, {
+          const normalized = normalizePostgresError(cause, {
             operation: "query",
             phase: failedPhase,
             indeterminate: failedPhase === "query" || failedPhase === "commit",
@@ -407,8 +426,8 @@ export class PostgresClient {
         } finally {
           try {
             client.release(discardConnection);
-          } catch (releaseError) {
-            const normalized = normalizePostgresError(releaseError, {
+          } catch (cause) {
+            const normalized = normalizePostgresError(cause, {
               operation: "release connection",
               phase: "pool",
             });
@@ -434,8 +453,11 @@ export class PostgresClient {
     try {
       const pool = this.poolPromise ? await this.poolPromise : this.pool;
       if (pool) await pool.end();
-    } catch (error) {
-      throw normalizePostgresError(error, { operation: "close", phase: "close" });
+    } catch (cause) {
+      throw normalizePostgresError(cause, {
+        operation: "close",
+        phase: "close",
+      });
     } finally {
       this.pool = null;
       this.poolPromise = null;
@@ -450,7 +472,7 @@ export class PostgresClient {
     if (!this.databaseUrl) throw new StoreClosedError("PostgreSQL client has no connection source");
 
     if (!this.poolPromise) {
-      this.poolPromise = this.createPool(this.databaseUrl).catch((error: unknown) => {
+      this.poolPromise = this.createPool(this.databaseUrl).catch((error) => {
         this.poolPromise = null;
         throw error;
       });
@@ -476,6 +498,7 @@ export class PostgresClient {
         cause,
       });
     }
+    // SAFETY: The `pg` package exports Pool with the constructor shape required by this adapter.
     this.poolConstructor = pg.Pool as PostgresPoolConstructor;
     return this.poolConstructor;
   }
@@ -483,8 +506,9 @@ export class PostgresClient {
 
 /** Normalize and validate a tenant UUID at SDK composition boundaries. */
 export function normalizeTenantId(tenantId: string): string {
-  if (typeof tenantId !== "string") throw new TypeError("tenantId must be a UUID");
-  const normalized = tenantId.trim().toLowerCase();
+  const parsed = z.string().safeParse(tenantId);
+  if (!parsed.success) throw new TypeError("tenantId must be a UUID");
+  const normalized = parsed.data.trim().toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)) {
     throw new TypeError("tenantId must be a UUID");
   }

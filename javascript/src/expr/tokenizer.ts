@@ -31,11 +31,41 @@ export interface Token {
   value: string;
 }
 
-const TWO_CHARACTER_OPERATORS = new Set<TokenType>(["**", "//", "==", "!=", "<=", ">="]);
-const ONE_CHARACTER_TOKENS = new Set<TokenType>(["(", ")", ",", "+", "-", "*", "/", "%", "<", ">"]);
-const KEYWORDS = new Set<TokenType>(["and", "or", "if", "else", "in", "not"]);
+interface ScanResult {
+  value: string;
+  next: number;
+}
 
-function readNumber(source: string, start: number): { value: string; next: number } {
+const TWO_CHARACTER_OPERATORS = new Map<string, TokenType>([
+  ["**", "**"],
+  ["//", "//"],
+  ["==", "=="],
+  ["!=", "!="],
+  ["<=", "<="],
+  [">=", ">="],
+]);
+const ONE_CHARACTER_TOKENS = new Map<string, TokenType>([
+  ["(", "("],
+  [")", ")"],
+  [",", ","],
+  ["+", "+"],
+  ["-", "-"],
+  ["*", "*"],
+  ["/", "/"],
+  ["%", "%"],
+  ["<", "<"],
+  [">", ">"],
+]);
+const KEYWORDS = new Map<string, TokenType>([
+  ["and", "and"],
+  ["or", "or"],
+  ["if", "if"],
+  ["else", "else"],
+  ["in", "in"],
+  ["not", "not"],
+]);
+
+function readNumber(source: string, start: number): ScanResult {
   let index = start;
   let value = "";
   let dotSeen = false;
@@ -67,7 +97,7 @@ function readNumber(source: string, start: number): { value: string; next: numbe
   return { value, next: index };
 }
 
-function readWord(source: string, start: number): { value: string; next: number } {
+function readWord(source: string, start: number): ScanResult {
   let index = start;
   let value = "";
   while (index < source.length && /[a-zA-Z0-9_]/.test(source.charAt(index))) {
@@ -86,15 +116,16 @@ export function tokenize(source: string): Token[] {
       continue;
     }
 
-    const pair = source.slice(index, index + 2) as TokenType;
-    if (TWO_CHARACTER_OPERATORS.has(pair)) {
-      tokens.push({ type: pair, value: pair });
+    const pair = source.slice(index, index + 2);
+    const pairType = TWO_CHARACTER_OPERATORS.get(pair);
+    if (pairType) {
+      tokens.push({ type: pairType, value: pair });
       index += 2;
       continue;
     }
 
-    const tokenType = character as TokenType;
-    if (ONE_CHARACTER_TOKENS.has(tokenType)) {
+    const tokenType = ONE_CHARACTER_TOKENS.get(character);
+    if (tokenType) {
       tokens.push({ type: tokenType, value: character });
       index++;
       continue;
@@ -111,11 +142,7 @@ export function tokenize(source: string): Token[] {
       const word = readWord(source, index);
       const isBoolean = word.value === "true" || word.value === "false";
       tokens.push({
-        type: isBoolean
-          ? "number"
-          : KEYWORDS.has(word.value as TokenType)
-            ? (word.value as TokenType)
-            : "identifier",
+        type: isBoolean ? "number" : (KEYWORDS.get(word.value) ?? "identifier"),
         value: word.value === "true" ? "1" : word.value === "false" ? "0" : word.value,
       });
       index = word.next;

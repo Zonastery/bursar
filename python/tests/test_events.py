@@ -46,7 +46,7 @@ def test_handlers_are_snapshot_copied_and_failures_are_isolated() -> None:
 
 def test_unknown_event_type_is_rejected() -> None:
     emitter = CreditEventEmitter()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not-a-credit-event"):
         emitter.emit(_event("not-a-credit-event"))  # type: ignore[arg-type]
 
 

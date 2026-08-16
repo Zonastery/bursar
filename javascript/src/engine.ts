@@ -1,12 +1,13 @@
 import { Decimal } from "decimal.js";
+import { z } from "zod";
 
 import { makeCostBreakdown } from "./breakdown.js";
 import type { CostBreakdown } from "./breakdown.js";
 import {
   canonicalParsedBursarConfigDict,
   loadConfigFromDict,
-  type Charge,
   type BursarConfigData,
+  type Charge,
   type DimensionMatcher,
   type OperationPricing,
   type ParsedBursarConfig,
@@ -31,11 +32,11 @@ function requiredMeasure(measures: Record<string, Decimal>, name: string): Decim
 export class PricingEngine {
   constructor(private readonly config: ParsedBursarConfig) {}
 
-  static fromDict(data: BursarConfigData | Record<string, unknown>): PricingEngine {
+  static fromDict<T extends object>(data: T): PricingEngine {
     return new PricingEngine(loadConfigFromDict(data));
   }
 
-  get pricingSchema(): Record<string, unknown> {
+  get pricingSchema(): BursarConfigData {
     return canonicalParsedBursarConfigDict(this.config);
   }
 
@@ -71,14 +72,22 @@ export class PricingEngine {
         continue;
       }
       if (definition.type === "string") {
-        if (typeof input !== "string") throw new ConfigError(`dimension '${name}' must be string`);
-        dimensions[name] = input;
+        const parsed = z.string().safeParse(input);
+        if (!parsed.success) throw new ConfigError(`dimension '${name}' must be string`);
+        dimensions[name] = parsed.data;
       } else if (definition.type === "boolean") {
-        if (typeof input !== "boolean")
-          throw new ConfigError(`dimension '${name}' must be boolean`);
-        dimensions[name] = input;
+        const parsed = z.boolean().safeParse(input);
+        if (!parsed.success) throw new ConfigError(`dimension '${name}' must be boolean`);
+        dimensions[name] = parsed.data;
       } else {
-        const numeric = new Decimal(input as Decimal.Value);
+        let numeric: Decimal;
+        if (input instanceof Decimal) {
+          numeric = input;
+        } else {
+          const parsed = z.union([z.string(), z.number(), z.bigint()]).safeParse(input);
+          if (!parsed.success) throw new ConfigError(`dimension '${name}' must be number`);
+          numeric = new Decimal(parsed.data);
+        }
         if (!numeric.isFinite()) throw new ConfigError(`dimension '${name}' must be finite`);
         dimensions[name] = numeric;
       }
@@ -118,7 +127,16 @@ export class PricingEngine {
         measures: Object.fromEntries(
           Object.entries(measures).map(([key, amount]) => [key, amount.toString()]),
         ),
-        dimensions: dimensionsInput,
+        dimensions: Object.fromEntries(
+          Object.entries(dimensionsInput).map(([key, value]) => [
+            key,
+            value instanceof Decimal
+              ? value.toString()
+              : z.bigint().safeParse(value).success
+                ? String(value)
+                : value,
+          ]),
+        ),
       },
     });
   }
@@ -167,8 +185,10 @@ export class PricingEngine {
       return matcher.values.some((candidate) => this.scalarEquals(value, candidate));
     if (matcher.op === "not_in")
       return !matcher.values.some((candidate) => this.scalarEquals(value, candidate));
-    if (matcher.op === "prefix")
-      return typeof value === "string" && value.startsWith(matcher.value);
+    if (matcher.op === "prefix") {
+      const parsed = z.string().safeParse(value);
+      return parsed.success && parsed.data.startsWith(matcher.value);
+    }
     if (matcher.op !== "range" || !(value instanceof Decimal)) return false;
     if (matcher.gt && !value.gt(matcher.gt)) return false;
     if (matcher.gte && !value.gte(matcher.gte)) return false;
@@ -179,8 +199,17 @@ export class PricingEngine {
 
   private scalarEquals(left: DimensionValue, right: string | Decimal | boolean): boolean {
     if (left instanceof Decimal || right instanceof Decimal) {
+      const leftValue =
+        left instanceof Decimal
+          ? { success: true as const, data: left }
+          : z.union([z.string(), z.number(), z.bigint()]).safeParse(left);
+      const rightValue =
+        right instanceof Decimal
+          ? { success: true as const, data: right }
+          : z.union([z.string(), z.number(), z.bigint()]).safeParse(right);
+      if (!leftValue.success || !rightValue.success) return false;
       try {
-        return new Decimal(left as Decimal.Value).eq(new Decimal(right as Decimal.Value));
+        return new Decimal(leftValue.data).eq(new Decimal(rightValue.data));
       } catch {
         return false;
       }
@@ -231,6 +260,6 @@ export class PricingEngine {
       return Decimal.sum(
         ...charge.components.map((component) => this.evaluateCharge(component, measures)),
       );
-    throw new ConfigError(`unsupported charge type '${String((charge as Charge).type)}'`);
+    throw new ConfigError("unsupported charge type");
   }
 }

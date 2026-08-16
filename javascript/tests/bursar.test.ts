@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { AccountService, Bursar } from "../src/bursar.js";
+import {
+  AccountService,
+  Bursar,
+  type BursarOptions,
+  type CatalogService,
+  type CreditsService,
+} from "../src/bursar.js";
 import type { BillingStore } from "../src/billing/billing-store.js";
+import type { BillingEvent } from "../src/billing/types/index.js";
 import type { CreditStore } from "../src/credits/store.js";
 import {
   CapabilityNotConfiguredError,
@@ -8,6 +15,26 @@ import {
   ConfigError,
   CatalogNotLoadedError,
 } from "../src/index.js";
+
+function testCredits(value: Partial<CreditsService>): CreditsService {
+  // SAFETY: Each fixture implements the CreditsService methods used by its scenario.
+  return value as CreditsService;
+}
+
+function testCatalog(value: Partial<CatalogService>): CatalogService {
+  // SAFETY: Each fixture implements the CatalogService methods used by its scenario.
+  return value as CatalogService;
+}
+
+function testCreditStore(value: Partial<CreditStore>): CreditStore {
+  // SAFETY: Each fixture implements the CreditStore methods used by its scenario.
+  return value as CreditStore;
+}
+
+function testBillingStore(value: Partial<BillingStore>): BillingStore {
+  // SAFETY: Each fixture implements the BillingStore methods used by its scenario.
+  return value as BillingStore;
+}
 
 describe("Bursar facade", () => {
   it("initializes a default plan and all account-created grants idempotently", async () => {
@@ -28,7 +55,7 @@ describe("Bursar facade", () => {
         },
       }),
     };
-    const accounts = new AccountService(credits as never, catalog as never);
+    const accounts = new AccountService(testCredits(credits), testCatalog(catalog));
 
     const result = await accounts.onAccountCreated({
       accountId: "user-1",
@@ -48,7 +75,7 @@ describe("Bursar facade", () => {
 
   it("validates account lifecycle identity before catalog access", async () => {
     const catalog = { getConfig: vi.fn() };
-    const accounts = new AccountService({} as never, catalog as never);
+    const accounts = new AccountService(testCredits({}), testCatalog(catalog));
 
     await expect(
       accounts.onAccountCreated({ accountId: " ", eventKey: "signup:1" }),
@@ -60,7 +87,7 @@ describe("Bursar facade", () => {
     const active = { version: 3 };
     const getActiveCatalog = vi.fn().mockResolvedValue(active);
     const applyDuePlanChanges = vi.fn().mockResolvedValue(2);
-    const creditStore = { getActiveCatalog, applyDuePlanChanges } as unknown as CreditStore;
+    const creditStore = testCreditStore({ getActiveCatalog, applyDuePlanChanges });
     const bursar = new Bursar({ creditStore });
 
     expect(bursar.billing).toBeNull();
@@ -71,35 +98,37 @@ describe("Bursar facade", () => {
   });
 
   it("rejects billing and commerce options that cannot be applied", () => {
-    const creditStore = {} as CreditStore;
+    const creditStore = testCreditStore({});
 
-    expect(() => new Bursar({ creditStore, billingOptions: {} } as never)).toThrow(
+    // SAFETY: This intentionally invalid option shape exercises Bursar's runtime validation.
+    expect(() => new Bursar({ creditStore, billingOptions: {} } as BursarOptions)).toThrow(
       /require billingStore/,
     );
     expect(
       () =>
+        // SAFETY: This intentionally invalid option shape exercises Bursar's runtime validation.
         new Bursar({
           creditStore,
           commerceOptions: { providerEnvironment: "test", providers: {} },
-        } as never),
+        } as BursarOptions),
     ).toThrow(/require billingStore/);
   });
 
   it("configures billing with the facade-owned credit provisioning capability", () => {
-    const billingStore = {} as BillingStore;
-    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore });
+    const billingStore = testBillingStore({});
+    const bursar = new Bursar({ creditStore: testCreditStore({}), billingStore });
 
     expect(bursar.billing).not.toBeNull();
     expect(bursar.billing?.hasProvisioning).toBe(true);
   });
 
   it("rejects mismatched credit and billing provider environments", () => {
-    const creditStore = {
+    const creditStore = testCreditStore({
       providerEnvironment: "live",
-    } as unknown as CreditStore;
-    const billingStore = {
+    });
+    const billingStore = testBillingStore({
       providerEnvironment: "test",
-    } as unknown as BillingStore;
+    });
 
     expect(
       () =>
@@ -112,15 +141,19 @@ describe("Bursar facade", () => {
   });
 
   it("routes provider events through the facade-owned billing service", async () => {
-    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore: {} as BillingStore });
+    const bursar = new Bursar({
+      creditStore: testCreditStore({}),
+      billingStore: testBillingStore({}),
+    });
     const ingest = vi
       .spyOn(bursar.billing!, "ingestBillingEvent")
       .mockResolvedValue({ handled: true, action: "subscription_created" });
-    const event = {
+    const event: BillingEvent = {
       provider: "mock",
       eventId: "evt-1",
       eventType: "subscription.created",
-    } as never;
+      occurredAt: "2026-08-05T00:00:00Z",
+    };
 
     await expect(bursar.ingestBillingEvent(event)).resolves.toEqual({
       handled: true,
@@ -130,31 +163,36 @@ describe("Bursar facade", () => {
   });
 
   it("emits typed errors from public facade operations", async () => {
-    const creditStore = {
+    const creditStore = testCreditStore({
       getActiveCatalog: vi.fn().mockResolvedValue(null),
-    } as unknown as CreditStore;
+    });
     const bursar = new Bursar({ creditStore });
 
     await expect(bursar.catalog.getConfig()).rejects.toBeInstanceOf(CatalogNotLoadedError);
-    await expect(bursar.ingestBillingEvent({} as never)).rejects.toBeInstanceOf(
-      CapabilityNotConfiguredError,
-    );
+    await expect(
+      bursar.ingestBillingEvent({
+        provider: "mock",
+        eventId: "evt-no-billing",
+        eventType: "customer.created",
+        occurredAt: "2026-08-05T00:00:00Z",
+      }),
+    ).rejects.toBeInstanceOf(CapabilityNotConfiguredError);
     expect(() => bursar.requireBilling()).toThrow(CapabilityNotConfiguredError);
     expect(() => bursar.requireCommerce()).toThrow(CommerceNotConfiguredError);
 
     const accounts = new AccountService(
-      {
+      testCredits({
         getUserPlan: vi.fn(),
         setUserPlan: vi.fn(),
         executeGrantProgram: vi.fn(),
-      } as never,
-      {
+      }),
+      testCatalog({
         getConfig: vi.fn().mockResolvedValue({
           catalog: {},
           plans: { free: { rank: 0 } },
           credits: { grantPrograms: {} },
         }),
-      } as never,
+      }),
     );
     await expect(
       accounts.onAccountCreated({ accountId: "user-1", eventKey: "signup:user-1" }),

@@ -5,6 +5,7 @@ import { children, type Node } from "./expr/ast.js";
 import { evaluateNode } from "./expr/evaluator.js";
 import { ALLOWED_FUNCTIONS, collectVariables, validateCalls } from "./expr/language.js";
 import { ExpressionParser } from "./expr/parser.js";
+import { z } from "zod";
 
 export type * from "./expr/ast.js";
 
@@ -46,7 +47,8 @@ export function validateExpression(expression: string, knownVariables: Iterable<
     }
   } catch (error) {
     if (error instanceof ExpressionError) throw error;
-    throw new ExpressionError(`invalid expression: ${(error as Error).message}`, { cause: error });
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ExpressionError(`invalid expression: ${message}`, { cause: error });
   }
 }
 
@@ -57,10 +59,13 @@ export function evaluateExpression(
   expression: string,
   variables: Record<string, number | Decimal>,
 ): Decimal {
-  if (!variables || typeof variables !== "object") {
+  const parsedVariables = z
+    .record(z.string(), z.union([z.number().finite(), z.instanceof(Decimal)]))
+    .safeParse(variables);
+  if (!parsedVariables.success) {
     throw new ExpressionError("variables must be a dict");
   }
-  if (Object.keys(variables).length === 0) {
+  if (Object.keys(parsedVariables.data).length === 0) {
     throw new ExpressionError("cannot evaluate: variables dict is empty");
   }
 
@@ -69,12 +74,13 @@ export function evaluateExpression(
     node = parseExpression(expression, "unexpected token: '{token}'");
   } catch (error) {
     if (error instanceof ExpressionError) throw error;
-    throw new ExpressionError(`syntax error: ${(error as Error).message}`, { cause: error });
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ExpressionError(`syntax error: ${message}`, { cause: error });
   }
   validateCalls(node);
-  validateVariables(node, variables);
+  validateVariables(node, parsedVariables.data);
 
-  const result = evaluateNode(node, variables);
+  const result = evaluateNode(node, parsedVariables.data);
   if (!result.isFinite()) {
     throw new ExpressionError(`expression evaluated to a non-finite value: ${result.toString()}`);
   }

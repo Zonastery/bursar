@@ -1221,21 +1221,21 @@ def test_team_creation_conflicts_have_no_persistent_side_effects(store: Postgres
     )
     before = _team_creation_snapshot(store.database_url, idempotency_key)
 
-    with pytest.raises(StoreError, match="^idempotency_conflict$"):
+    with pytest.raises(StoreError, match=r"^idempotency_conflict$"):
         store.create_team(
             TEAM_REPLAY_OWNER_ID,
             "Changed team",
             Decimal("7"),
             idempotency_key=idempotency_key,
         )
-    with pytest.raises(StoreError, match="^idempotency_conflict$"):
+    with pytest.raises(StoreError, match=r"^idempotency_conflict$"):
         store.create_team(
             TEAM_REPLAY_OWNER_ID,
             "Conflict-safe team",
             Decimal("8"),
             idempotency_key=idempotency_key,
         )
-    with pytest.raises(StoreError, match="^idempotency_conflict$"):
+    with pytest.raises(StoreError, match=r"^idempotency_conflict$"):
         store.create_team(
             TEAM_CHANGED_OWNER_ID,
             "Conflict-safe team",

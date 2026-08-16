@@ -2,7 +2,7 @@ import { Decimal } from "decimal.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { makeCostBreakdown } from "../src/breakdown.js";
-import { CreditEventEmitter } from "../src/credits/events.js";
+import { CreditEventEmitter, type CreditEvent } from "../src/credits/events.js";
 import { raiseDeductError } from "../src/credits/service-errors.js";
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
@@ -15,6 +15,16 @@ import {
   isRetryableBursarError,
 } from "../src/errors.js";
 import { retryBursarOperation } from "../src/retry.js";
+
+function testStore(value: Partial<CreditStore>): CreditStore {
+  // SAFETY: Each fixture implements the CreditStore methods exercised by its scenario.
+  return value as CreditStore;
+}
+
+function testEngine(value: Partial<PricingEngine>): PricingEngine {
+  // SAFETY: Each fixture implements the PricingEngine methods exercised by its scenario.
+  return value as PricingEngine;
+}
 
 describe("CreditsService mirror regressions", () => {
   it("only classifies transient store failures as retryable", () => {
@@ -70,7 +80,7 @@ describe("CreditsService mirror regressions", () => {
       error: null,
       bucketBreakdown: null,
     });
-    const store = {
+    const store = testStore({
       getUserPlan: vi.fn().mockResolvedValue({
         userId: "user-1",
         planId: null,
@@ -79,7 +89,7 @@ describe("CreditsService mirror regressions", () => {
       createLease,
       settleLease,
       listQuotaEvents: vi.fn().mockResolvedValue([]),
-    } as unknown as CreditStore;
+    });
     const service = new CreditsService(store);
 
     const operation = await service.beginBilledOperation("user-1", {
@@ -120,7 +130,7 @@ describe("CreditsService mirror regressions", () => {
       error: null,
       bucketBreakdown: null,
     });
-    const store = {
+    const store = testStore({
       getUserPlan: vi.fn().mockResolvedValue({
         userId: "user-1",
         catalogVersion: null,
@@ -128,12 +138,12 @@ describe("CreditsService mirror regressions", () => {
       }),
       deductWithAllowance,
       listQuotaEvents: vi.fn().mockResolvedValue([]),
-    } as unknown as CreditStore;
-    const engine = {
+    });
+    const engine = testEngine({
       calculate: vi.fn().mockReturnValue(makeCostBreakdown()),
-    } as unknown as PricingEngine;
+    });
     const emitter = new CreditEventEmitter();
-    const events: Array<Record<string, unknown> | undefined> = [];
+    const events: Array<CreditEvent["data"]> = [];
     emitter.on("credits.deducted", (event) => {
       events.push(event.data);
     });

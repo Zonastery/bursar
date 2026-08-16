@@ -21,8 +21,8 @@ clean:  ## Remove build artifacts and caches
 lint:  ## Run ruff lint
 	uv run ruff check src/ tests/ scripts/
 
-typecheck:  ## Run pyright
-	uv run pyright src/
+typecheck:  ## Run pyright (including warnings)
+	uv run pyright src/ --warnings
 
 test: lint typecheck  ## Lint, typecheck, then run the test suite
 	uv run python -m pytest tests/ -q

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -27,6 +28,11 @@ from bursar.providers._shared import (
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
 
 _log = StdlibProviderLogger(logging.getLogger(__name__))
+
+DodoEventHandler = Callable[
+    [str, dict[str, Any], str | None, dict[str, str], object, BillingEventSink, ProviderLogger],
+    Awaitable[None],
+]
 
 _DODO_SUBSCRIPTION_STATUS: dict[str, BillingSubscriptionStatus] = {
     "pending": BillingSubscriptionStatus.incomplete,
@@ -88,8 +94,8 @@ def _normalize_date(raw: Any) -> str | None:
             return parsed.astimezone(UTC).isoformat()
         if parsed:
             return None
-    except Exception:
-        pass
+    except (ValueError, TypeError, IndexError, OverflowError):
+        return None
     return None
 
 
@@ -308,7 +314,7 @@ async def _handle_subscription_renewed(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -337,7 +343,7 @@ async def _handle_subscription_cancelled(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -361,7 +367,7 @@ async def _handle_subscription_expired(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -385,7 +391,7 @@ async def _handle_subscription_failed(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -409,7 +415,7 @@ async def _handle_subscription_on_hold(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -433,7 +439,7 @@ async def _handle_subscription_paused(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -485,7 +491,7 @@ async def _handle_subscription_plan_changed(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
@@ -571,7 +577,7 @@ async def _handle_payment_failed(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
     payment_id = require_provider_string(data.get("payment_id"), "Dodo payment.payment_id")
@@ -617,7 +623,7 @@ async def _handle_refund(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
     refund_id_value = data.get("refund_id")
@@ -657,7 +663,7 @@ async def _handle_dispute_created(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
     dispute_id_value = data.get("dispute_id")
@@ -689,7 +695,7 @@ async def _handle_dispute_closed(
     metadata: dict[str, str],
     event_timestamp: object,
     sink: BillingEventSink,
-    logger: ProviderLogger,
+    _logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
     dispute_id_value = data.get("dispute_id")
@@ -714,7 +720,7 @@ async def _handle_dispute_closed(
     call_billing_event_sink(sink, BillingEvent(**_with_account(kw, account_id)))
 
 
-_EVENT_HANDLERS: dict[str, Any] = {
+_EVENT_HANDLERS: dict[str, DodoEventHandler] = {
     "subscription.active": _handle_subscription_active,
     "subscription.renewed": _handle_subscription_renewed,
     "subscription.cancelled": _handle_subscription_cancelled,
