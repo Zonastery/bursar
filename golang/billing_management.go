@@ -319,6 +319,9 @@ func (s *BillingService) GetUserPreferences(ctx context.Context, accountID strin
 // authoritative for billing policy. The document remains store-owned; this
 // method does not introduce a second billing-side catalog cache.
 func (s *BillingService) GetActiveCatalogDocument(ctx context.Context) (map[string]any, error) {
+	if s == nil {
+		return nil, NewError("billing catalog access is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	source, ok := s.store.(billingActiveCatalogSource)
 	if !ok {
 		return nil, NewError("billing catalog access is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -374,6 +377,9 @@ func (s *BillingService) UpdateBillingSubscriptionChange(ctx context.Context, id
 // operators can resolve it without silently selecting a second entitlement
 // source in process memory.
 func (s *BillingService) RecordSubscriptionConflict(ctx context.Context, input BillingSubscriptionConflictCreate) error {
+	if s == nil {
+		return NewError("billing subscription-conflict persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	recorder, ok := s.store.(billingSubscriptionConflictRecorder)
 	if !ok {
 		return NewError("billing subscription-conflict persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -382,6 +388,9 @@ func (s *BillingService) RecordSubscriptionConflict(ctx context.Context, input B
 }
 
 func (s *BillingService) UpsertBillingSubscription(ctx context.Context, state CommerceSubscription) (string, error) {
+	if s == nil {
+		return "", NewError("billing subscription persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	writer, ok := s.store.(billingSubscriptionWriter)
 	if !ok {
 		return "", NewError("billing subscription persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -414,6 +423,9 @@ func (s *BillingService) ResolveOfferByLookup(ctx context.Context, provider, loo
 }
 
 func (s *BillingService) ResolveTopup(ctx context.Context, provider, productID, priceID string) (*BillingTopupResult, error) {
+	if s == nil {
+		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	resolver, ok := s.store.(billingTopupResolver)
 	if !ok {
 		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -422,6 +434,9 @@ func (s *BillingService) ResolveTopup(ctx context.Context, provider, productID, 
 }
 
 func (s *BillingService) ResolveTopupByLookup(ctx context.Context, provider, lookupKey string) (*BillingTopupResult, error) {
+	if s == nil {
+		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	resolver, ok := s.store.(billingTopupResolver)
 	if !ok {
 		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -476,6 +491,9 @@ func (s *BillingService) UpdateAutoRechargeAttempt(ctx context.Context, update A
 }
 
 func (s *BillingService) UpdateAutoRechargeAttemptByProviderPayment(ctx context.Context, update AutoRechargeProviderPaymentUpdate) error {
+	if s == nil {
+		return NewError("billing auto-recharge provider reconciliation is not configured", ErrorOptions{Code: ErrorCodeAutoRechargeNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	store, ok := s.store.(autoRechargeProviderPaymentUpdater)
 	if !ok {
 		return NewError("billing auto-recharge provider reconciliation is not configured", ErrorOptions{Code: ErrorCodeAutoRechargeNotConfigured, Category: ErrorCategoryUnavailable})
@@ -590,6 +608,9 @@ func (s *BillingService) revokeIfCurrentSubscription(ctx context.Context, accoun
 }
 
 func (s *BillingService) PseudonymizeFinancialSubject(ctx context.Context, accountID string) error {
+	if s == nil {
+		return NewError("billing subject pseudonymization is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	pseudonymizer, ok := s.store.(billingPseudonymizer)
 	if !ok {
 		return NewError("billing subject pseudonymization is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})

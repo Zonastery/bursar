@@ -3,6 +3,7 @@ package bursar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -290,5 +291,358 @@ func requireStorageUUIDArgument(t *testing.T, argument any, expected string) {
 	value, ok := argument.(pgtype.UUID)
 	if !ok || !value.Valid || formatUUID(value.Bytes) != expected {
 		t.Fatalf("UUID arg = %#v (%T), want %s", argument, argument, expected)
+	}
+}
+
+func TestPostgresStorageRepositoryConstructorsAndRPCFailures(t *testing.T) {
+	if _, err := NewPostgresStorageRepository(nil); err == nil {
+		t.Fatal("nil PostgreSQL client accepted")
+	}
+	if _, err := NewPostgresStorageRepositoryFromStore(nil); err == nil {
+		t.Fatal("nil PostgreSQL store accepted")
+	}
+	if _, err := newPostgresStorageRepository(&storageCallerStub{tenantID: "not-a-uuid"}); err == nil {
+		t.Fatal("invalid tenant PostgreSQL client accepted")
+	}
+	client := &PostgresClient{options: PostgresClientOptions{TenantID: storageTestTenant}}
+	repository, err := NewPostgresStorageRepository(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.tenantID != storageTestTenant {
+		t.Fatalf("repository tenant = %q", repository.tenantID)
+	}
+	store := &PostgresStore{client: client}
+	if fromStore, err := NewPostgresStorageRepositoryFromStore(store); err != nil || fromStore.tenantID != storageTestTenant {
+		t.Fatalf("repository from store = %#v, %v", fromStore, err)
+	}
+
+	caller := &storageCallerStub{tenantID: storageTestTenant, call: func(context.Context, string, ...any) ([]map[string]any, error) {
+		return nil, errors.New("database password must not escape")
+	}}
+	repository, err = newPostgresStorageRepository(caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := OutboxEvent{EventID: "1", TenantID: storageTestTenant, ClaimToken: storageTestClaim}
+	if _, err := repository.Claim(context.Background(), []string{"usage"}, 1, 1); err == nil {
+		t.Fatal("claim call error was swallowed")
+	}
+	if _, err := repository.Renew(context.Background(), event, 1); err == nil {
+		t.Fatal("renew call error was swallowed")
+	}
+	if _, err := repository.Complete(context.Background(), event); err == nil {
+		t.Fatal("complete call error was swallowed")
+	}
+	if _, err := repository.Fail(context.Background(), event, "outbox_delivery_failed:Error", 1, 1); err == nil {
+		t.Fatal("fail call error was swallowed")
+	}
+	if _, err := repository.Stats(context.Background()); err == nil {
+		t.Fatal("stats call error was swallowed")
+	}
+	if _, err := repository.ListDeadLetters(context.Background(), OutboxDeadLetterListOptions{Limit: 1}); err == nil {
+		t.Fatal("dead-letter call error was swallowed")
+	}
+	if _, err := repository.Requeue(context.Background(), "1"); err == nil {
+		t.Fatal("requeue call error was swallowed")
+	}
+	if _, err := repository.GetUsageCharge(context.Background(), storageTestCharge); err == nil {
+		t.Fatal("usage export call error was swallowed")
+	}
+	if _, err := repository.GetBillingEventPayload(context.Background(), storageTestBilling); err == nil {
+		t.Fatal("billing export call error was swallowed")
+	}
+	if _, err := repository.ArchiveBillingEventPayload(context.Background(), storageTestBilling, "object", nil); err == nil {
+		t.Fatal("archive call error was swallowed")
+	}
+}
+
+func TestPostgresStorageRepositoryRejectsMalformedPersistenceResponses(t *testing.T) {
+	caller := &storageCallerStub{tenantID: storageTestTenant}
+	repository, err := newPostgresStorageRepository(caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := OutboxEvent{EventID: "1", TenantID: storageTestTenant, ClaimToken: storageTestClaim}
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"claim tenant mismatch", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) {
+				row := map[string]any{"event_id": "1", "tenant_id": storageOtherTenant, "topic": "usage", "aggregate_type": "charge", "aggregate_id": storageTestCharge, "payload_version": 1, "payload": map[string]any{}, "claim_token": storageTestClaim, "attempt_count": 0, "created_at": time.Now()}
+				return []map[string]any{row}, nil
+			}
+			_, err := repository.Claim(context.Background(), []string{"usage"}, 1, 1)
+			return err
+		}},
+		{"claim malformed row", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) {
+				return []map[string]any{{"event_id": "1", "tenant_id": storageTestTenant}}, nil
+			}
+			_, err := repository.Claim(context.Background(), []string{"usage"}, 1, 1)
+			return err
+		}},
+		{"renew scalar malformed", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) {
+				return []map[string]any{{"result": "not-bool", "extra": true}}, nil
+			}
+			_, err := repository.Renew(context.Background(), event, 1)
+			return err
+		}},
+		{"complete missing scalar", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) { return []map[string]any{{}}, nil }
+			_, err := repository.Complete(context.Background(), event)
+			return err
+		}},
+		{"fail empty rows", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) { return nil, nil }
+			_, err := repository.Fail(context.Background(), event, "outbox_delivery_failed:Error", 1, 1)
+			return err
+		}},
+		{"stats negative", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) {
+				return []map[string]any{{"pending_count": -1, "processing_count": 0, "delivered_count": 0, "dead_letter_count": 0}}, nil
+			}
+			_, err := repository.Stats(context.Background())
+			return err
+		}},
+		{"dead letter tenant mismatch", func() error {
+			caller.call = func(context.Context, string, ...any) ([]map[string]any, error) {
+				row := deadLetterRow("1", time.Now())
+				row["tenant_id"] = storageOtherTenant
+				return []map[string]any{row}, nil
+			}
+			_, err := repository.ListDeadLetters(context.Background(), OutboxDeadLetterListOptions{Limit: 1})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); err == nil {
+				t.Fatal("malformed response accepted")
+			}
+		})
+	}
+
+	for _, topics := range [][]string{nil, {""}, {string(make([]byte, 256))}} {
+		if err := validateOutboxClaim(topics, 1, 1); err == nil {
+			t.Errorf("invalid topics accepted: %#v", topics)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"invalid lease", func() error { _, err := repository.Renew(context.Background(), event, 0); return err }},
+		{"invalid retry delay", func() error {
+			_, err := repository.Fail(context.Background(), event, "outbox_delivery_failed:Error", 0, 1)
+			return err
+		}},
+		{"invalid attempt limit", func() error {
+			_, err := repository.Fail(context.Background(), event, "outbox_delivery_failed:Error", 1, 0)
+			return err
+		}},
+		{"invalid archive key", func() error {
+			_, err := repository.ArchiveBillingEventPayload(context.Background(), storageTestBilling, " ", nil)
+			return err
+		}},
+		{"invalid dead-letter limit", func() error {
+			_, err := repository.ListDeadLetters(context.Background(), OutboxDeadLetterListOptions{Limit: 101})
+			return err
+		}},
+		{"zero cursor ID", func() error {
+			_, err := repository.ListDeadLetters(context.Background(), OutboxDeadLetterListOptions{Limit: 1, Cursor: &OutboxDeadLetterCursor{CreatedAt: time.Now(), EventID: "0"}})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); err == nil {
+				t.Fatal("invalid request accepted")
+			}
+		})
+	}
+}
+
+func TestPostgresStorageRepositoryExportAvailabilityAndTenantChecks(t *testing.T) {
+	caller := &storageCallerStub{tenantID: storageTestTenant}
+	repository, err := newPostgresStorageRepository(caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller.call = func(_ context.Context, name string, _ ...any) ([]map[string]any, error) {
+		switch name {
+		case "export_usage_charge":
+			return []map[string]any{{"payload": map[string]any{"payload_available": false}}}, nil
+		case "export_billing_event_payload":
+			return nil, nil
+		case "archive_billing_event_payload":
+			return []map[string]any{{"result": false}}, nil
+		default:
+			return nil, nil
+		}
+	}
+	if _, err := repository.GetUsageCharge(context.Background(), storageTestCharge); err == nil {
+		t.Fatal("expired usage payload accepted")
+	}
+	if got, err := repository.GetBillingEventPayload(context.Background(), storageTestBilling); err != nil || got != nil {
+		t.Fatalf("missing billing payload = %#v, %v", got, err)
+	}
+	if got, err := repository.ArchiveBillingEventPayload(context.Background(), storageTestBilling, "object", nil); err != nil || got {
+		t.Fatalf("false archive result = %v, %v", got, err)
+	}
+
+	caller.call = func(_ context.Context, name string, _ ...any) ([]map[string]any, error) {
+		if name == "export_billing_event_payload" {
+			payload := validBillingExportPayload(time.Now().UTC())
+			payload["tenant_id"] = storageOtherTenant
+			return []map[string]any{{"payload": payload}}, nil
+		}
+		payload := validUsageExportPayload(time.Now().UTC())
+		payload["tenant_id"] = storageOtherTenant
+		return []map[string]any{{"payload": payload}}, nil
+	}
+	if _, err := repository.GetBillingEventPayload(context.Background(), storageTestBilling); err == nil {
+		t.Fatal("cross-tenant billing payload accepted")
+	}
+	if _, err := repository.GetUsageCharge(context.Background(), storageTestCharge); err == nil {
+		t.Fatal("cross-tenant usage payload accepted")
+	}
+}
+
+func validUsageExportPayload(now time.Time) map[string]any {
+	return map[string]any{
+		"payload_available": true, "tenant_id": storageTestTenant, "charge_id": storageTestCharge, "account_id": storageTestAccount, "subject_id": storageTestSubject, "operation": "generate",
+		"measures": map[string]any{}, "dimensions": map[string]any{}, "metadata": map[string]any{}, "requested": "1", "charged": "1", "allowance_requested": "0", "allowance_covered": "0", "billing_disposition": "billable", "pricing_snapshot": map[string]any{},
+		"idempotency_key": "idempotency", "request_digest": "digest", "event_at": now, "created_at": now,
+	}
+}
+
+func validBillingExportPayload(now time.Time) map[string]any {
+	return map[string]any{
+		"tenant_id": storageTestTenant, "event_id": storageTestBilling, "provider": "stripe", "provider_environment": "test", "provider_event_id": "evt", "event_type": "invoice.paid", "status": "completed", "received_at": now,
+		"completed_at": nil, "archived_at": nil, "envelope": map[string]any{},
+	}
+}
+
+func TestStorageExportRowMappersFailClosed(t *testing.T) {
+	now := time.Now().UTC()
+	usage := validUsageExportPayload(now)
+	for _, key := range []string{"tenant_id", "charge_id", "account_id", "subject_id", "operation", "requested", "charged", "allowance_requested", "allowance_covered", "billing_disposition", "measures", "dimensions", "metadata", "pricing_snapshot", "idempotency_key", "request_digest", "event_at", "created_at"} {
+		row := cloneAnyMap(usage)
+		delete(row, key)
+		if _, err := usageChargeExportFromPayload(row); err == nil {
+			t.Errorf("usage export missing %s accepted", key)
+		}
+	}
+	for _, key := range []string{"tenant_id", "event_id", "provider", "provider_environment", "provider_event_id", "event_type", "status", "received_at"} {
+		row := cloneAnyMap(validBillingExportPayload(now))
+		delete(row, key)
+		if _, err := billingPayloadExportFromPayload(row); err == nil {
+			t.Errorf("billing export missing %s accepted", key)
+		}
+	}
+	for _, row := range []map[string]any{
+		func() map[string]any { row := cloneAnyMap(usage); row["billing_disposition"] = "unknown"; return row }(),
+		func() map[string]any { row := cloneAnyMap(usage); row["charge_id"] = "bad"; return row }(),
+		func() map[string]any { row := cloneAnyMap(usage); row["requested"] = "not-money"; return row }(),
+		func() map[string]any { row := cloneAnyMap(usage); row["measures"] = "not-json"; return row }(),
+	} {
+		if _, err := usageChargeExportFromPayload(row); err == nil {
+			t.Errorf("malformed usage export accepted: %#v", row)
+		}
+	}
+	for _, row := range []map[string]any{
+		func() map[string]any {
+			row := cloneAnyMap(validBillingExportPayload(now))
+			row["envelope"] = "not-json"
+			return row
+		}(),
+		func() map[string]any {
+			row := cloneAnyMap(validBillingExportPayload(now))
+			row["received_at"] = "bad"
+			return row
+		}(),
+	} {
+		if _, err := billingPayloadExportFromPayload(row); err == nil {
+			t.Errorf("malformed billing export accepted: %#v", row)
+		}
+	}
+	invalidBilling := validBillingExportPayload(now)
+	invalidBilling["event_id"] = "bad"
+	if _, err := billingPayloadExportFromPayload(invalidBilling); err == nil {
+		t.Fatal("invalid billing event UUID accepted")
+	}
+}
+
+func TestPostgresStorageRepositoryPersistenceShapeBoundaries(t *testing.T) {
+	caller := &storageCallerStub{tenantID: storageTestTenant}
+	repository, err := newPostgresStorageRepository(caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := OutboxEvent{EventID: "1", TenantID: storageTestTenant, ClaimToken: storageTestClaim}
+	for _, lease := range []int{0, 3_601} {
+		if _, err := repository.Renew(context.Background(), event, lease); err == nil {
+			t.Errorf("lease %d accepted", lease)
+		}
+	}
+
+	validStats := map[string]any{"pending_count": 1, "processing_count": 2, "delivered_count": 3, "dead_letter_count": 4, "oldest_pending_at": time.Now().UTC()}
+	for _, response := range [][]map[string]any{nil, {{"pending_count": 1}, {"pending_count": 1}}} {
+		caller.call = func(context.Context, string, ...any) ([]map[string]any, error) { return response, nil }
+		if _, err := repository.Stats(context.Background()); err == nil {
+			t.Errorf("invalid stats row count accepted: %#v", response)
+		}
+	}
+	for _, key := range []string{"pending_count", "processing_count", "delivered_count", "dead_letter_count", "oldest_pending_at"} {
+		row := cloneAnyMap(validStats)
+		if key == "oldest_pending_at" {
+			row[key] = "bad"
+		} else {
+			delete(row, key)
+		}
+		caller.call = func(context.Context, string, ...any) ([]map[string]any, error) { return []map[string]any{row}, nil }
+		if _, err := repository.Stats(context.Background()); err == nil {
+			t.Errorf("malformed stats field %s accepted", key)
+		}
+	}
+
+	for _, response := range [][]map[string]any{
+		{{}},
+		{{"payload": "secret"}},
+		{{"payload": map[string]any{}}},
+	} {
+		caller.call = func(context.Context, string, ...any) ([]map[string]any, error) { return response, nil }
+		if _, err := repository.GetUsageCharge(context.Background(), storageTestCharge); err == nil {
+			t.Errorf("malformed usage export response accepted: %#v", response)
+		}
+	}
+	for _, response := range [][]map[string]any{
+		{{}},
+		{{"payload": "secret"}},
+		{{"payload": map[string]any{}}},
+	} {
+		caller.call = func(context.Context, string, ...any) ([]map[string]any, error) { return response, nil }
+		if _, err := repository.GetBillingEventPayload(context.Background(), storageTestBilling); err == nil {
+			t.Errorf("malformed billing export response accepted: %#v", response)
+		}
+	}
+
+	validEvent := map[string]any{"event_id": "1", "tenant_id": storageTestTenant, "topic": "usage", "aggregate_type": "charge", "aggregate_id": storageTestCharge, "payload_version": 1, "payload": map[string]any{}, "claim_token": storageTestClaim, "attempt_count": 0, "created_at": time.Now().UTC()}
+	for _, key := range []string{"event_id", "tenant_id", "topic", "aggregate_type", "aggregate_id", "payload_version", "payload", "claim_token", "attempt_count", "created_at"} {
+		row := cloneAnyMap(validEvent)
+		delete(row, key)
+		if _, err := outboxEventFromRow(row); err == nil {
+			t.Errorf("outbox event missing %s accepted", key)
+		}
+	}
+	validLetter := deadLetterRow("1", time.Now().UTC())
+	for _, key := range []string{"event_id", "tenant_id", "topic", "aggregate_type", "aggregate_id", "payload_version", "attempt_count", "created_at", "updated_at"} {
+		row := cloneAnyMap(validLetter)
+		delete(row, key)
+		if _, err := outboxDeadLetterFromRow(row); err == nil {
+			t.Errorf("dead letter missing %s accepted", key)
+		}
 	}
 }

@@ -67,6 +67,16 @@ module is rooted in `golang/`, maintainers publish the corresponding repository
 tag as `golang/v2.0.3`; the release workflow creates and verifies that nested
 tag from the same commit as the shared `v2.0.3` release tag.
 
+Google ADK applications install the optional adapter separately:
+
+```bash
+go get github.com/Zonastery/bursar/golang/integrations/googleadk/v2
+```
+
+The adapter follows ADK's Go 1.26.5 requirement while the core SDK remains
+compatible with Go 1.25. Releases publish its matching
+`golang/integrations/googleadk/v2.0.3` tag from the same commit.
+
 Create a tenant, then build the facade:
 
 ```bash
@@ -205,7 +215,7 @@ The full documentation — concepts, guides, CLI, and API references — is at
 
 - [Python package](python/README.md) — `bursar` on PyPI
 - [TypeScript and JavaScript package](javascript/README.md) — `@zonastery/bursar` on npm
-- [Go package](docs/docs/go-api/index.mdx) — `github.com/Zonastery/bursar/golang/v2` on pkg.go.dev
+- [Go package](docs/docs/go-api/index.mdx) — core SDK plus the optional Google ADK module
 - [Build a prepaid credit system for AI SaaS](https://zonastery.github.io/bursar/docs/guides/ai-saas-credits)
 - [Changelog](CHANGELOG.md)
 - [Citation metadata](CITATION.cff)

@@ -861,7 +861,7 @@ BEGIN
 
         IF a.ledger_entry_id IS NOT NULL THEN
             RETURN QUERY
-            SELECT a.ledger_entry_id,e.balance_after,true,NULL::text
+            SELECT a.ledger_entry_id,e.balance_after::numeric,true,NULL::text
             FROM bursar.credit_ledger_entries e
             WHERE e.id=a.ledger_entry_id;
 

@@ -121,9 +121,25 @@ type CustomerPortalProvider interface {
 	CreateCustomerPortalSession(context.Context, string, string) (string, error)
 }
 
-type PaymentMethodPortalProvider interface {
+// UpdatePaymentMethodProvider exposes the hosted update flow for an existing
+// subscription. It is independent from PaymentMethodSetupProvider so a
+// provider may support either payment-method flow without implementing both.
+type UpdatePaymentMethodProvider interface {
 	CreateUpdatePaymentMethodSession(context.Context, string, string, string) (string, error)
+}
+
+// PaymentMethodSetupProvider exposes the hosted setup flow used when an
+// account has no existing subscription. It is independent from
+// UpdatePaymentMethodProvider.
+type PaymentMethodSetupProvider interface {
 	CreatePaymentMethodSetupSession(context.Context, string, string, string) (string, error)
+}
+
+// PaymentMethodPortalProvider is retained as the combined compatibility
+// contract for callers that require both payment-method flows.
+type PaymentMethodPortalProvider interface {
+	UpdatePaymentMethodProvider
+	PaymentMethodSetupProvider
 }
 
 type CustomerProvider interface {
@@ -140,9 +156,21 @@ type CreateCustomerRequest struct {
 	IdempotencyKey string
 }
 
-type SubscriptionProvider interface {
+// SubscriptionCancellationProvider and SubscriptionReactivationProvider are
+// intentionally separate: providers may support one lifecycle operation
+// without supporting the other.
+type SubscriptionCancellationProvider interface {
 	CancelSubscription(context.Context, string, string) error
+}
+
+type SubscriptionReactivationProvider interface {
 	ReactivateSubscription(context.Context, string, string) error
+}
+
+// SubscriptionProvider is retained as the combined compatibility contract.
+type SubscriptionProvider interface {
+	SubscriptionCancellationProvider
+	SubscriptionReactivationProvider
 }
 
 type InvoiceProvider interface {

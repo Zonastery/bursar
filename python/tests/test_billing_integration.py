@@ -21,13 +21,23 @@ import psycopg2.pool
 import pytest
 
 from bursar.billing.billing_service import BillingService
+from bursar.billing.contracts import (
+    BillingDisputeUpsert,
+    BillingInvoiceUpsert,
+    BillingPaymentUpsert,
+    CheckoutIntentCreate,
+)
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.types import (
     BillingCustomerInfo,
+    BillingDisputeInfo,
     BillingEvent,
     BillingEventType,
+    BillingInvoiceInfo,
     BillingPaymentInfo,
+    BillingPreferences,
     BillingRefundInfo,
+    BillingSubscriptionChangeInput,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
@@ -823,6 +833,865 @@ class TestSubscriptionCrud:
         assert sub.status == BillingSubscriptionStatus.canceled
 
 
+# ── Financial read models ─────────────────────────────────────────────
+
+
+class TestFinancialReadModels:
+    def test_invoice_dispute_preferences_and_customer_views_share_one_persisted_account(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, _cm, service = _make_components(pg_database_url, pg_store)
+        missing_user = "00000000-0000-0000-0000-000000000099"
+        assert service.get_user_preferences(missing_user) is None
+        assert service.list_billing_invoices(missing_user) == []
+        assert service.get_customer_by_user_id(missing_user) is None
+
+        with pytest.raises(StoreError, match="invoice subscription is not available"):
+            bs.upsert_billing_invoice(
+                BillingInvoiceUpsert(
+                    provider=PROVIDER,
+                    provider_invoice_id="in_missing_subscription",
+                    provider_subscription_id="sub_missing",
+                    user_id=USER_ID,
+                    status="open",
+                    amount_paid_minor=0,
+                    amount_due_minor=1000,
+                    currency="USD",
+                    provider_updated_at="2026-08-19T10:00:00Z",
+                )
+            )
+        with pytest.raises(StoreError, match="dispute payment is required"):
+            bs.upsert_billing_dispute(
+                BillingDisputeUpsert(
+                    provider=PROVIDER,
+                    provider_dispute_id="dp_missing_payment",
+                    provider_payment_id="pay_missing",
+                    status="needs_response",
+                    provider_updated_at="2026-08-19T10:00:00Z",
+                )
+            )
+
+        bs.upsert_billing_customer(PROVIDER, "cus_financial_views", USER_ID, "billing@example.com")
+        bs.upsert_billing_subscription(
+            BillingSubscriptionState(
+                user_id=USER_ID,
+                provider=PROVIDER,
+                provider_subscription_id="sub_financial_views",
+                provider_customer_id="cus_financial_views",
+                offer_key="pro_monthly",
+                plan="pro",
+                status=BillingSubscriptionStatus.active,
+                provider_updated_at="2026-08-19T10:01:00Z",
+                cancel_at_period_end=False,
+            )
+        )
+        bs.upsert_billing_payment(
+            BillingPaymentUpsert(
+                provider=PROVIDER,
+                provider_payment_id="pay_financial_views",
+                provider_invoice_id="in_financial_views",
+                user_id=USER_ID,
+                amount_minor=1000,
+                tax_minor=100,
+                currency="USD",
+                purpose="subscription",
+                status="succeeded",
+                provider_updated_at="2026-08-19T10:02:00Z",
+                metadata={"reconciliation_source": "integration"},
+            )
+        )
+        bs.upsert_billing_invoice(
+            BillingInvoiceUpsert(
+                provider=PROVIDER,
+                provider_invoice_id="in_financial_views",
+                provider_subscription_id="sub_financial_views",
+                user_id=USER_ID,
+                status="paid",
+                amount_paid_minor=1000,
+                amount_due_minor=1000,
+                currency="USD",
+                period_start="2026-08-01T00:00:00Z",
+                period_end="2026-09-01T00:00:00Z",
+                provider_updated_at="2026-08-19T10:03:00Z",
+            )
+        )
+        bs.upsert_billing_dispute(
+            BillingDisputeUpsert(
+                provider=PROVIDER,
+                provider_dispute_id="dp_financial_views",
+                provider_payment_id="pay_financial_views",
+                status="needs_response",
+                reason="fraudulent",
+                metadata={"case": "case-1"},
+                provider_updated_at="2026-08-19T10:04:00Z",
+            )
+        )
+        preferences = BillingPreferences(
+            user_id=USER_ID,
+            auto_recharge=True,
+            overage_protection=True,
+            email_notifications=False,
+            usage_alerts=True,
+            invoice_reminders=False,
+        )
+        service.update_user_preferences(preferences)
+
+        customer = service.get_customer_by_user_id(USER_ID, PROVIDER)
+        assert customer is not None
+        assert customer.provider_customer_id == "cus_financial_views"
+        invoices = service.list_billing_invoices(USER_ID)
+        assert [(invoice.provider_invoice_id, invoice.status) for invoice in invoices] == [
+            ("in_financial_views", "paid")
+        ]
+        assert service.get_user_preferences(USER_ID) == preferences
+        catalog = service.get_active_catalog_document()
+        assert catalog is not None
+        assert catalog["version"] == 1
+        assert catalog["commerce"]["offers"]["pro_monthly"]["plan"] == "pro"
+        payment = bs.get_billing_payment(PROVIDER, "pay_financial_views")
+        assert payment is not None
+        assert payment.metadata == {"reconciliation_source": "integration"}
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT status, reason, metadata
+                FROM bursar.billing_disputes
+                WHERE provider = %s AND provider_dispute_id = %s
+                """,
+                (PROVIDER, "dp_financial_views"),
+            )
+            assert cursor.fetchone() == ("needs_response", "fraudulent", {"case": "case-1"})
+
+    def test_failed_payment_grace_recovers_through_invoice_and_dispute_events(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, credits, _service = _make_components(pg_database_url, pg_store)
+        service = BillingService(bs, provisioning=credits, past_due_grace_period_ms=1000)
+        customer = BillingCustomerInfo(provider_customer_id="cus_recovery")
+        subscription_id = "sub_recovery"
+        refs = ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID)
+
+        created = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_recovery_subscription",
+                event_type=BillingEventType.subscription_created,
+                occurred_at="2026-08-19T10:00:00Z",
+                account_id=USER_ID5,
+                customer=customer,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2026-08-01T00:00:00Z",
+                    period_end="2026-09-01T00:00:00Z",
+                    refs=refs,
+                ),
+            )
+        )
+        assert created.action == "subscription_created"
+        assert credits.get_user_plan(USER_ID5).plan_id is not None
+
+        failed = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_recovery_payment_failed",
+                event_type=BillingEventType.payment_failed,
+                occurred_at="2026-08-19T10:01:00Z",
+                customer=customer,
+                subscription=BillingSubscriptionInfo(provider_subscription_id=subscription_id),
+                payment=BillingPaymentInfo(
+                    provider_payment_id="pay_recovery",
+                    amount_minor=1000,
+                    tax_minor=0,
+                    currency="USD",
+                    purpose="subscription",
+                    status="failed",
+                ),
+            )
+        )
+        assert failed.action == "payment_failed_recorded"
+        past_due = bs.get_billing_subscription(PROVIDER, subscription_id)
+        assert past_due is not None
+        assert past_due.status == BillingSubscriptionStatus.past_due
+        assert past_due.grace_ends_at is not None
+        assert credits.get_user_plan(USER_ID5).plan_id is not None
+
+        assert service.expire_past_due_grace_periods(datetime.fromisoformat("2026-08-19T10:02:00+00:00")) == 1
+        assert credits.get_user_plan(USER_ID5).plan_id is None
+        assert service.expire_past_due_grace_periods(datetime.fromisoformat("2026-08-19T10:02:00+00:00")) == 0
+
+        paid = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_recovery_invoice_paid",
+                event_type=BillingEventType.invoice_paid,
+                occurred_at="2026-08-19T10:03:00Z",
+                customer=customer,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2026-08-19T10:03:00Z",
+                    period_end="2026-09-19T10:03:00Z",
+                    refs=refs,
+                ),
+                invoice=BillingInvoiceInfo(
+                    provider_invoice_id="in_recovery",
+                    status="paid",
+                    amount_paid_minor=1000,
+                    amount_due_minor=1000,
+                    currency="USD",
+                    period_start="2026-08-19T10:03:00Z",
+                    period_end="2026-09-19T10:03:00Z",
+                ),
+            )
+        )
+        assert paid.action == "subscription_renewed"
+        assert credits.get_user_plan(USER_ID5).plan_id is not None
+        assert [invoice.provider_invoice_id for invoice in service.list_billing_invoices(USER_ID5)] == ["in_recovery"]
+
+        dispute_events = (
+            (
+                BillingEvent(
+                    provider=PROVIDER,
+                    event_id="evt_recovery_dispute_created",
+                    event_type=BillingEventType.dispute_created,
+                    occurred_at="2026-08-19T10:04:00Z",
+                    customer=customer,
+                    dispute=BillingDisputeInfo(
+                        provider_dispute_id="dp_recovery",
+                        provider_payment_id="pay_recovery",
+                        status="needs_response",
+                        reason="fraudulent",
+                    ),
+                ),
+                "dispute_recorded",
+            ),
+            (
+                BillingEvent(
+                    provider=PROVIDER,
+                    event_id="evt_recovery_dispute_closed",
+                    event_type=BillingEventType.dispute_closed,
+                    occurred_at="2026-08-19T10:05:00Z",
+                    customer=customer,
+                    dispute=BillingDisputeInfo(
+                        provider_dispute_id="dp_recovery",
+                        provider_payment_id="pay_recovery",
+                        status="won",
+                        reason="won",
+                    ),
+                ),
+                "dispute_closed",
+            ),
+        )
+        for dispute_event, action in dispute_events:
+            result = service.ingest_billing_event(dispute_event)
+            assert result.action == action
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT status, reason
+                FROM bursar.billing_disputes
+                WHERE provider = %s AND provider_dispute_id = %s
+                """,
+                (PROVIDER, "dp_recovery"),
+            )
+            assert cursor.fetchone() == ("won", "won")
+
+    def test_subscription_payment_reconciles_invoice_and_async_callback(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, credits, _sink = _make_components(pg_database_url, pg_store)
+        callback_events: list[str] = []
+
+        async def on_payment_succeeded(event: BillingEvent, user_id: str) -> None:
+            await asyncio.sleep(0)
+            callback_events.append(f"{event.event_id}:{user_id}")
+
+        service = BillingService(
+            bs,
+            provisioning=credits,
+            event_handlers={BillingEventType.payment_succeeded: on_payment_succeeded},
+        )
+        subscription_id = "sub_payment_reconciliation"
+        refs = ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID)
+        created = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_payment_reconciliation_created",
+                event_type=BillingEventType.subscription_created,
+                occurred_at="2026-08-19T10:00:00Z",
+                account_id=USER_ID,
+                customer=BillingCustomerInfo(provider_customer_id="cus_payment_reconciliation"),
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2026-08-01T00:00:00Z",
+                    period_end="2026-09-01T00:00:00Z",
+                    refs=refs,
+                ),
+            )
+        )
+        assert created.action == "subscription_created"
+        assert service.has_provisioning is True
+        assert service.get_active_subscription(USER_ID) is not None
+        assert service.list_cancellable_provider_subscription_ids(USER_ID) == [subscription_id]
+
+        intent = service.create_or_get_checkout_intent(
+            CheckoutIntentCreate(
+                subject_id=USER_ID,
+                provider=PROVIDER,
+                operation_key="subscription-payment-reconciliation",
+                checkout_kind="subscription",
+                product_key="pro_monthly",
+                request_digest="33" * 32,
+                expires_at="2026-08-20T00:00:00Z",
+            )
+        )
+        payment_event = BillingEvent(
+            provider=PROVIDER,
+            event_id="evt_payment_reconciliation_succeeded",
+            event_type=BillingEventType.payment_succeeded,
+            occurred_at="2026-08-19T10:01:00Z",
+            subscription=BillingSubscriptionInfo(
+                provider_subscription_id=subscription_id,
+                period_start="2026-08-19T10:01:00Z",
+                period_end="2026-09-19T10:01:00Z",
+            ),
+            payment=BillingPaymentInfo(
+                provider_payment_id="pay_subscription_reconciliation",
+                amount_minor=1000,
+                tax_minor=100,
+                currency="USD",
+                purpose="subscription",
+                status="succeeded",
+            ),
+            metadata={"checkout_intent_id": intent.id},
+        )
+
+        async def ingest_payment():
+            return service.ingest_billing_event(payment_event)
+
+        result = asyncio.run(ingest_payment())
+        assert result.action == "payment_succeeded"
+        assert callback_events == [f"evt_payment_reconciliation_succeeded:{USER_ID}"]
+        payment = bs.get_billing_payment(PROVIDER, "pay_subscription_reconciliation")
+        assert payment is not None
+        assert payment.amount_minor == 1000
+        assert payment.tax_minor == 100
+        invoices = service.list_billing_invoices(USER_ID)
+        assert [(invoice.provider_invoice_id, invoice.status) for invoice in invoices] == [
+            ("pay_subscription_reconciliation", "paid")
+        ]
+        completed = service.get_checkout_intent(intent.id, USER_ID)
+        assert completed is not None
+        assert completed.status == "completed"
+
+    def test_failed_subscription_event_is_durable_and_retryable(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bs, _credits, service = _make_components(pg_database_url, pg_store)
+        service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_grace_read_created",
+                event_type=BillingEventType.subscription_created,
+                occurred_at="2026-08-19T10:01:00Z",
+                account_id=USER_ID2,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_grace_read",
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_grace_read_failed",
+                event_type=BillingEventType.payment_failed,
+                occurred_at="2026-08-19T10:02:00Z",
+                account_id=USER_ID2,
+                subscription=BillingSubscriptionInfo(provider_subscription_id="sub_grace_read"),
+                payment=BillingPaymentInfo(
+                    provider_payment_id="pay_grace_read",
+                    amount_minor=1000,
+                    tax_minor=0,
+                    currency="USD",
+                    purpose="subscription",
+                    status="failed",
+                ),
+            )
+        )
+        assert service.get_user_subscription(USER_ID2) is not None
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                UPDATE bursar.billing_subscriptions
+                SET grace_ends_at = now() - interval '1 minute'
+                WHERE provider = %s AND provider_subscription_id = %s
+                """,
+                (PROVIDER, "sub_grace_read"),
+            )
+        expired = service.get_user_subscription(USER_ID2)
+        assert expired is not None
+        assert expired.grace_expired_at is not None
+        missing_account = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_missing_account_cancellation",
+                event_type=BillingEventType.subscription_canceled,
+                occurred_at="2026-08-19T10:02:30Z",
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_missing_account_cancellation",
+                    status=BillingSubscriptionStatus.canceled,
+                ),
+            )
+        )
+        assert missing_account.handled is False
+        assert missing_account.error is not None
+        event = BillingEvent(
+            provider=PROVIDER,
+            event_id="evt_unknown_subscription_cancellation",
+            event_type=BillingEventType.subscription_canceled,
+            occurred_at="2026-08-19T10:02:00Z",
+            account_id=USER_ID2,
+            subscription=BillingSubscriptionInfo(
+                provider_subscription_id="sub_unknown_cancellation",
+                status=BillingSubscriptionStatus.canceled,
+            ),
+        )
+        first = service.ingest_billing_event(event)
+        assert first.handled is False
+        assert first.error is not None
+        retry = service.ingest_billing_event(event)
+        assert retry.handled is False
+        assert retry.error is not None
+        assert retry.error.startswith("billing_event_processing_failed:")
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT event.status, event.attempt_count, payload.envelope->'subscription'->>'providerSubscriptionId'
+                FROM bursar.billing_events AS event
+                JOIN bursar.billing_event_payloads AS payload ON payload.event_id = event.id
+                WHERE event.provider = %s AND event.provider_event_id = %s
+                """,
+                (PROVIDER, "evt_unknown_subscription_cancellation"),
+            )
+            assert cursor.fetchone() == ("failed", 2, "sub_unknown_cancellation")
+
+    def test_subscription_update_preserves_access_then_expiry_uses_terminal_plan(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, credits, _sink = _make_components(pg_database_url, pg_store)
+        service = BillingService(bs, provisioning=credits, terminal_plan_key="free")
+        subscription_id = "sub_terminal_plan_reconciliation"
+        created = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_terminal_plan_created",
+                event_type=BillingEventType.subscription_created,
+                occurred_at="2026-08-19T10:03:00Z",
+                account_id=USER_ID3,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        assert created.handled is True
+        assert credits.get_user_plan(USER_ID3).plan_key == "pro"
+
+        yearly = service.resolve_offer(PROVIDER, price_id="price_yearly_10000")
+        assert yearly is not None
+        service.create_billing_subscription_change(
+            BillingSubscriptionChangeInput(
+                provider=PROVIDER,
+                provider_subscription_id=subscription_id,
+                to_offer_id=yearly.offer_id,
+                effective_at="2026-09-01T00:00:00Z",
+                effective="renewal",
+                idempotency_key="terminal-plan-change",
+            )
+        )
+        assert service.get_open_billing_subscription_change(PROVIDER, subscription_id) is not None
+        changed = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_terminal_plan_changed",
+                event_type=BillingEventType.subscription_plan_changed,
+                occurred_at="2026-08-19T10:03:30Z",
+                account_id=USER_ID3,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id="price_yearly_10000"),
+                ),
+            )
+        )
+        assert changed.action == "plan_changed"
+        assert service.get_open_billing_subscription_change(PROVIDER, subscription_id) is None
+        assert credits.get_user_plan(USER_ID3).plan_key == "enterprise"
+
+        updated = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_terminal_plan_updated",
+                event_type=BillingEventType.subscription_updated,
+                occurred_at="2026-08-19T10:04:00Z",
+                account_id=USER_ID3,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                ),
+            )
+        )
+        assert updated.action == "subscription_updated"
+        assert credits.get_user_plan(USER_ID3).plan_key == "enterprise"
+
+        refreshed = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_terminal_plan_refreshed",
+                event_type=BillingEventType.subscription_updated,
+                occurred_at="2026-08-19T10:04:30Z",
+                account_id=USER_ID3,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id="price_yearly_10000"),
+                ),
+            )
+        )
+        assert refreshed.action == "subscription_updated"
+
+        paused = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_terminal_plan_paused",
+                event_type=BillingEventType.subscription_updated,
+                occurred_at="2026-08-19T10:04:45Z",
+                account_id=USER_ID3,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.paused,
+                ),
+            )
+        )
+        assert paused.action == "subscription_updated"
+        assert credits.get_user_plan(USER_ID3).plan_key == "free"
+
+        expired = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_terminal_plan_expired",
+                event_type=BillingEventType.subscription_expired,
+                occurred_at="2026-08-19T10:05:00Z",
+                account_id=USER_ID3,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.expired,
+                ),
+            )
+        )
+        assert expired.action == "subscription_expired"
+        assert credits.get_user_plan(USER_ID3).plan_key == "free"
+        stored = bs.get_billing_subscription(PROVIDER, subscription_id)
+        assert stored is not None
+        assert stored.status == BillingSubscriptionStatus.expired
+
+    def test_refund_without_account_id_resolves_subject_from_persisted_payment(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bs, credits, service = _make_components(pg_database_url, pg_store)
+        payment_id = "pay_refund_identity_fallback"
+        payment = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_identity_payment",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at="2026-08-19T11:00:00Z",
+                account_id=USER_ID4,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=1000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        assert payment.action == "payment_succeeded"
+        assert credits.get_balance(USER_ID4).balance == Decimal("1000")
+
+        refund = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_identity_fallback",
+                event_type=BillingEventType.refund_created,
+                occurred_at="2026-08-19T11:01:00Z",
+                refund=BillingRefundInfo(
+                    provider_refund_id="refund_identity_fallback",
+                    provider_payment_id=payment_id,
+                    amount_minor=250,
+                    currency="USD",
+                    status="succeeded",
+                ),
+            )
+        )
+        assert refund.action == "refund_clawback"
+        assert credits.get_balance(USER_ID4).balance == Decimal("750")
+
+    def test_checkout_webhooks_close_intents_and_reject_underpaid_topups(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bs, credits, service = _make_components(pg_database_url, pg_store)
+
+        def create_intent(operation_key: str) -> str:
+            return service.create_or_get_checkout_intent(
+                CheckoutIntentCreate(
+                    subject_id=USER_ID3,
+                    provider=PROVIDER,
+                    operation_key=operation_key,
+                    checkout_kind="credit_topup",
+                    product_key="standard_topup",
+                    request_digest="44" * 32,
+                    expires_at="2026-08-20T00:00:00Z",
+                )
+            ).id
+
+        expired_id = create_intent("checkout-webhook-expired")
+        expired = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_checkout_webhook_expired",
+                event_type=BillingEventType.checkout_expired,
+                occurred_at="2026-08-19T12:00:00Z",
+                account_id=USER_ID3,
+                metadata={"checkout_intent_id": expired_id},
+            )
+        )
+        assert expired.action == "ignored"
+        expired_intent = service.get_checkout_intent(expired_id, USER_ID3)
+        assert expired_intent is not None
+        assert expired_intent.status == "expired"
+
+        completed_id = create_intent("checkout-webhook-completed")
+        completed = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_checkout_webhook_completed",
+                event_type=BillingEventType.checkout_completed,
+                occurred_at="2026-08-19T12:01:00Z",
+                account_id=USER_ID3,
+                customer=BillingCustomerInfo(
+                    provider_customer_id="cus_checkout_webhook",
+                    email="checkout@example.com",
+                ),
+                metadata={"checkout_intent_id": completed_id},
+            )
+        )
+        assert completed.action == "checkout_completed"
+        completed_intent = service.get_checkout_intent(completed_id, USER_ID3)
+        assert completed_intent is not None
+        assert completed_intent.status == "completed"
+        assert service.get_customer_by_user_id(USER_ID3, PROVIDER) is not None
+
+        failed_id = create_intent("checkout-webhook-payment-failed")
+        failed = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_checkout_webhook_payment_failed",
+                event_type=BillingEventType.payment_failed,
+                occurred_at="2026-08-19T12:02:00Z",
+                account_id=USER_ID3,
+                payment=BillingPaymentInfo(
+                    provider_payment_id="pay_checkout_webhook_failed",
+                    amount_minor=1000,
+                    tax_minor=0,
+                    currency="USD",
+                    purpose="credit_topup",
+                    status="failed",
+                ),
+                metadata={"checkout_intent_id": failed_id},
+            )
+        )
+        assert failed.action == "payment_failed_recorded"
+        failed_intent = service.get_checkout_intent(failed_id, USER_ID3)
+        assert failed_intent is not None
+        assert failed_intent.status == "failed"
+
+        underpaid = service.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_checkout_webhook_underpaid",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at="2026-08-19T12:03:00Z",
+                account_id=USER_ID3,
+                payment=BillingPaymentInfo(
+                    provider_payment_id="pay_checkout_webhook_underpaid",
+                    amount_minor=999,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        assert underpaid.action == "payment_succeeded_out_of_bounds"
+        assert credits.get_balance(USER_ID3).balance == Decimal("0")
+
+    def test_pseudonymized_financial_subject_cannot_reintroduce_mutable_identity(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        store, _credits, service = _make_components(pg_database_url, pg_store)
+        store.upsert_billing_customer(PROVIDER, "cus_pseudonymized", USER_ID4, "pii@example.com")
+        payment = BillingPaymentUpsert(
+            provider=PROVIDER,
+            provider_payment_id="pay_pseudonymized",
+            user_id=USER_ID4,
+            amount_minor=1000,
+            tax_minor=0,
+            currency="USD",
+            purpose="subscription",
+            status="succeeded",
+            provider_updated_at="2026-08-19T13:00:00Z",
+            metadata={"email": "pii@example.com"},
+        )
+        store.upsert_billing_payment(payment)
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                INSERT INTO bursar.external_identities(subject_id, provider, external_subject)
+                VALUES (%s::uuid, 'host', 'external-user-pseudonymized')
+                """,
+                (USER_ID4,),
+            )
+
+        service.pseudonymize_financial_subject(USER_ID4)
+        store.upsert_billing_customer(
+            PROVIDER,
+            "cus_pseudonymized",
+            USER_ID4,
+            "reintroduced@example.com",
+        )
+        store.upsert_billing_payment(
+            payment.model_copy(
+                update={
+                    "provider_updated_at": "2026-08-19T13:00:01Z",
+                    "metadata": {"email": "reintroduced@example.com"},
+                }
+            )
+        )
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT
+                    subject.pseudonymized_at IS NOT NULL,
+                    customer.email,
+                    customer.metadata,
+                    payment.metadata,
+                    EXISTS (
+                        SELECT 1
+                        FROM bursar.external_identities AS identity
+                        WHERE identity.subject_id = subject.id
+                    )
+                FROM bursar.subjects AS subject
+                JOIN bursar.billing_customers AS customer ON customer.subject_id = subject.id
+                JOIN bursar.billing_payments AS payment ON payment.subject_id = subject.id
+                WHERE subject.id = %s::uuid
+                """,
+                (USER_ID4,),
+            )
+            assert cursor.fetchone() == (True, None, {}, {}, False)
+
+    def test_duplicate_active_subscription_is_recorded_without_replacing_entitlement(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _store, credits, service = _make_components(pg_database_url, pg_store)
+        customer = BillingCustomerInfo(provider_customer_id="cus_subscription_conflict")
+
+        def subscription_event(event_id: str, subscription_id: str) -> BillingEvent:
+            return BillingEvent(
+                provider=PROVIDER,
+                event_id=event_id,
+                event_type=BillingEventType.subscription_created,
+                occurred_at="2026-08-19T14:00:00Z",
+                account_id=USER_ID2,
+                customer=customer,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(price_id=PRICE_ID),
+                ),
+            )
+
+        first = service.ingest_billing_event(
+            subscription_event("evt_subscription_conflict_original", "sub_conflict_original")
+        )
+        duplicate = service.ingest_billing_event(
+            subscription_event("evt_subscription_conflict_duplicate", "sub_conflict_duplicate")
+        )
+
+        assert first.action == "subscription_created"
+        assert duplicate.handled is False
+        assert duplicate.error == "subscription_conflict"
+        assert credits.get_user_plan(USER_ID2).plan_key == "pro"
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT
+                    conflict.duplicate_provider_subscription_id,
+                    subscription.provider_subscription_id,
+                    event.provider_event_id
+                FROM bursar.billing_subscription_conflicts AS conflict
+                JOIN bursar.billing_subscriptions AS subscription
+                  ON subscription.id = conflict.existing_subscription_id
+                JOIN bursar.billing_events AS event
+                  ON event.id = conflict.billing_event_id
+                WHERE event.provider_event_id = %s
+                """,
+                ("evt_subscription_conflict_duplicate",),
+            )
+            assert cursor.fetchone() == (
+                "sub_conflict_duplicate",
+                "sub_conflict_original",
+                "evt_subscription_conflict_duplicate",
+            )
+
+
 # ── Event idempotency ──────────────────────────────────────────────────
 
 
@@ -1048,6 +1917,179 @@ class TestTopup:
 
 
 class TestBillingServiceLifecycle:
+    def test_customer_deletion_revokes_entitlement_and_isolates_callback_failure(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        bs, cm, _sink = _make_components(pg_database_url, pg_store)
+        callback_events: list[str] = []
+
+        def failing_callback(event: BillingEvent, account_id: str) -> None:
+            callback_events.append(f"{event.event_type.value}:{account_id}")
+            raise RuntimeError("downstream callback unavailable")
+
+        sink = BillingService(
+            bs,
+            provisioning=cm,
+            event_handlers={BillingEventType.customer_deleted: failing_callback},
+        )
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_customer_delete_setup",
+                event_type=BillingEventType.customer_created,
+                occurred_at=_now(),
+                account_id=USER_ID,
+                customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
+            )
+        )
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_customer_delete_subscription",
+                event_type=BillingEventType.subscription_created,
+                occurred_at=_now(),
+                account_id=USER_ID,
+                customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=SUB_ID,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        assert cm.get_user_plan(USER_ID).plan_key == "pro"
+
+        deleted = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_customer_delete",
+                event_type=BillingEventType.customer_deleted,
+                occurred_at=_now(),
+                customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
+            )
+        )
+        assert deleted.handled is True
+        assert deleted.action == "customer_deleted"
+        assert callback_events == [f"customer.deleted:{USER_ID}"]
+        assert cm.get_user_plan(USER_ID).plan_id is None
+
+        replay = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_customer_delete",
+                event_type=BillingEventType.customer_deleted,
+                occurred_at=_now(),
+                customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
+            )
+        )
+        assert replay.handled is True
+        assert replay.action == "duplicate"
+
+    def test_checkout_subscription_plan_change_and_cancellation_variants(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        intent = sink.create_or_get_checkout_intent(
+            CheckoutIntentCreate(
+                subject_id=USER_ID2,
+                provider=PROVIDER,
+                operation_key="checkout-subscription-lifecycle",
+                checkout_kind="subscription",
+                product_key="pro_monthly",
+                request_digest="22" * 32,
+                expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            )
+        )
+        subscription = BillingSubscriptionInfo(
+            provider_subscription_id=SUB_ID2,
+            status=BillingSubscriptionStatus.active,
+            refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+            interval="month",
+            interval_count=1,
+        )
+        checkout = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_checkout_subscription",
+                event_type=BillingEventType.checkout_completed,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
+                subscription=subscription,
+                metadata={"checkout_intent_id": intent.id},
+            )
+        )
+        assert checkout.handled is True
+        assert checkout.action == "subscription_created"
+        completed_intent = sink.get_checkout_intent(intent.id, USER_ID2)
+        assert completed_intent is not None
+        assert completed_intent.status == "completed"
+        assert cm.get_user_plan(USER_ID2).plan_key == "pro"
+
+        changed = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_subscription_plan_changed",
+                event_type=BillingEventType.subscription_plan_changed,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                subscription=subscription.model_copy(
+                    update={
+                        "refs": ProviderRef(product_id=PRODUCT_ID, price_id="price_yearly_10000"),
+                        "status": BillingSubscriptionStatus.active,
+                    }
+                ),
+            )
+        )
+        assert changed.action == "plan_changed"
+        assert cm.get_user_plan(USER_ID2).plan_key == "enterprise"
+
+        scheduled = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_subscription_cancel_scheduled",
+                event_type=BillingEventType.subscription_cancellation_scheduled,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                subscription=subscription,
+            )
+        )
+        assert scheduled.action == "cancellation_scheduled"
+        scheduled_state = bs.get_billing_subscription(PROVIDER, SUB_ID2)
+        assert scheduled_state is not None
+        assert scheduled_state.cancel_at_period_end is True
+
+        unscheduled = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_subscription_cancel_unscheduled",
+                event_type=BillingEventType.subscription_cancellation_unscheduled,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                subscription=subscription,
+            )
+        )
+        assert unscheduled.action == "cancellation_unscheduled"
+        unscheduled_state = bs.get_billing_subscription(PROVIDER, SUB_ID2)
+        assert unscheduled_state is not None
+        assert unscheduled_state.cancel_at_period_end is False
+
+        canceled = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_subscription_canceled_variant",
+                event_type=BillingEventType.subscription_canceled,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                subscription=subscription.model_copy(update={"status": BillingSubscriptionStatus.canceled}),
+            )
+        )
+        assert canceled.action == "subscription_canceled"
+        canceled_state = bs.get_billing_subscription(PROVIDER, SUB_ID2)
+        assert canceled_state is not None
+        assert canceled_state.status == BillingSubscriptionStatus.canceled
+        assert cm.get_user_plan(USER_ID2).plan_id is None
+
     def test_subscription_lifecycle_full(self, pg_database_url: str, pg_store: object) -> None:
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
@@ -1208,6 +2250,490 @@ class TestBillingServiceLifecycle:
         assert result.handled is True
         balance_after_refund = cm.get_balance(uid)
         assert balance_after_refund.balance == Decimal("0")
+
+    def test_partial_refund_rounds_credit_clawback_to_six_places(self, pg_database_url: str, pg_store: object) -> None:
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
+        precise_config = deepcopy(PRICING_DICT)
+        precise_config["commerce"]["offers"]["standard_topup"]["credits_per_unit"] = "1234.567891"
+        cm.publish_and_activate_catalog(precise_config)
+
+        uid = USER_ID5
+        payment_id = "py_refund_partial_precision"
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund_partial_precision",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=_now(),
+                account_id=uid,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=1000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        assert cm.get_balance(uid).balance == Decimal("1234.567891")
+
+        result = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_partial_precision",
+                event_type=BillingEventType.refund_created,
+                occurred_at=_now(),
+                account_id=uid,
+                refund=BillingRefundInfo(
+                    provider_refund_id="refund_partial_precision",
+                    provider_payment_id=payment_id,
+                    amount_minor=1,
+                    currency="USD",
+                    status="succeeded",
+                ),
+            )
+        )
+        assert result.handled is True
+        assert cm.get_balance(uid).balance == Decimal("1233.333323")
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT allocation.credit_amount, COUNT(ledger.id)
+                FROM bursar.billing_refund_grants AS allocation
+                JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+                JOIN bursar.credit_ledger_entries AS ledger ON ledger.id = allocation.ledger_entry_id
+                WHERE refund.provider = %s AND refund.provider_refund_id = %s
+                GROUP BY allocation.credit_amount
+                """,
+                (PROVIDER, "refund_partial_precision"),
+            )
+            assert cursor.fetchone() == (Decimal("1.234568"), 1)
+
+    def test_duplicate_refund_identity_with_new_event_id_replays_one_clawback(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
+        uid = USER_ID4
+        payment_id = "py_refund_duplicate_identity"
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund_duplicate_identity",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=_now(),
+                account_id=uid,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=2000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        refund = BillingRefundInfo(
+            provider_refund_id="refund_duplicate_identity",
+            provider_payment_id=payment_id,
+            amount_minor=2000,
+            currency="USD",
+            status="succeeded",
+        )
+        first = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_duplicate_identity_1",
+                event_type=BillingEventType.refund_created,
+                occurred_at=_now(),
+                account_id=uid,
+                refund=refund,
+            )
+        )
+        second = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_duplicate_identity_2",
+                event_type=BillingEventType.refund_created,
+                occurred_at=_now(),
+                account_id=uid,
+                refund=refund,
+            )
+        )
+        assert first.handled is True
+        assert second.handled is True
+        assert second.action == "refund_clawback"
+        assert cm.get_balance(uid).balance == Decimal("0")
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM bursar.billing_refunds
+                     WHERE provider = %s AND provider_refund_id = %s),
+                    (SELECT COUNT(*) FROM bursar.billing_refund_grants AS allocation
+                     JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+                     WHERE refund.provider = %s AND refund.provider_refund_id = %s),
+                    (SELECT COUNT(*) FROM bursar.credit_ledger_entries AS ledger
+                     JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+                     WHERE account.subject_id = %s::uuid AND ledger.kind = 'refund_clawback')
+                """,
+                (PROVIDER, "refund_duplicate_identity", PROVIDER, "refund_duplicate_identity", uid),
+            )
+            assert cursor.fetchone() == (1, 1, 1)
+
+    @pytest.mark.concurrency
+    def test_concurrent_distinct_events_same_refund_identity_post_once(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
+        uid = USER_ID
+        payment_id = "py_refund_concurrent_identity"
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund_concurrent_identity",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=_now(),
+                account_id=uid,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=2000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        refund = BillingRefundInfo(
+            provider_refund_id="refund_concurrent_identity",
+            provider_payment_id=payment_id,
+            amount_minor=2000,
+            currency="USD",
+            status="succeeded",
+        )
+        barrier = Barrier(8)
+
+        def ingest(index: int):
+            local_store = PostgresBillingStore(
+                pg_database_url,
+                tenant_id=TEST_TENANT_ID,
+                provider_environment="test",
+            )
+            local_sink = BillingService(local_store)
+            try:
+                barrier.wait(timeout=30)
+                return local_sink.ingest_billing_event(
+                    BillingEvent(
+                        provider=PROVIDER,
+                        event_id=f"evt_refund_concurrent_identity_{index}",
+                        event_type=BillingEventType.refund_created,
+                        occurred_at=refund_occurred_at,
+                        account_id=uid,
+                        refund=refund,
+                    )
+                )
+            finally:
+                local_store.close()
+
+        refund_occurred_at = _now()
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(ingest, range(8)))
+
+        assert all(result.handled is True for result in results)
+        assert all(result.action == "refund_clawback" for result in results)
+        assert cm.get_balance(uid).balance == Decimal("0")
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM bursar.billing_refunds
+                     WHERE provider = %s AND provider_refund_id = %s),
+                    (SELECT COUNT(*) FROM bursar.billing_refund_grants AS allocation
+                     JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+                     WHERE refund.provider = %s AND refund.provider_refund_id = %s),
+                    (SELECT COUNT(*) FROM bursar.credit_ledger_entries AS ledger
+                     JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+                     WHERE account.subject_id = %s::uuid AND ledger.kind = 'refund_clawback')
+                """,
+                (PROVIDER, refund.provider_refund_id, PROVIDER, refund.provider_refund_id, uid),
+            )
+            assert cursor.fetchone() == (1, 1, 1)
+
+    def test_cumulative_partial_refunds_round_to_six_places_and_fully_claw_back(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
+        precise_config = deepcopy(PRICING_DICT)
+        precise_config["commerce"]["offers"]["standard_topup"]["credits_per_unit"] = "1234.567891"
+        cm.publish_and_activate_catalog(precise_config)
+
+        uid = USER_ID2
+        payment_id = "py_refund_cumulative_precision"
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund_cumulative_precision",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=_now(),
+                account_id=uid,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=1000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        expected_credit_amounts = [
+            Decimal("151.851851"),
+            Decimal("562.962958"),
+            Decimal("519.753082"),
+        ]
+        expected_balances = [
+            Decimal("1082.716040"),
+            Decimal("519.753082"),
+            Decimal("0.000000"),
+        ]
+        observed_refund_ids: list[str] = []
+        for index, (amount_minor, expected_credit, expected_balance) in enumerate(
+            zip((123, 456, 421), expected_credit_amounts, expected_balances, strict=True),
+            start=1,
+        ):
+            provider_refund_id = f"refund_cumulative_precision_{index}"
+            observed_refund_ids.append(provider_refund_id)
+            result = sink.ingest_billing_event(
+                BillingEvent(
+                    provider=PROVIDER,
+                    event_id=f"evt_refund_cumulative_precision_{index}",
+                    event_type=BillingEventType.refund_created,
+                    occurred_at=_now(),
+                    account_id=uid,
+                    refund=BillingRefundInfo(
+                        provider_refund_id=provider_refund_id,
+                        provider_payment_id=payment_id,
+                        amount_minor=amount_minor,
+                        currency="USD",
+                        status="succeeded",
+                    ),
+                )
+            )
+            assert result.handled is True
+            assert result.action == "refund_clawback"
+            assert cm.get_balance(uid).balance == expected_balance
+
+            with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+                _bind_tenant(cursor)
+                cursor.execute(
+                    """
+                    SELECT allocation.credit_amount
+                    FROM bursar.billing_refund_grants AS allocation
+                    JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+                    WHERE refund.provider = %s AND refund.provider_refund_id = %s
+                    """,
+                    (PROVIDER, provider_refund_id),
+                )
+                assert cursor.fetchone() == (expected_credit,)
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM bursar.credit_ledger_entries AS ledger
+                JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+                WHERE account.subject_id = %s::uuid AND ledger.kind = 'refund_clawback'
+                """,
+                (uid,),
+            )
+            assert cursor.fetchone() == (3,)
+
+    def test_pending_refund_waits_for_succeeded_transition_and_replay_is_single_clawback(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
+        uid = USER_ID3
+        payment_id = "py_refund_pending_then_succeeded"
+        payment_occurred_at = datetime.now(UTC)
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund_pending_then_succeeded",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=payment_occurred_at.isoformat(),
+                account_id=uid,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=2000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        refund_id = "refund_pending_then_succeeded"
+        pending_at = payment_occurred_at + timedelta(seconds=1)
+        succeeded_at = payment_occurred_at + timedelta(seconds=2)
+        pending = BillingEvent(
+            provider=PROVIDER,
+            event_id="evt_refund_pending_then_succeeded_pending",
+            event_type=BillingEventType.refund_created,
+            occurred_at=pending_at.isoformat(),
+            account_id=uid,
+            refund=BillingRefundInfo(
+                provider_refund_id=refund_id,
+                provider_payment_id=payment_id,
+                amount_minor=1000,
+                currency="USD",
+                status="pending",
+            ),
+        )
+        pending_result = sink.ingest_billing_event(pending)
+        assert pending_result.handled is True
+        assert pending_result.action == "refund_recorded"
+        assert cm.get_balance(uid).balance == Decimal("2000")
+
+        pending_refund = pending.refund
+        assert pending_refund is not None
+        succeeded_refund = pending_refund.model_copy(update={"status": "succeeded"})
+        succeeded = pending.model_copy(
+            update={
+                "event_id": "evt_refund_pending_then_succeeded_succeeded",
+                "event_type": BillingEventType.refund_updated,
+                "occurred_at": succeeded_at.isoformat(),
+                "refund": succeeded_refund,
+            }
+        )
+        succeeded_result = sink.ingest_billing_event(succeeded)
+        assert succeeded_result.handled is True
+        assert succeeded_result.action == "refund_clawback"
+        assert cm.get_balance(uid).balance == Decimal("1000")
+
+        replay = succeeded.model_copy(
+            update={
+                "event_id": "evt_refund_pending_then_succeeded_replay",
+                "occurred_at": (payment_occurred_at + timedelta(seconds=3)).isoformat(),
+            }
+        )
+        replay_result = sink.ingest_billing_event(replay)
+        assert replay_result.handled is True
+        assert replay_result.action == "refund_clawback"
+        assert cm.get_balance(uid).balance == Decimal("1000")
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT refund.status, COUNT(DISTINCT allocation.refund_id), COUNT(DISTINCT ledger.id)
+                FROM bursar.billing_refunds AS refund
+                LEFT JOIN bursar.billing_refund_grants AS allocation ON allocation.refund_id = refund.id
+                LEFT JOIN bursar.credit_ledger_entries AS ledger ON ledger.id = allocation.ledger_entry_id
+                WHERE refund.provider = %s AND refund.provider_refund_id = %s
+                GROUP BY refund.status
+                """,
+                (PROVIDER, refund_id),
+            )
+            assert cursor.fetchone() == ("succeeded", 1, 1)
+
+    def test_over_refund_event_is_rejected_without_a_second_credit_mutation(
+        self, pg_database_url: str, pg_store: object
+    ) -> None:
+        _bs, cm, sink = _make_components(pg_database_url, pg_store)
+        uid = USER_ID3
+        payment_id = "py_refund_overallocation"
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund_overallocation",
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=_now(),
+                account_id=uid,
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=2000,
+                    tax_minor=0,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                    status="succeeded",
+                ),
+            )
+        )
+        first = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_overallocation_1",
+                event_type=BillingEventType.refund_created,
+                occurred_at=_now(),
+                account_id=uid,
+                refund=BillingRefundInfo(
+                    provider_refund_id="refund_overallocation_1",
+                    provider_payment_id=payment_id,
+                    amount_minor=1500,
+                    currency="USD",
+                    status="succeeded",
+                ),
+            )
+        )
+        second = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_overallocation_2",
+                event_type=BillingEventType.refund_created,
+                occurred_at=_now(),
+                account_id=uid,
+                refund=BillingRefundInfo(
+                    provider_refund_id="refund_overallocation_2",
+                    provider_payment_id=payment_id,
+                    amount_minor=600,
+                    currency="USD",
+                    status="succeeded",
+                ),
+            )
+        )
+        assert first.handled is True
+        assert second.handled is False
+        assert second.error is not None
+        assert cm.get_balance(uid).balance == Decimal("500")
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM bursar.billing_refunds
+                WHERE provider = %s AND payment_id = (
+                    SELECT id FROM bursar.billing_payments
+                    WHERE provider = %s AND provider_payment_id = %s
+                ) AND status = 'succeeded'
+                """,
+                (PROVIDER, PROVIDER, payment_id),
+            )
+            assert cursor.fetchone() == (1,)
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM bursar.credit_ledger_entries AS ledger
+                JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+                WHERE account.subject_id = %s::uuid AND ledger.kind = 'refund_clawback'
+                """,
+                (uid,),
+            )
+            assert cursor.fetchone() == (1,)
 
     def test_subscription_pause_resume(self, pg_database_url: str, pg_store: object) -> None:
         _bs, cm, sink = _make_components(pg_database_url, pg_store)

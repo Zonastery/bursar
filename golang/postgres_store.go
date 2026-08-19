@@ -1,6 +1,7 @@
 package bursar
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -298,6 +299,11 @@ func rowInt(row map[string]any, key, operation string) (int, error) {
 		if err == nil {
 			return parsed, nil
 		}
+	case json.Number:
+		parsed, err := strconv.Atoi(typed.String())
+		if err == nil {
+			return parsed, nil
+		}
 	case []byte:
 		parsed, err := strconv.Atoi(string(typed))
 		if err == nil {
@@ -322,6 +328,13 @@ func parseAmount(value any, field string) (Amount, error) {
 	switch typed := value.(type) {
 	case string:
 		text = typed
+	case json.Number:
+		text = typed.String()
+	case float64:
+		// pgx may decode JSONB into map[string]any before this boundary. Use
+		// fixed-point formatting so ordinary credit-scale values do not acquire
+		// exponent notation or binary-artifact digits before decimal parsing.
+		text = strconv.FormatFloat(typed, 'f', -1, 64)
 	case []byte:
 		text = string(typed)
 	case pgtype.Numeric:
@@ -445,10 +458,16 @@ func jsonMap(value any, field string) (map[string]any, error) {
 		return nil, NewStoreError("PostgreSQL returned an invalid "+field, ErrorOptions{})
 	}
 	var mapped map[string]any
-	if err := json.Unmarshal(raw, &mapped); err != nil {
+	if err := decodeJSONUseNumber(raw, &mapped); err != nil {
 		return nil, NewStoreError("PostgreSQL returned invalid JSON for "+field, ErrorOptions{Cause: err})
 	}
 	return mapped, nil
+}
+
+func decodeJSONUseNumber(data []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(destination)
 }
 
 func amountMap(value any, field string) (map[string]Amount, error) {
@@ -1462,9 +1481,15 @@ func (s *PostgresStore) ExecuteGrantProgram(ctx context.Context, request Execute
 		}
 		result = make([]GrantProgramAwardResult, 0, len(rows))
 		for _, row := range rows {
-			amount, err := rowAmount(row, "amount", "execute_grant_program")
-			if err != nil {
-				return err
+			errorCode := optionalRowText(row, "error_code")
+			var amount Amount
+			if rowValue(row, "amount") != nil {
+				amount, err = rowAmount(row, "amount", "execute_grant_program")
+				if err != nil {
+					return err
+				}
+			} else if errorCode == "" {
+				return NewStoreError("execute_grant_program returned no amount", ErrorOptions{})
 			}
 			idempotent, err := rowBool(row, "replayed", "execute_grant_program")
 			if err != nil {
@@ -1477,7 +1502,7 @@ func (s *PostgresStore) ExecuteGrantProgram(ctx context.Context, request Execute
 				LedgerEntryID:      optionalRowText(row, "ledger_entry_id"),
 				Amount:             amount,
 				Idempotent:         idempotent,
-				ErrorCode:          optionalRowText(row, "error_code"),
+				ErrorCode:          errorCode,
 			})
 		}
 		return nil
@@ -2861,7 +2886,7 @@ func (s *PostgresStore) CreateTeam(ctx context.Context, ownerUserID, name string
 		if err != nil {
 			return err
 		}
-		idempotent, err := rowBool(row, "replayed", "create_team")
+		idempotent, err := rowBool(row, "idempotent", "create_team")
 		if err != nil {
 			return err
 		}

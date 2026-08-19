@@ -2,6 +2,8 @@ package bursar
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,5 +124,120 @@ func TestWebhookRequestFromHTTPLimitsAndCopies(t *testing.T) {
 	overstated := httptest.NewRequest(http.MethodPost, "https://example.test/webhook", strings.NewReader("too-large"))
 	if _, err := WebhookRequestFromHTTP(overstated, 3); err == nil {
 		t.Fatal("expected size limit error")
+	}
+}
+
+func TestProviderRegistryRejectsInvalidFactoriesAndResults(t *testing.T) {
+	factoryContext := ProviderFactoryContext{ProviderEnvironment: ProviderEnvironmentTest}
+	valid := func(context.Context, ProviderFactoryContext) (PaymentProvider, error) {
+		return providerStub{name: "stub"}, nil
+	}
+	checks := []struct {
+		name      string
+		construct func() error
+	}{
+		{"invalid environment", func() error {
+			_, err := NewProviderRegistry(ProviderFactoryContext{}, map[string]ProviderFactory{"stub": valid})
+			return err
+		}},
+		{"empty factories", func() error { _, err := NewProviderRegistry(factoryContext, nil); return err }},
+		{"blank name", func() error {
+			_, err := NewProviderRegistry(factoryContext, map[string]ProviderFactory{" ": valid})
+			return err
+		}},
+		{"nil factory", func() error {
+			_, err := NewProviderRegistry(factoryContext, map[string]ProviderFactory{"stub": nil})
+			return err
+		}},
+		{"trimmed duplicate", func() error {
+			_, err := NewProviderRegistry(factoryContext, map[string]ProviderFactory{"stub": valid, " stub ": valid})
+			return err
+		}},
+	}
+	for _, test := range checks {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.construct(); err == nil {
+				t.Fatal("invalid provider configuration was accepted")
+			}
+		})
+	}
+
+	factoryError := errors.New("provider unavailable")
+	registries := []struct {
+		name    string
+		factory ProviderFactory
+	}{
+		{"factory error", func(context.Context, ProviderFactoryContext) (PaymentProvider, error) { return nil, factoryError }},
+		{"nil provider", func(context.Context, ProviderFactoryContext) (PaymentProvider, error) { return nil, nil }},
+		{"wrong name", func(context.Context, ProviderFactoryContext) (PaymentProvider, error) {
+			return providerStub{name: "other"}, nil
+		}},
+	}
+	for _, test := range registries {
+		t.Run(test.name, func(t *testing.T) {
+			registry, err := NewProviderRegistry(factoryContext, map[string]ProviderFactory{"stub": test.factory})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := registry.Get(context.Background(), "stub"); err == nil {
+				t.Fatal("invalid provider result was accepted")
+			}
+		})
+	}
+
+	registry, err := NewProviderRegistry(factoryContext, map[string]ProviderFactory{"stub": valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Get(context.Background(), "missing"); err == nil {
+		t.Fatal("unknown provider was accepted")
+	}
+	if _, err := registry.Get(context.Background(), " "); err == nil {
+		t.Fatal("blank provider was accepted")
+	}
+	if got, err := registry.Select(context.Background(), "", "", []string{"stub"}); err != nil || got.Name() != "stub" {
+		t.Fatalf("single compatible provider = %v, %v", got, err)
+	}
+	if got, err := registry.Select(context.Background(), "", "stub", []string{"stub"}); err != nil || got.Name() != "stub" {
+		t.Fatalf("fallback provider = %v, %v", got, err)
+	}
+	if _, err := registry.Select(context.Background(), "other", "", []string{"stub"}); err == nil {
+		t.Fatal("incompatible requested provider was accepted")
+	}
+	if _, err := registry.Select(context.Background(), "", "", nil); err == nil {
+		t.Fatal("empty compatible provider set was accepted")
+	}
+	var nilRegistry *ProviderRegistry
+	if nilRegistry.Configured() != nil || nilRegistry.Environment() != "" {
+		t.Fatal("nil registry accessors returned state")
+	}
+	nilRegistry.Clear()
+	if _, err := nilRegistry.Get(context.Background(), "stub"); err == nil {
+		t.Fatal("nil registry returned a provider")
+	}
+}
+
+type failingWebhookReader struct{ err error }
+
+func (r failingWebhookReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestWebhookRequestFromHTTPRejectsInvalidRequestBoundaries(t *testing.T) {
+	if _, err := WebhookRequestFromHTTP(nil, 1); err == nil {
+		t.Fatal("nil request was accepted")
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.test/webhook", strings.NewReader("body"))
+	request.Body = nil
+	if _, err := WebhookRequestFromHTTP(request, 1); err == nil {
+		t.Fatal("nil body was accepted")
+	}
+	request = httptest.NewRequest(http.MethodPost, "https://example.test/webhook", strings.NewReader("body"))
+	if _, err := WebhookRequestFromHTTP(request, 0); err == nil {
+		t.Fatal("unbounded body was accepted")
+	}
+	readError := errors.New("read failed")
+	request = httptest.NewRequest(http.MethodPost, "https://example.test/webhook", strings.NewReader("body"))
+	request.Body = io.NopCloser(failingWebhookReader{err: readError})
+	if _, err := WebhookRequestFromHTTP(request, 32); !errors.Is(err, readError) {
+		t.Fatalf("read error = %v", err)
 	}
 }

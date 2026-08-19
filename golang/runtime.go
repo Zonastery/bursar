@@ -108,6 +108,9 @@ func (r *BursarRuntime) StartWithOptions(ctx context.Context, options BursarRunt
 	if r == nil || r.Bursar == nil {
 		return NewError("runtime is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
+	if ctx == nil {
+		return NewError("runtime context is required", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
 	loadCatalog := true
 	if options.LoadCatalog != nil {
 		loadCatalog = *options.LoadCatalog
@@ -209,6 +212,11 @@ func (r *BursarRuntime) Flush(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
+	if ctx == nil {
+		return NewError("runtime context is required", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -232,6 +240,11 @@ func (r *BursarRuntime) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
+	if ctx == nil {
+		return NewError("runtime context is required", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()

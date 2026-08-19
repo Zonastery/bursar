@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
-import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adapters/clickhouse.js";
+import { Decimal } from "decimal.js";
+import {
+  ClickHouseUsageStore,
+  type ClickHouseClient,
+  type ClickHouseRow,
+} from "../src/storage/adapters/clickhouse.js";
 import {
   S3BillingArchive,
   type S3ArchiveClient,
@@ -174,6 +179,36 @@ describe("S3BillingArchive hardening", () => {
     expect(s3Mock.destroy).toHaveBeenCalledOnce();
   });
 
+  it("passes explicit endpoint and session credentials to the archive client", async () => {
+    const archive = new S3BillingArchive({
+      bucket: "billing-archive",
+      region: "eu-west-1",
+      endpoint: "https://s3.example.test",
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: "access-key",
+        secretAccessKey: "secret-key",
+        sessionToken: "session-token",
+      },
+      clientFactory: testClientFactory,
+    });
+
+    await archive.archive(billingEvent());
+
+    expect(s3Mock.configurations).toEqual([
+      {
+        region: "eu-west-1",
+        endpoint: "https://s3.example.test",
+        forcePathStyle: true,
+        credentials: {
+          accessKeyId: "access-key",
+          secretAccessKey: "secret-key",
+          sessionToken: "session-token",
+        },
+      },
+    ]);
+  });
+
   it("normalizes long slash-wrapped prefixes without pathological backtracking", async () => {
     const archive = new S3BillingArchive({
       bucket: "billing-archive",
@@ -263,6 +298,8 @@ describe("ClickHouseUsageStore hardening", () => {
   it("batches rows in one insert and preserves every outbox event ID", async () => {
     const client = clickHouseClient();
     const store = new ClickHouseUsageStore({ client, tenantId: TENANT_ID });
+    await expect(store.writeUsageBatch([])).resolves.toBeUndefined();
+    expect(client.insert).not.toHaveBeenCalled();
     const first = usageEvent();
     const second = usageEvent("00000000-0000-0000-0000-000000000043");
 
@@ -301,6 +338,12 @@ describe("ClickHouseUsageStore hardening", () => {
   });
 
   it("checks schema compatibility without prescribing replica topology", async () => {
+    const missing = new ClickHouseUsageStore({
+      client: clickHouseClient(),
+      tenantId: TENANT_ID,
+    });
+    await expect(missing.checkSchemaCompatibility()).rejects.toThrow("does not exist");
+
     const rows = compatibleSchemaRows();
     const client = clickHouseClient({ schemaRows: rows });
     const store = new ClickHouseUsageStore({
@@ -317,7 +360,10 @@ describe("ClickHouseUsageStore hardening", () => {
     );
 
     rows.find((row) => row.name === "outbox_event_id")!.type = "String";
-    await expect(store.checkSchemaCompatibility()).rejects.toThrow(/outbox_event_id is String/);
+    rows[0]!.engine = "MergeTree";
+    await expect(store.checkSchemaCompatibility()).rejects.toThrow(
+      /outbox_event_id is String.*not a ReplacingMergeTree/,
+    );
   });
 
   it("delegates single-row writes to the batch API", async () => {
@@ -328,5 +374,104 @@ describe("ClickHouseUsageStore hardening", () => {
     await store.writeUsage(event, "101");
 
     expect(batch).toHaveBeenCalledWith([[event, "101"]]);
+  });
+
+  it("decodes analytics aggregates and usage history with bounded cursors", async () => {
+    const client = clickHouseClient();
+    client.query.mockImplementation(async ({ query }) => ({
+      json: async <T>() => {
+        let value: ClickHouseRow[];
+        if (query.includes("usage_id")) {
+          value = [
+            {
+              usage_id: "00000000-0000-0000-0000-000000000042",
+              account_id: "00000000-0000-0000-0000-000000000006",
+              operation: "generate",
+              requested: "15.000000",
+              charged: "12.500000",
+              allowance_requested: "2.500000",
+              allowance_covered: "2.500000",
+              billing_disposition: "billable",
+              feature: "chat",
+              model: "gpt",
+              region: null,
+              event_at: "2026-07-29 12:00:00.123456",
+              idempotency_key: "usage:42",
+              metadata: null,
+              created_at: "2026-07-29 12:00:01.123456",
+            },
+            {
+              usage_id: "00000000-0000-0000-0000-000000000041",
+              account_id: "00000000-0000-0000-0000-000000000006",
+              operation: "generate",
+              requested: "5.000000",
+              charged: "5.000000",
+              allowance_requested: "0.000000",
+              allowance_covered: "0.000000",
+              billing_disposition: "record_only",
+              feature: null,
+              model: null,
+              region: "in",
+              event_at: "2026-07-28 12:00:00",
+              idempotency_key: "usage:41",
+              metadata: '{"source":"test"}',
+              created_at: "2026-07-28 12:00:01",
+            },
+          ];
+        } else if (query.includes("active_users")) {
+          value = [{ total_spend: "12.5", active_users: "1" }];
+        } else if (query.includes("formatDateTime")) {
+          value = [{ key: "2026-07-29", total_spend: "12.5", entry_count: "1" }];
+        } else {
+          value = [
+            {
+              key: query.includes("coalesce(model") ? "gpt" : TENANT_ID,
+              total_spend: "12.5",
+              entry_count: "1",
+            },
+          ];
+        }
+        // SAFETY: the mock selects a row shape matching each production query before decoding.
+        return value as T;
+      },
+    }));
+    const store = new ClickHouseUsageStore({ client, tenantId: TENANT_ID });
+    const start = new Date("2026-07-28T00:00:00.000Z");
+    const end = new Date("2026-07-30T00:00:00.000Z");
+
+    await expect(store.spendByUser(start, end)).resolves.toMatchObject([
+      { userId: TENANT_ID, totalSpend: new Decimal("12.5"), entryCount: 1 },
+    ]);
+    await expect(store.spendByModel(start, end)).resolves.toMatchObject([
+      { model: "gpt", totalSpend: new Decimal("12.5"), entryCount: 1 },
+    ]);
+    await expect(store.topUsers(1, start, end)).resolves.toHaveLength(1);
+    await expect(store.dailySpend(start, end)).resolves.toMatchObject([
+      { date: "2026-07-29", totalSpend: new Decimal("12.5"), entryCount: 1 },
+    ]);
+    await expect(store.aggregateStats(start, end)).resolves.toMatchObject({
+      totalCreditsConsumed: new Decimal("12.5"),
+      activeUsers: 1,
+      topModel: "gpt",
+      topUser: TENANT_ID,
+    });
+    await expect(
+      store.listUsageCharges("00000000-0000-0000-0000-000000000007", {
+        limit: 1,
+        fromDate: start,
+        toDate: end,
+        includeRecordOnly: false,
+        cursor: {
+          eventAt: "2026-07-30T00:00:00.000Z",
+          usageId: "00000000-0000-0000-0000-000000000099",
+        },
+      }),
+    ).resolves.toMatchObject({
+      items: [{ usageId: "00000000-0000-0000-0000-000000000042", billingDisposition: "billable" }],
+      nextCursor: {
+        usageId: "00000000-0000-0000-0000-000000000042",
+        eventAt: "2026-07-29T12:00:00.123456Z",
+      },
+    });
   });
 });

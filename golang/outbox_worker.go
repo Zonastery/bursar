@@ -111,6 +111,7 @@ type OutboxRunResult struct {
 
 type outboxActiveRun struct {
 	done   chan struct{}
+	cancel context.CancelFunc
 	result OutboxRunResult
 	err    error
 }
@@ -204,6 +205,10 @@ func (w *OutboxWorker) RunOnce(ctx context.Context) (OutboxRunResult, error) {
 	if w == nil {
 		return OutboxRunResult{}, outboxConfigError("outbox worker is not initialized")
 	}
+	return w.runOnce(ctx, false)
+}
+
+func (w *OutboxWorker) runOnce(ctx context.Context, detachFromParent bool) (OutboxRunResult, error) {
 	w.mu.Lock()
 	if w.stopped {
 		w.mu.Unlock()
@@ -213,11 +218,17 @@ func (w *OutboxWorker) RunOnce(ctx context.Context) (OutboxRunResult, error) {
 		w.mu.Unlock()
 		return waitOutboxRun(ctx, current)
 	}
-	current := &outboxActiveRun{done: make(chan struct{})}
+	runContext := ctx
+	if detachFromParent {
+		runContext = context.WithoutCancel(ctx)
+	}
+	runContext, cancel := context.WithCancel(runContext)
+	current := &outboxActiveRun{done: make(chan struct{}), cancel: cancel}
 	w.active = current
 	w.mu.Unlock()
 
-	current.result, current.err = w.dispatchOnce(ctx)
+	current.result, current.err = w.dispatchOnce(runContext)
+	cancel()
 	w.mu.Lock()
 	if w.active == current {
 		w.active = nil
@@ -255,18 +266,36 @@ func (w *OutboxWorker) Close(ctx context.Context) error {
 	loopDone := w.loopDone
 	active := w.active
 	w.mu.Unlock()
+	waitForRun := func() error {
+		if active == nil {
+			return nil
+		}
+		select {
+		case <-active.done:
+			return active.err
+		case <-ctx.Done():
+			active.cancel()
+			return ctx.Err()
+		}
+	}
+	var failures []error
+	if err := waitForRun(); err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		failures = append(failures, err)
+	}
 	if loopDone != nil {
 		select {
 		case <-loopDone:
 		case <-ctx.Done():
+			if active != nil {
+				active.cancel()
+			}
 			return ctx.Err()
 		}
 	}
-	if active != nil {
-		_, err := waitOutboxRun(ctx, active)
-		return err
-	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (w *OutboxWorker) Health(context.Context) error {
@@ -287,7 +316,7 @@ func (w *OutboxWorker) Health(context.Context) error {
 func (w *OutboxWorker) runLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	for {
-		if _, err := w.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if _, err := w.runOnce(ctx, true); err != nil && !errors.Is(err, context.Canceled) {
 			w.reportError(err)
 		}
 		timer := time.NewTimer(w.options.PollInterval)

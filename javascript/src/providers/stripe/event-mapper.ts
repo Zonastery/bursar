@@ -116,10 +116,10 @@ function checkoutCustomer(session: Stripe.Checkout.Session): BillingCustomerInfo
     })
     .safeParse(session.customer);
   const providerCustomerId = customerId(session.customer);
-  const email =
-    (customer.success && customer.data.deleted !== true ? (customer.data.email ?? null) : null) ??
-    session.customer_details?.email ??
-    null;
+  let email = session.customer_details?.email ?? null;
+  if (customer.success && customer.data.deleted !== true && customer.data.email != null) {
+    email = customer.data.email;
+  }
   return providerCustomerId || email ? { providerCustomerId, email } : undefined;
 }
 

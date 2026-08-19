@@ -1,0 +1,5 @@
+profile: coverage/adk.out
+
+threshold:
+  package: 90
+  total: 90

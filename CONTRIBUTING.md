@@ -52,6 +52,10 @@ The Go SDK supports Go 1.25 and 1.26. It is a versioned source module; use
 CLI or schema migration command: use the Python `bursar` CLI for the shared SQL
 baseline and tenant administration.
 
+The optional Google ADK adapter is a separate module at
+`golang/integrations/googleadk` because ADK requires Go 1.26.5. Keeping that
+dependency isolated preserves the core SDK's Go 1.25 floor.
+
 ## Running Tests
 
 ### Python
@@ -97,8 +101,27 @@ bun run typecheck             # typecheck
 cd golang
 go test -race ./...
 go vet ./...
-go tool staticcheck ./...  # uses the version pinned in go.mod
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+
+cd integrations/googleadk
+go mod tidy
+go test -race ./...
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 ```
+
+The required coverage checks use the maintained, pinned `go-test-coverage`
+tool and enforce at least 90% for every package and for each Go module overall.
+From the repository root, run:
+
+```bash
+gmake test-go-coverage       # requires the bootstrapped PostgreSQL test database
+gmake test-go-adk-coverage   # optional Google ADK module
+```
+
+`gmake test-integration` provisions both test tenants and runs both coverage
+checks automatically. Coverage profiles are written below the ignored
+`coverage/` directories and uploaded by CI for inspection.
 
 ## Code Style
 
@@ -136,7 +159,7 @@ bun run typecheck
 cd golang
 gofmt -w $(rg --files -g '*.go')
 go vet ./...
-go tool staticcheck ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 ```
 
 ### Git hooks (lefthook)
@@ -164,8 +187,9 @@ authoritative gate.** Install them with `lefthook install`.
    in every SDK. Do not introduce a divergence.
 4. Ensure all tests pass and there are no new type errors.
 5. Open a PR against `main`.
-6. CI runs lint → typecheck → test (Python 3.12–3.13, Node 22/24, Go 1.25–1.26,
-   all against PostgreSQL 16/17 + pg_partman 5 + pg_jsonschema 0.3) and the
+6. CI runs lint → typecheck → test (Python 3.12–3.13 and Node 22/24 against
+   PostgreSQL 16/17 + pg_partman 5 + pg_jsonschema 0.3; Go 1.25–1.26 unit and
+   race tests, plus the required Go PostgreSQL package-smoke suite) and the
    cross-SDK parity gate.
 
 ## Adding Storage Backends (Python)
@@ -200,8 +224,8 @@ git push origin v2.0.3
 On a `v*` tag, CI runs the full matrix, then the ordered publish jobs run under
 a **protected `release` GitHub environment**:
 
-- `release-go-tag` — creates or verifies the nested Go module tag at the release
-  commit.
+- `release-go-tag` — creates or verifies the core and optional Google ADK Go
+  module tags at the release commit.
 - `release-pypi` — `uv build && uv publish` to PyPI via OIDC.
 - `release-npm` — Bun installs and builds the SDK, then
   `npm publish --access public --provenance` publishes it via npm OIDC.
@@ -210,10 +234,11 @@ The Go SDK lives in `golang/` as the nested module
 `github.com/Zonastery/bursar/golang/v2`. Its `/v2` semantic import suffix is
 verified against the shared release version before anything is published. Once
 the complete release preflight passes, `release-go-tag` creates
-`golang/v2.0.3` at the exact commit referenced by `v2.0.3`. A rerun accepts an
-existing nested tag only when it resolves to that same commit; a conflicting
-tag fails the release. Maintainers create and push only the shared root tag—the
-workflow owns the nested tag. No separate Go registry or release CLI is needed.
+`golang/v2.0.3` and `golang/integrations/googleadk/v2.0.3` at the exact commit
+referenced by `v2.0.3`. A rerun accepts an existing nested tag only when it
+resolves to that same commit; a conflicting tag fails the release. Maintainers
+create and push only the shared root tag—the workflow owns both nested tags. No
+separate Go registry or release CLI is needed.
 
 The ordered, idempotent jobs let maintainers recover from a registry outage by
 rerunning the same immutable release, and the `release` environment allows an
@@ -225,12 +250,12 @@ cannot be killed mid-flight.
 
 - **PyPI trusted publisher** (<https://pypi.org/manage/account/publishing/>):
 
-  | Field | Value |
-  |---|---|
-  | PyPI Project | `bursar` |
+  | Field              | Value              |
+  | ------------------ | ------------------ |
+  | PyPI Project       | `bursar`           |
   | Owner / Repository | `Zonastery/bursar` |
-  | Workflow name | `ci.yml` |
-  | Environment | `release` |
+  | Workflow name      | `ci.yml`           |
+  | Environment        | `release`          |
 
 - **npm trusted publisher**: configure the package's "Trusted publisher" on
   npmjs.com to point at this repo's `ci.yml` workflow / `release` environment.
@@ -238,5 +263,6 @@ cannot be killed mid-flight.
   Environments) and, ideally, add required reviewers and restrict it to tag
   refs.
 - **Go tag permission**: keep Actions' `contents: write` permission enabled and,
-  if repository rules protect tags, allow `ci.yml` to create `golang/v*`. The
-  release job fails closed if it cannot create or verify that nested tag.
+  if repository rules protect tags, allow `ci.yml` to create `golang/v*` and
+  `golang/integrations/googleadk/v*`. The release job fails closed if it cannot
+  create or verify both nested tags.

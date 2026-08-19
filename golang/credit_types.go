@@ -642,11 +642,27 @@ type CreditsServiceOptions struct {
 	MaxConcurrent   *int
 	DefaultLeaseTTL time.Duration
 	EventSink       CreditEventSink
-	LowBalance      []Amount
+	// LowBalance is retained as the concise threshold-only form. Use
+	// LowBalanceConfig for a callback or bounded per-user edge state.
+	LowBalance       []Amount
+	LowBalanceConfig *LowBalanceConfig
+	LazyExpiry       bool
+	// CatalogCacheTTL defaults to five minutes. A non-nil zero value disables
+	// automatic refresh while preserving explicit Catalog.Load calls.
+	CatalogCacheTTL *time.Duration
 	PostDeduction   PostDeductionHook
 	Instrumentation Instrumentation
 	Analytics       UsageAnalyticsStore
 	UsageStore      UsageChargeStore
+}
+
+// LowBalanceConfig controls edge-triggered low-balance notifications.
+// MaxTrackedUsers defaults to 100,000 and bounds only explicit threshold
+// state; the default zero crossing requires no retained per-user state.
+type LowBalanceConfig struct {
+	Thresholds      []Amount
+	OnTrigger       CreditEventHandler
+	MaxTrackedUsers int
 }
 
 // PricedUsageOptions controls a metric-priced immediate charge. System-owned
@@ -708,11 +724,29 @@ type GrantSubscriptionCycleOptions struct {
 // returns an application result and the exact amount to settle.
 type BilledWork func(context.Context) (result any, actual Amount, err error)
 
+// BilledUsageWork returns the authoritative usage metrics produced by an
+// application operation. Settlement prices them against the immutable catalog
+// revision captured by the lease.
+type BilledUsageWork func(context.Context) (result any, actual UsageMetrics, err error)
+
 // RunBilledOptions wires reserve -> work -> settle without a framework
 // adapter. The operation key scopes both idempotency keys.
 type RunBilledOptions struct {
 	Estimate           Amount
 	DoWork             BilledWork
+	OperationKey       string
+	OperationType      string
+	BillingMode        BillingMode
+	TTL                time.Duration
+	Feature            string
+	Metadata           CreditMetadata
+	SettlementAttempts int
+}
+
+// RunBilledUsageOptions is the metric-priced counterpart to RunBilledOptions.
+type RunBilledUsageOptions struct {
+	Estimate           UsageMetrics
+	DoWork             BilledUsageWork
 	OperationKey       string
 	OperationType      string
 	BillingMode        BillingMode
@@ -732,6 +766,17 @@ type RunBilledResult struct {
 // operation. It may be reconstructed later with ResumeBilledOperation.
 type BeginBilledOperationOptions struct {
 	Estimate      Amount
+	OperationKey  string
+	OperationType string
+	BillingMode   BillingMode
+	TTL           time.Duration
+	Feature       string
+	Metadata      CreditMetadata
+}
+
+// BeginBilledUsageOperationOptions reserves a metric-priced durable lease.
+type BeginBilledUsageOperationOptions struct {
+	Estimate      UsageMetrics
 	OperationKey  string
 	OperationType string
 	BillingMode   BillingMode

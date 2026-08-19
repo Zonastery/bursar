@@ -247,6 +247,112 @@ func TestOutboxWorkerRuntimeLifecycle(t *testing.T) {
 	}
 }
 
+func TestOutboxWorkerCloseDrainsActiveRun(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var claimed atomic.Bool
+	var completed atomic.Bool
+	var handlerCanceled atomic.Bool
+	store := &outboxStoreStub{
+		claim: func(context.Context, []string, int, int) ([]OutboxEvent, error) {
+			if claimed.Swap(true) {
+				return nil, nil
+			}
+			return []OutboxEvent{{EventID: "drain", Topic: "drain", AttemptCount: 1}}, nil
+		},
+		complete: func(context.Context, OutboxEvent) (bool, error) {
+			completed.Store(true)
+			return true, nil
+		},
+	}
+	worker, err := NewOutboxWorker(store, []OutboxHandler{&outboxHandlerStub{
+		topics: []string{"drain"},
+		handle: func(ctx context.Context, _ OutboxEvent) error {
+			close(started)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				handlerCanceled.Store(true)
+				return ctx.Err()
+			}
+		},
+	}}, OutboxWorkerOptions{BatchSize: 1, Concurrency: 1, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- worker.Close(context.Background()) }()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned before active delivery was released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if !completed.Load() {
+		t.Fatal("active event was not completed")
+	}
+	if handlerCanceled.Load() {
+		t.Fatal("active handler context was canceled during graceful close")
+	}
+}
+
+func TestOutboxWorkerCloseDeadlineCancelsActiveRun(t *testing.T) {
+	started := make(chan struct{})
+	handlerDone := make(chan struct{})
+	var claimed atomic.Bool
+	var handlerCanceled atomic.Bool
+	store := &outboxStoreStub{
+		claim: func(context.Context, []string, int, int) ([]OutboxEvent, error) {
+			if claimed.Swap(true) {
+				return nil, nil
+			}
+			return []OutboxEvent{{EventID: "deadline", Topic: "deadline", AttemptCount: 1}}, nil
+		},
+	}
+	worker, err := NewOutboxWorker(store, []OutboxHandler{&outboxHandlerStub{
+		topics: []string{"deadline"},
+		handle: func(ctx context.Context, _ OutboxEvent) error {
+			close(started)
+			defer close(handlerDone)
+			<-ctx.Done()
+			handlerCanceled.Store(true)
+			return ctx.Err()
+		},
+	}}, OutboxWorkerOptions{BatchSize: 1, Concurrency: 1, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	closeContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := worker.Close(closeContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("active handler did not observe forced cancellation")
+	}
+	if !handlerCanceled.Load() {
+		t.Fatal("active handler did not receive cancellation")
+	}
+	if err := worker.Close(context.Background()); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
 func TestOutboxWorkerValidatesBounds(t *testing.T) {
 	_, err := NewOutboxWorker(&outboxStoreStub{}, []OutboxHandler{&outboxHandlerStub{topics: []string{"one"}}}, OutboxWorkerOptions{
 		RetryDelaySeconds:    10,

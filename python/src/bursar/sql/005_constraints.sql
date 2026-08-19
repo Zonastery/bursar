@@ -1415,7 +1415,27 @@ BEGIN
         FROM bursar.billing_refunds
         WHERE payment_id = NEW.payment_id
           AND status NOT IN ('failed', 'canceled')
-          AND id <> NEW.id;
+          AND (
+              (
+                  TG_OP = 'UPDATE'
+                  AND id <> NEW.id
+              )
+              OR (
+                  -- BEFORE INSERT runs before ON CONFLICT. Exclude the
+                  -- provider identity that the atomic upsert will reconcile,
+                  -- while still counting every independent refund.
+                  TG_OP = 'INSERT'
+                  AND ROW(
+                      provider,
+                      provider_environment,
+                      provider_refund_id
+                  ) IS DISTINCT FROM ROW(
+                      NEW.provider,
+                      NEW.provider_environment,
+                      NEW.provider_refund_id
+                  )
+              )
+          );
 
         IF v_refunded + NEW.amount_minor > v_original THEN
             RAISE EXCEPTION 'refund exceeds payment'

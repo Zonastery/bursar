@@ -693,8 +693,8 @@ class BillingService:
         )
         if provider_payment_id:
             payment = self._store.get_billing_payment(event.provider, provider_payment_id)
-            uid = payment.get("user_id") if isinstance(payment, dict) else None
-            if isinstance(uid, str) and uid:
+            if payment is not None and payment.user_id:
+                uid = payment.user_id
                 event.account_id = uid
                 return uid
         return None

@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, cast
 
 import pytest
 
@@ -136,19 +137,16 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
     assert top[0].total_spend == "8.5"
     assert ledger[0].entry_id == ENTRY_ID
     assert ledger[0].operation == "completion"
-    assert calls[-2] == (
-        "list_ledger",
-        [
-            USER_ID,
-            "2030-01-01T00:00:00+00:00",
-            ENTRY_ID,
-            25,
-            ["usage"],
-            "2029-01-01",
-            "2030-01-01",
-            True,
-        ],
-    )
+    assert calls[-2][0] == "list_ledger"
+    ledger_params = calls[-2][1]
+    assert ledger_params[:4] == [
+        USER_ID,
+        "2030-01-01T00:00:00+00:00",
+        ENTRY_ID,
+        25,
+    ]
+    assert cast(Any, ledger_params[4]).getquoted() == b"ARRAY['usage']"
+    assert ledger_params[5:] == ["2029-01-01", "2030-01-01", True]
     assert usage[0].usage_id == USAGE_ID
     assert usage[0].allowance_covered == "1.5"
     assert usage[0].billing_disposition == "billable"

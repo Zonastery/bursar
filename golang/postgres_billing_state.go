@@ -210,6 +210,9 @@ func billingPaymentRecordFromRow(row map[string]any, operation string) (*Billing
 	if err != nil {
 		return nil, err
 	}
+	if amountMinor < 0 || taxMinor < 0 {
+		return nil, NewStoreError(operation+" returned a negative payment amount", ErrorOptions{})
+	}
 	currency, err := requiredRowText(row, "currency", operation)
 	if err != nil || !billingCurrency(currency) {
 		return nil, NewStoreError(operation+" returned an invalid currency", ErrorOptions{Cause: err})

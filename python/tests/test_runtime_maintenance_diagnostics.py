@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -24,7 +24,12 @@ from bursar.storage.maintenance import (
     OperatorMaintenanceRunOptions,
 )
 from bursar.storage.postgres_repository import PostgresStorageRepository
-from bursar.storage.runtime import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
+from bursar.storage.runtime import (
+    BursarRuntimeOptions,
+    BursarRuntimeStartOptions,
+    UsageAnalyticsSink,
+    create_bursar_runtime,
+)
 
 TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
 
@@ -281,15 +286,18 @@ def test_diagnostics_do_not_expose_active_check_exception_messages() -> None:
 
 def test_runtime_validates_projection_schema_before_startup_completes() -> None:
     order: list[str] = []
-    clickhouse = SimpleNamespace(
-        initialize=lambda: order.append("initialize"),
-        check_schema_compatibility=lambda: order.append("check"),
-        write_usage=lambda _event, _outbox_event_id: None,
-        spend_by_user=lambda _start, _end: [],
-        spend_by_model=lambda _start, _end: [],
-        top_users=lambda _limit, _start, _end: [],
-        daily_spend=lambda _start, _end: [],
-        aggregate_stats=lambda _start, _end: None,
+    clickhouse = cast(
+        UsageAnalyticsSink,
+        SimpleNamespace(
+            initialize=lambda: order.append("initialize"),
+            check_schema_compatibility=lambda: order.append("check"),
+            write_usage=lambda _event, _outbox_event_id: None,
+            spend_by_user=lambda _start, _end: [],
+            spend_by_model=lambda _start, _end: [],
+            top_users=lambda _limit, _start, _end: [],
+            daily_spend=lambda _start, _end: [],
+            aggregate_stats=lambda _start, _end: None,
+        ),
     )
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(

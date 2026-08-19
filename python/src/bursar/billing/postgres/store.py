@@ -70,6 +70,7 @@ from bursar.billing.types import (
 )
 from bursar.credits.postgres.repositories._utils import (
     optional_mapping_row,
+    require_bigint_identifier_result,
     require_boolean_result,
     require_identifier_result,
     require_mapping_row,
@@ -1040,7 +1041,7 @@ class PostgresBillingStore(BillingStore):
                 json.dumps(input.metadata or {}),
             ],
         )
-        require_identifier_result(rows, "id", "PostgresBillingStore.record_subscription_conflict")
+        require_bigint_identifier_result(rows, "id", "PostgresBillingStore.record_subscription_conflict")
 
     def compute_topup_credits(self, amount_minor: int, topup_config: BillingTopupResult) -> Decimal:
         if isinstance(amount_minor, bool) or not isinstance(amount_minor, int):

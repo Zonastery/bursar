@@ -63,6 +63,10 @@ func TestNewRejectsInvalidDodoEnvironment(t *testing.T) {
 	if provider.ProviderEnvironment() != bursar.ProviderEnvironmentSandbox {
 		t.Fatalf("unexpected environment: %q", provider.ProviderEnvironment())
 	}
+	live, err := New(Options{APIKey: "test", WebhookKey: dodoTestWebhookKey, Environment: bursar.ProviderEnvironmentLive})
+	if err != nil || live.ProviderEnvironment() != bursar.ProviderEnvironmentLive {
+		t.Fatalf("unexpected live environment: %#v, %v", live, err)
+	}
 }
 
 func TestCreateCustomerRequiresDodoStableKey(t *testing.T) {

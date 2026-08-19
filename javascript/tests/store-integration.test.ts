@@ -2,11 +2,15 @@ import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { Decimal } from "decimal.js";
 import pg from "pg";
 import { CreditsService } from "../src/credits/service.js";
+import { CreditEventEmitter } from "../src/credits/events.js";
 import {
   FeatureNotEntitledError,
+  CapReachedError,
+  LeaseExpiredError,
   OperationNotAllowedError,
   QuotaExceededError,
   StoreError,
+  InsufficientCreditsError,
 } from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import type { BursarConfigData } from "../src/config.js";
@@ -21,6 +25,7 @@ const REPLAY_USER_ID = "00000000-0000-0000-0000-000000000912";
 const TEAM_REPLAY_OWNER_ID = "00000000-0000-0000-0000-000000000922";
 const TEAM_CONCURRENT_OWNER_ID = "00000000-0000-0000-0000-000000000923";
 const TEAM_CHANGED_OWNER_ID = "00000000-0000-0000-0000-000000000924";
+const REPORT_USER_ID = "00000000-0000-0000-0000-000000000942";
 
 const CONFIG = {
   version: 1,
@@ -644,6 +649,53 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect((await store.getUserPlan(USER_ID)).planId).toBe(targetPlanId);
   });
 
+  it("maps durable usage into financial reporting views", async () => {
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(CONFIG);
+    await service.setUserPlan(REPORT_USER_ID, "pro");
+    await service.addCredits(REPORT_USER_ID, new Decimal(20), {
+      type: "purchase",
+      idempotencyKey: "reporting-funding",
+    });
+    const usage = await service.deduct(
+      REPORT_USER_ID,
+      {
+        operation: "completion",
+        measures: { input_tokens: 1, output_tokens: 2 },
+        dimensions: { model: "reporting-model" },
+      },
+      { idempotencyKey: "reporting-deduction" },
+    );
+    expect(usage.amount.toString()).toBe("3");
+    const recorded = await service.recordUsage(
+      REPORT_USER_ID,
+      {
+        operation: "completion",
+        measures: { input_tokens: 1, output_tokens: 1 },
+        dimensions: { model: "external-model" },
+      },
+      { idempotencyKey: "reporting-external-usage" },
+    );
+    expect(recorded.error).toBeNull();
+
+    const start = new Date(Date.now() - 60_000);
+    const end = new Date(Date.now() + 60_000);
+    await expect(store.spendByUser(start, end)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: REPORT_USER_ID, entryCount: expect.any(Number) }),
+      ]),
+    );
+    await expect(store.spendByModel(start, end)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ model: "reporting-model" })]),
+    );
+    await expect(store.topUsers(10, start, end)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ userId: REPORT_USER_ID })]),
+    );
+    await expect(store.dailySpend(start, end)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ entryCount: expect.any(Number) })]),
+    );
+  });
+
   it("prevents concurrent unique-key deductions from double-spending", async () => {
     const userId = "00000000-0000-0000-0000-000000000925";
     const service = new CreditsService(store);
@@ -779,6 +831,229 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect(headroomAvailability.reserved.toString()).toBe("4");
   }, 60_000);
 
+  it("replays lease settlement and rejects changed payloads without extra accounting", async () => {
+    const userId = "00000000-0000-0000-0000-000000000929";
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(structuredClone(CONFIG));
+    await service.addCredits(userId, new Decimal("10"), {
+      type: "purchase",
+      idempotencyKey: "settlement-replay-funding",
+    });
+
+    const lease = await service.reserve(userId, new Decimal("3"), {
+      idempotencyKey: "settlement-replay-reserve",
+      ttl: 60,
+    });
+    const first = await service.settle(userId, lease.leaseId, new Decimal("2"), {
+      idempotencyKey: "settlement-replay-settle",
+    });
+    const replay = await service.settle(userId, lease.leaseId, new Decimal("2"), {
+      idempotencyKey: "settlement-replay-settle",
+    });
+
+    expect(first.error).toBeNull();
+    expect(first.idempotent).toBe(false);
+    expect(first.amount.toString()).toBe("2");
+    expect(first.balanceAfter?.toString()).toBe("8");
+    expect(replay).toMatchObject({
+      entryId: first.entryId,
+      usageChargeId: first.usageChargeId,
+      idempotent: true,
+      error: null,
+    });
+    expect(replay.amount.toString()).toBe("2");
+    expect(replay.balanceAfter?.toString()).toBe("8");
+
+    await expect(
+      service.settle(userId, lease.leaseId, new Decimal("2.5"), {
+        idempotencyKey: "settlement-replay-settle",
+      }),
+    ).rejects.toBeInstanceOf(StoreError);
+
+    const snapshot = await financialSnapshot(userId);
+    expect(new Decimal(snapshot.balance).toString()).toBe("8");
+    expect(new Decimal(snapshot.ledger_total).toString()).toBe("8");
+    expect(snapshot.usage_entries).toBe(1);
+    expect(snapshot.usage_charges).toBe(1);
+    expect(snapshot.usage_keys).toBe(1);
+
+    const leaseRow = await pool.query<{
+      status: string;
+      reserved_amount: string;
+      settled_amount: string;
+    }>(
+      `SELECT status, reserved_amount, settled_amount
+       FROM bursar.credit_leases
+       WHERE id = $1::uuid`,
+      [lease.leaseId],
+    );
+    expect(leaseRow.rows[0]).toEqual({
+      status: "settled",
+      reserved_amount: "3.000000",
+      settled_amount: "2.000000",
+    });
+  });
+
+  it("expires a lease, releases its reservation, and permits re-admission", async () => {
+    const userId = "00000000-0000-0000-0000-000000000930";
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(structuredClone(CONFIG));
+    await service.addCredits(userId, new Decimal("4"), {
+      type: "purchase",
+      idempotencyKey: "lease-expiry-funding",
+    });
+
+    const lease = await service.reserve(userId, new Decimal("3"), {
+      idempotencyKey: "lease-expiry-reserve",
+      ttl: 60,
+    });
+    expect((await store.getAvailable(userId)).available.toString()).toBe("1");
+    expect((await store.getAvailable(userId)).reserved.toString()).toBe("3");
+
+    const expiryClient = await pool.connect();
+    try {
+      await expiryClient.query("BEGIN");
+      await expiryClient.query("SELECT set_config('bursar.mutation_context', 'internal', true)");
+      const expired = await expiryClient.query(
+        `UPDATE bursar.credit_leases
+         SET created_at = created_at - interval '2 minutes',
+             expires_at = now() - interval '1 second'
+         WHERE id = $1::uuid`,
+        [lease.leaseId],
+      );
+      expect(expired.rowCount).toBe(1);
+      await expiryClient.query("COMMIT");
+    } catch (error) {
+      await expiryClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      expiryClient.release();
+    }
+    await expect(store.expireLeases(25)).resolves.toBe(1);
+
+    expect((await store.getAvailable(userId)).available.toString()).toBe("4");
+    expect((await store.getAvailable(userId)).reserved.toString()).toBe("0");
+    const expiredLease = await pool.query<{ status: string }>(
+      "SELECT status FROM bursar.credit_leases WHERE id = $1::uuid",
+      [lease.leaseId],
+    );
+    expect(expiredLease.rows[0]?.status).toBe("expired");
+    await expect(
+      service.settle(userId, lease.leaseId, new Decimal("2"), {
+        idempotencyKey: "lease-expiry-settle",
+      }),
+    ).rejects.toBeInstanceOf(LeaseExpiredError);
+
+    const snapshot = await financialSnapshot(userId);
+    expect(new Decimal(snapshot.balance).toString()).toBe("4");
+    expect(new Decimal(snapshot.ledger_total).toString()).toBe("4");
+    expect(snapshot.usage_entries).toBe(0);
+    expect(snapshot.usage_charges).toBe(0);
+
+    const replacement = await service.reserve(userId, new Decimal("3"), {
+      idempotencyKey: "lease-expiry-replacement",
+      ttl: 60,
+    });
+    expect(replacement.error).toBeNull();
+    expect(replacement.amount.toString()).toBe("3");
+    await service.release(userId, replacement.leaseId);
+  });
+
+  it("settles actual overdraft usage above the estimate within the credit line", async () => {
+    const userId = "00000000-0000-0000-0000-000000000931";
+    const overdraftConfig: BursarConfigData = structuredClone(CONFIG);
+    overdraftConfig.credits.policies = {
+      line: { type: "credit_line", limit: "5" },
+    };
+    overdraftConfig.plans!.pro!.credit_policy = "line";
+    delete overdraftConfig.plans!.pro!.quotas;
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(overdraftConfig);
+    await service.setUserPlan(userId, "pro");
+
+    const lease = await service.reserve(userId, new Decimal("2"), {
+      idempotencyKey: "overdraft-estimate-reserve",
+      operationType: "completion",
+      ttl: 60,
+    });
+    expect(lease.billingMode).toBe("overdraft");
+    expect(lease.minimumBalance.toString()).toBe("-5");
+
+    const settled = await service.settle(userId, lease.leaseId, new Decimal("4"), {
+      idempotencyKey: "overdraft-estimate-settle",
+    });
+    expect(settled.amount.toString()).toBe("4");
+    expect(settled.balanceAfter?.toString()).toBe("-4");
+    expect((await service.getBalance(userId)).balance.toString()).toBe("-4");
+
+    const snapshot = await financialSnapshot(userId);
+    expect(new Decimal(snapshot.balance).toString()).toBe("-4");
+    expect(new Decimal(snapshot.ledger_total).toString()).toBe("-4");
+    expect(snapshot.usage_entries).toBe(1);
+    expect(snapshot.usage_charges).toBe(1);
+    expect(snapshot.usage_keys).toBe(1);
+    const leaseRow = await pool.query<{
+      status: string;
+      reserved_amount: string;
+      settled_amount: string;
+    }>(
+      `SELECT status, reserved_amount, settled_amount
+       FROM bursar.credit_leases
+       WHERE id = $1::uuid`,
+      [lease.leaseId],
+    );
+    expect(leaseRow.rows[0]).toEqual({
+      status: "settled",
+      reserved_amount: "2.000000",
+      settled_amount: "4.000000",
+    });
+  });
+
+  it("consumes allowance first, then debits the purchased bucket for the remainder", async () => {
+    const userId = "00000000-0000-0000-0000-000000000932";
+    const allowanceConfig: BursarConfigData = structuredClone(CONFIG);
+    allowanceConfig.plans!.pro!.credit_allowance = {
+      amount: "5",
+      priority: 5,
+      window: { type: "calendar", unit: "month", count: 1, timezone: "UTC" },
+    };
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(allowanceConfig);
+    await service.setUserPlan(userId, "pro");
+    await service.addCredits(userId, new Decimal("3"), {
+      type: "purchase",
+      bucket: "purchased",
+      idempotencyKey: "allowance-partial-funding",
+    });
+
+    const usage = {
+      operation: "completion",
+      measures: { input_tokens: 0, output_tokens: 4 },
+      dimensions: { model: "standard" },
+    };
+    const allowanceOnly = await service.deduct(userId, usage, {
+      idempotencyKey: "allowance-only-charge",
+    });
+    const allowanceThenBucket = await service.deduct(userId, usage, {
+      idempotencyKey: "allowance-partial-charge",
+    });
+
+    expect(allowanceOnly.amount.toString()).toBe("0");
+    expect(allowanceOnly.allowanceConsumed.toString()).toBe("4");
+    expect(allowanceThenBucket.amount.toString()).toBe("3");
+    expect(allowanceThenBucket.allowanceConsumed.toString()).toBe("1");
+    expect(allowanceThenBucket.bucketBreakdown?.purchased?.toString()).toBe("3");
+    expect((await service.checkAllowance(userId))?.allowanceRemaining.toString()).toBe("0");
+    expect((await service.getBalance(userId)).balance.toString()).toBe("0");
+
+    const snapshot = await financialSnapshot(userId);
+    expect(new Decimal(snapshot.balance).toString()).toBe("0");
+    expect(new Decimal(snapshot.ledger_total).toString()).toBe("0");
+    expect(snapshot.usage_entries).toBe(1);
+    expect(snapshot.usage_charges).toBe(2);
+    expect(snapshot.usage_keys).toBe(2);
+  });
+
   it("replays team creation as one team, account, membership, and initial grant", async () => {
     await new CreditsService(store).publishAndActivateCatalog(CONFIG);
     const idempotencyKey = "team:create:replay";
@@ -872,4 +1147,150 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       initial_grant_count: 1,
     });
   }, 60_000);
+
+  it("applies team accounting policy through CreditsService", async () => {
+    const service = new CreditsService(store);
+    await service.publishAndActivateCatalog(CONFIG);
+    await service.setUserPlan(USER_ID, "pro");
+    await service.setUserPlan(REPLAY_USER_ID, "pro");
+
+    const team = await store.createTeam(USER_ID, "Service team", {
+      idempotencyKey: "team:create:service-policy",
+      initialBalance: new Decimal(10),
+    });
+    await store.addTeamMember(team.teamId, REPLAY_USER_ID, "member", new Decimal(3));
+
+    const free = await service.deductTeam(
+      team.teamId,
+      REPLAY_USER_ID,
+      { operation: "free_export", measures: { calls: 1 }, dimensions: {} },
+      { idempotencyKey: "team-service-free" },
+    );
+    expect(free).toMatchObject({ teamId: team.teamId, amount: new Decimal(0) });
+    expect(free.teamBalanceAfter?.toString()).toBe("10");
+
+    const charged = await service.deductTeam(
+      team.teamId,
+      REPLAY_USER_ID,
+      {
+        operation: "completion",
+        measures: { input_tokens: 1, output_tokens: 1 },
+        dimensions: { model: "standard" },
+      },
+      { idempotencyKey: "team-service-charge" },
+    );
+    expect(charged.amount.toString()).toBe("2");
+    expect(charged.teamBalanceAfter?.toString()).toBe("8");
+
+    await expect(
+      service.deductTeam(
+        team.teamId,
+        REPLAY_USER_ID,
+        {
+          operation: "completion",
+          measures: { input_tokens: 1, output_tokens: 1 },
+          dimensions: { model: "standard" },
+        },
+        { idempotencyKey: "team-service-cap" },
+      ),
+    ).rejects.toBeInstanceOf(CapReachedError);
+    await expect(store.getTeamBalance(team.teamId)).resolves.toMatchObject({
+      teamId: team.teamId,
+      balance: new Decimal(8),
+    });
+
+    await service.addCredits(USER_ID, new Decimal(5), {
+      type: "purchase",
+      idempotencyKey: "service-refund-funding",
+    });
+    const usage = await service.deduct(
+      USER_ID,
+      { operation: "completion", measures: { input_tokens: 1, output_tokens: 1 } },
+      { idempotencyKey: "service-refund-source" },
+    );
+    if (!usage.entryId) throw new Error("expected a refundable usage entry");
+    await expect(
+      service.refundCredits(usage.entryId, {
+        idempotencyKey: "service-refund-1",
+        reason: "integration correction",
+      }),
+    ).resolves.toMatchObject({ originalEntryId: usage.entryId });
+
+    const expiring = await service.addCredits(USER_ID, new Decimal(1), {
+      type: "purchase",
+      bucket: "grant",
+      expiresAt: new Date(Date.now() + 60_000),
+      idempotencyKey: "service-expiring-credit",
+    });
+    const setupClient = await pool.connect();
+    try {
+      await setupClient.query("BEGIN");
+      await setupClient.query("SELECT set_config('bursar.mutation_context', 'internal', true)");
+      await setupClient.query(
+        `UPDATE bursar.credit_lots
+            SET expires_at = now() - interval '1 second'
+          WHERE source_entry_id = $1::uuid`,
+        [expiring.entryId],
+      );
+      await setupClient.query("COMMIT");
+    } catch (error) {
+      await setupClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      setupClient.release();
+    }
+    await expect(service.sweepExpiredCredits()).resolves.toMatchObject({
+      dryRun: false,
+      expiredCount: 1,
+    });
+  });
+
+  it("keeps credit events observable while post-commit and team failures stay isolated", async () => {
+    const events: string[] = [];
+    const emitter = new CreditEventEmitter();
+    emitter.on("credits.deducted", () => {
+      events.push("deducted");
+    });
+    emitter.on("credits.revoked", () => {
+      events.push("revoked");
+    });
+    const service = new CreditsService(store, null, emitter);
+    await service.publishAndActivateCatalog(CONFIG);
+    const removeHook = service.addPostDeductionHook(async () => {
+      throw new Error("post-commit observer unavailable");
+    });
+
+    await service.addCredits(USER_ID, new Decimal(5), {
+      type: "purchase",
+      idempotencyKey: "observable-funding",
+    });
+    const deduction = await service.deduct(
+      USER_ID,
+      { operation: "completion", measures: { input_tokens: 1, output_tokens: 1 } },
+      { idempotencyKey: "observable-deduction" },
+    );
+    expect(deduction.amount.toString()).toBe("2");
+    removeHook();
+    expect(events).toContain("deducted");
+
+    await expect(service.revokeCreditsByEntryType(USER_ID, "purchase")).resolves.toMatchObject({
+      userId: USER_ID,
+      entryType: "purchase",
+    });
+    expect(events).toContain("revoked");
+
+    const emptyTeam = await store.createTeam(TEAM_REPLAY_OWNER_ID, "Empty service team", {
+      idempotencyKey: "team:service-empty",
+      initialBalance: new Decimal(0),
+    });
+    await store.addTeamMember(emptyTeam.teamId, REPLAY_USER_ID, "member", new Decimal(3));
+    await expect(
+      service.deductTeam(
+        emptyTeam.teamId,
+        REPLAY_USER_ID,
+        { operation: "completion", measures: { input_tokens: 1, output_tokens: 1 } },
+        { idempotencyKey: "team-service-insufficient" },
+      ),
+    ).rejects.toBeInstanceOf(InsufficientCreditsError);
+  });
 });

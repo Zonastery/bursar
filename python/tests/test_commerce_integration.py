@@ -16,18 +16,28 @@ from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
     BillingEventType,
+    BillingInvoiceInfo,
     BillingPaymentInfo,
     BillingSubscriptionInfo,
     BillingSubscriptionStatus,
     ProviderRef,
 )
 from bursar.bursar import Bursar
-from bursar.commerce import AutoRechargeInput, CheckoutConflictError, CommerceOptions, CreateCheckoutInput
+from bursar.commerce import (
+    AutoRechargeInput,
+    CheckoutCompletedError,
+    CheckoutConflictError,
+    CommerceOptions,
+    CommerceResourceNotFoundError,
+    CreateCheckoutInput,
+)
 from bursar.providers.mock.provider import MockPaymentProvider
 from bursar.providers.types import (
+    ChangePlanParams,
     ChangePlanPreview,
     CheckoutParams,
     CheckoutSessionResult,
+    CheckoutSessionStatus,
     PaymentMethodInfo,
     PreviewChangePlanParams,
     SavedPaymentChargeParams,
@@ -52,7 +62,12 @@ class IntegrationMockProvider(MockPaymentProvider):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.checkout_params: list[CheckoutParams] = []
+        self.change_plan_params: list[ChangePlanParams] = []
+        self.fail_change_plan = False
         self.checkout_gate: asyncio.Event | None = None
+        self.checkout_status: CheckoutSessionStatus | None = None
+        self.cancel_calls: list[tuple[str, str]] = []
+        self.reactivate_calls: list[tuple[str, str]] = []
         self.charges: list[SavedPaymentChargeResult] = [
             SavedPaymentChargeResult(
                 provider_payment_id="auto_pay_processing",
@@ -84,7 +99,7 @@ class IntegrationMockProvider(MockPaymentProvider):
         return CheckoutSessionResult(
             url=params.return_url,
             provider_session_id=f"session_{params.idempotency_key}",
-            customer_id=CUSTOMER_ID,
+            customer_id=f"cus_{params.account_id[-12:]}",
         )
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
@@ -97,6 +112,21 @@ class IntegrationMockProvider(MockPaymentProvider):
             effective_at="2026-08-01T00:00:00+00:00",
             next_billing_date="2026-09-01T00:00:00+00:00",
         )
+
+    async def change_plan(self, params: ChangePlanParams) -> None:
+        self.change_plan_params.append(params)
+        if self.fail_change_plan:
+            raise RuntimeError("injected plan change failure")
+
+    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
+        del provider_session_id
+        return self.checkout_status
+
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> None:
+        self.cancel_calls.append((subscription_id, idempotency_key))
+
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str) -> None:
+        self.reactivate_calls.append((subscription_id, idempotency_key))
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         del customer_id
@@ -303,6 +333,74 @@ async def test_commerce_checkout_persists_intent_and_topup_payment_grants_credit
 
 
 @pytest.mark.asyncio
+async def test_commerce_account_overview_projects_subscription_documents_and_payment_methods(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, _provider = _bursar(pg_database_url, pg_store)
+    try:
+        assert bursar.commerce is not None
+        customer = BillingCustomerInfo(provider_customer_id=CUSTOMER_ID, email="buyer@example.com")
+        bursar.ingest_billing_event(
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_overview_customer",
+                event_type=BillingEventType.customer_created,
+                occurred_at=_now(),
+                account_id=USER_ID,
+                customer=customer,
+            )
+        )
+        paid = bursar.ingest_billing_event(
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_overview_invoice_paid",
+                event_type=BillingEventType.invoice_paid,
+                occurred_at="2026-08-19T10:00:00Z",
+                account_id=USER_ID,
+                customer=customer,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_overview",
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2026-08-19T10:00:00Z",
+                    period_end="2026-09-19T10:00:00Z",
+                    refs=ProviderRef(price_id="price_pro_month"),
+                    interval="month",
+                    interval_count=1,
+                ),
+                invoice=BillingInvoiceInfo(
+                    provider_invoice_id="invoice_overview",
+                    status="paid",
+                    amount_paid_minor=2000,
+                    amount_due_minor=2000,
+                    currency="USD",
+                    period_start="2026-08-19T10:00:00Z",
+                    period_end="2026-09-19T10:00:00Z",
+                ),
+            )
+        )
+        assert paid.handled is True
+        overview = await bursar.commerce.get_account_overview(USER_ID)
+
+        assert overview.subscription_summary.plan_key == "pro"
+        assert overview.subscription_summary.access_state == "entitled"
+        assert overview.payment_methods[0].last4 == "4242"
+        assert [(invoice.provider_invoice_id, invoice.status) for invoice in overview.provider_invoices] == [
+            ("invoice_overview", "paid")
+        ]
+        assert {document.kind for document in overview.documents} == {"provider_invoice"}
+        assert overview.availability.payment_methods is True
+        assert overview.availability.provider_invoices is True
+        assert overview.availability.documents is True
+        invoice = next(document for document in overview.documents if document.kind == "provider_invoice")
+        assert (await bursar.commerce.get_invoice_link(USER_ID, invoice)).url == "https://example.com/invoice"
+        with pytest.raises(CommerceResourceNotFoundError, match="Invoice not found"):
+            await bursar.commerce.get_invoice_link(USER_ID2, invoice)
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
 async def test_checkout_operation_key_replays_once_and_conflicts_before_provider(
     pg_database_url: str,
     pg_store: object,
@@ -369,6 +467,54 @@ async def test_checkout_operation_key_replays_once_and_conflicts_before_provider
                     1,
                 ),
             ]
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+async def test_checkout_reconciles_terminal_provider_and_local_expiry_states(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, provider = _bursar(pg_database_url, pg_store)
+    commerce = bursar.commerce
+    assert commerce is not None
+
+    def checkout_input(user_id: str, operation_key: str) -> CreateCheckoutInput:
+        return CreateCheckoutInput(
+            subject_id=user_id,
+            account_id=user_id,
+            offer_key="standard_topup",
+            return_url="https://app.example/return?intent={intentId}",
+            cancel_url="https://app.example/cancel?intent={intentId}",
+            operation_key=operation_key,
+        )
+
+    try:
+        succeeded_input = checkout_input(USER_ID, "checkout-provider-succeeded")
+        succeeded = await commerce.create_checkout(succeeded_input)
+        provider.checkout_status = CheckoutSessionStatus(payment_status="succeeded")
+        with pytest.raises(CheckoutCompletedError):
+            await commerce.create_checkout(succeeded_input)
+        assert commerce.get_checkout_status(succeeded.intent_id, USER_ID).status == "succeeded"
+
+        failed_input = checkout_input(USER_ID2, "checkout-provider-terminal")
+        provider.checkout_status = None
+        failed = await commerce.create_checkout(failed_input)
+        provider.checkout_status = CheckoutSessionStatus(payment_status="requires_payment_method")
+        with pytest.raises(CheckoutConflictError, match="no longer active"):
+            await commerce.create_checkout(failed_input)
+        assert commerce.get_checkout_status(failed.intent_id, USER_ID2).status == "failed"
+
+        expired_input = checkout_input(USER_ID3, "checkout-locally-expired")
+        provider.checkout_status = None
+        commerce.options.checkout_intent_ttl_ms = 2_000
+        expired = await commerce.create_checkout(expired_input)
+        await asyncio.sleep(2.1)
+        with pytest.raises(CheckoutConflictError, match="expired"):
+            await commerce.create_checkout(expired_input)
+        assert commerce.get_checkout_status(expired.intent_id, USER_ID3).status == "expired"
+        assert len(provider.checkout_params) == 3
     finally:
         billing_store.close()
 
@@ -480,7 +626,7 @@ async def test_checkout_recovers_open_intent_after_transient_persistence_failure
                 """,
                 (USER_ID,),
             )
-            assert cursor.fetchone() == (CUSTOMER_ID, 1)
+            assert cursor.fetchone() == (f"cus_{USER_ID[-12:]}", 1)
     finally:
         billing_store.close()
 
@@ -593,6 +739,135 @@ async def test_commerce_subscription_plan_change_portal_and_cancel_flow(
         assert await bursar.commerce.cancel_scheduled_plan_change(USER_ID, "cancel-downgrade") == {"success": True}
         canceled = await bursar.commerce.cancel_subscription(USER_ID, "cancel-subscription")
         assert canceled.pending is True
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_then_reactivate_preserves_subscription_state(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, provider = _bursar(pg_database_url, pg_store)
+    commerce = bursar.commerce
+    assert commerce is not None
+    subscription_id = "sub_cancel_all"
+    customer = BillingCustomerInfo(provider_customer_id=CUSTOMER_ID)
+    try:
+        bursar.ingest_billing_event(
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_cancel_all_customer",
+                event_type=BillingEventType.customer_created,
+                occurred_at=_now(),
+                account_id=USER_ID,
+                customer=customer,
+            )
+        )
+        bursar.ingest_billing_event(
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_cancel_all_subscription",
+                event_type=BillingEventType.subscription_created,
+                occurred_at=_now(),
+                account_id=USER_ID,
+                customer=customer,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(price_id="price_pro_month"),
+                    interval="month",
+                    interval_count=1,
+                ),
+            )
+        )
+
+        canceled = await commerce.cancel_all_subscriptions(USER_ID, "close-account")
+        assert canceled.canceled_count == 1
+        assert canceled.subscriptions[0].canceled is True
+        assert provider.cancel_calls[0][0] == subscription_id
+        scheduled = billing_store.get_billing_subscription("stripe", subscription_id)
+        assert scheduled is not None
+        assert scheduled.cancel_at_period_end is True
+
+        reactivated = await commerce.reactivate_subscription(USER_ID, "keep-account")
+        assert reactivated.ok is True
+        assert reactivated.pending is True
+        assert provider.reactivate_calls == [(subscription_id, "keep-account")]
+        active = billing_store.get_billing_subscription("stripe", subscription_id)
+        assert active is not None
+        assert active.cancel_at_period_end is False
+
+        already_active = await commerce.reactivate_subscription(USER_ID, "already-active")
+        assert already_active.ok is True
+        assert already_active.pending is None
+        assert len(provider.reactivate_calls) == 1
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+async def test_commerce_plan_change_provider_failure_persists_failed_change(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, provider = _bursar(pg_database_url, pg_store)
+    try:
+        assert bursar.commerce is not None
+        customer = BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2)
+        bursar.ingest_billing_event(
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_plan_failure_customer",
+                event_type=BillingEventType.customer_created,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                customer=customer,
+            )
+        )
+        bursar.ingest_billing_event(
+            BillingEvent(
+                provider="stripe",
+                event_id="evt_plan_failure_subscription",
+                event_type=BillingEventType.subscription_created,
+                occurred_at=_now(),
+                account_id=USER_ID2,
+                customer=customer,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_plan_failure",
+                    status=BillingSubscriptionStatus.active,
+                    cancel_at_period_end=True,
+                    refs=ProviderRef(price_id="price_pro_month"),
+                    interval="month",
+                    interval_count=1,
+                ),
+            )
+        )
+
+        preview = await bursar.commerce.preview_plan_change(USER_ID2, offer_key="starter_month")
+        assert preview.quote_fingerprint is not None
+        provider.fail_change_plan = True
+        with pytest.raises(RuntimeError, match="injected plan change failure"):
+            await bursar.commerce.confirm_plan_change(
+                USER_ID2,
+                "plan-change-provider-failure",
+                offer_key="starter_month",
+                quote_fingerprint=preview.quote_fingerprint,
+            )
+
+        assert len(provider.change_plan_params) == 1
+        assert provider.reactivate_calls == [("sub_plan_failure", "plan-change-provider-failure:keep")]
+        assert provider.cancel_calls == [("sub_plan_failure", "plan-change-provider-failure:restore-cancellation")]
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT state, error_message
+                FROM bursar.billing_subscription_changes
+                WHERE idempotency_key = %s
+                """,
+                ("plan-change-provider-failure",),
+            )
+            assert cursor.fetchone() == ("failed", "subscription_change_failed:RuntimeError")
     finally:
         billing_store.close()
 
