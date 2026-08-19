@@ -247,6 +247,7 @@ func TestUsageBatcherRejectsInvalidCallsAndRecoversNonErrorPanics(t *testing.T) 
 		t.Fatal("nil usage batcher accepted a request")
 	}
 	batcher := newUsageWriteBatcher(&batchUsageSinkStub{})
+	//lint:ignore SA1012 This boundary test intentionally verifies nil-context rejection.
 	if err := batcher.submit(nil, UsageExportEntry{}); err == nil {
 		t.Fatal("nil usage batch context accepted")
 	}

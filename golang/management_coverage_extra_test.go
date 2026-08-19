@@ -162,10 +162,9 @@ func TestManagementCoveragePlanContextAndPortalCapabilities(t *testing.T) {
 
 func TestManagementCoverageProviderErrorsAndPlanChangeDurability(t *testing.T) {
 	ctx := context.Background()
-	service, state, provider, accountID := commerceWavePlanFixture(t)
 	statusProvider := &managementCoverageStatusErrorProvider{checkoutProviderStub: checkoutProviderStub{name: "stripe"}, err: errors.New("status provider failed")}
 	checkoutStore := &checkoutStoreStub{intent: CheckoutIntent{ID: "intent", SubjectID: "subject", Provider: "stripe", ProviderSessionID: "session", Status: "open", ExpiresAt: time.Now().Add(time.Hour)}}
-	service = newCommerceManagementTestService(t, checkoutStore, statusProvider)
+	service := newCommerceManagementTestService(t, checkoutStore, statusProvider)
 	if _, err := service.GetCheckoutStatus(ctx, "intent", "subject"); err == nil {
 		t.Fatal("checkout provider failure was ignored")
 	}
@@ -182,7 +181,7 @@ func TestManagementCoverageProviderErrorsAndPlanChangeDurability(t *testing.T) {
 		t.Fatal("provider registry failure was ignored")
 	}
 
-	service, state, provider, accountID = commerceWavePlanFixture(t)
+	service, state, provider, accountID := commerceWavePlanFixture(t)
 	provider.previewErr = errors.New("quote unavailable")
 	if _, err := service.PreviewPlanChange(ctx, PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
 		t.Fatal("provider quote failure was ignored")
@@ -261,8 +260,9 @@ func TestManagementCoverageOverviewCreditLineAndProviderCapability(t *testing.T)
 
 	store.customer = &BillingCustomerRecord{Provider: "stripe", ProviderCustomerID: "cus-1", AccountID: "account-1"}
 	arStore := &autoRechargeStoreStub{topup: &AutoRechargeTopup{ID: "topup-1"}, profile: autoRechargeActiveProfile(), customer: &AutoRechargeCustomer{UserID: "account-1", Provider: "stripe", ProviderCustomerID: "cus-1"}}
+	arStore.profile.UserID = "account-1"
 	arService := autoRechargeTestService(t, arStore, "management-overview")
-	autoProvider := &autoRechargeProviderStub{autoRechargeProviderBase: autoRechargeProviderBase{name: "stripe"}, methods: []PaymentMethodInfo{{ID: "pm-1", Last4: "4242", Brand: "visa", IsDefault: true}}}
+	autoProvider := &autoRechargeProviderStub{autoRechargeProviderBase: autoRechargeProviderBase{name: "stripe"}, methods: []PaymentMethodInfo{{ID: "pm-1", Last4: "4242", Brand: "visa", ExpiryMonth: 1, ExpiryYear: 2030, IsDefault: true}}}
 	autoRegistry, err := NewProviderRegistry(ProviderFactoryContext{ProviderEnvironment: ProviderEnvironmentTest}, map[string]ProviderFactory{
 		"stripe": func(context.Context, ProviderFactoryContext) (PaymentProvider, error) { return autoProvider, nil },
 	})

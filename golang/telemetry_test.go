@@ -267,6 +267,7 @@ func TestInstrumentedOperationCompletesOnceAndPreservesPanic(t *testing.T) {
 }
 
 func TestBeginInstrumentedNormalizesNilContextAndCallbacks(t *testing.T) {
+	//lint:ignore SA1012 This boundary test intentionally verifies nil-context normalization.
 	started, finish := beginInstrumented(nil, nilContextInstrumentation{}, "credits.deduct", nil)
 	if started == nil {
 		t.Fatal("beginInstrumented() returned nil context")

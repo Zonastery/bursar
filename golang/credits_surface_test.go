@@ -38,7 +38,6 @@ type creditsSurfaceStore struct {
 	quotaEvents    []QuotaEvent
 	quotaEventsErr error
 	closeErr       error
-	settleAttempts int
 }
 
 func (s *creditsSurfaceStore) Close() error { return s.closeErr }
