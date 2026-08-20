@@ -657,7 +657,7 @@ class TestAutoRechargeProfile:
         pg_database_url: str,
         pg_store: object,
     ) -> None:
-        _make_components(pg_database_url, pg_store)
+        _bs, _credits, _service = _make_components(pg_database_url, pg_store)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             _bind_tenant(cursor)
@@ -680,56 +680,91 @@ class TestAutoRechargeProfile:
                 """,
                 (USER_ID,),
             )
-            cursor.execute(
-                """
-                INSERT INTO bursar.billing_subscriptions(
-                    subject_id,
-                    provider,
-                    provider_environment,
-                    provider_subscription_id,
-                    offer_id,
-                    catalog_revision_id,
-                    status,
-                    provider_updated_at,
-                    status_changed_at
-                )
-                VALUES
-                    (
-                        %s::uuid, %s, 'live', 'sub-live',
-                        %s::uuid, %s::uuid, 'active',
-                        '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
-                    ),
-                    (
-                        %s::uuid, %s, 'test', 'sub-test',
+
+            subscription_ids: dict[str, str] = {}
+            event_ids: dict[str, str] = {}
+            for environment in ("live", "test"):
+                cursor.execute(
+                    """
+                    INSERT INTO bursar.billing_subscriptions(
+                        subject_id,
+                        provider,
+                        provider_environment,
+                        provider_subscription_id,
+                        offer_id,
+                        catalog_revision_id,
+                        status,
+                        provider_updated_at,
+                        status_changed_at
+                    )
+                    VALUES (
+                        %s::uuid, %s, %s, %s,
                         %s::uuid, %s::uuid, 'active',
                         '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'
                     )
-                RETURNING id, provider_environment
-                """,
-                (
-                    USER_ID,
-                    PROVIDER,
-                    offer_id,
-                    revision_id,
-                    USER_ID,
-                    PROVIDER,
-                    offer_id,
-                    revision_id,
-                ),
+                    RETURNING id
+                    """,
+                    (
+                        USER_ID,
+                        PROVIDER,
+                        environment,
+                        f"sub-entitlement-{environment}",
+                        offer_id,
+                        revision_id,
+                    ),
+                )
+                subscription_ids[environment] = str(cursor.fetchone()[0])  # type: ignore[index]
+
+                cursor.execute(
+                    """
+                    INSERT INTO bursar.billing_events(
+                        subject_id,
+                        provider,
+                        provider_environment,
+                        provider_event_id,
+                        event_type,
+                        envelope_digest,
+                        status,
+                        completed_at
+                    )
+                    VALUES (
+                        %s::uuid, %s, %s, %s, %s,
+                        decode(repeat('00', 32), 'hex'), 'completed', now()
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        USER_ID,
+                        PROVIDER,
+                        environment,
+                        f"evt-entitlement-{environment}",
+                        BillingEventType.subscription_created.value,
+                    ),
+                )
+                event_ids[environment] = str(cursor.fetchone()[0])  # type: ignore[index]
+
+        for environment in ("live", "test"):
+            environment_store = PostgresBillingStore(
+                pg_database_url,
+                tenant_id=TEST_TENANT_ID,
+                provider_environment=environment,
             )
-            subscription_ids = {environment: subscription_id for subscription_id, environment in cursor.fetchall()}
+            _COMPONENT_STORES.append(environment_store)
+            outcome = environment_store.reconcile_subscription_entitlement(
+                USER_ID,
+                subscription_ids[environment],
+                event_ids[environment],
+                BillingSubscriptionStatus.active,
+                "2025-01-01T00:00:00Z",
+                None,
+                True,
+                "free",
+                "subscription_active",
+            )
+            assert outcome == "applied"
 
-            for environment in ("live", "test"):
-                cursor.execute(
-                    "SELECT set_config('bursar.provider_environment', %s, false)",
-                    (environment,),
-                )
-                cursor.execute(
-                    "SELECT bursar.select_entitlement_source(%s::uuid, %s::uuid)",
-                    (USER_ID, subscription_ids[environment]),
-                )
-                assert cursor.fetchone() == (True,)
-
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
             cursor.execute(
                 """
                 SELECT provider_environment
