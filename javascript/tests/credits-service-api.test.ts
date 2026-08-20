@@ -3,11 +3,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
+import { CreditEventEmitter } from "../src/credits/events.js";
+import { RefundError } from "../src/errors.js";
 import { requireStableKey, scopedStableKey } from "../src/shared/idempotency.js";
 
 function service(store: Partial<CreditStore>): CreditsService {
   // SAFETY: Each fixture implements the CreditStore methods exercised by its scenario.
   return new CreditsService(store as CreditStore);
+}
+
+function testStore(store: Partial<CreditStore>): CreditStore {
+  // SAFETY: Each fixture implements the CreditStore methods exercised by its scenario.
+  return store as CreditStore;
 }
 
 describe("CreditsService public amount validation", () => {
@@ -175,5 +182,110 @@ describe("grantSubscriptionCycle replay", () => {
     });
 
     expect(setUserPlan).toHaveBeenCalledWith("user-1", "pro", undefined);
+  });
+});
+
+describe("administrative credit mutations", () => {
+  it("deducts an exact decimal amount and preserves the caller's accounting context", async () => {
+    const addCredits = vi.fn().mockResolvedValue({
+      entryId: "debit-entry-1",
+      userId: "user-1",
+      amount: new Decimal("-12.345678"),
+      newBalance: new Decimal("87.654322"),
+      lifetimePurchased: new Decimal("100"),
+      bucket: "purchased",
+      idempotent: false,
+    });
+    const emitter = new CreditEventEmitter();
+    const events: { type: string; amount?: unknown }[] = [];
+    emitter.on("credits.deducted", (event) => {
+      events.push({ type: event.type, amount: event.data?.amount });
+    });
+    const credits = new CreditsService(testStore({ addCredits }), null, emitter);
+
+    const result = await credits.deductCredits("user-1", "12.345678", {
+      entryType: "refund_clawback",
+      bucket: "purchased",
+      metadata: { providerRefundId: "refund-1" },
+      idempotencyKey: "refund-clawback-1",
+    });
+
+    expect(addCredits).toHaveBeenCalledWith("user-1", new Decimal("-12.345678"), {
+      type: "refund_clawback",
+      metadata: { providerRefundId: "refund-1" },
+      bucket: "purchased",
+      idempotencyKey: "refund-clawback-1",
+    });
+    expect(result.amount.toString()).toBe("-12.345678");
+    expect(events).toEqual([{ type: "credits.deducted", amount: result.amount }]);
+  });
+
+  it("refunds an exact partial amount and emits only the committed refund event", async () => {
+    const refundCredits = vi.fn().mockResolvedValue({
+      originalEntryId: "usage-entry-1",
+      userId: "user-1",
+      error: null,
+      refundEntryId: "refund-entry-1",
+      amount: new Decimal("2.345678"),
+      newBalance: new Decimal("52.345678"),
+      bucketBreakdown: { purchased: new Decimal("52.345678") },
+    });
+    const emitter = new CreditEventEmitter();
+    const events: string[] = [];
+    emitter.on("credits.refunded", (event) => {
+      events.push(event.type);
+    });
+    emitter.on("credits.refund_failed", (event) => {
+      events.push(event.type);
+    });
+    const credits = new CreditsService(testStore({ refundCredits }), null, emitter);
+
+    const result = await credits.refundCredits("usage-entry-1", {
+      amount: "2.345678",
+      reason: "provider partial refund",
+      metadata: { providerRefundId: "provider-refund-1" },
+      idempotencyKey: "refund-operation-1",
+    });
+
+    expect(refundCredits).toHaveBeenCalledWith("usage-entry-1", {
+      amount: new Decimal("2.345678"),
+      reason: "provider partial refund",
+      metadata: { providerRefundId: "provider-refund-1" },
+      idempotencyKey: "refund-operation-1",
+    });
+    expect(result.amount.toString()).toBe("2.345678");
+    expect(events).toEqual(["credits.refunded"]);
+  });
+
+  it("raises a typed error and emits no success event when a refund is rejected", async () => {
+    const refundCredits = vi.fn().mockResolvedValue({
+      originalEntryId: "usage-entry-1",
+      userId: "user-1",
+      error: "refund_exceeds_original",
+      refundEntryId: null,
+      amount: null,
+      newBalance: null,
+      bucketBreakdown: null,
+    });
+    const emitter = new CreditEventEmitter();
+    const events: string[] = [];
+    emitter.on("credits.refunded", (event) => {
+      events.push(event.type);
+    });
+    emitter.on("credits.refund_failed", (event) => {
+      events.push(event.type);
+    });
+    const credits = new CreditsService(testStore({ refundCredits }), null, emitter);
+
+    await expect(
+      credits.refundCredits("usage-entry-1", {
+        amount: "99.000000",
+        reason: "duplicate provider refund",
+        idempotencyKey: "refund-operation-2",
+      }),
+    ).rejects.toBeInstanceOf(RefundError);
+
+    expect(events).toEqual(["credits.refund_failed"]);
+    expect(refundCredits).toHaveBeenCalledOnce();
   });
 });

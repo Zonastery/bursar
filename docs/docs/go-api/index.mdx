@@ -26,22 +26,30 @@ See the [quickstart](../quickstart.mdx).
 
 | Area                     | Public Go surface                                                                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Facade and runtime       | `bursar.New`, `Bursar`, `NewBursarRuntime`                                                                                                 |
+| Facade and runtime       | `bursar.New`, `Bursar`, lightweight `NewBursarRuntime`, and `storage/runtime.NewBursarRuntime`                                             |
 | Catalog and pricing      | `CatalogService`, `PricingEngine`, `UsageMetrics`                                                                                          |
 | Credits and accounting   | `CreditsService`, exact `Amount`, priced usage, leases, plans, quotas, teams, ledger, and analytics                                        |
 | Billing and commerce     | `BillingService`, normalized lifecycle events, customer/subscription/invoice/payment state, checkout, auto-recharge, and `CommerceService` |
 | Payment providers        | `providers/stripe`, `providers/dodo`, `providers/mock`, and `ProviderRegistry`                                                             |
+| Google ADK (optional)    | Separate `golang/integrations/googleadk/v2` module with replay-safe model-call admission, settlement, and durable session recovery         |
 | Storage and outbox       | `PostgresStorageRepository`, `OutboxWorker`, projection handlers, maintenance, `storage/clickhouse`, and `storage/s3`                      |
 | Telemetry and resilience | `Instrumentation`, `telemetry/opentelemetry`, and `RetryBursarOperation`                                                                   |
 
 The complete exported signatures are available on
 [pkg.go.dev](https://pkg.go.dev/github.com/Zonastery/bursar/golang/v2).
 
+Google ADK users install
+`github.com/Zonastery/bursar/golang/integrations/googleadk/v2` separately and
+register its plugin through ADK's `runner.PluginConfig`. That module follows
+ADK's Go 1.26.5 requirement; the core SDK retains its Go 1.25 floor. See
+[Meter Google ADK model calls](../guides/google-adk.mdx) for the complete
+registration and financial-lifecycle example.
+
 ## Construct the facade and runtime
 
-Create one tenant-bound store. Passing it as both `CreditStore` and
-`BillingStore` enables the default PostgreSQL billing lifecycle as well as the
-catalog, credits, and account surfaces.
+For a complete process runtime, use the storage composition root. It accepts
+database URLs or caller-owned pools and keeps the tenant-bound primary and
+unscoped operator connections distinct:
 
 ```go
 package main
@@ -52,47 +60,51 @@ import (
 	"os"
 
 	bursar "github.com/Zonastery/bursar/golang/v2"
+	storageRuntime "github.com/Zonastery/bursar/golang/v2/storage/runtime"
 )
 
 func main() {
 	ctx := context.Background()
-	store, err := bursar.NewPostgresStore(ctx, os.Getenv("DATABASE_URL"), bursar.PostgresStoreOptions{
-		TenantID:            os.Getenv("BURSAR_TENANT_ID"),
+	runtime, err := storageRuntime.NewBursarRuntime(ctx, storageRuntime.Options{
+		TenantID:            os.Getenv("BURSAR_TENANT_ID"), // UUID
+		TenantSlug:          os.Getenv("BURSAR_TENANT_SLUG"),
 		ProviderEnvironment: bursar.ProviderEnvironmentTest,
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		OperatorDatabaseURL: os.Getenv("BURSAR_OPERATOR_DATABASE_URL"),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	sdk, err := bursar.New(bursar.Options{
-		CreditStore:  store,
-		BillingStore: store,
-	})
-	if err != nil {
-		_ = store.Close()
-		log.Fatal(err)
-	}
-
-	runtime, err := bursar.NewBursarRuntime(bursar.BursarRuntimeOptions{Bursar: sdk})
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := runtime.Start(ctx); err != nil { // Loads the active catalog by default.
+	if err := runtime.Start(ctx); err != nil { // Verifies identity and retries catalog loading.
 		log.Fatal(err)
 	}
 	defer runtime.Close(context.Background())
 
-	if !runtime.Health().Ready {
+	if !runtime.Health(ctx).Ready {
 		log.Fatal("Bursar runtime is not ready")
 	}
 }
 ```
 
+`storage/runtime.NewBursarRuntime` validates the tenant UUID and optional slug,
+constructs the facade, recovery and maintenance handles, optional
+ClickHouse/S3 projections, and the outbox worker. Its `Start`, `Health`,
+`State`, `CheckDependencies`, `Flush`, and `Close` methods own that lifecycle.
+`Health` and `State` are race-safe local snapshots and never perform network or
+database I/O. Use `CheckDependencies` when a probe should actively verify
+PostgreSQL, the loaded catalog revision, bounded outbox status, dead letters,
+and configured component health.
+The operator connection is deliberately unscoped and separate from the
+tenant-bound primary connection.
+
+The root `bursar.NewBursarRuntime` is the lightweight alternative. It accepts
+an already constructed `*bursar.Bursar` plus optional `RuntimeComponent`
+instances and coordinates catalog loading, component lifecycle, readiness,
+dependency checks, flush, and close; it does not create stores, projections,
+or workers. Both runtimes leave migrations and CLI administration to Python.
+
 `Bursar` exposes `Credits`, `Catalog`, `Accounts`, and optional `Billing` and
-`Commerce` capabilities. `BursarRuntime` coordinates catalog loading,
-background `RuntimeComponent` instances, local readiness, dependency checks,
-flush, and reverse-order close. It never runs migrations or schedules
-maintenance for the host.
+`Commerce` capabilities.
 
 ## Exact and metric-priced credits
 
@@ -123,6 +135,30 @@ price `UsageMetrics` with the subject's effective catalog and rate card.
 `SettleUsage` prices final metrics against that immutable lease revision, so a
 catalog activation cannot change an in-flight charge.
 
+For work whose final metrics are only known after execution,
+`CreditsService.RunBilledUsage` combines a metric-priced reserve, work
+callback, and settlement:
+
+```go
+result, err := sdk.Credits.RunBilledUsage(ctx, userID, bursar.RunBilledUsageOptions{
+	Estimate:     estimatedMetrics,
+	OperationKey: "request:job-42",
+	DoWork: func(ctx context.Context) (any, bursar.UsageMetrics, error) {
+		value, metrics, err := runModel(ctx)
+		return value, metrics, err
+	},
+})
+```
+
+The operation key is reused for replay-safe settlement. A work failure
+releases the lease; retryable settlement reuses the same idempotency context.
+`CreditsServiceOptions.CatalogCacheTTL` controls TTL-aware lazy catalog
+refresh (five minutes by default; zero disables automatic refresh), and
+`LazyExpiry` enables expiry handling during normal credit reads.
+`LowBalanceConfig` adds edge-triggered `CreditEventHandler` notifications via
+its `Thresholds`, `OnTrigger`, and bounded `MaxTrackedUsers` fields. The
+concise `LowBalance` thresholds remain available without a callback.
+
 The lower-level exact-amount methods remain available for administrative or
 already-priced operations: `AddCredits`, `Deduct`, `Reserve`, `Settle`,
 `Release`, `Renew`, refunds, grants, plans, entitlements, quotas, teams,
@@ -139,6 +175,23 @@ attaches `Billing.AutoRecharge` for profile, quote, enable/disable, retry, and
 post-deduction processing. `CommerceService` adds checkout, verified webhook,
 subscription commands, plan changes, portals, invoice links, and account
 overview operations.
+
+Register post-completion billing notifications with
+`BillingServiceOptions.EventHandlers` (or `BillingService.OnEvent`). These
+`BillingEventCallback` functions are failure-isolated and cannot change a
+completed event. Use `BillingServiceOptions.Handlers`, `On`, or
+`SetDefaultHandler` only when deliberately replacing a normalized lifecycle
+route. `CommerceService.GetAccountOverview(ctx, accountID)` returns the
+combined `AccountCommerceOverview` projection, including durable credit,
+entitlement, subscription, invoice, transaction, usage, payment-method, and
+availability sections.
+
+Provider-specific accounting inputs can be captured through
+`ProviderReceiptSource`, whose `Begin`/`Finish` pair returns a
+`*ProviderReceipt` containing exact `UsageMetrics` and financial metadata.
+`ProviderReceipt.Validate` checks that the metrics can be priced. This keeps
+provider response parsing at the integration boundary while settlement
+continues through the normal credits API.
 
 Provider adapters verify raw webhook signatures before returning a normalized
 `BillingEvent`. Only then should the application ingest the event:
@@ -204,8 +257,21 @@ worker, err := bursar.NewOutboxWorker(
 
 `OutboxWorker` is a bounded, concurrent `RuntimeComponent` with claim
 heartbeats, exponential retry delays, single-flight flushes, claim-loss
-reporting, and dead-letter limits. The two supplied handlers project only
-canonical records reloaded from PostgreSQL when necessary.
+reporting, and dead-letter limits. `Snapshot` exposes local lifecycle, the last
+manual run, and the last sanitized worker error without touching the store.
+`Stop` idempotently stops polling while leaving the caller-owned store open;
+`Close` provides the final `RuntimeComponent` shutdown alias. The two supplied
+handlers project only canonical records reloaded from PostgreSQL when
+necessary.
+
+`UsageChargeOutboxHandler` detects the optional `BatchUsageEventSink`
+capability. With a batch sink, concurrent deliveries coalesce over a small
+fixed window into one `WriteUsageBatch` call; every handler waits for the
+shared result. `storage/clickhouse.ClickHouseUsageStore` implements this
+interface and preserves each `UsageExportEntry.OutboxEventID`, so retries and
+replays remain idempotent. Sinks that implement only `UsageEventSink` retain
+the direct one-event `WriteUsage` path, and cancellation still reaches the
+underlying context.
 
 Optional projection packages keep PostgreSQL as the financial authority:
 

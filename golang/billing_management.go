@@ -167,11 +167,10 @@ type billingPseudonymizer interface {
 
 type billingGraceStateStore interface {
 	ListExpiredGraceSubscriptions(context.Context, time.Time, int) ([]CommerceSubscription, error)
-	MarkSubscriptionGraceExpired(context.Context, string, time.Time, time.Time) (bool, error)
 }
 
-type billingSubscriptionLookup interface {
-	GetBillingSubscriptionByProvider(context.Context, string, string) (*CommerceSubscription, error)
+type billingGraceExpiryStore interface {
+	expirePastDueGracePeriod(context.Context, CommerceSubscription, time.Time, string) (bool, error)
 }
 
 type autoRechargeProviderPaymentUpdater interface {
@@ -319,6 +318,9 @@ func (s *BillingService) GetUserPreferences(ctx context.Context, accountID strin
 // authoritative for billing policy. The document remains store-owned; this
 // method does not introduce a second billing-side catalog cache.
 func (s *BillingService) GetActiveCatalogDocument(ctx context.Context) (map[string]any, error) {
+	if s == nil {
+		return nil, NewError("billing catalog access is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	source, ok := s.store.(billingActiveCatalogSource)
 	if !ok {
 		return nil, NewError("billing catalog access is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -374,6 +376,9 @@ func (s *BillingService) UpdateBillingSubscriptionChange(ctx context.Context, id
 // operators can resolve it without silently selecting a second entitlement
 // source in process memory.
 func (s *BillingService) RecordSubscriptionConflict(ctx context.Context, input BillingSubscriptionConflictCreate) error {
+	if s == nil {
+		return NewError("billing subscription-conflict persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	recorder, ok := s.store.(billingSubscriptionConflictRecorder)
 	if !ok {
 		return NewError("billing subscription-conflict persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -382,6 +387,9 @@ func (s *BillingService) RecordSubscriptionConflict(ctx context.Context, input B
 }
 
 func (s *BillingService) UpsertBillingSubscription(ctx context.Context, state CommerceSubscription) (string, error) {
+	if s == nil {
+		return "", NewError("billing subscription persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	writer, ok := s.store.(billingSubscriptionWriter)
 	if !ok {
 		return "", NewError("billing subscription persistence is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -414,6 +422,9 @@ func (s *BillingService) ResolveOfferByLookup(ctx context.Context, provider, loo
 }
 
 func (s *BillingService) ResolveTopup(ctx context.Context, provider, productID, priceID string) (*BillingTopupResult, error) {
+	if s == nil {
+		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	resolver, ok := s.store.(billingTopupResolver)
 	if !ok {
 		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -422,6 +433,9 @@ func (s *BillingService) ResolveTopup(ctx context.Context, provider, productID, 
 }
 
 func (s *BillingService) ResolveTopupByLookup(ctx context.Context, provider, lookupKey string) (*BillingTopupResult, error) {
+	if s == nil {
+		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	resolver, ok := s.store.(billingTopupResolver)
 	if !ok {
 		return nil, NewError("billing top-up resolution is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
@@ -476,6 +490,9 @@ func (s *BillingService) UpdateAutoRechargeAttempt(ctx context.Context, update A
 }
 
 func (s *BillingService) UpdateAutoRechargeAttemptByProviderPayment(ctx context.Context, update AutoRechargeProviderPaymentUpdate) error {
+	if s == nil {
+		return NewError("billing auto-recharge provider reconciliation is not configured", ErrorOptions{Code: ErrorCodeAutoRechargeNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	store, ok := s.store.(autoRechargeProviderPaymentUpdater)
 	if !ok {
 		return NewError("billing auto-recharge provider reconciliation is not configured", ErrorOptions{Code: ErrorCodeAutoRechargeNotConfigured, Category: ErrorCategoryUnavailable})
@@ -492,7 +509,7 @@ func (s *BillingService) CountAutoRechargeAttempts(ctx context.Context, accountI
 }
 
 func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time.Time, limit int) (int, error) {
-	if s == nil || s.provisioning == nil {
+	if s == nil || s.provisioning == nil || !s.autoSelectEntitlementSource {
 		return 0, nil
 	}
 	state, ok := s.store.(billingGraceStateStore)
@@ -512,26 +529,16 @@ func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time
 	if err != nil {
 		return 0, err
 	}
-	lookup, ok := s.store.(billingSubscriptionLookup)
+	expirer, ok := s.store.(billingGraceExpiryStore)
 	if !ok {
-		return 0, NewError("billing subscription lookup is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+		return 0, NewError("atomic billing grace-period expiry is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
 	}
 	expired := 0
 	for _, candidate := range candidates {
-		if candidate.ID == "" || candidate.GraceEndsAt == nil {
+		if candidate.ID == "" || candidate.GraceEndsAt == nil || candidate.Status != "past_due" || candidate.GraceExpiredAt != nil {
 			continue
 		}
-		current, lookupErr := lookup.GetBillingSubscriptionByProvider(ctx, candidate.Provider, candidate.ProviderSubscriptionID)
-		if lookupErr != nil {
-			return expired, lookupErr
-		}
-		if current == nil || current.Status != "past_due" || current.GraceEndsAt == nil || current.GraceExpiredAt != nil || !current.GraceEndsAt.Equal(*candidate.GraceEndsAt) {
-			continue
-		}
-		if err := s.revokeIfCurrentSubscription(ctx, current.AccountID, current.ProviderSubscriptionID); err != nil {
-			return expired, err
-		}
-		marked, markErr := state.MarkSubscriptionGraceExpired(ctx, current.ID, *current.GraceEndsAt, now)
+		marked, markErr := expirer.expirePastDueGracePeriod(ctx, candidate, now, s.terminalPlanKey)
 		if markErr != nil {
 			return expired, markErr
 		}
@@ -543,17 +550,14 @@ func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time
 }
 
 func (s *BillingService) expireGraceIfNeeded(ctx context.Context, subscription *CommerceSubscription, now time.Time) (*CommerceSubscription, error) {
-	if subscription == nil || s == nil || s.provisioning == nil || subscription.Status != "past_due" || subscription.GraceExpiredAt != nil || subscription.GraceEndsAt == nil || subscription.GraceEndsAt.After(now) || subscription.ID == "" {
+	if subscription == nil || s == nil || s.provisioning == nil || !s.autoSelectEntitlementSource || subscription.Status != "past_due" || subscription.GraceExpiredAt != nil || subscription.GraceEndsAt == nil || subscription.GraceEndsAt.After(now) || subscription.ID == "" {
 		return subscription, nil
 	}
-	state, ok := s.store.(billingGraceStateStore)
+	expirer, ok := s.store.(billingGraceExpiryStore)
 	if !ok {
-		return nil, NewError("billing grace-period maintenance is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+		return nil, NewError("atomic billing grace-period expiry is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
 	}
-	if err := s.revokeIfCurrentSubscription(ctx, subscription.AccountID, subscription.ProviderSubscriptionID); err != nil {
-		return nil, err
-	}
-	marked, err := state.MarkSubscriptionGraceExpired(ctx, subscription.ID, *subscription.GraceEndsAt, now)
+	marked, err := expirer.expirePastDueGracePeriod(ctx, *subscription, now, s.terminalPlanKey)
 	if err != nil {
 		return nil, err
 	}
@@ -566,30 +570,10 @@ func (s *BillingService) expireGraceIfNeeded(ctx context.Context, subscription *
 	return &copy, nil
 }
 
-func (s *BillingService) revokeIfCurrentSubscription(ctx context.Context, accountID, providerSubscriptionID string) error {
-	store, err := s.stateStore()
-	if err != nil {
-		return err
-	}
-	current, err := store.GetBillingSubscription(ctx, accountID, []string{"active", "trialing", "past_due"})
-	if err != nil {
-		return err
-	}
-	if current != nil && current.ProviderSubscriptionID != providerSubscriptionID {
-		return nil
-	}
-	if s.provisioning == nil {
-		return nil
-	}
-	if s.terminalPlanKey != "" {
-		_, err = s.provisioning.SetUserPlan(ctx, accountID, s.terminalPlanKey, SetUserPlanOptions{})
-		return err
-	}
-	_, err = s.provisioning.UnsetUserPlan(ctx, accountID)
-	return err
-}
-
 func (s *BillingService) PseudonymizeFinancialSubject(ctx context.Context, accountID string) error {
+	if s == nil {
+		return NewError("billing subject pseudonymization is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+	}
 	pseudonymizer, ok := s.store.(billingPseudonymizer)
 	if !ok {
 		return NewError("billing subject pseudonymization is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})

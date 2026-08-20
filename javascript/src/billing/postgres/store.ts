@@ -13,6 +13,8 @@ import type {
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
   BillingSubscriptionState,
+  BillingSubscriptionStatus,
+  SubscriptionEntitlementOutcome,
   CheckoutIntent,
   BillingTopupResult,
 } from "../types/index.js";
@@ -517,15 +519,43 @@ export class PostgresBillingStore extends BillingStore {
     return rows.map((row) => this.rowToSubscriptionState(row));
   }
 
-  async markSubscriptionGraceExpired(
+  async reconcileSubscriptionEntitlement(
+    subjectId: string,
+    subscriptionId: string,
+    billingEventId: string,
+    expectedStatus: BillingSubscriptionStatus,
+    expectedProviderUpdatedAt: string,
+    planAssignedAt: Date | string | null,
+    applyEntitlement: boolean,
+    terminalPlanKey: string | null,
+    reason: string,
+  ): Promise<SubscriptionEntitlementOutcome> {
+    return this.billingSubscription.reconcileEntitlement(
+      subjectId,
+      subscriptionId,
+      billingEventId,
+      expectedStatus,
+      expectedProviderUpdatedAt,
+      planAssignedAt,
+      applyEntitlement,
+      terminalPlanKey,
+      reason,
+    );
+  }
+
+  async expireSubscriptionGracePeriod(
+    subjectId: string,
     subscriptionId: string,
     expectedGraceEndsAt: string,
-    expiredAt = new Date().toISOString(),
+    expiredAt: string,
+    terminalPlanKey: string | null,
   ): Promise<boolean> {
-    return this.billingSubscription.markGraceExpired(
+    return this.billingSubscription.expireGracePeriod(
+      subjectId,
       subscriptionId,
       expectedGraceEndsAt,
       expiredAt,
+      terminalPlanKey,
     );
   }
 
@@ -552,18 +582,6 @@ export class PostgresBillingStore extends BillingStore {
 
   async recordSubscriptionConflict(input: BillingSubscriptionConflictCreate): Promise<void> {
     await this.billingSubscription.recordConflict(input);
-  }
-
-  async selectSubscriptionEntitlementSource(
-    userId: string,
-    provider: string,
-    providerSubscriptionId?: string | null,
-  ): Promise<boolean> {
-    return this.billingSubscription.selectEntitlementSource(
-      userId,
-      provider,
-      providerSubscriptionId,
-    );
   }
 
   private rowToTopup(r: BillingTopupRow | null): BillingTopupResult | null {

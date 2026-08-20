@@ -12,6 +12,9 @@ export type BillingSubscriptionStatus =
   | "paused"
   | "expired";
 
+/** Durable result returned by the atomic subscription entitlement fence. */
+export type SubscriptionEntitlementOutcome = "applied" | "revoked" | "preserved" | "stale";
+
 export const SUBSCRIPTION_STATUS = {
   ACTIVE: "active",
   TRIALING: "trialing",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from bursar.billing.postgres.repositories.schemas import (
@@ -10,12 +10,17 @@ from bursar.billing.postgres.repositories.schemas import (
     PersistedSubscriptionRow,
     SubscriptionRow,
 )
-from bursar.billing.types import BillingSubscriptionState
+from bursar.billing.types import (
+    BillingSubscriptionState,
+    BillingSubscriptionStatus,
+    SubscriptionEntitlementOutcome,
+)
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import (
     optional_mapping_row,
     require_boolean_result,
     require_identifier_result,
+    require_mapping_row,
     validate_row,
 )
 from bursar.errors import StoreError
@@ -219,44 +224,55 @@ class BillingSubscriptionRepository:
             if isinstance(row, dict)
         ]
 
-    def mark_grace_expired(
+    def reconcile_entitlement(
         self,
+        subject_id: str,
+        subscription_id: str,
+        billing_event_id: str,
+        expected_status: BillingSubscriptionStatus,
+        expected_provider_updated_at: str,
+        plan_assigned_at: datetime | str | None,
+        apply_entitlement: bool,
+        terminal_plan_key: str | None,
+        reason: str,
+    ) -> SubscriptionEntitlementOutcome:
+        rows = self._execute(
+            "SELECT bursar.reconcile_subscription_entitlement("
+            "%s::uuid,%s::uuid,%s::uuid,%s::bursar.billing_subscription_status,"
+            "%s::timestamptz,%s::timestamptz,%s,%s,%s) AS outcome",
+            [
+                subject_id,
+                subscription_id,
+                billing_event_id,
+                expected_status.value,
+                expected_provider_updated_at,
+                plan_assigned_at,
+                apply_entitlement,
+                terminal_plan_key,
+                reason,
+            ],
+        )
+        context = "BillingSubscriptionRepository.reconcile_entitlement"
+        outcome = require_mapping_row(rows, context).get("outcome")
+        if outcome not in {"applied", "revoked", "preserved", "stale"}:
+            raise StoreError(
+                f"{context}: unexpected reconciliation outcome",
+                indeterminate=True,
+                details={"context": context, "outcome": outcome},
+            )
+        return cast("SubscriptionEntitlementOutcome", outcome)
+
+    def expire_grace_period(
+        self,
+        subject_id: str,
         subscription_id: str,
         expected_grace_ends_at: str,
         expired_at: str,
+        terminal_plan_key: str | None,
     ) -> bool:
         rows = self._execute(
-            "SELECT bursar.mark_subscription_grace_expired(%s::uuid,%s::timestamptz,%s::timestamptz) AS marked",
-            [subscription_id, expected_grace_ends_at, expired_at],
+            "SELECT bursar.expire_subscription_grace_period("
+            "%s::uuid,%s::uuid,%s::timestamptz,%s::timestamptz,%s) AS expired",
+            [subject_id, subscription_id, expected_grace_ends_at, expired_at, terminal_plan_key],
         )
-        return require_boolean_result(rows, "marked", "BillingSubscriptionRepository.mark_grace_expired")
-
-    def select_entitlement_source(
-        self,
-        user_id: str,
-        provider: str,
-        provider_subscription_id: str | None = None,
-    ) -> bool:
-        eligible_statuses = {"trialing", "active", "past_due", "paused"}
-        rows = self._execute("SELECT * FROM bursar.list_billing_subscriptions(%s::uuid)", [user_id])
-        if any(not isinstance(row, dict) for row in rows):
-            raise StoreError("BillingSubscriptionRepository.select_entitlement_source: expected object rows")
-        candidates = [
-            persisted
-            for row in rows
-            if isinstance(row, dict)
-            and (persisted := self._persisted(row, "BillingSubscriptionRepository.select_entitlement_source")).provider
-            == provider
-            and persisted.status in eligible_statuses
-            and (provider_subscription_id is None or persisted.provider_subscription_id == provider_subscription_id)
-        ]
-        if not candidates:
-            return False
-        replacement = max(candidates, key=lambda row: row.provider_updated_at)
-        rows = self._execute(
-            "SELECT bursar.select_entitlement_source(%s::uuid,%s::uuid) AS selected",
-            [user_id, replacement.id],
-        )
-        if not require_boolean_result(rows, "selected", "BillingSubscriptionRepository.select_entitlement_source"):
-            raise StoreError("subscription entitlement source selection was rejected")
-        return True
+        return require_boolean_result(rows, "expired", "BillingSubscriptionRepository.expire_grace_period")

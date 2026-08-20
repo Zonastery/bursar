@@ -55,4 +55,5 @@ export type {
   EntitlementMode,
   ProviderRef,
   SubscriptionGrant,
+  SubscriptionEntitlementOutcome,
 } from "./types/index.js";

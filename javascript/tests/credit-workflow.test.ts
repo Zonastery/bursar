@@ -542,4 +542,36 @@ describe("credit lease workflow", () => {
       expect.objectContaining({ idempotencyKey: "job:45:settle" }),
     );
   });
+
+  it("does not release a lease when settlement fails after work succeeds", async () => {
+    const releaseLease = vi.fn().mockResolvedValue({ released: true, reason: "aborted" });
+    const service = makeService({
+      getUserPlan: vi.fn().mockResolvedValue({
+        userId: "user-1",
+        planId: null,
+        planKey: null,
+        planLabel: null,
+        allowance: null,
+        entitlements: {},
+        creditPolicy: null,
+        admission: null,
+      }),
+      createLease: vi.fn().mockResolvedValue(leaseResult()),
+      settleLease: vi.fn().mockResolvedValue({ error: "expired_lease" }),
+      releaseLease,
+      listQuotaEvents: vi.fn().mockResolvedValue([]),
+    });
+
+    await expect(
+      service.runBilled("user-1", {
+        estimate: new Decimal(10),
+        operationKey: "job:settle-failure",
+        doWork: vi.fn().mockResolvedValue({ result: "done", actual: new Decimal(8) }),
+      }),
+    ).rejects.toThrow(LeaseExpiredError);
+
+    // A settlement can have an unknown commit outcome; replaying the stable
+    // settlement key is safe, while releasing here could discard a committed hold.
+    expect(releaseLease).not.toHaveBeenCalled();
+  });
 });

@@ -10,13 +10,14 @@ import (
 	"time"
 )
 
-// BillingServiceOptions configures application-owned handlers around Bursar's
-// durable billing event lifecycle. Financial provisioning belongs in these
-// handlers or a BillingStore implementation; it is never inferred from an
-// unverified provider webhook.
+// BillingServiceOptions configures application-owned behavior around Bursar's
+// durable billing event lifecycle. Handlers and DefaultHandler are explicit
+// lifecycle overrides. EventHandlers are post-completion notifications: they
+// cannot replace persistence or make an already committed event fail.
 type BillingServiceOptions struct {
 	Handlers                    map[BillingEventType]BillingEventHandler
 	DefaultHandler              BillingEventHandler
+	EventHandlers               map[BillingEventType]BillingEventCallback
 	Provisioning                BillingProvisioningPort
 	AutoSelectEntitlementSource *bool
 	PastDueGracePeriod          *time.Duration
@@ -244,6 +245,17 @@ func applyBillingOptions(service *BillingService, options *BillingServiceOptions
 		}
 	}
 	service.SetDefaultHandler(options.DefaultHandler)
+	eventKeys := make([]string, 0, len(options.EventHandlers))
+	for eventType := range options.EventHandlers {
+		eventKeys = append(eventKeys, string(eventType))
+	}
+	sort.Strings(eventKeys)
+	for _, key := range eventKeys {
+		eventType := BillingEventType(key)
+		if err := service.OnEvent(eventType, options.EventHandlers[eventType]); err != nil {
+			return err
+		}
+	}
 	if options.Provisioning != nil {
 		service.provisioning = options.Provisioning
 	}

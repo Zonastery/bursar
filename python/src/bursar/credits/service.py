@@ -1034,6 +1034,8 @@ class CreditsService:
             raise LeaseNotFoundError(f"Lease not found. User={user_id}")
         if error in ("released_lease", "settled_lease"):
             raise LeaseNotFoundError(f"Lease is already finalized. User={user_id}")
+        if error == "settlement_conflict":
+            raise StoreError(f"Lease operation failed: {error}. User={user_id}")
         if error in ("missing_quota_measure", "invalid_measure", "policy_mismatch"):
             raise ConfigError(f"Invalid operation policy for user {user_id}: {error}")
         if error in ("invalid_amount", "invalid_request"):

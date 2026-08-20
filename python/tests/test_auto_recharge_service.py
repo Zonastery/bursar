@@ -1,13 +1,40 @@
 """Focused recovery tests for provider-side auto-recharge outcomes."""
 
+from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from bursar.billing.auto_recharge_service import AutoRechargeService, _ResolvedAutoRechargePolicy
+from bursar.billing.policy_window import resolve_auto_recharge_window
 from bursar.billing.types import BillingAutoRechargeAttempt, BillingAutoRechargeProfile
+from bursar.config.types import CalendarWindow
 from bursar.providers.types import PaymentMethodInfo, SavedPaymentChargeParams, SavedPaymentChargeResult
+
+
+def test_calendar_policy_windows_preserve_local_boundaries() -> None:
+    instant = datetime(2026, 3, 18, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+    expected: dict[Literal["day", "week", "month", "year"], tuple[str, str]] = {
+        "day": ("2026-03-18", "2026-03-19"),
+        "week": ("2026-03-16", "2026-03-23"),
+        "month": ("2026-03-01", "2026-04-01"),
+        "year": ("2026-01-01", "2027-01-01"),
+    }
+
+    for unit, (start_date, end_date) in expected.items():
+        result = resolve_auto_recharge_window(
+            CalendarWindow(type="calendar", unit=unit, timezone="America/New_York"),
+            now=instant,
+        )
+        local_start = datetime.fromisoformat(result.start).astimezone(ZoneInfo("America/New_York"))
+        local_end = datetime.fromisoformat(result.end).astimezone(ZoneInfo("America/New_York"))
+        assert result.anchor == "calendar"
+        assert result.timezone == "America/New_York"
+        assert local_start.date().isoformat() == start_date
+        assert local_end.date().isoformat() == end_date
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,16 @@ package bursar
 import (
 	"context"
 	"sync"
+	"time"
 )
+
+const defaultCatalogCacheTTL = 5 * time.Minute
+
+// CatalogServiceOptions controls automatic active-catalog refresh. A zero TTL
+// disables automatic refresh; callers can still force a reload with Load.
+type CatalogServiceOptions struct {
+	CacheTTL time.Duration
+}
 
 // CatalogService owns process-local parsing and pricing-engine caching around
 // the database-authoritative catalog revision. Catalog writes remain atomic
@@ -15,18 +24,34 @@ type CatalogService struct {
 	store CreditStore
 
 	mu             sync.RWMutex
+	refreshMu      sync.Mutex
 	revision       *CatalogRevision
 	config         *BursarConfig
 	engine         *PricingEngine
 	versionEngines map[int]*PricingEngine
+	cacheTTL       time.Duration
+	loadedAt       time.Time
+	now            func() time.Time
 }
 
 // NewCatalogService constructs the catalog capability for a durable store.
 func NewCatalogService(store CreditStore) (*CatalogService, error) {
+	return NewCatalogServiceWithOptions(store, CatalogServiceOptions{CacheTTL: defaultCatalogCacheTTL})
+}
+
+// NewCatalogServiceWithOptions constructs a catalog capability with an
+// explicit refresh TTL.
+func NewCatalogServiceWithOptions(store CreditStore, options CatalogServiceOptions) (*CatalogService, error) {
 	if store == nil {
 		return nil, NewError("catalog requires a credit store", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
-	return &CatalogService{store: store, versionEngines: make(map[int]*PricingEngine)}, nil
+	if options.CacheTTL < 0 {
+		return nil, NewError("catalog cache TTL must not be negative", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	return &CatalogService{
+		store: store, versionEngines: make(map[int]*PricingEngine),
+		cacheTTL: options.CacheTTL, now: time.Now,
+	}, nil
 }
 
 // GetActive returns the currently active persisted catalog revision, if any.
@@ -51,22 +76,10 @@ func (s *CatalogService) IsLoaded() bool {
 // Load reads the current active persisted revision, validates it using the
 // shared pricing schema and semantics, and installs an exact PricingEngine.
 func (s *CatalogService) Load(ctx context.Context) error {
-	if s == nil || s.store == nil {
-		return NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
-	}
-	revision, err := s.store.GetActiveCatalog(ctx)
-	if err != nil {
-		return err
-	}
-	if revision == nil {
-		return NewError("no active Bursar catalog is available", ErrorOptions{Code: ErrorCodeCatalogNotLoaded, Category: ErrorCategoryNotFound})
-	}
-	return s.install(revision)
+	return s.refreshNow(ctx)
 }
 
-// Refresh reloads only when the active persisted revision differs from the
-// cached revision. Concurrent readers always observe an all-or-nothing engine.
-func (s *CatalogService) Refresh(ctx context.Context) error {
+func (s *CatalogService) refreshNow(ctx context.Context) error {
 	if s == nil || s.store == nil {
 		return NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
@@ -78,23 +91,60 @@ func (s *CatalogService) Refresh(ctx context.Context) error {
 		return NewError("no active Bursar catalog is available", ErrorOptions{Code: ErrorCodeCatalogNotLoaded, Category: ErrorCategoryNotFound})
 	}
 	s.mu.RLock()
-	loaded := s.revision != nil && s.revision.ID == revision.ID && s.revision.Version == revision.Version
+	loaded := s.revision != nil && s.revision.ID == revision.ID && s.revision.Version == revision.Version && s.engine != nil
 	s.mu.RUnlock()
 	if loaded {
+		s.mu.Lock()
+		s.loadedAt = s.now().UTC()
+		s.mu.Unlock()
 		return nil
 	}
 	return s.install(revision)
 }
 
-// Invalidate clears the in-process cache. It never alters the persisted
-// catalog; the next Load or Refresh obtains the active revision from storage.
+// Refresh reloads after the configured cache TTL. A zero TTL disables
+// automatic refresh, matching the Python and TypeScript SDKs. Concurrent
+// stale readers coalesce into one PostgreSQL read.
+func (s *CatalogService) Refresh(ctx context.Context) error {
+	return s.RefreshIfStale(ctx)
+}
+
+// RefreshIfStale is the explicit name for Refresh's TTL-aware behavior.
+func (s *CatalogService) RefreshIfStale(ctx context.Context) error {
+	if s == nil || s.store == nil {
+		return NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+	}
+	if s.cacheTTL == 0 {
+		return nil
+	}
+	if s.catalogFresh() {
+		return nil
+	}
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	if s.catalogFresh() {
+		return nil
+	}
+	return s.refreshNow(ctx)
+}
+
+func (s *CatalogService) catalogFresh() bool {
+	s.mu.RLock()
+	loadedAt := s.loadedAt
+	cacheTTL := s.cacheTTL
+	now := s.now
+	s.mu.RUnlock()
+	return !loadedAt.IsZero() && now().Sub(loadedAt) < cacheTTL
+}
+
+// Invalidate marks the in-process catalog stale without discarding the last
+// valid engine. The next TTL-aware Refresh or unpinned pricing call reloads it.
 func (s *CatalogService) Invalidate() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	s.revision, s.config, s.engine = nil, nil, nil
-	s.versionEngines = make(map[int]*PricingEngine)
+	s.loadedAt = time.Time{}
 	s.mu.Unlock()
 }
 
@@ -144,6 +194,11 @@ func (s *CatalogService) CalculateForUser(ctx context.Context, userID string, me
 	plan, err := s.store.GetUserPlan(ctx, userID)
 	if err != nil {
 		return CostBreakdown{}, err
+	}
+	if plan.CatalogVersion == nil {
+		if err := s.RefreshIfStale(ctx); err != nil {
+			return CostBreakdown{}, err
+		}
 	}
 	engine, err := s.engineForVersion(ctx, plan.CatalogVersion)
 	if err != nil {
@@ -229,10 +284,11 @@ func (s *CatalogService) PublishDraft(ctx context.Context, config map[string]any
 	if s == nil || s.store == nil {
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	if _, err := LoadConfigFromMap(config); err != nil {
+	parsed, err := LoadConfigFromMap(config)
+	if err != nil {
 		return "", err
 	}
-	return s.store.PublishCatalogDraft(ctx, config, label)
+	return s.store.PublishCatalogDraft(ctx, CanonicalParsedBursarConfigDict(parsed), label)
 }
 
 // Activate makes one existing revision active with the catalog-defined rollout
@@ -242,10 +298,15 @@ func (s *CatalogService) Activate(ctx context.Context, version int, rollout Cata
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
 	result, err := s.store.ActivateCatalogRevision(ctx, version, rollout)
-	if err == nil {
-		s.Invalidate()
+	if err != nil {
+		return result, err
 	}
-	return result, err
+	// The activation is already durable at this point. Do not turn a cache
+	// refresh failure into an apparent mutation failure: callers could retry a
+	// successful activation and amplify side effects. Mark the cache stale so
+	// the next read performs the refresh and reports any read failure there.
+	s.Invalidate()
+	return result, nil
 }
 
 // PublishAndActivate validates and atomically publishes the next revision and
@@ -254,14 +315,18 @@ func (s *CatalogService) PublishAndActivate(ctx context.Context, config map[stri
 	if s == nil || s.store == nil {
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	if _, err := LoadConfigFromMap(config); err != nil {
+	parsed, err := LoadConfigFromMap(config)
+	if err != nil {
 		return "", err
 	}
-	result, err := s.store.PublishAndActivateCatalog(ctx, config, label, rollout)
-	if err == nil {
-		s.Invalidate()
+	result, err := s.store.PublishAndActivateCatalog(ctx, CanonicalParsedBursarConfigDict(parsed), label, rollout)
+	if err != nil {
+		return result, err
 	}
-	return result, err
+	// Publishing and activation commit atomically in storage. Keep the mutation
+	// result unambiguous and make the following read refresh the local cache.
+	s.Invalidate()
+	return result, nil
 }
 
 // SetRevisionPin pins or unpins an existing subject assignment from automatic
@@ -300,6 +365,7 @@ func (s *CatalogService) install(revision *CatalogRevision) error {
 	s.engine = engine
 	s.versionEngines = make(map[int]*PricingEngine)
 	s.versionEngines[revision.Version] = engine
+	s.loadedAt = s.now().UTC()
 	s.mu.Unlock()
 	return nil
 }

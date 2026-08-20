@@ -1,4 +1,5 @@
 import type { StructuredObject } from "../shared/json.js";
+import { normalizeLogger, type Logger, type NormalizedLogger } from "../shared/logger.js";
 
 /**
  * Typed event emitter for credit lifecycle events.
@@ -63,6 +64,35 @@ type EventHandler = (event: CreditEvent) => void | PromiseLike<void>;
 /** Typed pub/sub event emitter for credit events. */
 export class CreditEventEmitter {
   private listeners = new Map<CreditEventType, Set<EventHandler>>();
+  private readonly logger: NormalizedLogger;
+
+  /**
+   * Create an emitter with an optional SDK logger.
+   *
+   * The argument is optional for compatibility with existing no-argument
+   * construction. Missing logger methods are normalized to no-ops.
+   */
+  constructor(logger?: Logger | null) {
+    this.logger = normalizeLogger(logger);
+  }
+
+  private logHandlerFailure(message: string, eventType: CreditEventType, cause: unknown): void {
+    let error: Error | string;
+    try {
+      error = cause instanceof Error ? cause : String(cause);
+    } catch {
+      error = "Unknown handler failure";
+    }
+    try {
+      // Logger methods may be synchronous or asynchronous. Normalize the
+      // result so a rejecting injected logger cannot escape as an unhandled
+      // rejection and weaken listener isolation.
+      const loggerResult = this.logger.error(message, { eventType, error });
+      void Promise.resolve(loggerResult).catch(() => {});
+    } catch {
+      // Logging must not weaken listener isolation if a caller-supplied logger fails.
+    }
+  }
 
   /** Register a handler for a specific event type. */
   on(type: CreditEventType, handler: EventHandler): void {
@@ -94,12 +124,12 @@ export class CreditEventEmitter {
         const out = handler(event);
         // Swallow rejections from async handlers so they never become unhandled.
         if (out != null) {
-          void Promise.resolve(out).catch((err) => {
-            console.error(`[CreditEventEmitter] async handler error for event ${event.type}:`, err);
+          void Promise.resolve(out).catch((error: unknown) => {
+            this.logHandlerFailure("[CreditEventEmitter] async handler failed", event.type, error);
           });
         }
-      } catch (err) {
-        console.error(`[CreditEventEmitter] handler error for event ${event.type}:`, err);
+      } catch (error) {
+        this.logHandlerFailure("[CreditEventEmitter] handler failed", event.type, error);
       }
     }
   }

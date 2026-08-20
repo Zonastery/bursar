@@ -7,6 +7,7 @@ import { Decimal } from "decimal.js";
 import pg from "pg";
 import { z } from "zod";
 import { PostgresClient } from "../src/shared/postgres-client.js";
+import type { JsonObject } from "../src/shared/json.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
 import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
 import type { BillingEventPayloadExport, UsageChargeExport } from "../src/storage/ports.js";
@@ -15,10 +16,11 @@ import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers
 const DATABASE_URL = inject("DATABASE_URL");
 const OTHER_TENANT_ID = "00000000-0000-0000-0000-000000000002";
 
-async function seedStorageRows(pool: pg.Pool): Promise<{
-  chargeId: string;
-  billingEventId: string;
-}> {
+async function seedUsageOnly(
+  pool: pg.Pool,
+  idempotencyKey = "storage-repo-usage-1",
+  traceId = "trace-1",
+): Promise<{ chargeId: string; subjectId: string }> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -43,18 +45,38 @@ async function seedStorageRows(pool: pg.Pool): Promise<{
         $1::uuid,
         'completion',
         0,
-        'storage-repo-usage-1',
+        $2,
         p_model => 'small-model',
         p_region => 'in',
         p_measures => '{"input_tokens":12}'::jsonb,
         p_dimensions => '{"tenant_tier":"starter"}'::jsonb,
-        p_metadata => '{"trace_id":"trace-1"}'::jsonb
+        p_metadata => jsonb_build_object('trace_id', $3::text)
       )
       `,
-      [subjectId],
+      [subjectId, idempotencyKey, traceId],
     );
     expect(usage.rows[0]?.error_code).toBeNull();
 
+    await client.query("COMMIT");
+    return { chargeId: String(usage.rows[0]?.charge_id), subjectId };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function seedStorageRows(pool: pg.Pool): Promise<{
+  chargeId: string;
+  billingEventId: string;
+}> {
+  const { chargeId, subjectId } = await seedUsageOnly(pool);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+    await client.query("SELECT set_config('bursar.provider_environment', 'test', true)");
     const billingClaim = await client.query(
       `
       SELECT *
@@ -74,16 +96,103 @@ async function seedStorageRows(pool: pg.Pool): Promise<{
       [billingClaimToken],
     );
     await client.query("COMMIT");
-    return {
-      chargeId: String(usage.rows[0]?.charge_id),
-      billingEventId,
-    };
+    return { chargeId, billingEventId };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
   } finally {
     client.release();
   }
+}
+
+function usageOutboxPayload(event: UsageChargeExport): JsonObject {
+  return {
+    tenant_id: event.tenantId,
+    charge_id: event.chargeId,
+    account_id: event.accountId,
+    subject_id: event.subjectId,
+    operation: event.operation,
+    feature: event.feature,
+    model: event.model,
+    region: event.region,
+    measures: event.measures,
+    dimensions: event.dimensions,
+    metadata: event.metadata,
+    requested: event.requested,
+    charged: event.charged,
+    allowance_requested: event.allowanceRequested,
+    allowance_covered: event.allowanceCovered,
+    billing_disposition: event.billingDisposition,
+    catalog_revision_id: event.catalogRevisionId,
+    plan_id: event.planId,
+    rate_card_key: event.rateCardKey,
+    pricing_snapshot: event.pricingSnapshot,
+    ledger_entry_id: event.ledgerEntryId,
+    correction_of_charge_id: event.correctionOfChargeId,
+    idempotency_key: event.idempotencyKey,
+    request_digest: event.requestDigest,
+    event_at: event.eventAt,
+    created_at: event.createdAt,
+  };
+}
+
+function billingOutboxPayload(event: BillingEventPayloadExport): JsonObject {
+  return {
+    tenant_id: event.tenantId,
+    event_id: event.eventId,
+    provider: event.provider,
+    provider_environment: event.providerEnvironment,
+    provider_event_id: event.providerEventId,
+    event_type: event.eventType,
+    status: event.status,
+    received_at: event.receivedAt,
+    completed_at: event.completedAt,
+    envelope: event.envelope,
+    object_key: event.objectKey,
+    object_version: event.objectVersion,
+    archived_at: event.archivedAt,
+  };
+}
+
+interface OutboxReplay {
+  sourceAggregateId: string;
+  topic: string;
+  aggregateId: string;
+  idempotencyKey: string;
+  payload?: JsonObject;
+  payloadVersion?: number;
+  patch?: { key: string; value: string };
+}
+
+async function enqueueOutboxReplay(pool: pg.Pool, replay: OutboxReplay): Promise<void> {
+  await pool.query(
+    `INSERT INTO bursar.event_outbox(
+       tenant_id, topic, aggregate_type, aggregate_id, idempotency_key,
+       status, payload_version, payload
+     )
+     SELECT tenant_id, topic, aggregate_type, $1::uuid, $2::text,
+            'pending', COALESCE($3::integer, payload_version),
+            CASE
+              WHEN $4::jsonb IS NOT NULL THEN $4::jsonb
+              WHEN $5::text IS NOT NULL
+                THEN jsonb_set(payload, ARRAY[$5::text], to_jsonb($6::text))
+              ELSE payload
+            END
+     FROM bursar.event_outbox
+     WHERE aggregate_id = $7::uuid AND topic = $8::text
+     ORDER BY id
+     LIMIT 1`,
+    [
+      replay.aggregateId,
+      replay.idempotencyKey,
+      replay.payloadVersion ?? null,
+      replay.payload === undefined ? null : JSON.stringify(replay.payload),
+      replay.patch?.key ?? null,
+      replay.patch?.value ?? null,
+      replay.sourceAggregateId,
+      replay.topic,
+    ],
+  );
 }
 
 async function seedDeadLetters(pool: pg.Pool): Promise<string[]> {
@@ -322,6 +431,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     try {
       expect(runtime.health()).toMatchObject({ started: false, closed: false });
       await runtime.start({ loadCatalog: false });
+      await runtime.start({ loadCatalog: false });
       expect(initialized).toBe(true);
       const result = await runtime.flush();
       expect(result).toEqual({ claimed: 2, delivered: 2, failed: 0, claimLost: 0 });
@@ -337,5 +447,612 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     }
     expect(archiveClosed).toBe(true);
     await expect(runtime.flush()).rejects.toThrow("closed");
+    await expect(runtime.worker?.stop()).resolves.toBeUndefined();
+    await expect(Promise.resolve().then(() => runtime.worker!.runOnce())).rejects.toThrow(
+      "stopped",
+    );
+  });
+
+  it("coalesces usage exports through the optional batch sink", async () => {
+    await seedUsageOnly(pool);
+    await seedUsageOnly(pool, "storage-repo-usage-2", "trace-2");
+    const usageRows = await pool.query<{ aggregate_id: string }>(
+      `SELECT aggregate_id::text
+       FROM bursar.event_outbox
+       WHERE topic = 'usage.charge_recorded'
+       ORDER BY id`,
+    );
+    for (const row of usageRows.rows) {
+      const usage = await repository.getUsageCharge(row.aggregate_id);
+      await pool.query(
+        `UPDATE bursar.event_outbox SET payload = $1::jsonb
+         WHERE aggregate_id = $2::uuid AND topic = 'usage.charge_recorded'`,
+        [JSON.stringify(usageOutboxPayload(usage!)), row.aggregate_id],
+      );
+    }
+    const batches: (readonly [UsageChargeExport, string])[][] = [];
+    const clickhouse = {
+      initialize: async () => {},
+      writeUsage: async () => {},
+      writeUsageBatch: async (
+        entries: readonly (readonly [UsageChargeExport, string])[],
+      ): Promise<void> => {
+        batches.push(Array.from(entries));
+      },
+      spendByUser: async () => [],
+      spendByModel: async () => [],
+      topUsers: async () => [],
+      dailySpend: async () => [],
+      aggregateStats: async () => ({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse,
+      outbox: { batchSize: 10, pollIntervalMs: 60_000 },
+    });
+    try {
+      await runtime.start({ loadCatalog: false });
+      await expect(runtime.flush()).resolves.toEqual({
+        claimed: 2,
+        delivered: 2,
+        failed: 0,
+        claimLost: 0,
+      });
+      expect(batches).toHaveLength(1);
+      expect(batches[0]).toHaveLength(2);
+      expect(batches[0]?.[0]?.[0].operation).toBe("completion");
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("records a failed batch export while keeping the runtime closable", async () => {
+    await seedUsageOnly(pool);
+    const clickhouse = {
+      initialize: async () => {},
+      writeUsage: async () => {},
+      writeUsageBatch: async (): Promise<void> => {
+        throw new Error("analytics sink unavailable");
+      },
+      spendByUser: async () => [],
+      spendByModel: async () => [],
+      topUsers: async () => [],
+      dailySpend: async () => [],
+      aggregateStats: async () => ({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse,
+      outbox: { batchSize: 10, pollIntervalMs: 60_000, attemptLimit: 1 },
+    });
+    try {
+      await runtime.start({ loadCatalog: false });
+      await expect(runtime.flush()).resolves.toMatchObject({
+        claimed: 1,
+        delivered: 0,
+        failed: 1,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("composes tenant identity, diagnostics, and operator storage maintenance", async () => {
+    const runtime = await createBursarRuntime({
+      postgres: `${DATABASE_URL!}?application_name=bursar-runtime-tenant`,
+      operatorPostgres: `${DATABASE_URL!}?application_name=bursar-runtime-operator`,
+      tenantId: TEST_TENANT_ID,
+      tenantSlug: " BURSAR-TESTS ",
+      providerEnvironment: "test",
+      outbox: false,
+    });
+    try {
+      await runtime.start({ loadCatalog: false });
+      expect(runtime.state()).toMatchObject({
+        started: true,
+        closed: false,
+        catalogLoaded: false,
+        worker: { configured: false, lifecycle: "not_configured" },
+      });
+      await expect(runtime.checkDependencies({ outboxLimit: 3 })).resolves.toMatchObject({
+        postgres: { status: "ok" },
+        catalog: { status: "ok", loaded: false },
+        outbox: { status: "ok", limit: 3 },
+      });
+
+      await expect(
+        runtime.maintenance.runOnce({
+          limit: 1,
+          now: new Date("2026-08-19T00:00:00.000Z"),
+        }),
+      ).resolves.toMatchObject({ status: "completed", count: expect.any(Number) });
+
+      const forced = await runtime.operatorMaintenance.runOnce({
+        mode: "force",
+        now: new Date("2026-08-19T00:00:00.000Z"),
+      });
+      expect(forced).toMatchObject({ status: "completed", hasMore: expect.any(Boolean) });
+      expect(forced.count).toBeGreaterThanOrEqual(0);
+
+      const maintenanceLock = await pool.connect();
+      try {
+        await maintenanceLock.query("BEGIN");
+        await maintenanceLock.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('bursar.storage.maintenance', 0))",
+        );
+        await expect(runtime.operatorMaintenance.runOnce({ mode: "force" })).resolves.toMatchObject(
+          {
+            status: "busy",
+            count: 0,
+            hasMore: true,
+          },
+        );
+      } finally {
+        await maintenanceLock.query("ROLLBACK");
+        maintenanceLock.release();
+      }
+
+      const partitionLock = await pool.connect();
+      try {
+        await partitionLock.query("BEGIN");
+        await partitionLock.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('bursar.storage.partition.usage_charge_payloads', 0))",
+        );
+        await expect(
+          runtime.operatorMaintenance.runPartitionOnce("usage_charge_payloads"),
+        ).resolves.toMatchObject({
+          status: "busy",
+          parentTable: "usage_charge_payloads",
+          count: 0,
+          hasMore: true,
+        });
+      } finally {
+        await partitionLock.query("ROLLBACK");
+        partitionLock.release();
+      }
+
+      const notDue = await runtime.operatorMaintenance.runOnce({
+        mode: "ifDue",
+        now: new Date("2026-08-19T00:00:01.000Z"),
+      });
+      expect(notDue).toMatchObject({ status: "not_due", count: 0, hasMore: false });
+
+      for (const parentTable of ["usage_charge_payloads", "billing_event_payloads"] as const) {
+        await expect(
+          runtime.operatorMaintenance.runPartitionOnce(parentTable),
+        ).resolves.toMatchObject({
+          status: "completed",
+          parentTable,
+          count: expect.any(Number),
+          defaultPartitionHasRows: expect.any(Boolean),
+        });
+      }
+    } finally {
+      await runtime.close();
+    }
+
+    expect(runtime.health()).toMatchObject({ started: true, closed: true });
+    await expect(runtime.checkDependencies()).resolves.toMatchObject({
+      ready: false,
+      postgres: { status: "skipped", reason: "runtime is closed" },
+      catalog: { status: "skipped" },
+      outbox: { status: "skipped" },
+    });
+  });
+
+  it("recovers a usage projection after losing its PostgreSQL lease", async () => {
+    await seedUsageOnly(pool);
+    let writes = 0;
+    const outcomes: Array<{
+      status: string;
+      claimLossPhase: string | null;
+      summary: string | null;
+    }> = [];
+    const clickhouse = {
+      initialize: async () => {},
+      writeUsage: async (_event: UsageChargeExport, outboxEventId: string) => {
+        writes += 1;
+        if (writes !== 1) return;
+        const client = await pool.connect();
+        try {
+          await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+          await client.query(
+            `UPDATE bursar.event_outbox
+             SET claim_expires_at = now() - interval '1 second'
+             WHERE id = $1::bigint AND status = 'processing'`,
+            [outboxEventId],
+          );
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } finally {
+          client.release();
+        }
+      },
+      spendByUser: async () => [],
+      spendByModel: async () => [],
+      topUsers: async () => [],
+      dailySpend: async () => [],
+      aggregateStats: async () => ({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse,
+      outbox: {
+        batchSize: 1,
+        leaseSeconds: 1,
+        attemptLimit: 2,
+        pollIntervalMs: 60_000,
+        onEventOutcome: (outcome) => {
+          outcomes.push({
+            status: outcome.status,
+            claimLossPhase: outcome.claimLossPhase,
+            summary: outcome.summary,
+          });
+        },
+      },
+    });
+    try {
+      await expect(runtime.flush()).resolves.toMatchObject({
+        claimed: 1,
+        delivered: 0,
+        failed: 1,
+      });
+      expect(writes).toBe(1);
+      expect(outcomes).toHaveLength(1);
+      await expect(runtime.flush()).resolves.toEqual({
+        claimed: 1,
+        delivered: 1,
+        failed: 0,
+        claimLost: 0,
+      });
+    } finally {
+      await runtime.close();
+    }
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["claim_lost", "delivered"]);
+    expect(outcomes[0]?.claimLossPhase).toBe("heartbeat");
+  });
+
+  it("projects and replays valid envelopes while rejecting unsafe persisted events", async () => {
+    const { chargeId, billingEventId } = await seedStorageRows(pool);
+    const usage = await repository.getUsageCharge(chargeId);
+    const billing = await repository.getBillingEventPayload(billingEventId);
+    expect(usage).not.toBeNull();
+    expect(billing).not.toBeNull();
+    await pool.query(
+      `UPDATE bursar.event_outbox
+       SET payload = $1::jsonb
+      WHERE aggregate_id = $2::uuid AND topic = 'usage.charge_recorded'`,
+      [JSON.stringify(usageOutboxPayload(usage!)), chargeId],
+    );
+    await pool.query(
+      `UPDATE bursar.event_outbox
+       SET topic = 'billing.webhook_received', payload = $1::jsonb
+       WHERE aggregate_id = $2::uuid AND topic = 'billing.webhook_completed'`,
+      [JSON.stringify(billingOutboxPayload(billing!)), billingEventId],
+    );
+
+    const usageWrites: string[] = [];
+    const archives: string[] = [];
+    const archivePointerMissingId = "00000000-0000-0000-0000-0000000000b6";
+    const clickhouse = {
+      initialize: async () => {},
+      writeUsage: async (_event: UsageChargeExport, outboxEventId: string) => {
+        usageWrites.push(outboxEventId);
+      },
+      spendByUser: async () => [],
+      spendByModel: async () => [],
+      topUsers: async () => [],
+      dailySpend: async () => [],
+      aggregateStats: async () => ({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse,
+      s3: {
+        archive: async (event: BillingEventPayloadExport) => {
+          archives.push(event.eventId);
+          return { key: `archive/${event.providerEventId}.json`, versionId: "version-complete" };
+        },
+      },
+      outbox: { batchSize: 10, pollIntervalMs: 60_000 },
+    });
+    try {
+      await expect(runtime.flush()).resolves.toEqual({
+        claimed: 2,
+        delivered: 2,
+        failed: 0,
+        claimLost: 0,
+      });
+
+      await enqueueOutboxReplay(pool, {
+        sourceAggregateId: billingEventId,
+        topic: "billing.webhook_received",
+        aggregateId: billingEventId,
+        idempotencyKey: "billing-replay-after-archive",
+      });
+      await expect(runtime.flush()).resolves.toEqual({
+        claimed: 1,
+        delivered: 1,
+        failed: 0,
+        claimLost: 0,
+      });
+
+      await enqueueOutboxReplay(pool, {
+        sourceAggregateId: chargeId,
+        topic: "usage.charge_recorded",
+        aggregateId: "00000000-0000-0000-0000-0000000000b2",
+        idempotencyKey: "usage-version-2",
+        payloadVersion: 2,
+      });
+      await enqueueOutboxReplay(pool, {
+        sourceAggregateId: billingEventId,
+        topic: "billing.webhook_received",
+        aggregateId: "00000000-0000-0000-0000-0000000000b4",
+        idempotencyKey: "billing-incomplete",
+        payload: {},
+      });
+      await enqueueOutboxReplay(pool, {
+        sourceAggregateId: billingEventId,
+        topic: "billing.webhook_received",
+        aggregateId: archivePointerMissingId,
+        idempotencyKey: "billing-archive-pointer-missing",
+        patch: { key: "event_id", value: archivePointerMissingId },
+      });
+      await expect(runtime.flush()).resolves.toMatchObject({
+        claimed: 3,
+        delivered: 0,
+        failed: 3,
+      });
+
+      await enqueueOutboxReplay(pool, {
+        sourceAggregateId: chargeId,
+        topic: "usage.charge_recorded",
+        aggregateId: "00000000-0000-0000-0000-0000000000a1",
+        idempotencyKey: "usage-tenant-integrity",
+        patch: { key: "tenant_id", value: OTHER_TENANT_ID },
+      });
+      await enqueueOutboxReplay(pool, {
+        sourceAggregateId: billingEventId,
+        topic: "billing.webhook_received",
+        aggregateId: "00000000-0000-0000-0000-0000000000a4",
+        idempotencyKey: "billing-event-integrity",
+        patch: {
+          key: "event_id",
+          value: "00000000-0000-0000-0000-0000000000a5",
+        },
+      });
+      await expect(runtime.flush()).resolves.toMatchObject({
+        claimed: 2,
+        delivered: 0,
+        failed: 2,
+        claimLost: 0,
+      });
+    } finally {
+      await runtime.close();
+    }
+    expect(usageWrites).toHaveLength(1);
+    expect(archives).toEqual([billingEventId, archivePointerMissingId]);
+  });
+
+  it("records manual and background diagnostics when the operator database is unavailable", async () => {
+    const failedOperatorPool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
+    const clickhouse = {
+      initialize: async () => {},
+      writeUsage: async () => {},
+      spendByUser: async () => [],
+      spendByModel: async () => [],
+      topUsers: async () => [],
+      dailySpend: async () => [],
+      aggregateStats: async () => ({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: failedOperatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse,
+      outbox: { batchSize: 1, pollIntervalMs: 60_000 },
+    });
+    await failedOperatorPool.end();
+    try {
+      await expect(runtime.operatorMaintenance.runOnce({ mode: "force" })).resolves.toMatchObject({
+        status: "failed",
+        hasMore: true,
+      });
+      await expect(
+        runtime.operatorMaintenance.runPartitionOnce("usage_charge_payloads"),
+      ).resolves.toMatchObject({
+        status: "failed",
+        parentTable: "usage_charge_payloads",
+        hasMore: true,
+      });
+      await expect(runtime.flush()).rejects.toThrow();
+      expect(runtime.state().worker.lastRun).toMatchObject({ status: "failed", result: null });
+
+      await runtime.start({ loadCatalog: false });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(runtime.state().worker.lastError).toMatchObject({
+        error: "outbox_worker_failed:STORE_ERROR",
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("keeps a dangling usage outbox event retryable when its charge is gone", async () => {
+    const aggregateId = "00000000-0000-0000-0000-0000000000d1";
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+      await client.query(
+        `INSERT INTO bursar.event_outbox(
+           tenant_id, topic, aggregate_type, aggregate_id, idempotency_key,
+           status, payload_version, payload
+         ) VALUES ($1::uuid, 'usage.charge_recorded', 'credit_usage_charge',
+           $2::uuid, 'dangling-usage-retry', 'pending', 1,
+           '{"delivery_required": false}'::jsonb)`,
+        [TEST_TENANT_ID, aggregateId],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const writes: string[] = [];
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse: {
+        initialize: async () => {},
+        writeUsage: async (_event: UsageChargeExport, outboxEventId: string) => {
+          writes.push(outboxEventId);
+        },
+        spendByUser: async () => [],
+        spendByModel: async () => [],
+        topUsers: async () => [],
+        dailySpend: async () => [],
+        aggregateStats: async () => ({
+          totalCreditsConsumed: new Decimal(0),
+          activeUsers: 0,
+          avgDailySpend: new Decimal(0),
+          topModel: "",
+          topUser: "",
+        }),
+      },
+      outbox: {
+        batchSize: 1,
+        attemptLimit: 1,
+        pollIntervalMs: 60_000,
+        onEventOutcome: () => Promise.reject(new Error("metrics sink unavailable")),
+      },
+    });
+    try {
+      await expect(runtime.flush()).resolves.toMatchObject({
+        claimed: 1,
+        delivered: 0,
+        failed: 1,
+      });
+    } finally {
+      await runtime.close();
+    }
+    expect(writes).toEqual([]);
+  });
+
+  it("leaves a billing event pending when archive-pointer recording loses its race", async () => {
+    const { billingEventId } = await seedStorageRows(pool);
+    let archiveCalls = 0;
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      s3: {
+        archive: async (event: BillingEventPayloadExport) => {
+          archiveCalls += 1;
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+            await client.query("SELECT set_config('bursar.provider_environment', 'test', true)");
+            await client.query(
+              `UPDATE bursar.billing_events
+               SET payload_object_key = 'archive/race-winner.json',
+                   payload_object_version = 'race-version', payload_archived_at = now()
+               WHERE id = $1::uuid AND payload_object_key IS NULL`,
+              [event.eventId],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          } finally {
+            client.release();
+          }
+          return { key: "archive/loser.json", versionId: "loser-version" };
+        },
+      },
+      outbox: { batchSize: 1, attemptLimit: 1, pollIntervalMs: 60_000 },
+    });
+    try {
+      await expect(runtime.flush()).resolves.toMatchObject({
+        claimed: 1,
+        delivered: 0,
+        failed: 1,
+      });
+    } finally {
+      await runtime.close();
+    }
+    expect(archiveCalls).toBe(1);
+    await expect(repository.getBillingEventPayload(billingEventId)).resolves.toMatchObject({
+      objectKey: "archive/race-winner.json",
+      objectVersion: "race-version",
+    });
+  });
+
+  it("closes cleanly when tenant verification fails during startup", async () => {
+    await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+      OTHER_TENANT_ID,
+      "missing-tenant",
+      "Missing tenant",
+    ]);
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      tenantSlug: "missing-tenant",
+      providerEnvironment: "test",
+      outbox: false,
+    });
+    const start = runtime.start({ loadCatalog: false });
+    await expect(runtime.close()).resolves.toBeUndefined();
+    await expect(start).rejects.toThrow(/resolves to a different tenant/);
+    expect(runtime.health()).toMatchObject({ started: false, closed: true });
   });
 });

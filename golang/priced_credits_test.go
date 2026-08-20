@@ -10,6 +10,7 @@ type pricedCreditsStoreStub struct {
 	CreditStore
 
 	active       *CatalogRevision
+	activeCalls  int
 	revisions    map[int]*CatalogRevision
 	plan         GetUserPlanResult
 	leasePricing *LeasePricingContext
@@ -31,6 +32,7 @@ type pricedCreditsStoreStub struct {
 func (*pricedCreditsStoreStub) Close() error { return nil }
 
 func (s *pricedCreditsStoreStub) GetActiveCatalog(context.Context) (*CatalogRevision, error) {
+	s.activeCalls++
 	return s.active, nil
 }
 
@@ -200,6 +202,101 @@ func TestMetricPricedCreditMethodsUseCatalogAndLeaseSnapshots(t *testing.T) {
 
 	if len(store.quotaKeys) != 3 {
 		t.Fatalf("quota event lookups = %v, want deduct, reserve, and settle", store.quotaKeys)
+	}
+}
+
+func TestRunBilledUsagePricesEstimateAndActualFromCapturedCatalogs(t *testing.T) {
+	t.Parallel()
+
+	active := &CatalogRevision{ID: "catalog-current", Version: 2, Config: pricedCreditsCatalog("pro", "0.001")}
+	historical := &CatalogRevision{ID: "catalog-historical", Version: 1, Config: pricedCreditsCatalog("legacy", "0.004")}
+	store := &pricedCreditsStoreStub{
+		active:       active,
+		revisions:    map[int]*CatalogRevision{1: historical, 2: active},
+		plan:         GetUserPlanResult{UserID: "user-1", PlanKey: "pro", RateCard: "pro"},
+		leasePricing: &LeasePricingContext{CatalogVersion: 1, PlanKey: "legacy", RateCard: "legacy"},
+	}
+	service, err := NewCreditsService(store, CreditsServiceOptions{})
+	if err != nil {
+		t.Fatalf("NewCreditsService() error = %v", err)
+	}
+
+	result, err := service.RunBilledUsage(context.Background(), "user-1", RunBilledUsageOptions{
+		Estimate:     pricedCreditsMetrics("2000"),
+		OperationKey: "completion-42",
+		DoWork: func(context.Context) (any, UsageMetrics, error) {
+			return "generated", pricedCreditsMetrics("1500"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunBilledUsage() error = %v", err)
+	}
+	if result.Result != "generated" {
+		t.Fatalf("work result = %#v", result.Result)
+	}
+	assertAmount(t, store.reserveAmount, "0.002000")
+	assertAmount(t, store.settleAmount, "0.006000")
+	if store.reserveOpts.IdempotencyKey != "completion-42:reserve" || store.settleOptions.IdempotencyKey != "completion-42:settle" {
+		t.Fatalf("replay keys = %q / %q", store.reserveOpts.IdempotencyKey, store.settleOptions.IdempotencyKey)
+	}
+	if store.reserveOpts.OperationUsageOptions.Measures["tokens"].String() != "2000" || store.settleOptions.OperationUsageOptions.Measures["tokens"].String() != "1500" {
+		t.Fatalf("captured measures = reserve %#v / settle %#v", store.reserveOpts.Measures, store.settleOptions.Measures)
+	}
+}
+
+func TestCatalogRefreshesUnpinnedPricingAfterTTL(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC)
+	store := &pricedCreditsStoreStub{
+		active:    &CatalogRevision{ID: "catalog-1", Version: 1, Config: pricedCreditsCatalog("pro", "0.001")},
+		revisions: map[int]*CatalogRevision{},
+		plan:      GetUserPlanResult{UserID: "user-1", PlanKey: "pro", RateCard: "pro"},
+	}
+	catalog, err := NewCatalogServiceWithOptions(store, CatalogServiceOptions{CacheTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("NewCatalogServiceWithOptions() error = %v", err)
+	}
+	now := base
+	catalog.now = func() time.Time { return now }
+
+	first, err := catalog.CalculateForUser(context.Background(), "user-1", pricedCreditsMetrics("1000"))
+	if err != nil {
+		t.Fatalf("first CalculateForUser() error = %v", err)
+	}
+	assertAmount(t, first.Total, "0.001000")
+	if store.activeCalls != 1 {
+		t.Fatalf("initial catalog reads = %d, want 1", store.activeCalls)
+	}
+
+	now = now.Add(30 * time.Second)
+	if _, err := catalog.CalculateForUser(context.Background(), "user-1", pricedCreditsMetrics("1000")); err != nil {
+		t.Fatalf("fresh CalculateForUser() error = %v", err)
+	}
+	if store.activeCalls != 1 {
+		t.Fatalf("fresh catalog reads = %d, want 1", store.activeCalls)
+	}
+
+	store.active = &CatalogRevision{ID: "catalog-2", Version: 2, Config: pricedCreditsCatalog("pro", "0.002")}
+	now = now.Add(time.Minute)
+	second, err := catalog.CalculateForUser(context.Background(), "user-1", pricedCreditsMetrics("1000"))
+	if err != nil {
+		t.Fatalf("stale CalculateForUser() error = %v", err)
+	}
+	assertAmount(t, second.Total, "0.002000")
+	if store.activeCalls != 2 {
+		t.Fatalf("stale catalog reads = %d, want 2", store.activeCalls)
+	}
+
+	catalog.Invalidate()
+	store.active = &CatalogRevision{ID: "catalog-3", Version: 3, Config: pricedCreditsCatalog("pro", "0.003")}
+	third, err := catalog.CalculateForUser(context.Background(), "user-1", pricedCreditsMetrics("1000"))
+	if err != nil {
+		t.Fatalf("invalidated CalculateForUser() error = %v", err)
+	}
+	assertAmount(t, third.Total, "0.003000")
+	if store.activeCalls != 3 {
+		t.Fatalf("invalidated catalog reads = %d, want 3", store.activeCalls)
 	}
 }
 

@@ -26,6 +26,12 @@ type recordingInstrumentation struct {
 	finishes []error
 }
 
+type nilContextInstrumentation struct{}
+
+func (nilContextInstrumentation) Start(context.Context, string, TelemetryAttributes) (context.Context, func(error)) {
+	return nil, nil
+}
+
 func (instrumentation *recordingInstrumentation) Start(ctx context.Context, operation string, attributes TelemetryAttributes) (context.Context, func(error)) {
 	instrumentation.mu.Lock()
 	instrumentation.starts = append(instrumentation.starts, recordedTelemetryStart{
@@ -100,6 +106,35 @@ func TestSanitizeTelemetryAttributesMatchesSharedContract(t *testing.T) {
 	})
 	if nonFinite != nil {
 		t.Fatalf("non-finite/complex attributes = %#v, want nil", nonFinite)
+	}
+}
+
+func TestTelemetryNormalizationAndVersionFallbacks(t *testing.T) {
+	if got := usableModuleVersion("  v2.3.4  "); got != "v2.3.4" {
+		t.Fatalf("usableModuleVersion() = %q, want trimmed version", got)
+	}
+	for _, version := range []string{"", "(devel)"} {
+		if got := usableModuleVersion(version); got != unknownInstrumentationVersion {
+			t.Fatalf("usableModuleVersion(%q) = %q, want unknown", version, got)
+		}
+	}
+	if got := InstrumentationVersion(); got == "" {
+		t.Fatal("InstrumentationVersion() returned an empty version")
+	}
+	if got := normalizeTelemetryToken("--- !!! ---", "fallback"); got != "fallback" {
+		t.Fatalf("normalizeTelemetryToken() = %q, want fallback", got)
+	}
+	if got := normalizeTelemetryToken("  HTTPResponse  ", "fallback"); got != "httpresponse" {
+		t.Fatalf("normalizeTelemetryToken() = %q, want normalized token", got)
+	}
+}
+
+func TestSanitizeTelemetryAttributesRejectsNilAndOutOfRangeValues(t *testing.T) {
+	if got := SanitizeTelemetryAttributes(TelemetryAttributes{
+		"bursar.backend": nil,
+		"error.code":     uint64(math.MaxInt64) + 1,
+	}); got != nil {
+		t.Fatalf("invalid scalar attributes = %#v, want nil", got)
 	}
 }
 
@@ -228,6 +263,38 @@ func TestInstrumentedOperationCompletesOnceAndPreservesPanic(t *testing.T) {
 	}()
 	if len(instrumentation.finishes) != 1 || instrumentation.finishes[0] != errInstrumentedOperationPanicked {
 		t.Fatalf("panic finishes = %#v, want one fixed safe error", instrumentation.finishes)
+	}
+}
+
+func TestBeginInstrumentedNormalizesNilContextAndCallbacks(t *testing.T) {
+	//lint:ignore SA1012 This boundary test intentionally verifies nil-context normalization.
+	started, finish := beginInstrumented(nil, nilContextInstrumentation{}, "credits.deduct", nil)
+	if started == nil {
+		t.Fatal("beginInstrumented() returned nil context")
+	}
+	if finish == nil {
+		t.Fatal("beginInstrumented() returned nil finish callback")
+	}
+	finish(errors.New("ignored"))
+
+	var typedNil *recordingInstrumentation
+	started, finish = beginInstrumented(context.Background(), typedNil, "credits.grant", nil)
+	if started == nil || finish == nil {
+		t.Fatal("typed-nil instrumentation was not replaced safely")
+	}
+}
+
+func TestInstrumentedOperationFinishesWithReturnedError(t *testing.T) {
+	instrumentation := &recordingInstrumentation{}
+	want := errors.New("operation failed")
+	_, err := runInstrumentedValue(context.Background(), instrumentation, "credits.grant", nil, func(context.Context) (int, error) {
+		return 0, want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("runInstrumentedValue() error = %v, want %v", err, want)
+	}
+	if len(instrumentation.finishes) != 1 || !errors.Is(instrumentation.finishes[0], want) {
+		t.Fatalf("finish errors = %#v, want returned error", instrumentation.finishes)
 	}
 }
 

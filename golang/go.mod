@@ -13,6 +13,7 @@ require (
 	github.com/dodopayments/dodopayments-go v1.111.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/pashagolub/pgxmock/v5 v5.1.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/shopspring/decimal v1.4.0
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1
@@ -60,5 +61,5 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 )

@@ -10,6 +10,8 @@ import type {
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
   BillingSubscriptionState,
+  BillingSubscriptionStatus,
+  SubscriptionEntitlementOutcome,
   CheckoutIntent,
   BillingTopupResult,
   BillingInvoiceRecord,
@@ -104,10 +106,24 @@ export abstract class BillingStore {
     limit?: number,
   ): Promise<BillingSubscriptionState[]>;
 
-  abstract markSubscriptionGraceExpired(
+  abstract reconcileSubscriptionEntitlement(
+    subjectId: string,
+    subscriptionId: string,
+    billingEventId: string,
+    expectedStatus: BillingSubscriptionStatus,
+    expectedProviderUpdatedAt: string,
+    planAssignedAt: Date | string | null,
+    applyEntitlement: boolean,
+    terminalPlanKey: string | null,
+    reason: string,
+  ): Promise<SubscriptionEntitlementOutcome>;
+
+  abstract expireSubscriptionGracePeriod(
+    subjectId: string,
     subscriptionId: string,
     expectedGraceEndsAt: string,
-    expiredAt?: string,
+    expiredAt: string,
+    terminalPlanKey: string | null,
   ): Promise<boolean>;
 
   abstract updateBillingSubscriptionChange(
@@ -174,13 +190,6 @@ export abstract class BillingStore {
   abstract getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
 
   abstract recordSubscriptionConflict(input: BillingSubscriptionConflictCreate): Promise<void>;
-
-  /** Select a current provider subscription as the subject's entitlement source. */
-  abstract selectSubscriptionEntitlementSource(
-    userId: string,
-    provider: string,
-    providerSubscriptionId?: string | null,
-  ): Promise<boolean>;
 
   abstract getBillingPreferences(userId: string): Promise<BillingPreferences | null>;
 

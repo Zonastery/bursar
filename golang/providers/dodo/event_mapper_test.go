@@ -65,6 +65,25 @@ func TestHandleWebhookRejectsInvalidDodoSignature(t *testing.T) {
 	}
 }
 
+func TestHandleWebhookRejectsMalformedVerifiedPayloads(t *testing.T) {
+	p, err := New(Options{APIKey: "test", WebhookKey: dodoTestWebhookKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.HandleWebhook(t.Context(), bursar.WebhookRequest{}); err == nil {
+		t.Fatal("expected empty webhook body error")
+	}
+	for _, payload := range [][]byte{
+		[]byte(`{"type":"payment.succeeded","timestamp":"2026-07-18T05:15:24Z"}`),
+		[]byte(`{"type":"payment.succeeded","timestamp":"2026-07-18T05:15:24Z","data":"invalid"}`),
+		[]byte(`{"type":"payment.failed","timestamp":"2026-07-18T05:15:24Z","data":{"payment_id":"pay_1"}}`),
+	} {
+		if _, err := p.HandleWebhook(t.Context(), bursar.WebhookRequest{RawBody: payload, Header: signDodoWebhook(t, "wh_malformed", payload)}); err == nil {
+			t.Fatalf("expected malformed webhook error: %s", payload)
+		}
+	}
+}
+
 func TestHandleWebhookAcknowledgesUnsupportedDodoEventWithCanonicalID(t *testing.T) {
 	p, err := New(Options{APIKey: "test", WebhookKey: dodoTestWebhookKey})
 	if err != nil {

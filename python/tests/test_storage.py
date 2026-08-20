@@ -135,6 +135,53 @@ class FakeClickHouseClient:
         return FakeClickHouseResult(self.query_rows)
 
 
+class FinancialAnalyticsClickHouseClient(FakeClickHouseClient):
+    def query(
+        self,
+        query: str,
+        *,
+        parameters: dict[str, Any] | None = None,
+    ) -> FakeClickHouseResult:
+        assert parameters is not None
+        self.queries.append(query)
+        if "AS usage_id" in query:
+            rows = [
+                {
+                    "usage_id": f"00000000-0000-0000-0000-00000000004{index}",
+                    "account_id": "00000000-0000-0000-0000-000000000006",
+                    "operation": "completion",
+                    "requested": "7.5",
+                    "charged": "6.25",
+                    "allowance_requested": "1.25",
+                    "allowance_covered": "1.25",
+                    "billing_disposition": "record_only" if index == 9 else "billable",
+                    "feature": "chat",
+                    "model": "gpt-5",
+                    "region": "in",
+                    "event_at": f"2026-07-2{index} 12:00:00.000000",
+                    "idempotency_key": f"usage:{index}",
+                    "metadata": {"trace_id": f"trace-{index}"},
+                    "created_at": f"2026-07-2{index} 12:00:01.000000",
+                }
+                for index in (9, 8)
+            ]
+        elif "uniqExact(subject_id)" in query:
+            rows = [{"total_spend": "12.5", "active_users": "2"}]
+        elif "formatDateTime(toStartOfDay" in query:
+            rows = [{"key": "2026-07-29", "total_spend": "12.5", "entry_count": "2"}]
+        elif "coalesce(model" in query:
+            rows = [{"key": "gpt-5", "total_spend": "12.5", "entry_count": "2"}]
+        else:
+            rows = [
+                {
+                    "key": "00000000-0000-0000-0000-000000000007",
+                    "total_spend": "12.5",
+                    "entry_count": "2",
+                }
+            ]
+        return FakeClickHouseResult(rows)
+
+
 class FakePool:
     def __init__(self) -> None:
         self.closeall = Mock()
@@ -396,6 +443,52 @@ def test_clickhouse_serves_usage_history_with_a_cursor() -> None:
     assert page.items[0].usage_id == _usage_export().charge_id
     assert page.items[0].metadata == {"trace_id": "trace-42"}
     assert str(page.items[0].charged) == "12.500000"
+    assert "billing_disposition = 'billable'" in client.queries[-1]
+
+
+def test_clickhouse_financial_analytics_and_cursor_contract() -> None:
+    client = FinancialAnalyticsClickHouseClient()
+    store = ClickHouseUsageStore(
+        ClickHouseUsageStoreOptions(
+            client=client,
+            tenant_id=UUID(TENANT_ID),
+            create_table=False,
+        )
+    )
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 8, 1, tzinfo=UTC)
+
+    assert store.spend_by_model(start, end)[0].model == "gpt-5"
+    top_user = store.top_users(1, start, end)[0]
+    assert top_user.user_id is not None
+    assert top_user.user_id.endswith("0007")
+    assert store.daily_spend(start, end)[0].date == "2026-07-29"
+    aggregate = store.aggregate_stats(start, end)
+    assert str(aggregate.total_credits_consumed) == "12.5"
+    assert aggregate.active_users == 2
+    assert str(aggregate.avg_daily_spend) == str(aggregate.total_credits_consumed / 31)
+    assert aggregate.top_model == "gpt-5"
+    assert aggregate.top_user is not None
+    assert aggregate.top_user.endswith("0007")
+
+    first_page = store.list_usage_charges(
+        "00000000-0000-0000-0000-000000000007",
+        start,
+        end,
+        limit=1,
+    )
+    assert len(first_page.items) == 1
+    assert first_page.items[0].billing_disposition == "record_only"
+    assert first_page.items[0].metadata == {"trace_id": "trace-9"}
+    assert first_page.next_cursor is not None
+
+    store.list_usage_charges(
+        "00000000-0000-0000-0000-000000000007",
+        limit=1,
+        cursor=first_page.next_cursor,
+        include_record_only=False,
+    )
+    assert "cursor_event_at" in client.queries[-1]
     assert "billing_disposition = 'billable'" in client.queries[-1]
 
 

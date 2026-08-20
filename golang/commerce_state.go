@@ -368,14 +368,83 @@ type AutoRechargeInput struct {
 	ReturnURL string
 }
 
-// AccountCommerceOverview combines the most useful durable financial and
-// entitlement projections. Optional provider-only sections are deliberately
-// absent rather than being invented from client state.
+// CommerceSectionAvailability reports whether an ancillary overview section
+// was read successfully. Core credit and entitlement failures still fail the
+// overview; provider and historical sections degrade independently.
+type CommerceSectionAvailability struct {
+	PaymentMethods   bool
+	Documents        bool
+	ProviderInvoices bool
+	Transactions     bool
+	Usage            bool
+	AutoRecharge     bool
+}
+
+// AccountAllowanceOverview is the account-facing allowance projection used by
+// the commerce overview. The database-owned allowance window may be absent.
+type AccountAllowanceOverview struct {
+	Remaining   Amount
+	Limit       *Amount
+	PeriodStart *time.Time
+	PeriodEnd   *time.Time
+}
+
+// CreditSpendSource identifies one deterministic source in the account's
+// allowance/bucket spend order.
+type CreditSpendSource struct {
+	Type     string
+	Key      string
+	Label    string
+	Priority int
+}
+
+// AccountCreditDisplay contains the catalog-defined display conversion. It is
+// informational only; all accounting remains in exact credit units.
+type AccountCreditDisplay struct {
+	Currency      string
+	UnitsPerMajor Amount
+}
+
+// AccountCreditOverview combines exact balances, allowance state, bucket
+// projections, and deterministic spend ordering.
+type AccountCreditOverview struct {
+	LedgerBalance             Amount
+	EffectiveSpendableBalance Amount
+	LifetimePurchases         Amount
+	Allowance                 AccountAllowanceOverview
+	Buckets                   []BucketBalance
+	BucketsByKey              map[string]Amount
+	SpendOrder                []CreditSpendSource
+	Display                   *AccountCreditDisplay
+}
+
+// BillingDocumentRef is a customer-safe provider-invoice or ledger-document
+// projection. It contains no provider credentials or raw payment payloads.
+type BillingDocumentRef struct {
+	Kind               string
+	Provider           string
+	ProviderDocumentID string
+	LedgerEntryID      string
+	Status             string
+	AmountPaidMinor    int64
+	AmountDueMinor     int64
+	Currency           string
+	PeriodStart        *time.Time
+	PeriodEnd          *time.Time
+	CreatedAt          time.Time
+	EntryType          string
+	Amount             Amount
+}
+
+// AccountCommerceOverview combines durable financial and entitlement
+// projections. Ancillary provider/history sections remain usable when one
+// optional read is unavailable, matching the Python facade behavior.
 type AccountCommerceOverview struct {
 	AccountID           string
 	Balance             BalanceResult
 	Available           AvailableResult
 	Buckets             BucketBalancesResult
+	Credits             AccountCreditOverview
 	Entitlement         GetUserPlanResult
 	Allowance           *AllowanceResult
 	SubscriptionSummary AccountSubscriptionSummary
@@ -385,4 +454,9 @@ type AccountCommerceOverview struct {
 	Invoices            []BillingInvoice
 	Transactions        LedgerPage
 	Usage               UsageChargePage
+	PaymentMethods      []PaymentMethodInfo
+	Documents           []BillingDocumentRef
+	ProviderInvoices    []BillingInvoice
+	AutoRecharge        *AutoRechargeStatus
+	Availability        CommerceSectionAvailability
 }

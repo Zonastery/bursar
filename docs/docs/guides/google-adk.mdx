@@ -18,14 +18,30 @@ dimensions, provider request ID, and trace correlation needed for accounting.
 
 ## Install
 
+### Python
+
 ```bash
 pip install "bursar[google-adk,postgres]"
 ```
 
-The integration is tested against Google ADK 2.6. It is an optional extra, so
+The Python integration is tested against Google ADK 2.7. It is an optional
+extra, so
 applications that do not use ADK do not install ADK transitively.
 
+### Go
+
+```bash
+go get github.com/Zonastery/bursar/golang/integrations/googleadk/v2
+```
+
+The Go integration is a separate optional module tested against Google ADK Go
+v2.1.0. It requires Go 1.26.5 because ADK does; the core
+`github.com/Zonastery/bursar/golang/v2` module remains compatible with Go 1.25
+and does not pull ADK into applications that do not use it.
+
 ## Register the plugin
+
+### Python
 
 Declare the largest usage you are willing to admit for one model call. The
 measure and dimension names also form an allow-list: undeclared provider
@@ -77,10 +93,73 @@ Register the Bursar plugin before plugins that may short-circuit a model call.
 This makes credit admission the first gate. Its run and agent error hooks clean
 up a reservation if a later plugin or agent callback exits early.
 
+### Go
+
+Create the Bursar plugin and register it through ADK's official
+`runner.PluginConfig`. The estimate is both the admission ceiling and the
+allow-list for measures and pricing dimensions copied into Bursar.
+
+```go
+import (
+	bursar "github.com/Zonastery/bursar/golang/v2"
+	bursaradk "github.com/Zonastery/bursar/golang/integrations/googleadk/v2"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+)
+
+billingPlugin, err := bursaradk.NewPlugin(sdk.Credits, bursaradk.Options{
+	Estimate: bursar.UsageMetrics{
+		Operation: "completion",
+		Measures: map[string]bursar.Amount{
+			"calls":             bursar.MustAmount("1"),
+			"input_tokens":      bursar.MustAmount("8000"),
+			"output_tokens":     bursar.MustAmount("4096"),
+			"total_tokens":      bursar.MustAmount("12096"),
+			"cache_read_tokens": bursar.DecimalZero,
+			"reasoning_tokens":  bursar.DecimalZero,
+			"tool_calls":        bursar.DecimalZero,
+		},
+		Dimensions: map[string]any{
+			"model": "configured-model", "provider": "openrouter",
+		},
+	},
+	OperationType:      "completion",
+	Feature:            "agent_chat",
+	Provider:           "openrouter",
+	ReferenceType:      "chat",
+	OperationKeyPrefix: "chat",
+	StateNamespace:     "support",
+})
+if err != nil {
+	return err
+}
+
+adkRunner, err := runner.New(runner.Config{
+	AppName:        "support_agent",
+	Agent:          rootAgent,
+	SessionService: sessionService,
+	PluginConfig: runner.PluginConfig{
+		Plugins: []*plugin.Plugin{billingPlugin},
+	},
+})
+if err != nil {
+	return err
+}
+defer adkRunner.Close()
+```
+
+Put the Bursar plugin first when registering several plugins. The adapter uses
+ADK's before/after/error model callbacks, stores unresolved lease state under
+`_bursar_model_leases:<namespace>:` in durable session state, and creates a
+distinct replay-safe operation key for each model call in an invocation.
+
 ## Subject and invocation attribution
 
 By default, the account is ADK's `user_id`. Override `subject_resolver` when
 your Bursar account identifier comes from another trusted context field.
+
+In Go, set `Options.SubjectResolver`; the remaining configuration equivalents
+are `ShouldBill`, `MetadataFactory`, `AdmissionMessage`, and `Retry`.
 
 ADK supplies the invocation ID; callers do not need to create a job ID. Bursar
 uses that invocation as the financial reference and creates a distinct,
@@ -122,6 +201,10 @@ Use the provider SDK's official callback or middleware surface. Do not parse
 logs or put unbounded response payloads in Bursar metadata. Fields absent from
 the estimate are intentionally discarded; they belong in OpenTelemetry.
 
+The Go module accepts the same framework-neutral contract through
+`bursaradk.Options.ReceiptSource`, using `bursar.ProviderReceiptSource` from the
+core SDK.
+
 ## Fixed-price parent jobs
 
 Do not attach child model charges merely because a fixed-price batch workflow
@@ -133,8 +216,9 @@ actually prices both the parent and the inferences.
 ## Other agent frameworks
 
 The financial lifecycle is not coupled to Google ADK. `ProviderReceipt` and
-`ProviderReceiptSource` live in `bursar.integrations`, while reservation,
-settlement, and replay live in `CreditsService`. An adapter for another agent
-framework only needs to map that framework's before/after/error hooks onto the
-same contracts. Installing `bursar[google-adk]` is therefore an adapter choice,
+`ProviderReceiptSource` live in Python's `bursar.integrations` and at the Go
+core package root, while reservation, settlement, and replay live in
+`CreditsService`. An adapter for another agent framework only needs to map that
+framework's before/after/error hooks onto the same contracts. Installing
+`bursar[google-adk]` or the optional Go module is therefore an adapter choice,
 not a requirement for Bursar itself.

@@ -19,6 +19,7 @@ from bursar.credits.service import CreditsService
 from bursar.credits.service_types import ReserveOptions, SettleOptions
 from bursar.credits.store import CreateLeaseOptions, StoreError
 from bursar.credits.types import CreditMetadata, DeductionResult, ExecuteGrantProgramRequest, LeaseResult
+from bursar.errors import LeaseExpiredError
 from bursar.metrics import UsageMetrics
 from tests.conftest import TEST_TENANT_ID
 
@@ -628,6 +629,239 @@ def test_concurrent_lease_admission_enforces_max_concurrent_and_headroom(
         Decimal("1"),
         Decimal("4"),
     )
+
+
+def test_lease_settlement_replay_and_changed_payload_have_no_extra_accounting(
+    store: PostgresStore,
+) -> None:
+    user_id = "00000000-0000-0000-0000-000000000925"
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(deepcopy(CONFIG))
+    service.add_credits(
+        user_id,
+        Decimal("10"),
+        entry_type="purchase",
+        idempotency_key="settlement-replay-funding",
+    )
+
+    lease = service.reserve(
+        user_id,
+        Decimal("3"),
+        ReserveOptions(idempotency_key="settlement-replay-reserve", ttl=60),
+    )
+    assert lease.lease_id is not None
+    first = service.settle(
+        user_id,
+        lease.lease_id,
+        Decimal("2"),
+        SettleOptions(idempotency_key="settlement-replay-settle"),
+    )
+    replay = service.settle(
+        user_id,
+        lease.lease_id,
+        Decimal("2"),
+        SettleOptions(idempotency_key="settlement-replay-settle"),
+    )
+
+    assert first.error is None
+    assert first.idempotent is False
+    assert first.amount == Decimal("2")
+    assert first.balance_after == Decimal("8")
+    assert replay.entry_id == first.entry_id
+    assert replay.usage_charge_id == first.usage_charge_id
+    assert replay.idempotent is True
+    assert replay.amount == Decimal("2")
+    assert replay.balance_after == Decimal("8")
+
+    with pytest.raises(StoreError, match="settlement_conflict"):
+        service.settle(
+            user_id,
+            lease.lease_id,
+            Decimal("2.5"),
+            SettleOptions(idempotency_key="settlement-replay-settle"),
+        )
+
+    balance, ledger_total, usage_entries, usage_charges, usage_keys = _financial_snapshot(
+        store.database_url,
+        user_id,
+    )
+    assert balance == Decimal("8")
+    assert ledger_total == Decimal("8")
+    assert usage_entries == 1
+    assert usage_charges == 1
+    assert usage_keys == 1
+
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT status, reserved_amount, settled_amount FROM bursar.credit_leases WHERE id = %s",
+            [lease.lease_id],
+        )
+        assert cursor.fetchone() == ("settled", Decimal("3.000000"), Decimal("2.000000"))
+
+
+def test_expired_lease_releases_reservation_and_cannot_settle(
+    store: PostgresStore,
+) -> None:
+    user_id = "00000000-0000-0000-0000-000000000926"
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(deepcopy(CONFIG))
+    service.add_credits(user_id, Decimal("4"), idempotency_key="lease-expiry-funding")
+
+    lease = service.reserve(
+        user_id,
+        Decimal("3"),
+        ReserveOptions(idempotency_key="lease-expiry-reserve", ttl=60),
+    )
+    assert lease.lease_id is not None
+    assert store.get_available(user_id).available == Decimal("1")
+    assert store.get_available(user_id).reserved == Decimal("3")
+
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.mutation_context', 'internal', true)")
+        cursor.execute(
+            """
+            UPDATE bursar.credit_leases
+            SET created_at = created_at - interval '2 minutes',
+                expires_at = now() - interval '1 second'
+            WHERE id = %s
+            """,
+            [lease.lease_id],
+        )
+        assert cursor.rowcount == 1
+
+    assert store.expire_leases(25) == 1
+    assert store.get_available(user_id).available == Decimal("4")
+    assert store.get_available(user_id).reserved == Decimal("0")
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT status FROM bursar.credit_leases WHERE id = %s", [lease.lease_id])
+        assert cursor.fetchone() == ("expired",)
+
+    with pytest.raises(LeaseExpiredError):
+        service.settle(
+            user_id,
+            lease.lease_id,
+            Decimal("2"),
+            SettleOptions(idempotency_key="lease-expiry-settle"),
+        )
+
+    balance, ledger_total, usage_entries, usage_charges, _usage_keys = _financial_snapshot(
+        store.database_url,
+        user_id,
+    )
+    assert balance == Decimal("4")
+    assert ledger_total == Decimal("4")
+    assert usage_entries == 0
+    assert usage_charges == 0
+
+    replacement = service.reserve(
+        user_id,
+        Decimal("3"),
+        ReserveOptions(idempotency_key="lease-expiry-replacement", ttl=60),
+    )
+    assert replacement.amount == Decimal("3")
+    assert replacement.lease_id is not None
+    service.release(user_id, replacement.lease_id)
+
+
+def test_lease_settles_actual_overdraft_above_estimate_within_credit_line(
+    store: PostgresStore,
+) -> None:
+    user_id = "00000000-0000-0000-0000-000000000927"
+    config = deepcopy(CONFIG)
+    config["credits"]["policies"] = {"line": {"type": "credit_line", "limit": "5"}}
+    config["plans"]["pro"]["credit_policy"] = "line"
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(config)
+    service.set_user_plan(user_id, "pro")
+
+    lease = service.reserve(
+        user_id,
+        Decimal("2"),
+        ReserveOptions(
+            idempotency_key="overdraft-estimate-reserve",
+            operation_type="completion",
+            ttl=60,
+        ),
+    )
+    assert lease.lease_id is not None
+    assert lease.billing_mode == "overdraft"
+    assert lease.minimum_balance == Decimal("-5")
+
+    settled = service.settle(
+        user_id,
+        lease.lease_id,
+        Decimal("4"),
+        SettleOptions(idempotency_key="overdraft-estimate-settle"),
+    )
+    assert settled.amount == Decimal("4")
+    assert settled.balance_after == Decimal("-4")
+    assert service.get_balance(user_id).balance == Decimal("-4")
+
+    balance, ledger_total, usage_entries, usage_charges, usage_keys = _financial_snapshot(
+        store.database_url,
+        user_id,
+    )
+    assert balance == Decimal("-4")
+    assert ledger_total == Decimal("-4")
+    assert usage_entries == 1
+    assert usage_charges == 1
+    assert usage_keys == 1
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT status, reserved_amount, settled_amount FROM bursar.credit_leases WHERE id = %s",
+            [lease.lease_id],
+        )
+        assert cursor.fetchone() == ("settled", Decimal("2.000000"), Decimal("4.000000"))
+
+
+def test_allowance_is_consumed_before_purchased_bucket_debit(
+    store: PostgresStore,
+) -> None:
+    user_id = "00000000-0000-0000-0000-000000000928"
+    config = deepcopy(CONFIG)
+    config["plans"]["pro"]["credit_allowance"] = {
+        "amount": "5",
+        "priority": 5,
+        "window": {"type": "calendar", "unit": "month", "count": 1, "timezone": "UTC"},
+    }
+    service = CreditsService(store=store)
+    service.publish_and_activate_catalog(config)
+    service.set_user_plan(user_id, "pro")
+    service.add_credits(
+        user_id,
+        Decimal("3"),
+        entry_type="purchase",
+        bucket="purchased",
+        idempotency_key="allowance-partial-funding",
+    )
+
+    usage = UsageMetrics(
+        operation="completion",
+        measures={"input_tokens": Decimal("0"), "output_tokens": Decimal("4")},
+        dimensions={"model": "standard"},
+    )
+    allowance_only = service.deduct(user_id, usage, idempotency_key="allowance-only-charge")
+    allowance_then_bucket = service.deduct(user_id, usage, idempotency_key="allowance-partial-charge")
+
+    assert allowance_only.amount == Decimal("0")
+    assert allowance_only.allowance_consumed == Decimal("4")
+    assert allowance_then_bucket.amount == Decimal("3")
+    assert allowance_then_bucket.allowance_consumed == Decimal("1")
+    assert allowance_then_bucket.bucket_breakdown == {"purchased": Decimal("3")}
+    allowance = service.check_allowance(user_id)
+    assert allowance is not None
+    assert allowance.allowance_remaining == Decimal("0")
+    assert service.get_balance(user_id).balance == Decimal("0")
+
+    balance, ledger_total, usage_entries, usage_charges, usage_keys = _financial_snapshot(
+        store.database_url,
+        user_id,
+    )
+    assert balance == Decimal("0")
+    assert ledger_total == Decimal("0")
+    assert usage_entries == 1
+    assert usage_charges == 2
+    assert usage_keys == 2
 
 
 def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStore) -> None:

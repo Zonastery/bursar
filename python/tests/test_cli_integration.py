@@ -22,7 +22,7 @@ from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service import CreditsService
 from bursar.credits.store import CreateLeaseOptions
 from bursar.sql import _get_sql_files
-from tests.conftest import _handle_unavailable_postgres, _start_testcontainer
+from tests.conftest import TEST_TENANT_ID, _handle_unavailable_postgres, _start_testcontainer
 from tests.test_store_integration import CONFIG
 
 pytestmark = [pytest.mark.integration, pytest.mark.security]
@@ -277,6 +277,122 @@ def _write_config(path: Path, *, display_name: str) -> None:
         },
     }
     path.write_text(json.dumps(config))
+
+
+def test_cli_bootstraps_tenant_and_applies_catalog_rollout(
+    pg_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tenant_id = str(uuid4())
+    config = tmp_path / "bootstrap.json"
+    updated_config = tmp_path / "rollout.json"
+    rollout = tmp_path / "rollout-manifest.json"
+    _write_config(config, display_name="Bootstrap Pro")
+    _write_config(updated_config, display_name="Rolled Out Pro")
+    rollout.write_text(json.dumps({"plans": {"pro": {"effective": "immediate", "include_pinned": True}}}))
+    for variable in ("DATABASE_URL", "BURSAR_OPERATOR_DATABASE_URL"):
+        monkeypatch.setenv(variable, pg_database_url)
+    monkeypatch.setenv("BURSAR_TENANT_ID", tenant_id)
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "test")
+
+    cli.main(["tenant", "bootstrap", "bootstrap-cli", str(config), "--id", tenant_id, "--label", "initial"])
+    assert f"Tenant {tenant_id} bootstrapped successfully (config applied)." in capsys.readouterr().out
+
+    cli.main(
+        [
+            "config",
+            "set",
+            str(updated_config),
+            "--rollout",
+            str(rollout),
+            "--label",
+            "rollout",
+        ]
+    )
+    assert capsys.readouterr().out == "Bursar config set successfully.\n"
+
+    cli.main(["config", "get"])
+    active = json.loads(capsys.readouterr().out)
+    assert active["version"] == 2
+    assert active["config"]["plans"]["pro"]["display_name"] == "Rolled Out Pro"
+    cli.main(["config", "list"])
+    listed = capsys.readouterr().out
+    assert "* v2" in listed
+    assert "  rollout" in listed
+
+
+def test_cli_reports_empty_config_and_unknown_tenant_operator_failures(
+    pg_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for variable in ("DATABASE_URL", "BURSAR_OPERATOR_DATABASE_URL"):
+        monkeypatch.setenv(variable, pg_database_url)
+    monkeypatch.setenv("BURSAR_TENANT_ID", TEST_TENANT_ID)
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "test")
+
+    with pytest.raises(SystemExit) as missing_config:
+        cli.main(["config", "get"])
+    assert missing_config.value.code == 1
+    assert "No active Bursar config." in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as missing_history:
+        cli.main(["config", "list"])
+    assert missing_history.value.code == 1
+    assert "No Bursar configs found." in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as missing_tenant:
+        cli.main(["tenant", "status", str(uuid4()), "active"])
+    assert missing_tenant.value.code == 1
+    assert "Tenant not found" in capsys.readouterr().err
+
+
+def test_cli_catalog_maintenance_and_validation_guardrails(
+    pg_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "maintenance-config.json"
+    invalid_config = tmp_path / "invalid-config.json"
+    invalid_rollout = tmp_path / "invalid-rollout.json"
+    _write_config(config, display_name="Maintenance Pro")
+    invalid_config.write_text('{"version": 1, "credits": {"accounting": {"rounding": "invalid"}}}')
+    invalid_rollout.write_text(json.dumps({"plans": {"missing-plan": {"effective": "immediate"}}}))
+    monkeypatch.setenv("DATABASE_URL", pg_database_url)
+    monkeypatch.setenv("BURSAR_TENANT_ID", TEST_TENANT_ID)
+    monkeypatch.setenv("BURSAR_PROVIDER_ENVIRONMENT", "test")
+
+    cli.main(["config", "set", str(config), "--label", "maintenance"])
+    assert capsys.readouterr().out == "Bursar config set successfully.\n"
+
+    cli.main(["config", "apply-due", "--limit", "5"])
+    assert capsys.readouterr().out == "Applied 0 due plan change(s).\n"
+    with pytest.raises(SystemExit) as missing_assignment:
+        cli.main(["config", "pin", str(uuid4())])
+    assert missing_assignment.value.code == 1
+    assert capsys.readouterr().err == "No current plan assignment found.\n"
+    with pytest.raises(SystemExit) as missing_diff:
+        cli.main(["config", "diff", "99", "1"])
+    assert missing_diff.value.code == 1
+    assert capsys.readouterr().err == "Version 99 not found.\n"
+
+    cli.main(["config", "schema"])
+    assert json.loads(capsys.readouterr().out)["title"] == "BursarConfig"
+    with pytest.raises(SystemExit) as invalid_validation:
+        cli.main(["config", "validate", str(invalid_config)])
+    assert invalid_validation.value.code == 1
+    assert "Validation failed:" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as invalid_set:
+        cli.main(["config", "set", str(invalid_config)])
+    assert invalid_set.value.code == 1
+    assert "Validation failed:" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as invalid_rollout_manifest:
+        cli.main(["config", "set", str(config), "--rollout", str(invalid_rollout)])
+    assert invalid_rollout_manifest.value.code == 1
+    assert "Rollout validation failed:" in capsys.readouterr().err
 
 
 @pytest.mark.timeout(300)
@@ -919,7 +1035,9 @@ def test_cli_manages_tenants_migrations_and_config_versions(
             """,
             (PARTITION_OWNER_ROLE,),
         )
-        missing_partman_grants, partman_function_count = cursor.fetchone()
+        partman_grant_row = cursor.fetchone()
+        assert partman_grant_row is not None
+        missing_partman_grants, partman_function_count = partman_grant_row
         assert missing_partman_grants == 0
         assert partman_function_count > 0
 

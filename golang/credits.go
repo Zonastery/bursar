@@ -1,6 +1,7 @@
 package bursar
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"reflect"
@@ -20,15 +21,20 @@ type CreditsService struct {
 	analytics       UsageAnalyticsStore
 	usageStore      UsageChargeStore
 
-	policy          CreditPolicyPreset
-	overdraftFloor  Amount
-	maxConcurrent   *int
-	defaultLeaseTTL time.Duration
-	events          CreditEventSink
-	lowBalance      []Amount
+	policy               CreditPolicyPreset
+	overdraftFloor       Amount
+	maxConcurrent        *int
+	defaultLeaseTTL      time.Duration
+	events               CreditEventSink
+	lowBalance           []Amount
+	lowBalanceHandler    CreditEventHandler
+	lowBalanceMaxTracked int
+	lazyExpiry           bool
 
 	lowBalanceMu    sync.Mutex
 	lowBalanceState map[string]map[string]struct{}
+	lowBalanceOrder *list.List
+	lowBalanceUsers map[string]*list.Element
 
 	postDeductionMu     sync.RWMutex
 	postDeductionHooks  map[uint64]PostDeductionHook
@@ -64,7 +70,22 @@ func NewCreditsService(store CreditStore, options CreditsServiceOptions) (*Credi
 	if _, err := requirePositiveDuration(defaultTTL, "default lease TTL"); err != nil {
 		return nil, err
 	}
+	if options.LowBalanceConfig != nil && len(options.LowBalance) > 0 {
+		return nil, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "configure low balance with either LowBalance or LowBalanceConfig")
+	}
 	lowBalance := append([]Amount(nil), options.LowBalance...)
+	lowBalanceHandler := CreditEventHandler(nil)
+	lowBalanceMaxTracked := 100_000
+	if options.LowBalanceConfig != nil {
+		lowBalance = append([]Amount(nil), options.LowBalanceConfig.Thresholds...)
+		lowBalanceHandler = options.LowBalanceConfig.OnTrigger
+		if options.LowBalanceConfig.MaxTrackedUsers != 0 {
+			lowBalanceMaxTracked = options.LowBalanceConfig.MaxTrackedUsers
+		}
+	}
+	if lowBalanceMaxTracked < 1 {
+		return nil, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "low balance max tracked users must be positive")
+	}
 	for _, threshold := range lowBalance {
 		if threshold.IsNegative() {
 			return nil, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "low balance thresholds must not be negative")
@@ -77,7 +98,11 @@ func NewCreditsService(store CreditStore, options CreditsServiceOptions) (*Credi
 		nextPostDeductionID = 1
 		postDeductionHooks[nextPostDeductionID] = options.PostDeduction
 	}
-	catalog, err := NewCatalogService(store)
+	catalogCacheTTL := defaultCatalogCacheTTL
+	if options.CatalogCacheTTL != nil {
+		catalogCacheTTL = *options.CatalogCacheTTL
+	}
+	catalog, err := NewCatalogServiceWithOptions(store, CatalogServiceOptions{CacheTTL: catalogCacheTTL})
 	if err != nil {
 		return nil, err
 	}
@@ -94,20 +119,25 @@ func NewCreditsService(store CreditStore, options CreditsServiceOptions) (*Credi
 		usageStore = store
 	}
 	return &CreditsService{
-		store:               store,
-		catalog:             catalog,
-		instrumentation:     instrumentation,
-		analytics:           analytics,
-		usageStore:          usageStore,
-		policy:              policy,
-		overdraftFloor:      overdraftFloor,
-		maxConcurrent:       options.MaxConcurrent,
-		defaultLeaseTTL:     defaultTTL,
-		events:              options.EventSink,
-		lowBalance:          lowBalance,
-		lowBalanceState:     make(map[string]map[string]struct{}),
-		postDeductionHooks:  postDeductionHooks,
-		nextPostDeductionID: nextPostDeductionID,
+		store:                store,
+		catalog:              catalog,
+		instrumentation:      instrumentation,
+		analytics:            analytics,
+		usageStore:           usageStore,
+		policy:               policy,
+		overdraftFloor:       overdraftFloor,
+		maxConcurrent:        options.MaxConcurrent,
+		defaultLeaseTTL:      defaultTTL,
+		events:               options.EventSink,
+		lowBalance:           lowBalance,
+		lowBalanceHandler:    lowBalanceHandler,
+		lowBalanceMaxTracked: lowBalanceMaxTracked,
+		lazyExpiry:           options.LazyExpiry,
+		lowBalanceState:      make(map[string]map[string]struct{}),
+		lowBalanceOrder:      list.New(),
+		lowBalanceUsers:      make(map[string]*list.Element),
+		postDeductionHooks:   postDeductionHooks,
+		nextPostDeductionID:  nextPostDeductionID,
 	}, nil
 }
 
@@ -191,7 +221,18 @@ func (s *CreditsService) GetBalance(ctx context.Context, userID string) (Balance
 	if s == nil || s.store == nil {
 		return BalanceResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
+	if err := s.maybeLazyExpire(ctx, userID); err != nil {
+		return BalanceResult{}, err
+	}
 	return s.store.GetBalance(ctx, userID)
+}
+
+func (s *CreditsService) maybeLazyExpire(ctx context.Context, userID string) error {
+	if s == nil || !s.lazyExpiry {
+		return nil
+	}
+	_, err := s.SweepExpiredCredits(ctx, false, userID, 100)
+	return err
 }
 
 // GetAvailable returns an advisory snapshot; it is not an admission gate.
@@ -262,6 +303,9 @@ func (s *CreditsService) Deduct(ctx context.Context, userID string, amount Amoun
 			return DeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 		}
 		if _, err := requireNonNegativeAmount(amount, "deduct"); err != nil {
+			return DeductionResult{}, err
+		}
+		if err := s.maybeLazyExpire(ctx, userID); err != nil {
 			return DeductionResult{}, err
 		}
 		result, err := s.store.DeductWithAllowance(ctx, userID, QuantizeMoney(amount), options)
@@ -848,21 +892,23 @@ func (s *CreditsService) GetActiveCatalog(ctx context.Context) (*CatalogRevision
 	return s.store.GetActiveCatalog(ctx)
 }
 
-// PublishAndActivateCatalog delegates revision validation/persistence to the
-// store and returns the committed revision ID.
+// PublishAndActivateCatalog validates, canonicalizes, and publishes through
+// the shared catalog service so every public publishing path persists the same
+// default-complete document and refreshes the in-process pricing cache.
 func (s *CreditsService) PublishAndActivateCatalog(ctx context.Context, config map[string]any, label string, rollout CatalogRollout) (string, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || s.catalog == nil {
 		return "", NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.PublishAndActivateCatalog(ctx, config, label, rollout)
+	return s.catalog.PublishAndActivate(ctx, config, label, rollout)
 }
 
-// PublishCatalogDraft writes an inactive catalog revision.
+// PublishCatalogDraft validates and canonicalizes an inactive revision through
+// the shared catalog service.
 func (s *CreditsService) PublishCatalogDraft(ctx context.Context, config map[string]any, label string) (string, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || s.catalog == nil {
 		return "", NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.PublishCatalogDraft(ctx, config, label)
+	return s.catalog.PublishDraft(ctx, config, label)
 }
 
 // GetCatalogHistory lists historical catalog revisions.
@@ -1107,6 +1153,9 @@ func (s *CreditsService) DeductTeam(ctx context.Context, teamID, userID string, 
 		if s == nil || s.store == nil {
 			return TeamDeductionResult{}, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 		}
+		if err := s.maybeLazyExpire(ctx, userID); err != nil {
+			return TeamDeductionResult{}, err
+		}
 		result, err := s.store.DeductTeam(ctx, teamID, userID, amount, options)
 		if err != nil {
 			return TeamDeductionResult{}, err
@@ -1140,6 +1189,9 @@ func (s *CreditsService) DeductTeamUsage(ctx context.Context, teamID, userID str
 			return TeamDeductionResult{}, err
 		}
 		if breakdown.Total.IsZero() {
+			if err := s.maybeLazyExpire(ctx, userID); err != nil {
+				return TeamDeductionResult{}, err
+			}
 			team, err := s.store.GetTeamBalance(ctx, teamID)
 			if err != nil {
 				return TeamDeductionResult{}, err
@@ -1193,6 +1245,41 @@ func (s *CreditsService) BeginBilledOperation(ctx context.Context, userID string
 		operationKey: operationKey,
 		feature:      options.Feature,
 		metadata:     options.Metadata.Clone(),
+	}, nil
+}
+
+// BeginBilledUsageOperation is the metric-priced counterpart to
+// BeginBilledOperation. The estimate is priced against the subject's current
+// catalog, while final usage is priced against the lease's captured revision.
+func (s *CreditsService) BeginBilledUsageOperation(ctx context.Context, userID string, options BeginBilledUsageOperationOptions) (*BilledOperation, error) {
+	if s == nil || s.store == nil {
+		return nil, NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+	}
+	operationKey, err := requireStableKey(options.OperationKey, "operation key")
+	if err != nil {
+		return nil, err
+	}
+	reserveKey, err := scopedOperationKey(operationKey, "reserve")
+	if err != nil {
+		return nil, err
+	}
+	lease, err := s.ReserveUsage(ctx, userID, options.Estimate, ReserveOptions{
+		OperationUsageOptions: OperationUsageOptions{Feature: options.Feature},
+		IdempotencyKey:        reserveKey,
+		OperationType:         options.OperationType,
+		BillingMode:           options.BillingMode,
+		TTL:                   options.TTL,
+		Metadata:              options.Metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if lease.LeaseID == "" {
+		return nil, NewStoreError("reserve succeeded without a lease ID", ErrorOptions{})
+	}
+	return &BilledOperation{
+		service: s, userID: userID, leaseID: lease.LeaseID,
+		operationKey: operationKey, feature: options.Feature, metadata: options.Metadata.Clone(),
 	}, nil
 }
 
@@ -1275,12 +1362,33 @@ func (o *BilledOperation) Settle(ctx context.Context, actual Amount) (DeductionR
 	})
 }
 
+// SettleUsage prices final metrics against the immutable catalog and plan
+// context captured by this operation's lease.
+func (o *BilledOperation) SettleUsage(ctx context.Context, actual UsageMetrics) (DeductionResult, error) {
+	if o == nil || o.service == nil {
+		return DeductionResult{}, NewError("billed operation is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
+	}
+	settleKey, err := scopedOperationKey(o.operationKey, "settle")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	return o.service.SettleUsage(ctx, o.userID, o.leaseID, actual, SettleOptions{
+		OperationUsageOptions: OperationUsageOptions{Feature: o.feature},
+		IdempotencyKey:        settleKey,
+		Metadata:              o.metadata.Clone(),
+	})
+}
+
 // RunBilled reserves, executes application work, then settles the durable
 // lease. If work fails the lease is released; after work succeeds a failed
 // settle is retried only when its transport error is classified retryable.
 func (s *CreditsService) RunBilled(ctx context.Context, userID string, options RunBilledOptions) (RunBilledResult, error) {
 	if options.DoWork == nil {
 		return RunBilledResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "billed work callback is required")
+	}
+	attempts, err := normalizeSettlementAttempts(options.SettlementAttempts)
+	if err != nil {
+		return RunBilledResult{}, err
 	}
 	operation, err := s.BeginBilledOperation(ctx, userID, BeginBilledOperationOptions{
 		Estimate:      options.Estimate,
@@ -1301,13 +1409,6 @@ func (s *CreditsService) RunBilled(ctx context.Context, userID string, options R
 		cancel()
 		return RunBilledResult{}, workErr
 	}
-	attempts := options.SettlementAttempts
-	if attempts == 0 {
-		attempts = 3
-	}
-	if attempts < 1 {
-		return RunBilledResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "settlement attempts must be positive")
-	}
 	var deduction DeductionResult
 	for attempt := 0; attempt < attempts; attempt++ {
 		deduction, err = operation.Settle(ctx, actual)
@@ -1319,6 +1420,55 @@ func (s *CreditsService) RunBilled(ctx context.Context, userID string, options R
 		}
 	}
 	return RunBilledResult{}, err
+}
+
+// RunBilledUsage reserves estimated metrics, executes application work, and
+// settles the returned final metrics against the lease's immutable pricing
+// context. Work failures release the lease; settlement retries reuse one key.
+func (s *CreditsService) RunBilledUsage(ctx context.Context, userID string, options RunBilledUsageOptions) (RunBilledResult, error) {
+	if options.DoWork == nil {
+		return RunBilledResult{}, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "billed usage work callback is required")
+	}
+	attempts, err := normalizeSettlementAttempts(options.SettlementAttempts)
+	if err != nil {
+		return RunBilledResult{}, err
+	}
+	operation, err := s.BeginBilledUsageOperation(ctx, userID, BeginBilledUsageOperationOptions{
+		Estimate: options.Estimate, OperationKey: options.OperationKey,
+		OperationType: options.OperationType, BillingMode: options.BillingMode,
+		TTL: options.TTL, Feature: options.Feature, Metadata: options.Metadata,
+	})
+	if err != nil {
+		return RunBilledResult{}, err
+	}
+	workResult, actual, workErr := options.DoWork(ctx)
+	if workErr != nil {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, _ = operation.Release(releaseCtx)
+		cancel()
+		return RunBilledResult{}, workErr
+	}
+	var deduction DeductionResult
+	for attempt := 0; attempt < attempts; attempt++ {
+		deduction, err = operation.SettleUsage(ctx, actual)
+		if err == nil {
+			return RunBilledResult{Result: workResult, Deduction: deduction}, nil
+		}
+		if !IsRetryableError(err) || ctx.Err() != nil {
+			return RunBilledResult{}, err
+		}
+	}
+	return RunBilledResult{}, err
+}
+
+func normalizeSettlementAttempts(attempts int) (int, error) {
+	if attempts == 0 {
+		return 3, nil
+	}
+	if attempts < 1 {
+		return 0, errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "settlement attempts must be positive")
+	}
+	return attempts, nil
 }
 
 func pricedOperationOptions(metrics UsageMetrics, _ CostBreakdown, _ string, feature string, _ CreditMetadata) OperationUsageOptions {
@@ -1410,7 +1560,7 @@ func creditBusinessError(operation, userID, code string) error {
 	switch code {
 	case "insufficient_credits", "insufficient_headroom":
 		return NewError(message, ErrorOptions{Code: ErrorCodeInsufficientCredits, Category: ErrorCategoryPaymentRequired, Details: details})
-	case "max_concurrent_reached", "concurrency_limit_reached":
+	case "concurrency_limit", "max_concurrent_reached", "concurrency_limit_reached":
 		return NewError(message, ErrorOptions{Code: ErrorCodeConcurrencyLimitReached, Category: ErrorCategoryRateLimited, Details: details})
 	case "quota_exceeded":
 		return NewError(message, ErrorOptions{Code: ErrorCodeQuotaExceeded, Category: ErrorCategoryRateLimited, Details: details})
@@ -1420,8 +1570,12 @@ func creditBusinessError(operation, userID, code string) error {
 		return NewError(message, ErrorOptions{Code: ErrorCodeOperationNotAllowed, Category: ErrorCategoryForbidden, Details: details})
 	case "lease_expired", "expired_lease":
 		return NewError(message, ErrorOptions{Code: ErrorCodeLeaseExpired, Category: ErrorCategoryConflict, Details: details})
-	case "lease_not_found", "missing_lease", "released_lease":
+	case "lease_not_found", "not_found", "missing_lease", "released_lease", "settled_lease":
 		return NewError(message, ErrorOptions{Code: ErrorCodeLeaseNotFound, Category: ErrorCategoryNotFound, Details: details})
+	case "settlement_conflict":
+		return NewStoreError(message, ErrorOptions{Category: ErrorCategoryConflict, Details: details})
+	case "missing_quota_measure", "invalid_measure", "policy_mismatch", "invalid_amount", "invalid_request":
+		return NewError(message, ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest, Details: details})
 	case "refund_rejected", "already_refunded", "over_refund":
 		return NewError(message, ErrorOptions{Code: ErrorCodeRefundRejected, Category: ErrorCategoryConflict, Details: details})
 	default:
@@ -1437,7 +1591,7 @@ func (s *CreditsService) emitPostDeduction(ctx context.Context, userID string, s
 	if balanceAfter.IsNegative() {
 		emitCreditEvent(ctx, s.events, CreditEventOverdraft, userID, CreditMetadata{"balance": balanceAfter, "amount": result.Amount})
 	}
-	s.emitLowBalance(ctx, userID, balanceAfter)
+	s.emitLowBalance(ctx, userID, balanceAfter.Add(result.Amount), balanceAfter)
 	s.runPostDeductionHooks(ctx, PostDeductionContext{UserID: userID, Source: source, Deduction: cloneDeductionResult(result)})
 }
 
@@ -1483,20 +1637,22 @@ func (s *CreditsService) runPostDeductionHooks(ctx context.Context, deductionCon
 	}
 }
 
-func (s *CreditsService) emitLowBalance(ctx context.Context, userID string, balance Amount) {
-	if s == nil || len(s.lowBalance) == 0 {
+func (s *CreditsService) emitLowBalance(ctx context.Context, userID string, balanceBefore, balanceAfter Amount) {
+	if s == nil {
+		return
+	}
+	if len(s.lowBalance) == 0 {
+		if balanceBefore.GreaterThan(DecimalZero) && balanceAfter.LessThanOrEqual(DecimalZero) {
+			s.fireLowBalance(ctx, userID, balanceAfter, DecimalZero)
+		}
 		return
 	}
 	s.lowBalanceMu.Lock()
-	below := s.lowBalanceState[userID]
-	if below == nil {
-		below = make(map[string]struct{})
-		s.lowBalanceState[userID] = below
-	}
+	below := s.lowBalanceStateForUserLocked(userID)
 	var fire *Amount
 	for _, threshold := range s.lowBalance {
 		key := threshold.StringFixed(MoneyDecimalPlaces)
-		if balance.LessThanOrEqual(threshold) {
+		if balanceAfter.LessThanOrEqual(threshold) {
 			if _, alreadyBelow := below[key]; !alreadyBelow {
 				below[key] = struct{}{}
 				candidate := threshold
@@ -1510,8 +1666,39 @@ func (s *CreditsService) emitLowBalance(ctx context.Context, userID string, bala
 	}
 	s.lowBalanceMu.Unlock()
 	if fire != nil {
-		emitCreditEvent(ctx, s.events, CreditEventLowBalance, userID, CreditMetadata{"balance": balance, "threshold": *fire})
+		s.fireLowBalance(ctx, userID, balanceAfter, *fire)
 	}
+}
+
+func (s *CreditsService) fireLowBalance(ctx context.Context, userID string, balance, threshold Amount) {
+	data := CreditMetadata{"balance": balance, "threshold": threshold}
+	emitCreditEvent(ctx, s.events, CreditEventLowBalance, userID, data)
+	if s.lowBalanceHandler == nil {
+		return
+	}
+	event := CreditEvent{Type: CreditEventLowBalance, Timestamp: time.Now().UTC(), UserID: userID, Data: data.Clone()}
+	func() {
+		defer func() { _ = recover() }()
+		s.lowBalanceHandler(ctx, event)
+	}()
+}
+
+func (s *CreditsService) lowBalanceStateForUserLocked(userID string) map[string]struct{} {
+	if element := s.lowBalanceUsers[userID]; element != nil {
+		s.lowBalanceOrder.MoveToBack(element)
+		return s.lowBalanceState[userID]
+	}
+	below := make(map[string]struct{})
+	s.lowBalanceState[userID] = below
+	s.lowBalanceUsers[userID] = s.lowBalanceOrder.PushBack(userID)
+	for s.lowBalanceOrder.Len() > s.lowBalanceMaxTracked {
+		oldest := s.lowBalanceOrder.Front()
+		oldestUser, _ := oldest.Value.(string)
+		s.lowBalanceOrder.Remove(oldest)
+		delete(s.lowBalanceUsers, oldestUser)
+		delete(s.lowBalanceState, oldestUser)
+	}
+	return below
 }
 
 func (s *CreditsService) rearmLowBalance(userID string, balance Amount) {
@@ -1527,6 +1714,13 @@ func (s *CreditsService) rearmLowBalance(userID string, balance Amount) {
 	for _, threshold := range s.lowBalance {
 		if balance.GreaterThan(threshold) {
 			delete(below, threshold.StringFixed(MoneyDecimalPlaces))
+		}
+	}
+	if len(below) == 0 {
+		delete(s.lowBalanceState, userID)
+		if element := s.lowBalanceUsers[userID]; element != nil {
+			s.lowBalanceOrder.Remove(element)
+			delete(s.lowBalanceUsers, userID)
 		}
 	}
 }

@@ -599,6 +599,11 @@ func validateYAMLNode(node *yaml.Node) error {
 
 func normalizeYAMLValue(value any) any {
 	switch typed := value.(type) {
+	case time.Time:
+		// yaml.v3 resolves unquoted RFC 3339 timestamps to time.Time. The
+		// canonical JSON schema expects date-time strings, so preserve the
+		// instant without forcing callers to quote otherwise valid YAML.
+		return typed.Format(time.RFC3339Nano)
 	case map[string]any:
 		result := make(map[string]any, len(typed))
 		for key, child := range typed {

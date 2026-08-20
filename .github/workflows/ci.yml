@@ -229,6 +229,40 @@ jobs:
       - run: go test -race -count=1 ./...
         working-directory: golang
 
+  go-adk-quality:
+    name: Go Google ADK integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: golang/integrations/googleadk/go.sum
+      - name: Verify optional module metadata and formatting
+        working-directory: golang/integrations/googleadk
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          files="$(git ls-files '*.go')"
+          if [ -n "$files" ]; then
+            test -z "$(gofmt -l $files)"
+          fi
+      - run: go vet ./...
+        working-directory: golang/integrations/googleadk
+      - name: Run pinned Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+        working-directory: golang/integrations/googleadk
+      - name: Run race tests and enforce Google ADK coverage
+        run: |
+          mkdir -p coverage
+          go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/adk.out ./...
+          go run github.com/vladopajic/go-test-coverage/v2@v2.19.0 --config=.testcoverage.yml
+        working-directory: golang/integrations/googleadk
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-adk-coverage-report
+          path: golang/integrations/googleadk/coverage/adk.out
+
   sdk-contract-parity:
     name: Cross-SDK deterministic contract parity
     runs-on: ubuntu-latest
@@ -283,14 +317,16 @@ jobs:
           PY
 
   package-smoke:
-    name: Published artifact smoke test
+    name: Published artifact and Go PostgreSQL integration test
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
       BURSAR_MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
       BURSAR_OPERATOR_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
       BURSAR_TENANT_ID: 00000000-0000-4000-8000-000000000201
+      BURSAR_SECONDARY_TENANT_ID: 00000000-0000-4000-8000-000000000202
       BURSAR_PROVIDER_ENVIRONMENT: test
+      BURSAR_REQUIRE_POSTGRES_TESTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -351,6 +387,11 @@ jobs:
             --id "$BURSAR_TENANT_ID" \
             --display-name "Package smoke" \
             --label initial
+          /tmp/bursar-python-consumer/bin/bursar tenant bootstrap package-smoke-secondary \
+            .github/package-smoke/pricing.json \
+            --id "$BURSAR_SECONDARY_TENANT_ID" \
+            --display-name "Package smoke secondary" \
+            --label initial
           /tmp/bursar-python-consumer/bin/python .github/package-smoke/python-postgres-smoke.py
       - name: Install and exercise npm artifact in a clean consumer
         run: |
@@ -382,6 +423,12 @@ jobs:
           cp "$GITHUB_WORKSPACE"/.github/package-smoke/go-postgres-smoke.go main.go
           go mod tidy
           go run .
+      - name: Run Go PostgreSQL integration suite and enforce coverage
+        run: make test-go-coverage
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-coverage-report
+          path: golang/coverage/core.out
       - name: Stop package-smoke PostgreSQL
         if: always()
         run: docker rm --force bursar-package-smoke-postgres || true
@@ -389,7 +436,15 @@ jobs:
   # All three SDK suites load the shared parity fixtures, so a divergence fails
   # at least one suite. This aggregating job is the single required parity check.
   parity-gate:
-    needs: [test, js-test, go-test, sdk-contract-parity]
+    needs:
+      [
+        test,
+        js-test,
+        go-test,
+        go-adk-quality,
+        sdk-contract-parity,
+        package-smoke,
+      ]
     runs-on: ubuntu-latest
     steps:
       - run: echo "Python, JavaScript, and Go suites passed against the shared parity fixtures — engines agree."
@@ -412,6 +467,7 @@ jobs:
         js-quality,
         go-quality,
         go-test,
+        go-adk-quality,
         sdk-contract-parity,
         parity-gate,
         package-smoke,
@@ -442,9 +498,24 @@ jobs:
               ),
               None,
           )
+          adk_go_mod = Path("golang/integrations/googleadk/go.mod").read_text().splitlines()
+          adk_module = next(
+              (line.split()[1] for line in adk_go_mod if line.startswith("module ")),
+              None,
+          )
+          adk_parent_version = next(
+              (
+                  line.split()[1]
+                  for line in adk_go_mod
+                  if line.strip().startswith("github.com/Zonastery/bursar/golang/v")
+              ),
+              None,
+          )
           release_tag = os.environ["RELEASE_TAG"]
           expected_tag = f"v{python_version}"
-          expected_go_module = f"github.com/Zonastery/bursar/golang/v{python_version.split('.', 1)[0]}"
+          major = python_version.split('.', 1)[0]
+          expected_go_module = f"github.com/Zonastery/bursar/golang/v{major}"
+          expected_adk_module = f"github.com/Zonastery/bursar/golang/integrations/googleadk/v{major}"
 
           if python_version != javascript_version:
               raise SystemExit(
@@ -456,6 +527,16 @@ jobs:
               raise SystemExit(
                   f"Go module {go_module!r} must use the matching semantic import path "
                   f"{expected_go_module!r}"
+              )
+          if adk_module != expected_adk_module:
+              raise SystemExit(
+                  f"Google ADK Go module {adk_module!r} must use the matching semantic "
+                  f"import path {expected_adk_module!r}"
+              )
+          if adk_parent_version != expected_tag:
+              raise SystemExit(
+                  f"Google ADK Go module requires Bursar {adk_parent_version!r}, "
+                  f"expected {expected_tag!r}"
               )
           PY
 
@@ -470,37 +551,39 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Publish the nested Go module tag
+      - name: Publish the nested Go module tags
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           release_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
-          go_tag="golang/${RELEASE_TAG}"
+          for go_tag in \
+            "golang/${RELEASE_TAG}" \
+            "golang/integrations/googleadk/${RELEASE_TAG}"; do
+            if git ls-remote --exit-code --tags origin "refs/tags/${go_tag}" >/dev/null 2>&1; then
+              git fetch --force origin "refs/tags/${go_tag}:refs/tags/${go_tag}"
+              existing_commit="$(git rev-parse "${go_tag}^{commit}")"
+              if [ "$existing_commit" != "$release_commit" ]; then
+                echo "${go_tag} already points to ${existing_commit}, expected ${release_commit}" >&2
+                exit 1
+              fi
+              echo "${go_tag} already points to the release commit; skipping"
+              continue
+            fi
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${go_tag}" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/${go_tag}:refs/tags/${go_tag}"
-            existing_commit="$(git rev-parse "${go_tag}^{commit}")"
-            if [ "$existing_commit" != "$release_commit" ]; then
-              echo "${go_tag} already points to ${existing_commit}, expected ${release_commit}" >&2
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${go_tag}" \
+              -f "sha=${release_commit}"; then
+              echo "tag creation did not succeed; checking for an identical concurrent publish" >&2
+            fi
+            published_commit="$(git ls-remote --exit-code --tags origin "refs/tags/${go_tag}" | awk 'NR == 1 { print $1 }')"
+            if [ "$published_commit" != "$release_commit" ]; then
+              echo "${go_tag} resolves to ${published_commit}, expected ${release_commit}" >&2
               exit 1
             fi
-            echo "${go_tag} already points to the release commit; skipping"
-            exit 0
-          fi
-
-          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f "ref=refs/tags/${go_tag}" \
-            -f "sha=${release_commit}"; then
-            echo "tag creation did not succeed; checking for an identical concurrent publish" >&2
-          fi
-          published_commit="$(git ls-remote --exit-code --tags origin "refs/tags/${go_tag}" | awk 'NR == 1 { print $1 }')"
-          if [ "$published_commit" != "$release_commit" ]; then
-            echo "${go_tag} resolves to ${published_commit}, expected ${release_commit}" >&2
-            exit 1
-          fi
-          echo "published ${go_tag} at ${published_commit}"
+            echo "published ${go_tag} at ${published_commit}"
+          done
 
   release-pypi:
     if: startsWith(github.ref, 'refs/tags/v')

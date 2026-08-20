@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import psycopg2.extensions
+
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import validate_non_empty, validate_non_negative
 from bursar.credits.postgres.repositories.schemas import (
@@ -136,7 +138,7 @@ class AnalyticsRepository:
                     cursor_created_at,
                     cursor_entry_id,
                     limit,
-                    entry_types,
+                    psycopg2.extensions.adapt(entry_types) if entry_types is not None else None,
                     from_date,
                     to_date,
                     usage_only,

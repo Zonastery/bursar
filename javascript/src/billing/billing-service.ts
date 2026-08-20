@@ -240,26 +240,13 @@ export class BillingService {
     let expiredCount = 0;
     for (const candidate of candidates) {
       if (!candidate.subscriptionId || !candidate.graceEndsAt) continue;
-      const current = await this.store.getBillingSubscription(
-        candidate.provider,
-        candidate.providerSubscriptionId,
-      );
       if (
-        current?.status !== "past_due" ||
-        current.graceEndsAt !== candidate.graceEndsAt ||
-        current.graceExpiredAt
-      ) {
-        continue;
-      }
-      await this.events.revokeIfCurrentSubscription(
-        candidate.userId,
-        candidate.providerSubscriptionId,
-      );
-      if (
-        await this.store.markSubscriptionGraceExpired(
+        await this.store.expireSubscriptionGracePeriod(
+          candidate.userId,
           candidate.subscriptionId,
           candidate.graceEndsAt,
           asOf,
+          this.events.terminalPlanKey,
         )
       ) {
         expiredCount += 1;
@@ -283,15 +270,13 @@ export class BillingService {
       return subscription;
     }
 
-    await this.events.revokeIfCurrentSubscription(
-      subscription.userId,
-      subscription.providerSubscriptionId,
-    );
     const expiredAt = new Date().toISOString();
-    const marked = await this.store.markSubscriptionGraceExpired(
+    const marked = await this.store.expireSubscriptionGracePeriod(
+      subscription.userId,
       subscription.subscriptionId,
       subscription.graceEndsAt,
       expiredAt,
+      this.events.terminalPlanKey,
     );
     return marked ? { ...subscription, graceExpiredAt: expiredAt } : subscription;
   }

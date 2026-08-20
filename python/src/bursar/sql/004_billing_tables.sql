@@ -87,6 +87,17 @@ CREATE TABLE bursar.billing_subscriptions (
     grace_expired_at timestamptz CHECK (grace_expired_at IS NULL OR bursar.is_finite_timestamptz(grace_expired_at)),
     provider_updated_at timestamptz NOT NULL
     CHECK (bursar.is_finite_timestamptz(provider_updated_at)),
+    entitlement_provider_updated_at timestamptz CHECK (
+        entitlement_provider_updated_at IS NULL
+        OR bursar.is_finite_timestamptz(entitlement_provider_updated_at)
+    ),
+    entitlement_billing_event_id uuid,
+    entitlement_reconciliation_outcome text CHECK (
+        entitlement_reconciliation_outcome IS NULL
+        OR entitlement_reconciliation_outcome IN (
+            'applied', 'revoked', 'preserved'
+        )
+    ),
     status_changed_at timestamptz NOT NULL
     CHECK (bursar.is_finite_timestamptz(status_changed_at)),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -123,6 +134,12 @@ CREATE TABLE bursar.billing_subscriptions (
     CHECK (
         grace_expired_at IS NULL
         OR grace_expired_at >= grace_ends_at
+    ),
+    CHECK (
+        (entitlement_provider_updated_at IS NULL)::integer
+        + (entitlement_billing_event_id IS NULL)::integer
+        + (entitlement_reconciliation_outcome IS NULL)::integer
+        IN (0, 3)
     )
 );
 
@@ -303,6 +320,12 @@ CREATE TABLE bursar.billing_events (
         (payload_archived_at IS NOT NULL AND payload_object_key IS NOT NULL)
     )
 );
+
+ALTER TABLE bursar.billing_subscriptions
+ADD CONSTRAINT billing_subscriptions_entitlement_event_fkey
+FOREIGN KEY (entitlement_billing_event_id)
+REFERENCES bursar.billing_events (id)
+ON DELETE RESTRICT;
 
 -- Keep full provider envelopes in a time-partitioned retention tier, separate
 -- from the durable event digest and processing outcome.

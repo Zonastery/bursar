@@ -41,19 +41,15 @@ export default defineConfig({
         "src/credits/store.ts",
       ],
       reporter: ["text", "json", "html"],
-      // PostgreSQL repositories need a real DB to exercise.
-      // The CI job runs with a real Postgres, so its effective coverage is
-      // higher. Ratchet these up as coverage improves — never lower without a
-      // documented reason.
-      // Branch coverage is dominated by the billing lifecycle handlers;
-      // Vitest 4's V8 remapper changed branch accounting, so the post-upgrade
-      // Keep the post-upgrade 71.11% baseline from regressing while leaving a
-      // small allowance for Node/V8 remapper differences across the matrix.
+      // PostgreSQL repositories need a real DB to exercise. CI supplies one,
+      // so these thresholds enforce the production integration-suite result.
+      // Keep modest branch/function headroom for Node/V8 remapper differences
+      // across the supported runtime matrix.
       thresholds: {
-        statements: 81,
-        branches: 71,
-        functions: 88,
-        lines: 83,
+        statements: 90,
+        branches: 77,
+        functions: 94,
+        lines: 90,
       },
     },
   },

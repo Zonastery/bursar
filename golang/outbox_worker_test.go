@@ -118,6 +118,14 @@ func TestOutboxWorkerDispatchesFailuresAndClaimLoss(t *testing.T) {
 	if result != (OutboxRunResult{Claimed: 3, Delivered: 1, Failed: 2, ClaimLost: 1}) {
 		t.Fatalf("result = %#v", result)
 	}
+	snapshot := worker.Snapshot()
+	if snapshot.LastRun == nil || snapshot.LastRun.Result == nil {
+		t.Fatalf("successful run snapshot = %#v", snapshot.LastRun)
+	}
+	snapshot.LastRun.Result.Claimed = 0
+	if fresh := worker.Snapshot(); fresh.LastRun == nil || fresh.LastRun.Result == nil || fresh.LastRun.Result.Claimed != 3 {
+		t.Fatalf("caller mutated retained worker snapshot: %#v", fresh.LastRun)
+	}
 	if failedSummary != "outbox_delivery_failed:Error" {
 		t.Fatalf("unsafe or unexpected summary = %q", failedSummary)
 	}
@@ -244,6 +252,192 @@ func TestOutboxWorkerRuntimeLifecycle(t *testing.T) {
 	}
 	if err := worker.Start(context.Background()); err == nil {
 		t.Fatal("closed worker restarted")
+	}
+}
+
+func TestOutboxWorkerStopIsIdempotentAndSnapshotsLocalState(t *testing.T) {
+	worker, err := NewOutboxWorker(
+		&outboxStoreStub{},
+		[]OutboxHandler{&outboxHandlerStub{topics: []string{"one"}}},
+		OutboxWorkerOptions{PollInterval: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := worker.Snapshot(); !snapshot.Configured || snapshot.Lifecycle != OutboxWorkerNotStarted {
+		t.Fatalf("initial snapshot = %#v", snapshot)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := worker.Snapshot(); snapshot.Lifecycle != OutboxWorkerRunning {
+		t.Fatalf("running snapshot = %#v", snapshot)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+	if snapshot := worker.Snapshot(); snapshot.Lifecycle != OutboxWorkerStopped {
+		t.Fatalf("stopped snapshot = %#v", snapshot)
+	}
+	if err := worker.Close(context.Background()); err != nil {
+		t.Fatalf("Close() after Stop() error = %v", err)
+	}
+}
+
+func TestOutboxWorkerBackgroundRunDoesNotReplaceManualSnapshot(t *testing.T) {
+	claimStarted := make(chan struct{})
+	errorReported := make(chan struct{})
+	var claimCalls atomic.Int32
+	store := &outboxStoreStub{claim: func(context.Context, []string, int, int) ([]OutboxEvent, error) {
+		switch claimCalls.Add(1) {
+		case 1:
+			return nil, errors.New("manual provider secret")
+		case 2:
+			close(claimStarted)
+			return nil, errors.New("background provider secret")
+		}
+		return nil, nil
+	}}
+	worker, err := NewOutboxWorker(store, []OutboxHandler{&outboxHandlerStub{topics: []string{"one"}}}, OutboxWorkerOptions{
+		PollInterval: time.Hour,
+		OnError:      func(error) { close(errorReported) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.RunOnce(context.Background()); err == nil {
+		t.Fatal("manual run unexpectedly succeeded")
+	}
+	manual := worker.Snapshot()
+	if manual.LastRun == nil || manual.LastRun.Source != "manual" || manual.LastRun.Error != "outbox_worker_failed:Error" {
+		t.Fatalf("manual snapshot = %#v", manual.LastRun)
+	}
+	if manual.LastRun.Result != nil {
+		t.Fatalf("failed manual run unexpectedly has a result: %#v", manual.LastRun.Result)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-claimStarted
+	<-errorReported
+	snapshot := worker.Snapshot()
+	if snapshot.LastRun == nil || snapshot.LastRun.Source != "manual" {
+		t.Fatalf("background run replaced manual snapshot: %#v", snapshot.LastRun)
+	}
+	if snapshot.LastError == nil || snapshot.LastError.Error != "outbox_worker_failed:Error" {
+		t.Fatalf("background error snapshot = %#v", snapshot.LastError)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOutboxWorkerCloseDrainsActiveRun(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var claimed atomic.Bool
+	var completed atomic.Bool
+	var handlerCanceled atomic.Bool
+	store := &outboxStoreStub{
+		claim: func(context.Context, []string, int, int) ([]OutboxEvent, error) {
+			if claimed.Swap(true) {
+				return nil, nil
+			}
+			return []OutboxEvent{{EventID: "drain", Topic: "drain", AttemptCount: 1}}, nil
+		},
+		complete: func(context.Context, OutboxEvent) (bool, error) {
+			completed.Store(true)
+			return true, nil
+		},
+	}
+	worker, err := NewOutboxWorker(store, []OutboxHandler{&outboxHandlerStub{
+		topics: []string{"drain"},
+		handle: func(ctx context.Context, _ OutboxEvent) error {
+			close(started)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				handlerCanceled.Store(true)
+				return ctx.Err()
+			}
+		},
+	}}, OutboxWorkerOptions{BatchSize: 1, Concurrency: 1, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- worker.Close(context.Background()) }()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned before active delivery was released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if !completed.Load() {
+		t.Fatal("active event was not completed")
+	}
+	if handlerCanceled.Load() {
+		t.Fatal("active handler context was canceled during graceful close")
+	}
+}
+
+func TestOutboxWorkerCloseDeadlineCancelsActiveRun(t *testing.T) {
+	started := make(chan struct{})
+	handlerDone := make(chan struct{})
+	var claimed atomic.Bool
+	var handlerCanceled atomic.Bool
+	store := &outboxStoreStub{
+		claim: func(context.Context, []string, int, int) ([]OutboxEvent, error) {
+			if claimed.Swap(true) {
+				return nil, nil
+			}
+			return []OutboxEvent{{EventID: "deadline", Topic: "deadline", AttemptCount: 1}}, nil
+		},
+	}
+	worker, err := NewOutboxWorker(store, []OutboxHandler{&outboxHandlerStub{
+		topics: []string{"deadline"},
+		handle: func(ctx context.Context, _ OutboxEvent) error {
+			close(started)
+			defer close(handlerDone)
+			<-ctx.Done()
+			handlerCanceled.Store(true)
+			return ctx.Err()
+		},
+	}}, OutboxWorkerOptions{BatchSize: 1, Concurrency: 1, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	closeContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := worker.Close(closeContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("active handler did not observe forced cancellation")
+	}
+	if !handlerCanceled.Load() {
+		t.Fatal("active handler did not receive cancellation")
+	}
+	if err := worker.Close(context.Background()); err != nil {
+		t.Fatalf("second Close() error = %v", err)
 	}
 }
 

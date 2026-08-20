@@ -22,6 +22,10 @@ export class BillingEventProcessor {
     return this.handlers.hasProvisioning;
   }
 
+  get terminalPlanKey(): string | null {
+    return this.handlers.terminalPlan;
+  }
+
   constructor(
     private readonly store: BillingStore,
     options?: BillingServiceOptions,
@@ -175,7 +179,7 @@ export class BillingEventProcessor {
       return { handled: false, error: "unhandled_event_type" };
     }
     const result = await handler(event);
-    if (result.handled) {
+    if (result.handled && result.action !== "stale_subscription_event") {
       await this.fireEventHandlers(event, event.accountId ?? null);
     }
     return result;
@@ -195,9 +199,5 @@ export class BillingEventProcessor {
         },
       );
     }
-  }
-
-  async revokeIfCurrentSubscription(userId: string, subscriptionId: string): Promise<void> {
-    await this.handlers.revokeIfCurrentSubscription(userId, subscriptionId);
   }
 }

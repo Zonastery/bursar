@@ -165,12 +165,14 @@ describe("CreditEventEmitter", () => {
 
   // ── Handler exception isolation ────────────────────────────────────────────
   describe("handler exception isolation", () => {
-    it("second handler still fires even when first handler throws, and emit does not throw", () => {
-      const emitter = new CreditEventEmitter();
+    it("logs a synchronous handler failure through the injected normalized logger", () => {
+      const error = new Error("handler 1 explosion");
+      const logError = vi.fn();
+      const emitter = new CreditEventEmitter({ error: logError });
       const secondCalls: number[] = [];
 
       emitter.on("credits.deducted", () => {
-        throw new Error("handler 1 explosion");
+        throw error;
       });
       emitter.on("credits.deducted", () => {
         secondCalls.push(1);
@@ -181,25 +183,34 @@ describe("CreditEventEmitter", () => {
 
       // Second handler still ran.
       expect(secondCalls).toHaveLength(1);
+      expect(logError).toHaveBeenCalledOnce();
+      expect(logError).toHaveBeenCalledWith("[CreditEventEmitter] handler failed", {
+        eventType: "credits.deducted",
+        error,
+      });
     });
 
-    it("async handler that rejects does not surface as an unhandled rejection", () => {
-      const emitter = new CreditEventEmitter();
-      // Spy on console.error to confirm it was swallowed, not propagated.
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    it("logs an async handler rejection through the injected normalized logger", async () => {
+      const error = new Error("async rejection");
+      const logError = vi.fn();
+      const emitter = new CreditEventEmitter({ error: logError });
 
       emitter.on("credits.added", async () => {
         await Promise.resolve();
-        throw new Error("async rejection");
+        throw error;
       });
 
       expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
-      consoleSpy.mockRestore();
+      await vi.waitFor(() => expect(logError).toHaveBeenCalledOnce());
+      expect(logError).toHaveBeenCalledWith("[CreditEventEmitter] async handler failed", {
+        eventType: "credits.added",
+        error,
+      });
     });
 
     it("thenable handler rejections are isolated like native promises", async () => {
-      const emitter = new CreditEventEmitter();
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const logError = vi.fn();
+      const emitter = new CreditEventEmitter({ error: logError });
       const rejection: PromiseLike<void> = {
         then: (onFulfilled, onRejected) =>
           Promise.reject(new Error("thenable rejection")).then(onFulfilled, onRejected),
@@ -207,8 +218,55 @@ describe("CreditEventEmitter", () => {
       emitter.on("credits.added", () => rejection);
 
       expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
-      await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(logError).toHaveBeenCalledOnce());
+    });
+
+    it("keeps no-argument construction backward compatible", async () => {
+      const emitter = new CreditEventEmitter();
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      emitter.on("credits.added", () => {
+        throw new Error("sync rejection");
+      });
+      emitter.on("credits.added", async () => {
+        throw new Error("async rejection");
+      });
+
+      expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(consoleSpy).not.toHaveBeenCalled();
       consoleSpy.mockRestore();
+    });
+
+    it("preserves handler isolation when the injected logger throws", async () => {
+      const emitter = new CreditEventEmitter({
+        error: () => {
+          throw new Error("logger unavailable");
+        },
+      });
+      emitter.on("credits.added", () => {
+        throw new Error("sync rejection");
+      });
+      emitter.on("credits.added", async () => {
+        throw new Error("async rejection");
+      });
+
+      expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    it("observes and isolates a rejecting async injected logger", async () => {
+      const loggerRejection = Promise.reject(new Error("async logger unavailable"));
+      const catchSpy = vi.spyOn(loggerRejection, "catch");
+      const emitter = new CreditEventEmitter({ error: () => loggerRejection });
+      emitter.on("credits.added", () => {
+        throw new Error("listener rejection");
+      });
+
+      expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
+      expect(catchSpy).toHaveBeenCalledOnce();
+      await expect(loggerRejection.catch(() => undefined)).resolves.toBeUndefined();
     });
   });
 });

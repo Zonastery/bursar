@@ -22,6 +22,7 @@ from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
     BillingEventClaim,
+    BillingEventResult,
     BillingEventType,
     BillingInvoiceInfo,
     BillingOfferResult,
@@ -143,16 +144,73 @@ def test_expire_past_due_grace_periods_matches_javascript_cas_flow() -> None:
         cancel_at_period_end=False,
     )
     store.get_user_subscription.return_value = store.get_billing_subscription.return_value
-    store.mark_subscription_grace_expired.return_value = True
+    store.expire_subscription_grace_period.return_value = True
     service = BillingService(store, provisioning=provisioning)
 
     assert service.expire_past_due_grace_periods(datetime(2026, 7, 30, tzinfo=UTC)) == 1
-    provisioning.unset_user_plan.assert_called_once_with(user_id)
-    store.mark_subscription_grace_expired.assert_called_once_with(
+    provisioning.unset_user_plan.assert_not_called()
+    store.expire_subscription_grace_period.assert_called_once_with(
+        user_id,
         subscription_id,
         "2026-07-29T00:00:00+00:00",
         "2026-07-30T00:00:00+00:00",
+        None,
     )
+
+
+def test_grace_expiry_is_disabled_without_plan_provisioning() -> None:
+    store = MagicMock()
+    service = BillingService(store)
+
+    assert service.expire_past_due_grace_periods(datetime(2026, 7, 30, tzinfo=UTC)) == 0
+    store.list_expired_grace_subscriptions.assert_not_called()
+    store.expire_subscription_grace_period.assert_not_called()
+
+
+def test_terminal_subscription_replacement_is_source_aware() -> None:
+    user_id = "00000000-0000-0000-0000-000000000001"
+    subscription_id = "00000000-0000-0000-0000-000000000002"
+    store = MagicMock()
+    store.get_billing_subscription.return_value = BillingSubscriptionState(
+        subscription_id=subscription_id,
+        user_id=user_id,
+        provider="stripe",
+        provider_subscription_id="sub_paused",
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-29T00:00:00+00:00",
+        cancel_at_period_end=False,
+    )
+    provisioning = MagicMock()
+    service = BillingService(store, provisioning=provisioning, terminal_plan_key="free")
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_paused_source",
+        event_type=BillingEventType.subscription_paused,
+        occurred_at="2026-07-30T00:00:00+00:00",
+        account_id=user_id,
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_paused",
+            status=BillingSubscriptionStatus.paused,
+        ),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
+    )
+    store.reconcile_subscription_entitlement.return_value = "revoked"
+
+    result = service._handle_subscription_paused(event)
+
+    assert result.handled is True
+    store.reconcile_subscription_entitlement.assert_called_once_with(
+        user_id,
+        subscription_id,
+        "00000000-0000-0000-0000-000000000099",
+        BillingSubscriptionStatus.paused,
+        "2026-07-30T00:00:00+00:00",
+        None,
+        True,
+        "free",
+        "subscription_paused",
+    )
+    provisioning.unset_user_plan.assert_not_called()
 
 
 def test_async_billing_event_handler_is_awaited() -> None:
@@ -189,7 +247,20 @@ def test_unknown_cancellation_with_offer_refs_persists_tombstone() -> None:
         claim_token="claim",
         billing_event_id="00000000-0000-0000-0000-000000000099",
     )
-    store.get_billing_subscription.return_value = None
+    persisted = BillingSubscriptionState(
+        subscription_id="00000000-0000-0000-0000-000000000011",
+        user_id="00000000-0000-0000-0000-000000000001",
+        provider="stripe",
+        provider_subscription_id="sub_unknown",
+        offer_id="00000000-0000-0000-0000-000000000010",
+        offer_key="pro_monthly",
+        plan="pro",
+        status=BillingSubscriptionStatus.canceled,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=True,
+    )
+    store.get_billing_subscription.side_effect = [None, persisted]
+    store.reconcile_subscription_entitlement.return_value = "preserved"
     store.resolve_billing_offer.return_value = BillingOfferResult(
         offer_id="00000000-0000-0000-0000-000000000010",
         offer_key="pro_monthly",
@@ -236,10 +307,22 @@ def test_unknown_cancellation_without_offer_refs_is_failed_for_retry() -> None:
     store.fail_billing_event.assert_called_once()
 
 
-def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -> None:
+def test_subscription_entitlement_uses_atomic_store_boundary() -> None:
     provisioning = MagicMock()
     store = MagicMock()
-    store.select_subscription_entitlement_source.return_value = True
+    persisted = BillingSubscriptionState(
+        subscription_id="00000000-0000-0000-0000-000000000011",
+        user_id="00000000-0000-0000-0000-000000000001",
+        provider="stripe",
+        provider_subscription_id="sub_provision",
+        offer_id="00000000-0000-0000-0000-000000000010",
+        plan="pro",
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
+    )
+    store.get_billing_subscription.return_value = persisted
+    store.reconcile_subscription_entitlement.return_value = "applied"
     service = BillingService(store, provisioning=provisioning)
     user_id = "00000000-0000-0000-0000-000000000001"
     event = BillingEvent(
@@ -249,6 +332,7 @@ def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -
         occurred_at="2026-07-29T00:00:00Z",
         account_id=user_id,
         subscription=BillingSubscriptionInfo(provider_subscription_id="sub_provision"),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
     )
     offer = BillingOfferResult(
         offer_id="00000000-0000-0000-0000-000000000010",
@@ -260,13 +344,152 @@ def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -
         grant=None,
     )
 
-    service._provision_subscription(user_id, offer, event)
-
-    provisioning.set_user_plan.assert_called_once_with(
-        user_id,
-        "pro",
-        plan_assigned_at=None,
+    expected = BillingSubscriptionState(
+        user_id=user_id,
+        provider="stripe",
+        provider_subscription_id="sub_provision",
+        offer_id=offer.offer_id,
+        plan=offer.plan,
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
     )
+    assert service._reconcile_subscription_event(user_id, event, expected) == "applied"
+
+    store.reconcile_subscription_entitlement.assert_called_once_with(
+        user_id,
+        persisted.subscription_id,
+        "00000000-0000-0000-0000-000000000099",
+        BillingSubscriptionStatus.active,
+        "2026-07-29T00:00:00+00:00",
+        None,
+        True,
+        None,
+        "subscription_active",
+    )
+    provisioning.set_user_plan.assert_not_called()
+
+
+def test_stale_renewal_suppresses_cycle_grant_and_callback() -> None:
+    user_id = "00000000-0000-0000-0000-000000000001"
+    subscription_id = "00000000-0000-0000-0000-000000000011"
+    callback = MagicMock()
+    store = MagicMock()
+    store.get_billing_subscription.return_value = BillingSubscriptionState(
+        subscription_id=subscription_id,
+        user_id=user_id,
+        provider="stripe",
+        provider_subscription_id="sub_stale",
+        offer_id="00000000-0000-0000-0000-000000000010",
+        plan="pro",
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-30T00:00:00Z",
+        cancel_at_period_end=False,
+    )
+    store.resolve_billing_offer.return_value = BillingOfferResult(
+        offer_id="00000000-0000-0000-0000-000000000010",
+        offer_key="pro_monthly",
+        plan_id="00000000-0000-0000-0000-000000000020",
+        plan="pro",
+        interval="month",
+        interval_count=1,
+        grant=None,
+    )
+    store.reconcile_subscription_entitlement.return_value = "stale"
+    service = BillingService(
+        store,
+        provisioning=MagicMock(spec=BillingProvisioningPort),
+        event_handlers={BillingEventType.subscription_renewed: callback},
+    )
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_stale_renewal",
+        event_type=BillingEventType.subscription_renewed,
+        occurred_at="2026-07-29T00:00:00Z",
+        account_id=user_id,
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_stale",
+            status=BillingSubscriptionStatus.active,
+            refs=ProviderRef(price_id="price_pro"),
+        ),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
+    )
+
+    result = service._route_event(event)
+
+    assert result == BillingEventResult(handled=True, action="stale_subscription_event")
+    store.create_billing_credit_grant.assert_not_called()
+    callback.assert_not_called()
+
+
+def test_entitlement_opt_out_still_uses_atomic_version_fence() -> None:
+    user_id = "00000000-0000-0000-0000-000000000001"
+    subscription_id = "00000000-0000-0000-0000-000000000011"
+    store = MagicMock()
+    store.get_billing_subscription.return_value = BillingSubscriptionState(
+        subscription_id=subscription_id,
+        user_id=user_id,
+        provider="stripe",
+        provider_subscription_id="sub_opt_out",
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
+    )
+    store.reconcile_subscription_entitlement.return_value = "preserved"
+    service = BillingService(
+        store,
+        BillingServiceOptions(auto_select_entitlement_source=False),
+    )
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_opt_out",
+        event_type=BillingEventType.subscription_activated,
+        occurred_at="2026-07-29T00:00:00Z",
+        account_id=user_id,
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_opt_out",
+            status=BillingSubscriptionStatus.active,
+        ),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
+    )
+    expected = store.get_billing_subscription.return_value
+
+    assert service._reconcile_subscription_event(user_id, event, expected) == "preserved"
+    assert store.reconcile_subscription_entitlement.call_args.args[6] is False
+
+
+def test_falsey_provisioning_adapter_still_enables_atomic_entitlement() -> None:
+    user_id = "00000000-0000-0000-0000-000000000001"
+    store = MagicMock()
+    persisted = BillingSubscriptionState(
+        subscription_id="00000000-0000-0000-0000-000000000011",
+        user_id=user_id,
+        provider="stripe",
+        provider_subscription_id="sub_falsey",
+        status=BillingSubscriptionStatus.active,
+        provider_updated_at="2026-07-29T00:00:00Z",
+        cancel_at_period_end=False,
+    )
+    store.get_billing_subscription.return_value = persisted
+    store.reconcile_subscription_entitlement.return_value = "applied"
+    provisioning = MagicMock()
+    provisioning.__bool__.return_value = False
+    service = BillingService(store, provisioning=provisioning)
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_falsey",
+        event_type=BillingEventType.subscription_activated,
+        occurred_at="2026-07-29T00:00:00Z",
+        account_id=user_id,
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_falsey",
+            status=BillingSubscriptionStatus.active,
+        ),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
+    )
+
+    assert service._reconcile_subscription_event(user_id, event, persisted) == "applied"
+    assert store.reconcile_subscription_entitlement.call_args.args[6] is True
 
 
 def test_get_user_subscription_uses_subsecond_timestamps() -> None:
@@ -327,31 +550,24 @@ def test_get_user_subscription_rejects_invalid_provider_timestamp() -> None:
         )
 
 
-def test_deactivate_other_providers_selects_newest_replacement() -> None:
-    rows = [
-        _persisted_subscription_row(
-            id="00000000-0000-0000-0000-000000000012",
-            provider="stripe",
-            provider_subscription_id="sub_newest",
-            provider_updated_at=datetime(2026, 7, 29, 12, 0, 0, 900_000, tzinfo=UTC),
-        ),
-        _persisted_subscription_row(
-            id="00000000-0000-0000-0000-000000000013",
-            provider="dodo",
-            provider_subscription_id="sub_other",
-            provider_updated_at=datetime(2026, 7, 29, 12, 0, 1, tzinfo=UTC),
-        ),
-    ]
-    store = object.__new__(PostgresBillingStore)
-    store._execute = MagicMock(side_effect=[rows, [{"selected": True}]])
+def test_reconcile_entitlement_validates_the_scalar_outcome() -> None:
+    execute = MagicMock(return_value=[{"outcome": "applied"}])
+    repository = BillingSubscriptionRepository(execute)
 
-    result = store.select_subscription_entitlement_source(
+    result = repository.reconcile_entitlement(
         "00000000-0000-0000-0000-000000000001",
-        "stripe",
+        "00000000-0000-0000-0000-000000000012",
+        "00000000-0000-0000-0000-000000000099",
+        BillingSubscriptionStatus.active,
+        "2026-07-29T12:00:00.900000+00:00",
+        None,
+        True,
+        None,
+        "subscription_active",
     )
 
-    assert result is True
-    assert str(store._execute.call_args_list[1].args[1][1]) == "00000000-0000-0000-0000-000000000012"
+    assert result == "applied"
+    assert "reconcile_subscription_entitlement" in execute.call_args.args[0]
 
 
 def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
@@ -539,7 +755,7 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
     assert len(execute.call_args_list) == 2
 
 
-def test_plan_change_advances_before_subscription_upsert() -> None:
+def test_plan_change_advances_only_after_entitlement_version_fence() -> None:
     store = MagicMock()
     store.get_billing_subscription.return_value = BillingSubscriptionState(
         subscription_id="00000000-0000-0000-0000-000000000011",
@@ -564,6 +780,7 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
         grant=None,
     )
     store.get_open_billing_subscription_change.return_value = SimpleNamespace(id="change_1")
+    store.reconcile_subscription_entitlement.return_value = "preserved"
     service = BillingService(store)
     event = BillingEvent(
         provider="dodo",
@@ -576,13 +793,17 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
             status=BillingSubscriptionStatus.active,
             refs=ProviderRef(product_id="prod_sage"),
         ),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
     )
 
     result = service._handle_subscription_plan_changed(event)
 
     assert result.handled
     method_names = [call[0] for call in store.method_calls]
-    assert method_names.index("update_billing_subscription_change") < method_names.index("upsert_billing_subscription")
+    assert method_names.index("upsert_billing_subscription") < method_names.index("reconcile_subscription_entitlement")
+    assert method_names.index("reconcile_subscription_entitlement") < method_names.index(
+        "update_billing_subscription_change"
+    )
     state = store.upsert_billing_subscription.call_args.args[0]
     assert state.metadata == {"pendingPlanChange": None}
 
@@ -614,6 +835,7 @@ def test_plan_change_captures_allowance_anchor_before_advancing() -> None:
         grant=None,
     )
     store.get_open_billing_subscription_change.return_value = SimpleNamespace(id="12")
+    store.reconcile_subscription_entitlement.return_value = "applied"
     service = BillingService(store, provisioning=provisioning)
     event = BillingEvent(
         provider="dodo",
@@ -626,17 +848,25 @@ def test_plan_change_captures_allowance_anchor_before_advancing() -> None:
             status=BillingSubscriptionStatus.active,
             refs=ProviderRef(product_id="prod_sage"),
         ),
+        billing_event_id="00000000-0000-0000-0000-000000000099",
     )
 
     result = service._handle_subscription_plan_changed(event)
 
     assert result.handled
     assert provisioning.method_calls[0].args == (event.account_id,)
-    provisioning.set_user_plan.assert_called_once_with(
+    store.reconcile_subscription_entitlement.assert_called_once_with(
         event.account_id,
-        "sage",
-        plan_assigned_at=anchor,
+        "00000000-0000-0000-0000-000000000011",
+        "00000000-0000-0000-0000-000000000099",
+        BillingSubscriptionStatus.active,
+        "2026-07-29T00:00:00+00:00",
+        anchor,
+        True,
+        None,
+        "subscription_active",
     )
+    provisioning.set_user_plan.assert_not_called()
     assert provisioning.get_user_plan.call_count == 1
 
 

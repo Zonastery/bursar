@@ -412,6 +412,14 @@ func billingEventClaimEnvelope(event BillingEvent) map[string]any {
 	return envelope
 }
 
+func billingMetadataString(metadata CreditMetadata, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
 func billingProviderRefEnvelope(reference *ProviderRef) map[string]any {
 	result := map[string]any{}
 	setBillingEnvelopeText(result, "productId", reference.ProductID)
@@ -608,6 +616,12 @@ type BillingAccountResolver interface {
 // against the claim and leave the provider retryable where appropriate.
 type BillingEventHandler func(context.Context, BillingEvent, string) error
 
+// BillingEventCallback observes a successfully completed lifecycle event.
+// Callback panics are recovered and cannot alter the durable event outcome.
+// Use BillingEventHandler only when deliberately replacing the built-in
+// lifecycle processor; ordinary application notifications belong here.
+type BillingEventCallback func(context.Context, BillingEvent, string)
+
 // BillingProvisioningPort is the narrow credit capability used by the
 // provider-neutral subscription lifecycle. PostgresStore deliberately does
 // not make plan decisions itself; the facade supplies its CreditsService.
@@ -627,6 +641,7 @@ type BillingService struct {
 	store                       BillingStore
 	mu                          sync.RWMutex
 	handlers                    map[BillingEventType]BillingEventHandler
+	eventHandlers               map[BillingEventType]BillingEventCallback
 	defaultHandler              BillingEventHandler
 	provisioning                BillingProvisioningPort
 	autoSelectEntitlementSource bool
@@ -644,7 +659,13 @@ func NewBillingService(store BillingStore, options ...BillingServiceOptions) (*B
 	if err := store.ProviderEnvironment().Validate(); err != nil {
 		return nil, err
 	}
-	service := &BillingService{store: store, handlers: make(map[BillingEventType]BillingEventHandler), autoSelectEntitlementSource: true, pastDueGracePeriod: 7 * 24 * time.Hour}
+	service := &BillingService{
+		store:                       store,
+		handlers:                    make(map[BillingEventType]BillingEventHandler),
+		eventHandlers:               make(map[BillingEventType]BillingEventCallback),
+		autoSelectEntitlementSource: true,
+		pastDueGracePeriod:          7 * 24 * time.Hour,
+	}
 	if len(options) == 1 {
 		if err := applyBillingOptions(service, &options[0]); err != nil {
 			return nil, err
@@ -674,6 +695,36 @@ func (s *BillingService) SetDefaultHandler(handler BillingEventHandler) {
 	s.mu.Lock()
 	s.defaultHandler = handler
 	s.mu.Unlock()
+}
+
+// OnEvent registers a failure-isolated notification for one successfully
+// processed event type. It does not replace Bursar's built-in lifecycle
+// processor. Registering another callback for the same type replaces the
+// previous callback, matching the Python SDK's event_handlers mapping.
+func (s *BillingService) OnEvent(eventType BillingEventType, callback BillingEventCallback) error {
+	if s == nil || callback == nil || strings.TrimSpace(string(eventType)) == "" {
+		return errors.New("bursar: billing event type and callback are required")
+	}
+	s.mu.Lock()
+	s.eventHandlers[eventType] = callback
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *BillingService) fireEventHandler(ctx context.Context, event BillingEvent, accountID string) {
+	if s == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	s.mu.RLock()
+	callback := s.eventHandlers[event.Type]
+	s.mu.RUnlock()
+	if callback == nil {
+		return
+	}
+	func() {
+		defer func() { _ = recover() }()
+		callback(ctx, event, accountID)
+	}()
 }
 
 // Ingest claims, handles, and completes a verified normalized billing event.
@@ -753,6 +804,17 @@ func (s *BillingService) Ingest(ctx context.Context, event BillingEvent) (result
 		// Expired/upcoming provider events are intentionally acknowledged: their
 		// state has no financial effect until a later confirmed lifecycle event.
 		if event.Type == BillingEventCheckoutExpired || event.Type == BillingEventInvoiceUpcoming {
+			if event.Type == BillingEventCheckoutExpired {
+				if intentID := billingMetadataString(event.Metadata, "checkout_intent_id"); intentID != "" {
+					if intents, ok := s.store.(interface {
+						UpdateCheckoutIntent(context.Context, string, string, CheckoutIntentUpdate) error
+					}); ok {
+						if err := intents.UpdateCheckoutIntent(ctx, intentID, accountID, CheckoutIntentUpdate{Status: "expired"}); err != nil {
+							return s.fail(ctx, event, claim.ClaimToken, err)
+						}
+					}
+				}
+			}
 			if _, err := s.store.CompleteBillingEvent(ctx, event.Provider, event.canonicalEventID(), claim.ClaimToken); err != nil {
 				return result, fmt.Errorf("bursar: complete ignored billing event: %w", err)
 			}
@@ -768,8 +830,12 @@ func (s *BillingService) Ingest(ctx context.Context, event BillingEvent) (result
 		return result, fmt.Errorf("bursar: billing event %s completion claim was lost", event.canonicalEventID())
 	}
 	if lifecycleResult != nil {
+		if !lifecycleResult.Ignored {
+			s.fireEventHandler(ctx, event, lifecycleResult.AccountID)
+		}
 		return *lifecycleResult, nil
 	}
+	s.fireEventHandler(ctx, event, accountID)
 	return BillingEventResult{Handled: true, AccountID: accountID}, nil
 }
 

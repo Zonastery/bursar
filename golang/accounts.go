@@ -57,7 +57,9 @@ func (s *AccountService) OnAccountCreated(ctx context.Context, input AccountCrea
 	if err != nil {
 		return AccountCreatedResult{}, err
 	}
-	config, err := s.catalog.GetConfig(ctx)
+	config, err := RetryBursarOperation(ctx, func(ctx context.Context) (*BursarConfig, error) {
+		return s.catalog.GetConfig(ctx)
+	})
 	if err != nil {
 		return AccountCreatedResult{}, err
 	}
@@ -66,14 +68,18 @@ func (s *AccountService) OnAccountCreated(ctx context.Context, input AccountCrea
 	}
 
 	store := s.credits.Store()
-	current, err := store.GetUserPlan(ctx, accountID)
+	current, err := RetryBursarOperation(ctx, func(ctx context.Context) (GetUserPlanResult, error) {
+		return store.GetUserPlan(ctx, accountID)
+	})
 	if err != nil {
 		return AccountCreatedResult{}, err
 	}
 	planKey := current.PlanKey
 	planAssigned := planKey == ""
 	if planAssigned {
-		if _, err := s.credits.SetUserPlan(ctx, accountID, *config.Catalog.DefaultPlan, SetUserPlanOptions{}); err != nil {
+		if _, err := RetryBursarOperation(ctx, func(ctx context.Context) (SetUserPlanResult, error) {
+			return s.credits.SetUserPlan(ctx, accountID, *config.Catalog.DefaultPlan, SetUserPlanOptions{})
+		}); err != nil {
 			return AccountCreatedResult{}, err
 		}
 		planKey = *config.Catalog.DefaultPlan
@@ -90,13 +96,15 @@ func (s *AccountService) OnAccountCreated(ctx context.Context, input AccountCrea
 		if program.Trigger != "account_created" {
 			continue
 		}
-		awards, err := s.credits.ExecuteGrantProgram(ctx, ExecuteGrantProgramRequest{
-			Trigger:    "account_created",
-			ProgramKey: programKey,
-			SubjectID:  accountID,
-			EventKey:   eventKey,
-			Region:     input.Region,
-			Metadata:   input.Metadata.Clone(),
+		awards, err := RetryBursarOperation(ctx, func(ctx context.Context) ([]GrantProgramAwardResult, error) {
+			return s.credits.ExecuteGrantProgram(ctx, ExecuteGrantProgramRequest{
+				Trigger:    "account_created",
+				ProgramKey: programKey,
+				SubjectID:  accountID,
+				EventKey:   eventKey,
+				Region:     input.Region,
+				Metadata:   input.Metadata.Clone(),
+			})
 		})
 		if err != nil {
 			return AccountCreatedResult{}, err

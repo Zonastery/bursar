@@ -2,6 +2,7 @@ package bursar
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -162,11 +164,32 @@ func NewPostgresClient(ctx context.Context, databaseURL string, options Postgres
 		config.ConnConfig.RuntimeParams = make(map[string]string)
 	}
 	config.ConnConfig.RuntimeParams["application_name"] = normalized.ApplicationName
+	config.AfterConnect = installExactJSONCodecs
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, normalizePostgresError(err, "connect to PostgreSQL", false)
 	}
 	return &PostgresClient{pool: pool, options: normalized, owned: true}, nil
+}
+
+func installExactJSONCodecs(_ context.Context, conn *pgx.Conn) error {
+	conn.TypeMap().RegisterType(&pgtype.Type{
+		Name: "json",
+		OID:  pgtype.JSONOID,
+		Codec: &pgtype.JSONCodec{
+			Marshal:   json.Marshal,
+			Unmarshal: decodeJSONUseNumber,
+		},
+	})
+	conn.TypeMap().RegisterType(&pgtype.Type{
+		Name: "jsonb",
+		OID:  pgtype.JSONBOID,
+		Codec: &pgtype.JSONBCodec{
+			Marshal:   json.Marshal,
+			Unmarshal: decodeJSONUseNumber,
+		},
+	})
+	return nil
 }
 
 // NewPostgresClientFromPool binds an application-owned pool to the Bursar
@@ -280,23 +303,7 @@ func (tx *PostgresTransaction) call(ctx context.Context, name string, arguments 
 		return nil, err
 	}
 	defer rows.Close()
-	fieldDescriptions := rows.FieldDescriptions()
-	result := make([]map[string]any, 0)
-	for rows.Next() {
-		values, err := rows.Values()
-		if err != nil {
-			return nil, err
-		}
-		row := make(map[string]any, len(fieldDescriptions))
-		for index, field := range fieldDescriptions {
-			row[string(field.Name)] = values[index]
-		}
-		result = append(result, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return collectPostgresRows(rows)
 }
 
 // Query runs parameterized SQL inside a tenant-scoped transaction. It is
@@ -327,15 +334,35 @@ func (tx *PostgresTransaction) query(ctx context.Context, query string, argument
 		return nil, err
 	}
 	defer rows.Close()
+	return collectPostgresRows(rows)
+}
+
+// collectPostgresRows preserves JSON and JSONB as their exact wire text. pgx's
+// default scan into any decodes JSON numbers as float64, which is unsafe for
+// six-decimal accounting values and also affects caller-owned pools whose
+// codecs Bursar cannot configure before connection creation.
+func collectPostgresRows(rows pgx.Rows) ([]map[string]any, error) {
 	fields := rows.FieldDescriptions()
 	result := make([]map[string]any, 0)
 	for rows.Next() {
-		values, err := rows.Values()
-		if err != nil {
+		values := make([]any, len(fields))
+		destinations := make([]any, len(fields))
+		jsonValues := make([]json.RawMessage, len(fields))
+		for index, field := range fields {
+			if field.DataTypeOID == pgtype.JSONOID || field.DataTypeOID == pgtype.JSONBOID {
+				destinations[index] = &jsonValues[index]
+			} else {
+				destinations[index] = &values[index]
+			}
+		}
+		if err := rows.Scan(destinations...); err != nil {
 			return nil, err
 		}
 		row := make(map[string]any, len(fields))
 		for index, field := range fields {
+			if destinations[index] == &jsonValues[index] {
+				values[index] = append([]byte(nil), jsonValues[index]...)
+			}
 			row[string(field.Name)] = values[index]
 		}
 		result = append(result, row)

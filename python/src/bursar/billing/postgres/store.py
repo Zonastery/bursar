@@ -67,9 +67,11 @@ from bursar.billing.types import (
     BillingTopupResult,
     CheckoutIntent,
     CheckoutIntentStatus,
+    SubscriptionEntitlementOutcome,
 )
 from bursar.credits.postgres.repositories._utils import (
     optional_mapping_row,
+    require_bigint_identifier_result,
     require_boolean_result,
     require_identifier_result,
     require_mapping_row,
@@ -1017,13 +1019,45 @@ class PostgresBillingStore(BillingStore):
             result.append(mapped)
         return result
 
-    def mark_subscription_grace_expired(self, id: str, expected_grace_ends_at: str, expired_at: str) -> bool:
-        return self._subscription_repo.mark_grace_expired(id, expected_grace_ends_at, expired_at)
+    def reconcile_subscription_entitlement(
+        self,
+        subject_id: str,
+        subscription_id: str,
+        billing_event_id: str,
+        expected_status: BillingSubscriptionStatus,
+        expected_provider_updated_at: str,
+        plan_assigned_at: datetime | str | None,
+        apply_entitlement: bool,
+        terminal_plan_key: str | None,
+        reason: str,
+    ) -> SubscriptionEntitlementOutcome:
+        return self._subscription_repo.reconcile_entitlement(
+            subject_id,
+            subscription_id,
+            billing_event_id,
+            expected_status,
+            expected_provider_updated_at,
+            plan_assigned_at,
+            apply_entitlement,
+            terminal_plan_key,
+            reason,
+        )
 
-    def select_subscription_entitlement_source(
-        self, user_id: str, provider: str, subscription_id: str | None = None
+    def expire_subscription_grace_period(
+        self,
+        subject_id: str,
+        subscription_id: str,
+        expected_grace_ends_at: str,
+        expired_at: str,
+        terminal_plan_key: str | None,
     ) -> bool:
-        return self._subscription_repo.select_entitlement_source(user_id, provider, subscription_id)
+        return self._subscription_repo.expire_grace_period(
+            subject_id,
+            subscription_id,
+            expected_grace_ends_at,
+            expired_at,
+            terminal_plan_key,
+        )
 
     def record_subscription_conflict(
         self,
@@ -1040,7 +1074,7 @@ class PostgresBillingStore(BillingStore):
                 json.dumps(input.metadata or {}),
             ],
         )
-        require_identifier_result(rows, "id", "PostgresBillingStore.record_subscription_conflict")
+        require_bigint_identifier_result(rows, "id", "PostgresBillingStore.record_subscription_conflict")
 
     def compute_topup_credits(self, amount_minor: int, topup_config: BillingTopupResult) -> Decimal:
         if isinstance(amount_minor, bool) or not isinstance(amount_minor, int):

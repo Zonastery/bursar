@@ -7,8 +7,11 @@ import (
 	"context"
 	"encoding/hex"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 // CheckoutIntent is Bursar's durable record for one hosted-provider checkout.
@@ -95,6 +98,12 @@ type CommerceOptions struct {
 	AutoRechargeReturnURL string
 	Providers             *ProviderRegistry
 	DefaultProvider       string
+	// CheckoutIntentTTL controls how long a newly-created checkout intent
+	// remains reusable. Zero uses the 24-hour default.
+	CheckoutIntentTTL time.Duration
+	// PreferenceDefaults supplies catalog/application defaults for accounts
+	// without a persisted preference row. Nil fields retain Bursar defaults.
+	PreferenceDefaults PreferencePatch
 }
 
 // CreateCheckoutInput is the application-facing checkout request. OfferKey is
@@ -102,9 +111,12 @@ type CommerceOptions struct {
 type CreateCheckoutInput struct {
 	// SubjectID is the authenticated actor that owns and may inspect the
 	// checkout intent. It must not be inferred from AccountID.
-	SubjectID      string
-	AccountID      string
-	OfferKey       string
+	SubjectID string
+	AccountID string
+	OfferKey  string
+	// Type optionally asserts the caller's intended offer kind ("subscription"
+	// or "credit_pack"). An omitted type accepts either catalog kind.
+	Type           string
 	Quantity       *int64
 	Region         string
 	Provider       string
@@ -148,6 +160,8 @@ type CommerceService struct {
 	postDeductionUnsubscribe func()
 	providers                *ProviderRegistry
 	defaultProvider          string
+	checkoutIntentTTL        time.Duration
+	preferenceDefaults       PreferencePatch
 }
 
 // NewCommerceService constructs commerce from facade-owned capabilities.
@@ -177,18 +191,27 @@ func NewCommerceService(billing *BillingService, catalog *CatalogService, credit
 			})
 		}
 	}
+	checkoutIntentTTL := options.CheckoutIntentTTL
+	if checkoutIntentTTL == 0 {
+		checkoutIntentTTL = 24 * time.Hour
+	}
+	if checkoutIntentTTL < 0 {
+		return nil, NewError("commerce checkout intent TTL must not be negative", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
 	state := options.StateStore
 	if state == nil {
 		state, _ = options.Store.(CommerceStateStore)
 	}
 	service := &CommerceService{
-		billing:         billing,
-		catalog:         catalog,
-		credits:         credits,
-		store:           options.Store,
-		state:           state,
-		providers:       options.Providers,
-		defaultProvider: strings.TrimSpace(options.DefaultProvider),
+		billing:            billing,
+		catalog:            catalog,
+		credits:            credits,
+		store:              options.Store,
+		state:              state,
+		providers:          options.Providers,
+		defaultProvider:    strings.TrimSpace(options.DefaultProvider),
+		checkoutIntentTTL:  checkoutIntentTTL,
+		preferenceDefaults: options.PreferenceDefaults,
 	}
 	autoRecharge := billing.AutoRecharge
 	if autoRecharge == nil {
@@ -211,6 +234,53 @@ func NewCommerceService(billing *BillingService, catalog *CatalogService, credit
 		service.postDeductionUnsubscribe = credits.AddPostDeductionHook(autoRecharge.PostDeductionHook(options.Providers, options.AutoRechargeReturnURL))
 	}
 	return service, nil
+}
+
+// ProviderForAccount resolves the provider already associated with an
+// account, falling back to the configured default or an unambiguous provider.
+// When offerKey is supplied, only providers with a catalog reference for that
+// offer are eligible.
+func (s *CommerceService) ProviderForAccount(ctx context.Context, accountID string, offerKey ...string) (PaymentProvider, error) {
+	if s == nil || s.providers == nil {
+		return nil, NewError("commerce providers are not configured", ErrorOptions{Code: ErrorCodeCommerceNotConfigured, Category: ErrorCategoryUnavailable})
+	}
+	accountID, err := requireText(accountID, "account ID")
+	if err != nil {
+		return nil, err
+	}
+	if len(offerKey) > 1 {
+		return nil, NewError("at most one offer key may be supplied", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	current := ""
+	if s.state != nil {
+		subscription, stateErr := s.state.GetBillingSubscription(ctx, accountID, nil)
+		if stateErr != nil {
+			return nil, stateErr
+		}
+		if subscription != nil {
+			current = strings.TrimSpace(subscription.Provider)
+		}
+		customer, customerErr := s.state.GetBillingCustomer(ctx, accountID, current)
+		if customerErr != nil {
+			return nil, customerErr
+		}
+		if current == "" && customer != nil {
+			current = strings.TrimSpace(customer.Provider)
+		}
+	}
+	compatible := s.providers.Configured()
+	if len(offerKey) == 1 && strings.TrimSpace(offerKey[0]) != "" {
+		config, configErr := s.catalog.GetConfig(ctx)
+		if configErr != nil {
+			return nil, configErr
+		}
+		offer, found := config.Commerce.Offers[strings.TrimSpace(offerKey[0])]
+		if !found {
+			return nil, NewError("checkout offer was not found", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryNotFound, Details: map[string]any{"offer_key": offerKey[0]}})
+		}
+		compatible = sortedProviderKeys(offer.Providers)
+	}
+	return s.providers.Select(ctx, "", firstNonEmpty(current, s.defaultProvider), compatible)
 }
 
 // Providers returns configured provider names in deterministic order.
@@ -275,18 +345,46 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 	if !found {
 		return CreateCheckoutResult{}, NewError("checkout offer was not found", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryNotFound, Details: map[string]any{"offer_key": offerKey}})
 	}
+	if requestedType := strings.ToLower(strings.TrimSpace(input.Type)); requestedType != "" {
+		if requestedType != "subscription" && requestedType != "credit_pack" {
+			return CreateCheckoutResult{}, NewError("checkout type is invalid", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+		}
+		offerType := strings.ToLower(strings.TrimSpace(offer.Type))
+		if offerType == "topup" {
+			offerType = "credit_pack"
+		}
+		if requestedType != offerType {
+			return CreateCheckoutResult{}, NewError("checkout type does not match the selected offer", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryInvalidRequest, Details: map[string]any{"offer_key": offerKey, "type": requestedType}})
+		}
+	}
 	quantity, err := checkoutQuantity(offer, input.Quantity)
 	if err != nil {
 		return CreateCheckoutResult{}, err
 	}
-	if offer.Type == "subscription" {
-		state, err := s.requireState()
+	var currentSubscription *CommerceSubscription
+	var accountCustomer *BillingCustomerRecord
+	currentProvider := ""
+	if s.state != nil {
+		currentSubscription, err = s.state.GetBillingSubscription(ctx, accountID, nil)
 		if err != nil {
 			return CreateCheckoutResult{}, err
 		}
-		blocking, err := state.GetBillingSubscription(ctx, accountID, blockingSubscriptionStatuses)
+		if currentSubscription != nil {
+			currentProvider = strings.TrimSpace(currentSubscription.Provider)
+		}
+		accountCustomer, err = s.state.GetBillingCustomer(ctx, accountID, currentProvider)
 		if err != nil {
 			return CreateCheckoutResult{}, err
+		}
+	}
+	if offer.Type == "subscription" {
+		state, stateErr := s.requireState()
+		if stateErr != nil {
+			return CreateCheckoutResult{}, stateErr
+		}
+		blocking, blockingErr := state.GetBillingSubscription(ctx, accountID, blockingSubscriptionStatuses)
+		if blockingErr != nil {
+			return CreateCheckoutResult{}, blockingErr
 		}
 		if blocking != nil {
 			return CreateCheckoutResult{}, NewError("account already has a blocking subscription", ErrorOptions{
@@ -297,9 +395,21 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		}
 	}
 	compatible := sortedProviderKeys(offer.Providers)
-	provider, err := s.providers.Select(ctx, input.Provider, s.defaultProvider, compatible)
+	providerFallback := s.defaultProvider
+	if currentProvider != "" {
+		providerFallback = currentProvider
+	} else if accountCustomer != nil {
+		providerFallback = strings.TrimSpace(accountCustomer.Provider)
+	}
+	provider, err := s.providers.Select(ctx, input.Provider, providerFallback, compatible)
 	if err != nil {
 		return CreateCheckoutResult{}, err
+	}
+	if s.state != nil && (accountCustomer == nil || accountCustomer.Provider != provider.Name()) {
+		accountCustomer, err = s.state.GetBillingCustomer(ctx, accountID, provider.Name())
+		if err != nil {
+			return CreateCheckoutResult{}, err
+		}
 	}
 	providerRef, exists := offer.Providers[provider.Name()]
 	if !exists {
@@ -312,6 +422,30 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 
 	metadata := cloneStringMap(input.Metadata)
 	metadata["bursar_account_id"] = accountID
+	if offer.Type == "subscription" {
+		if offer.Plan != nil {
+			metadata["plan_slug"] = strings.TrimSpace(*offer.Plan)
+		}
+		if offer.BillingInterval != nil {
+			metadata["billing_interval"] = strings.TrimSpace(offer.BillingInterval.Unit)
+		}
+	} else {
+		if offer.CreditsPerUnit != nil {
+			metadata["credits"] = offer.CreditsPerUnit.Mul(decimal.NewFromInt(quantity)).String()
+		}
+		metadata["quantity"] = strconv.FormatInt(quantity, 10)
+	}
+	// A durable state store is authoritative for provider customer identity;
+	// accepting a caller-supplied ID in that mode could attach checkout to a
+	// different customer's provider record. Keep the legacy input only for
+	// checkout-only deployments that have no state capability.
+	customerID := ""
+	if s.state == nil {
+		customerID = strings.TrimSpace(input.CustomerID)
+	}
+	if accountCustomer != nil && strings.TrimSpace(accountCustomer.ProviderCustomerID) != "" {
+		customerID = strings.TrimSpace(accountCustomer.ProviderCustomerID)
+	}
 	create := CheckoutIntentCreate{
 		SubjectID:      subjectID,
 		AccountID:      accountID,
@@ -320,7 +454,7 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		ProductKey:     offerKey,
 		Quantity:       quantity,
 		IdempotencyKey: idempotencyKey,
-		ExpiresAt:      time.Now().UTC().Add(24 * time.Hour),
+		ExpiresAt:      time.Now().UTC().Add(s.checkoutIntentTTL),
 		Region:         input.Region,
 		Metadata:       metadata,
 	}
@@ -355,6 +489,7 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		intent.Status = "expired"
 		return CreateCheckoutResult{Intent: intent}, NewError("checkout operation expired; use a new idempotency key", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict, Details: map[string]any{"checkout_intent_id": intent.ID}})
 	}
+	metadata["checkout_intent_id"] = intent.ID
 	if intent.ProviderSessionID != "" && intent.ProviderURL != "" {
 		status, statusErr := s.resolveCheckoutStatus(ctx, intent, subjectID)
 		if statusErr != nil {
@@ -374,9 +509,9 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		ProductID:      productID,
 		Mode:           checkoutMode(offer.Type),
 		Quantity:       quantity,
-		SuccessURL:     input.SuccessURL,
-		CancelURL:      input.CancelURL,
-		CustomerID:     input.CustomerID,
+		SuccessURL:     replaceCheckoutIntentURL(input.SuccessURL, intent.ID),
+		CancelURL:      replaceCheckoutIntentURL(input.CancelURL, intent.ID),
+		CustomerID:     customerID,
 		CustomerEmail:  input.CustomerEmail,
 		Metadata:       metadata,
 		IdempotencyKey: idempotencyKey,
@@ -440,6 +575,14 @@ func (s *CommerceService) HandleWebhook(ctx context.Context, providerName string
 	if s == nil || s.providers == nil || s.billing == nil {
 		return WebhookHandlingResult{}, NewError("commerce is not configured", ErrorOptions{Code: ErrorCodeCommerceNotConfigured, Category: ErrorCategoryInternal})
 	}
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		configured := s.providers.Configured()
+		if len(configured) != 1 {
+			return WebhookHandlingResult{}, NewError("webhook provider selection is ambiguous", ErrorOptions{Code: ErrorCodeProviderSelectionFailed, Category: ErrorCategoryInvalidRequest})
+		}
+		providerName = configured[0]
+	}
 	provider, err := s.providers.Get(ctx, providerName)
 	if err != nil {
 		return WebhookHandlingResult{}, err
@@ -459,6 +602,12 @@ func (s *CommerceService) HandleWebhook(ctx context.Context, providerName string
 }
 
 func checkoutQuantity(offer CommerceOffer, requested *int64) (int64, error) {
+	if offer.Type == "subscription" {
+		if requested != nil && *requested != 1 {
+			return 0, NewError("subscription checkout quantity must be 1", ErrorOptions{Code: ErrorCodeInvalidOfferQuantity, Category: ErrorCategoryInvalidRequest})
+		}
+		return 1, nil
+	}
 	quantity := int64(1)
 	if offer.Quantity != nil && offer.Quantity.Default > 0 {
 		quantity = int64(offer.Quantity.Default)
@@ -478,6 +627,10 @@ func checkoutQuantity(offer CommerceOffer, requested *int64) (int64, error) {
 		}
 	}
 	return quantity, nil
+}
+
+func replaceCheckoutIntentURL(value, intentID string) string {
+	return strings.ReplaceAll(value, "{intentId}", intentID)
 }
 
 func providerProductID(reference ProviderReference) string {

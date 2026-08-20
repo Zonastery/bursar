@@ -134,6 +134,55 @@ func TestBillingServiceUsesStoreLifecycleProcessor(t *testing.T) {
 	}
 }
 
+func TestBillingServiceEventCallbackRunsAfterLifecycleCompletion(t *testing.T) {
+	store := &billingLifecycleStoreStub{
+		environment:   ProviderEnvironmentTest,
+		accountID:     "account-1",
+		processResult: BillingEventResult{Handled: true},
+	}
+	service := newBillingLifecycleService(t, store)
+	callbackAccountID := ""
+	if err := service.OnEvent(BillingEventSubscriptionRenewed, func(_ context.Context, _ BillingEvent, accountID string) {
+		store.steps = append(store.steps, "callback")
+		callbackAccountID = accountID
+	}); err != nil {
+		t.Fatalf("OnEvent() error = %v", err)
+	}
+
+	result, err := service.Ingest(context.Background(), lifecycleEvent(BillingEventSubscriptionRenewed))
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if !result.Handled || callbackAccountID != "account-1" {
+		t.Fatalf("result = %#v, callback account = %q", result, callbackAccountID)
+	}
+	if got, want := strings.Join(store.steps, ","), "claim,process,complete,callback"; got != want {
+		t.Fatalf("processing order = %q, want %q", got, want)
+	}
+}
+
+func TestBillingServiceEventCallbackFailureCannotChangeCompletedEvent(t *testing.T) {
+	store := &billingLifecycleStoreStub{
+		environment:   ProviderEnvironmentTest,
+		accountID:     "account-1",
+		processResult: BillingEventResult{Handled: true},
+	}
+	service := newBillingLifecycleService(t, store)
+	if err := service.OnEvent(BillingEventPaymentSucceeded, func(context.Context, BillingEvent, string) {
+		panic("notification failed")
+	}); err != nil {
+		t.Fatalf("OnEvent() error = %v", err)
+	}
+
+	result, err := service.Ingest(context.Background(), lifecycleEvent(BillingEventPaymentSucceeded))
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if !result.Handled || store.completed != 1 || store.failed != 0 {
+		t.Fatalf("result = %#v, completion/failure = %d/%d", result, store.completed, store.failed)
+	}
+}
+
 func TestBillingServiceClaimsCanonicalEnvelopeWithoutRawPayload(t *testing.T) {
 	store := &billingLifecycleStoreStub{
 		environment:   ProviderEnvironmentTest,
@@ -258,9 +307,38 @@ func TestBillingServiceAcknowledgesIgnoredEventsWithoutLifecycleProcessor(t *tes
 	}
 }
 
+func TestBillingServiceExpiresCheckoutIntentForIgnoredEvent(t *testing.T) {
+	store := &billingStoreWithCheckoutIntent{billingStoreWithoutLifecycle: billingStoreWithoutLifecycle{environment: ProviderEnvironmentTest}}
+	service, err := NewBillingService(store)
+	if err != nil {
+		t.Fatalf("NewBillingService() error = %v", err)
+	}
+	event := lifecycleEvent(BillingEventCheckoutExpired)
+	event.Metadata = CreditMetadata{"checkout_intent_id": "intent-1"}
+	result, err := service.Ingest(context.Background(), event)
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if !result.Handled || !result.Ignored || store.intentID != "intent-1" || store.intentStatus != "expired" {
+		t.Fatalf("result = %#v, intent = %q/%q", result, store.intentID, store.intentStatus)
+	}
+}
+
 type billingStoreWithoutLifecycle struct {
 	environment ProviderEnvironment
 	completed   int
+}
+
+type billingStoreWithCheckoutIntent struct {
+	billingStoreWithoutLifecycle
+	intentID     string
+	intentStatus string
+}
+
+func (s *billingStoreWithCheckoutIntent) UpdateCheckoutIntent(_ context.Context, intentID, _ string, update CheckoutIntentUpdate) error {
+	s.intentID = intentID
+	s.intentStatus = update.Status
+	return nil
 }
 
 func (s *billingStoreWithoutLifecycle) ProviderEnvironment() ProviderEnvironment {

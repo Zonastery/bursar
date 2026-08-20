@@ -126,7 +126,7 @@ func (s *CommerceService) CancelSubscription(ctx context.Context, input Subscrip
 	if err != nil {
 		return SubscriptionCommandResult{}, err
 	}
-	cancellation, ok := provider.(SubscriptionProvider)
+	cancellation, ok := provider.(SubscriptionCancellationProvider)
 	if !ok {
 		return SubscriptionCommandResult{}, providerCapabilityError(provider.Name(), "cancel_subscription")
 	}
@@ -157,7 +157,7 @@ func (s *CommerceService) ReactivateSubscription(ctx context.Context, input Subs
 	if err != nil {
 		return SubscriptionCommandResult{}, err
 	}
-	reactivation, ok := provider.(SubscriptionProvider)
+	reactivation, ok := provider.(SubscriptionReactivationProvider)
 	if !ok {
 		return SubscriptionCommandResult{}, providerCapabilityError(provider.Name(), "reactivate_subscription")
 	}
@@ -354,7 +354,7 @@ func (s *CommerceService) ConfirmPlanChange(ctx context.Context, input ConfirmPl
 	}
 	var reactivated bool
 	if planContext.subscription.CancelAtPeriodEnd {
-		provider, ok := planContext.provider.(SubscriptionProvider)
+		provider, ok := planContext.provider.(SubscriptionReactivationProvider)
 		if !ok {
 			failure := providerCapabilityError(planContext.provider.Name(), "reactivate_subscription")
 			message := failure.Error()
@@ -378,7 +378,7 @@ func (s *CommerceService) ConfirmPlanChange(ctx context.Context, input ConfirmPl
 	if providerErr != nil {
 		failure := providerErr
 		if reactivated {
-			if provider, ok := planContext.provider.(SubscriptionProvider); ok {
+			if provider, ok := planContext.provider.(SubscriptionCancellationProvider); ok {
 				restoreKey, keyErr := commerceScopedKey(operationKey, "restore-cancellation")
 				if keyErr == nil {
 					if restoreErr := provider.CancelSubscription(ctx, planContext.subscription.ProviderSubscriptionID, restoreKey); restoreErr != nil {
@@ -480,12 +480,16 @@ func (s *CommerceService) CreatePortalSession(ctx context.Context, input PortalS
 		purpose = PortalPurposeBilling
 	}
 	if purpose == PortalPurposePaymentMethod {
-		portals, ok := provider.(PaymentMethodPortalProvider)
-		if !ok {
-			return "", providerCapabilityError(provider.Name(), "payment_method_portal")
-		}
 		if subscription != nil && strings.TrimSpace(subscription.ProviderSubscriptionID) != "" {
+			portals, ok := provider.(UpdatePaymentMethodProvider)
+			if !ok {
+				return "", providerCapabilityError(provider.Name(), "create_update_payment_method_session")
+			}
 			return portals.CreateUpdatePaymentMethodSession(ctx, customer.ProviderCustomerID, subscription.ProviderSubscriptionID, input.ReturnURL)
+		}
+		portals, ok := provider.(PaymentMethodSetupProvider)
+		if !ok {
+			return "", providerCapabilityError(provider.Name(), "create_payment_method_setup_session")
 		}
 		return portals.CreatePaymentMethodSetupSession(ctx, customer.ProviderCustomerID, input.ReturnURL, input.CancelURL)
 	}
@@ -513,7 +517,7 @@ func (s *CommerceService) UpdatePreferences(ctx context.Context, accountID strin
 	if err != nil {
 		return BillingPreferences{}, err
 	}
-	next := defaultBillingPreferences(accountID)
+	next := defaultBillingPreferences(accountID, s.preferenceDefaults)
 	if current != nil {
 		next = *current
 		next.AccountID = accountID
@@ -635,24 +639,176 @@ func (s *CommerceService) GetAccountOverview(ctx context.Context, accountID stri
 	if err != nil {
 		return AccountCommerceOverview{}, err
 	}
-	invoices, err := state.ListBillingInvoices(ctx, accountID)
-	if err != nil {
-		return AccountCommerceOverview{}, err
-	}
-	transactions, err := s.credits.ListLedgerEntries(ctx, accountID, ListLedgerEntriesOptions{Limit: 100})
-	if err != nil {
-		return AccountCommerceOverview{}, err
-	}
-	usage, err := s.credits.ListUsageCharges(ctx, accountID, ListUsageChargesOptions{Limit: 100})
-	if err != nil {
-		return AccountCommerceOverview{}, err
-	}
-	preferences := defaultBillingPreferences(accountID)
+	preferences := defaultBillingPreferences(accountID, s.preferenceDefaults)
 	if prefs != nil {
 		preferences = *prefs
 		preferences.AccountID = accountID
 	}
-	return AccountCommerceOverview{AccountID: accountID, Balance: balance, Available: available, Buckets: buckets, Entitlement: entitlement, Allowance: allowance, SubscriptionSummary: summary, Subscription: summary.Subscription, PendingChange: summary.PendingChange, Preferences: preferences, Invoices: invoices, Transactions: transactions, Usage: usage}, nil
+
+	config, err := s.catalog.GetConfig(ctx)
+	if err != nil {
+		return AccountCommerceOverview{}, err
+	}
+	transactionsAvailable := true
+	transactions := LedgerPage{}
+	if page, listErr := s.credits.ListLedgerEntries(ctx, accountID, ListLedgerEntriesOptions{Limit: 50}); listErr != nil {
+		transactionsAvailable = false
+	} else {
+		transactions = page
+		transactions.Items = filterOverviewTransactions(page.Items)
+	}
+	usageAvailable := true
+	usage := UsageChargePage{}
+	includeRecordOnly := false
+	if page, listErr := s.credits.ListUsageCharges(ctx, accountID, ListUsageChargesOptions{Limit: 100, IncludeRecordOnly: &includeRecordOnly}); listErr != nil {
+		usageAvailable = false
+	} else {
+		usage = page
+	}
+	documentsAvailable := true
+	invoices := []BillingInvoice{}
+	if listed, listErr := state.ListBillingInvoices(ctx, accountID); listErr != nil {
+		documentsAvailable = false
+	} else {
+		invoices = listed
+	}
+
+	paymentMethods := []PaymentMethodInfo{}
+	paymentMethodsAvailable := true
+	autoRechargeAvailable := true
+	var autoRecharge *AutoRechargeStatus
+	if customer, customerErr := state.GetBillingCustomer(ctx, accountID, subscriptionProvider(summary.Subscription)); customerErr != nil {
+		paymentMethodsAvailable = false
+		autoRechargeAvailable = false
+	} else if customer != nil {
+		provider, providerErr := s.providers.Get(ctx, customer.Provider)
+		if providerErr != nil {
+			paymentMethodsAvailable = false
+			autoRechargeAvailable = false
+		} else {
+			providerOverviewUsable := true
+			methods, capable := provider.(PaymentMethodsProvider)
+			if !capable {
+				paymentMethodsAvailable = false
+			} else if listed, methodsErr := methods.ListPaymentMethods(ctx, customer.ProviderCustomerID); methodsErr != nil {
+				paymentMethodsAvailable = false
+				providerOverviewUsable = false
+			} else {
+				paymentMethods = listed
+			}
+			if !providerOverviewUsable {
+				autoRechargeAvailable = false
+			} else if s.AutoRecharge == nil {
+				autoRechargeAvailable = false
+			} else if status, statusErr := s.AutoRecharge.GetStatus(ctx, accountID); statusErr != nil {
+				autoRechargeAvailable = false
+			} else {
+				autoRecharge = status
+			}
+		}
+	}
+
+	allowanceRemaining := DecimalZero
+	if allowance != nil {
+		allowanceRemaining = allowance.AllowanceRemaining
+	}
+	allowanceOverview := AccountAllowanceOverview{Remaining: allowanceRemaining}
+	if entitlement.Allowance != nil {
+		limit := entitlement.Allowance.Amount
+		allowanceOverview.Limit = &limit
+	}
+	if allowance != nil {
+		periodStart := allowance.PeriodStart
+		periodEnd := allowance.PeriodEnd
+		allowanceOverview.PeriodStart = &periodStart
+		allowanceOverview.PeriodEnd = &periodEnd
+	}
+	effectiveSpendable := available.Available.Add(allowanceRemaining)
+	if entitlement.CreditPolicy != nil && entitlement.CreditPolicy.Type == "credit_line" && entitlement.CreditPolicy.CreditLimit != nil {
+		effectiveSpendable = effectiveSpendable.Add(*entitlement.CreditPolicy.CreditLimit)
+	}
+	bucketsByKey := make(map[string]Amount, len(buckets.Buckets))
+	spendOrder := make([]CreditSpendSource, 0, len(buckets.Buckets)+1)
+	if entitlement.Allowance != nil {
+		spendOrder = append(spendOrder, CreditSpendSource{Type: "allowance", Key: "allowance", Label: "Plan allowance", Priority: entitlement.Allowance.Priority})
+	}
+	for _, bucket := range buckets.Buckets {
+		bucketsByKey[bucket.BucketKey] = bucket.Balance
+		spendOrder = append(spendOrder, CreditSpendSource{Type: "bucket", Key: bucket.BucketKey, Label: bucket.Label, Priority: bucket.Priority})
+	}
+	sort.SliceStable(spendOrder, func(left, right int) bool {
+		if spendOrder[left].Priority != spendOrder[right].Priority {
+			return spendOrder[left].Priority < spendOrder[right].Priority
+		}
+		if spendOrder[left].Type != spendOrder[right].Type {
+			return spendOrder[left].Type == "allowance"
+		}
+		return spendOrder[left].Key < spendOrder[right].Key
+	})
+	var display *AccountCreditDisplay
+	if config.Credits.Display != nil {
+		display = &AccountCreditDisplay{Currency: config.Credits.Display.Currency, UnitsPerMajor: config.Credits.Display.UnitsPerMajor}
+	}
+	providerInvoices := append([]BillingInvoice(nil), invoices...)
+	documents := overviewDocuments(invoices, transactions.Items)
+	return AccountCommerceOverview{
+		AccountID: accountID, Balance: balance, Available: available, Buckets: buckets,
+		Credits: AccountCreditOverview{
+			LedgerBalance: balance.Balance, EffectiveSpendableBalance: effectiveSpendable,
+			LifetimePurchases: balance.LifetimePurchased, Allowance: allowanceOverview,
+			Buckets: append([]BucketBalance(nil), buckets.Buckets...), BucketsByKey: bucketsByKey,
+			SpendOrder: spendOrder, Display: display,
+		},
+		Entitlement: entitlement, Allowance: allowance, SubscriptionSummary: summary,
+		Subscription: summary.Subscription, PendingChange: summary.PendingChange, Preferences: preferences,
+		Invoices: invoices, Transactions: transactions, Usage: usage,
+		PaymentMethods: paymentMethods, Documents: documents, ProviderInvoices: providerInvoices,
+		AutoRecharge: autoRecharge,
+		Availability: CommerceSectionAvailability{
+			PaymentMethods: paymentMethodsAvailable, Documents: documentsAvailable && transactionsAvailable,
+			ProviderInvoices: documentsAvailable, Transactions: transactionsAvailable,
+			Usage: usageAvailable, AutoRecharge: autoRechargeAvailable,
+		},
+	}, nil
+}
+
+func subscriptionProvider(subscription *CommerceSubscription) string {
+	if subscription == nil {
+		return ""
+	}
+	return strings.TrimSpace(subscription.Provider)
+}
+
+func filterOverviewTransactions(entries []LedgerEntry) []LedgerEntry {
+	filtered := make([]LedgerEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.EntryType != "usage" {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func overviewDocuments(invoices []BillingInvoice, transactions []LedgerEntry) []BillingDocumentRef {
+	documents := make([]BillingDocumentRef, 0, len(invoices)+len(transactions))
+	for _, invoice := range invoices {
+		documents = append(documents, BillingDocumentRef{
+			Kind: "provider_invoice", Provider: invoice.Provider, ProviderDocumentID: firstNonEmpty(invoice.ProviderInvoiceID, invoice.ID),
+			Status: invoice.Status, AmountPaidMinor: invoice.AmountPaidMinor, AmountDueMinor: invoice.AmountDueMinor,
+			Currency: invoice.Currency, PeriodStart: invoice.PeriodStart, PeriodEnd: invoice.PeriodEnd,
+		})
+	}
+	for _, entry := range transactions {
+		documentID := firstNonEmpty(metadataText(entry.Metadata, "provider_document_id"), metadataText(entry.Metadata, "provider_invoice_id"), metadataText(entry.Metadata, "provider_payment_id"))
+		if documentID == "" {
+			continue
+		}
+		documents = append(documents, BillingDocumentRef{
+			Kind: "ledger_entry", LedgerEntryID: entry.EntryID, Provider: metadataText(entry.Metadata, "provider"),
+			ProviderDocumentID: documentID, CreatedAt: entry.CreatedAt, EntryType: entry.EntryType, Amount: entry.Amount,
+		})
+	}
+	return documents
 }
 
 type commercePlanChangeContext struct {
@@ -863,8 +1019,24 @@ func providerCapabilityError(provider, capability string) error {
 	return NewError("provider does not support "+capability, ErrorOptions{Code: ErrorCodeProviderCapabilityNotSupported, Category: ErrorCategoryInvalidRequest, Details: map[string]any{"provider": provider, "capability": capability}})
 }
 
-func defaultBillingPreferences(accountID string) BillingPreferences {
-	return BillingPreferences{AccountID: accountID, AutoRecharge: false, OverageProtection: true, EmailNotifications: true, UsageAlerts: true, InvoiceReminders: false}
+func defaultBillingPreferences(accountID string, patch PreferencePatch) BillingPreferences {
+	preferences := BillingPreferences{AccountID: accountID, AutoRecharge: false, OverageProtection: true, EmailNotifications: true, UsageAlerts: true, InvoiceReminders: false}
+	if patch.AutoRecharge != nil {
+		preferences.AutoRecharge = *patch.AutoRecharge
+	}
+	if patch.OverageProtection != nil {
+		preferences.OverageProtection = *patch.OverageProtection
+	}
+	if patch.EmailNotifications != nil {
+		preferences.EmailNotifications = *patch.EmailNotifications
+	}
+	if patch.UsageAlerts != nil {
+		preferences.UsageAlerts = *patch.UsageAlerts
+	}
+	if patch.InvoiceReminders != nil {
+		preferences.InvoiceReminders = *patch.InvoiceReminders
+	}
+	return preferences
 }
 
 func metadataText(metadata CreditMetadata, key string) string {

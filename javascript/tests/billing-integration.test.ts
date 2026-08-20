@@ -4,7 +4,7 @@
  * Mirrors Python test_billing_integration.py.
  */
 
-import { describe, it, expect, beforeAll, beforeEach, afterAll, inject } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, inject, vi } from "vitest";
 import { Decimal } from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/credits/postgres/store.js";
@@ -16,6 +16,7 @@ import type {
   BillingPreferences,
   BillingSubscriptionState,
 } from "../src/billing/index.js";
+import type { PaymentProvider } from "../src/providers/types.js";
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 import { mapDodoEvent } from "./helpers/dodo-fixtures.js";
 
@@ -453,7 +454,9 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   it("preserves an idempotency conflict without creating another event or payload", async () => {
     const { bs } = await makePgComponents(pool);
     const eventId = "evt_claim_conflict";
-    const first = await bs.claimBillingEvent(PROVIDER, eventId, "test.event", { amount: 100 });
+    const first = await bs.claimBillingEvent(PROVIDER, eventId, "test.event", {
+      amount: 100,
+    });
     expect(first.status).toBe("claimed");
     if (first.status !== "claimed") throw new Error("expected initial event claim");
     await expect(bs.completeBillingEvent(PROVIDER, eventId, first.claimToken)).resolves.toBe(true);
@@ -644,9 +647,197 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
       },
     });
-    expect(cancelResult).toEqual({ handled: true, action: "subscription_canceled" });
+    expect(cancelResult).toEqual({
+      handled: true,
+      action: "subscription_canceled",
+    });
     const plan2 = await cm.getUserPlan(USER_ID);
     expect(plan2.planId).toBeNull();
+  });
+
+  it("fences stale terminal and positive subscription events", async () => {
+    const { bs, cm, bm } = await makePgComponents(pool);
+    const subscriptionId = "sub_stale_entitlement";
+
+    const active = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_stale_entitlement_active",
+      eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+      occurredAt: "2026-08-20T10:00:02.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(active.action).toBe("subscription_renewed");
+    expect((await cm.getUserPlan(USER_ID4)).planKey).toBe("pro");
+
+    const staleCancel = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_stale_entitlement_cancel",
+      eventType: BillingEventType.SUBSCRIPTION_CANCELED,
+      occurredAt: "2026-08-20T10:00:01.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "canceled",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(staleCancel.action).toBe("stale_subscription_event");
+    expect((await cm.getUserPlan(USER_ID4)).planKey).toBe("pro");
+
+    const canceled = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_current_entitlement_cancel",
+      eventType: BillingEventType.SUBSCRIPTION_CANCELED,
+      occurredAt: "2026-08-20T10:00:03.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "canceled",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(canceled.action).toBe("subscription_canceled");
+    expect((await cm.getUserPlan(USER_ID4)).planId).toBeNull();
+
+    const staleResume = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_stale_entitlement_resume",
+      eventType: BillingEventType.SUBSCRIPTION_RESUMED,
+      occurredAt: "2026-08-20T10:00:02.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(staleResume.action).toBe("stale_subscription_event");
+    expect((await cm.getUserPlan(USER_ID4)).planId).toBeNull();
+    expect((await bs.getBillingSubscription(PROVIDER, subscriptionId))?.status).toBe("canceled");
+  });
+
+  it("fences distinct equal-timestamp events while replaying the reconciled event", async () => {
+    const { bs, cm } = await makePgComponents(pool);
+    const timestamp = "2026-08-20T10:01:00.000Z";
+    const subscriptionId = "sub_equal_timestamp";
+    const callbacks: string[] = [];
+    const bm = new BillingService(bs, {
+      provisioning: cm,
+      eventHandlers: {
+        [BillingEventType.SUBSCRIPTION_RENEWED]: async (billingEvent) => {
+          callbacks.push(billingEvent.eventId);
+        },
+      },
+    });
+    const renewal = (eventId: string): BillingEvent => ({
+      provider: PROVIDER,
+      eventId,
+      eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+      occurredAt: timestamp,
+      accountId: USER_ID5,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+
+    const first = await bm.ingestBillingEvent(renewal("evt_equal_timestamp_first"));
+    const second = await bm.ingestBillingEvent(renewal("evt_equal_timestamp_second"));
+    expect(first.action).toBe("subscription_renewed");
+    expect(second.action).toBe("stale_subscription_event");
+    expect(callbacks).toEqual(["evt_equal_timestamp_first"]);
+
+    const subscription = await bs.getBillingSubscription(PROVIDER, subscriptionId);
+    expect(subscription?.subscriptionId).toBeTruthy();
+    const eventRow = await pool.query<{ id: string }>(
+      `SELECT id
+         FROM bursar.billing_events
+        WHERE tenant_id = $1::uuid
+          AND provider = $2
+          AND provider_environment = 'test'
+          AND provider_event_id = $3`,
+      [TEST_TENANT_ID, PROVIDER, "evt_equal_timestamp_first"],
+    );
+    expect(eventRow.rows).toHaveLength(1);
+    await expect(
+      bs.reconcileSubscriptionEntitlement(
+        USER_ID5,
+        subscription!.subscriptionId!,
+        eventRow.rows[0]!.id,
+        "active",
+        timestamp,
+        null,
+        true,
+        null,
+        "subscription_active",
+      ),
+    ).resolves.toBe("applied");
+  });
+
+  it("converges to the newer terminal state under concurrent webhook delivery", async () => {
+    const { bs, cm } = await makePgComponents(pool);
+    const subscriptionId = "sub_concurrent_entitlement";
+    const localPools = [
+      new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+      new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+    ];
+    const provisioning = {
+      getUserPlan: vi.fn().mockResolvedValue(null),
+      setUserPlan: vi.fn().mockResolvedValue(undefined),
+      unsetUserPlan: vi.fn().mockResolvedValue(undefined),
+    };
+    try {
+      const stores = localPools.map(
+        (postgres) =>
+          new PostgresBillingStore({
+            postgres,
+            tenantId: TEST_TENANT_ID,
+            providerEnvironment: "test",
+          }),
+      );
+      const services = stores.map(
+        (billingStore) => new BillingService(billingStore, { provisioning }),
+      );
+      const [older, newer] = await Promise.all([
+        services[0]!.ingestBillingEvent({
+          provider: PROVIDER,
+          eventId: "evt_concurrent_entitlement_active",
+          eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+          occurredAt: "2026-08-20T10:02:00.000Z",
+          accountId: USER_ID4,
+          subscription: {
+            providerSubscriptionId: subscriptionId,
+            status: "active",
+            refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+          },
+        }),
+        services[1]!.ingestBillingEvent({
+          provider: PROVIDER,
+          eventId: "evt_concurrent_entitlement_canceled",
+          eventType: BillingEventType.SUBSCRIPTION_CANCELED,
+          occurredAt: "2026-08-20T10:02:01.000Z",
+          accountId: USER_ID4,
+          subscription: {
+            providerSubscriptionId: subscriptionId,
+            status: "canceled",
+            refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+          },
+        }),
+      ]);
+      expect(older.handled).toBe(true);
+      expect(newer.handled).toBe(true);
+    } finally {
+      await Promise.all(localPools.map((localPool) => localPool.end()));
+    }
+
+    expect((await bs.getBillingSubscription(PROVIDER, subscriptionId))?.status).toBe("canceled");
+    expect((await cm.getUserPlan(USER_ID4)).planId).toBeNull();
   });
 
   it("does not revoke a newer active subscription when an older one is cancelled", async () => {
@@ -682,7 +873,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventType: "subscription.canceled",
       occurredAt: new Date().toISOString(),
       accountId: USER_ID3,
-      subscription: { providerSubscriptionId: "sub_stale_old", status: "canceled" },
+      subscription: {
+        providerSubscriptionId: "sub_stale_old",
+        status: "canceled",
+      },
     });
 
     const plan = await cm.getUserPlan(USER_ID3);
@@ -757,7 +951,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
       },
     });
-    expect(first).toEqual({ handled: true, action: "subscription_created" });
+    expect(first).toMatchObject({ handled: true, action: "subscription_created" });
     expect(second).toEqual({ handled: false, error: "subscription_conflict" });
     expect(await bs.getBillingSubscription(PROVIDER, "sub_conflict_second")).toBeNull();
     const conflicts = await pool.query(
@@ -765,7 +959,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
        FROM bursar.billing_subscription_conflicts`,
     );
     expect(conflicts.rows).toEqual([
-      { duplicate_provider_subscription_id: "sub_conflict_second", linked: true },
+      {
+        duplicate_provider_subscription_id: "sub_conflict_second",
+        linked: true,
+      },
     ]);
   });
 
@@ -780,6 +977,16 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       requestDigest: "11".repeat(32),
       expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     });
+    const replayedIntent = await bs.createOrGetCheckoutIntent({
+      subjectId: USER_ID,
+      provider: PROVIDER,
+      operationKey: "checkout-payment-failed",
+      checkoutKind: "subscription",
+      productKey: "pro_monthly",
+      requestDigest: "11".repeat(32),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    expect(replayedIntent.id).toBe(failedIntent.id);
 
     await bm.ingestBillingEvent({
       provider: PROVIDER,
@@ -1067,7 +1274,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     // First call — should succeed
     await mapDodoEvent(
       "subscription.active",
-      { subscription_id: "sub_dodo_dup", status: "active", product_id: dodoProductId },
+      {
+        subscription_id: "sub_dodo_dup",
+        status: "active",
+        product_id: dodoProductId,
+      },
       USER_ID5,
       {},
       bm,
@@ -1077,7 +1288,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     // Second call with same payload — should be handled as duplicate (not error)
     await mapDodoEvent(
       "subscription.active",
-      { subscription_id: "sub_dodo_dup", status: "active", product_id: dodoProductId },
+      {
+        subscription_id: "sub_dodo_dup",
+        status: "active",
+        product_id: dodoProductId,
+      },
       USER_ID5,
       {},
       bm,
@@ -1103,14 +1318,22 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     // Three different subscription events — each should produce a unique event ID
     await mapDodoEvent(
       "subscription.active",
-      { subscription_id: "sub_dodo_multi_1", status: "active", product_id: dodoProductId },
+      {
+        subscription_id: "sub_dodo_multi_1",
+        status: "active",
+        product_id: dodoProductId,
+      },
       USER_ID5,
       {},
       bm,
     );
     await mapDodoEvent(
       "subscription.renewed",
-      { subscription_id: "sub_dodo_multi_1", status: "active", product_id: dodoProductId },
+      {
+        subscription_id: "sub_dodo_multi_1",
+        status: "active",
+        product_id: dodoProductId,
+      },
       USER_ID5,
       {},
       bm,
@@ -1219,7 +1442,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         status: "active",
         periodStart: "2025-06-01T00:00:00Z",
         periodEnd: "2025-07-01T00:00:00Z",
-        refs: { productId: "prod_cycle_grant", priceId: "price_cycle_grant_5000" },
+        refs: {
+          productId: "prod_cycle_grant",
+          priceId: "price_cycle_grant_5000",
+        },
         interval: "month",
         intervalCount: 1,
       },
@@ -1285,7 +1511,463 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
        WHERE provider = $1 AND provider_refund_id = $2`,
       [PROVIDER, "refund_1"],
     );
-    expect(refundAudit.rows[0]?.metadata).toEqual({ provider_case: "full_clawback" });
+    expect(refundAudit.rows[0]?.metadata).toEqual({
+      provider_case: "full_clawback",
+    });
+  });
+
+  it("partial refund rounds the credit clawback to six decimal places", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const preciseConfig = structuredClone(PRICING_DICT);
+    preciseConfig.commerce!.offers.standard_topup.credits_per_unit = "1234.567891";
+    await cm.publishAndActivateCatalog(preciseConfig);
+
+    const uid = USER_ID5;
+    const paymentId = "py_refund_partial_precision";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund_partial_precision",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 1000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("1234.567891");
+
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_partial_precision",
+      eventType: "refund.created",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      refund: {
+        providerRefundId: "refund_partial_precision",
+        providerPaymentId: paymentId,
+        amountMinor: 1,
+        currency: "USD",
+        status: "succeeded",
+      },
+    });
+    expect(result.handled).toBe(true);
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("1233.333323");
+
+    const allocation = await pool.query(
+      `SELECT allocation.credit_amount, COUNT(ledger.id)::int AS ledger_count
+       FROM bursar.billing_refund_grants AS allocation
+       JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+       JOIN bursar.credit_ledger_entries AS ledger ON ledger.id = allocation.ledger_entry_id
+       WHERE refund.provider = $1 AND refund.provider_refund_id = $2
+       GROUP BY allocation.credit_amount`,
+      [PROVIDER, "refund_partial_precision"],
+    );
+    expect(allocation.rows).toEqual([{ credit_amount: "1.234568", ledger_count: 1 }]);
+  });
+
+  it("duplicate refund identity with a new event id replays one clawback", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const uid = USER_ID4;
+    const paymentId = "py_refund_duplicate_identity";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund_duplicate_identity",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 2000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+    const refund = {
+      providerRefundId: "refund_duplicate_identity",
+      providerPaymentId: paymentId,
+      amountMinor: 2000,
+      currency: "USD",
+      status: "succeeded" as const,
+    };
+    const first = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_duplicate_identity_1",
+      eventType: "refund.created",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      refund,
+    });
+    const second = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_duplicate_identity_2",
+      eventType: "refund.created",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      refund,
+    });
+    expect(first.handled).toBe(true);
+    expect(second).toMatchObject({ handled: true, action: "refund_clawback" });
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("0");
+
+    const counts = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM bursar.billing_refunds
+          WHERE provider = $1 AND provider_refund_id = $2) AS refund_count,
+         (SELECT COUNT(*)::int FROM bursar.billing_refund_grants AS allocation
+          JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+          WHERE refund.provider = $1 AND refund.provider_refund_id = $2) AS allocation_count,
+         (SELECT COUNT(*)::int FROM bursar.credit_ledger_entries AS ledger
+          JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+          WHERE account.subject_id = $3 AND ledger.kind = 'refund_clawback') AS ledger_count`,
+      [PROVIDER, "refund_duplicate_identity", uid],
+    );
+    expect(counts.rows[0]).toEqual({
+      refund_count: 1,
+      allocation_count: 1,
+      ledger_count: 1,
+    });
+  });
+
+  it("concurrent distinct refund events with one provider identity claw back once", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const uid = USER_ID;
+    const paymentId = "py_refund_concurrent_identity";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund_concurrent_identity",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 2000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+
+    const workers = Array.from(
+      { length: 12 },
+      () => new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+    );
+    const refund = {
+      providerRefundId: "refund_concurrent_identity",
+      providerPaymentId: paymentId,
+      amountMinor: 2000,
+      currency: "USD",
+      status: "succeeded" as const,
+    };
+    try {
+      const results = await Promise.all(
+        workers.map((worker, index) => {
+          const localStore = new PostgresBillingStore({
+            postgres: worker,
+            tenantId: TEST_TENANT_ID,
+            providerEnvironment: "test",
+          });
+          const localBilling = new BillingService(localStore);
+          return localBilling.ingestBillingEvent({
+            provider: PROVIDER,
+            eventId: `evt_refund_concurrent_identity_${index}`,
+            eventType: "refund.created",
+            occurredAt: new Date(Date.now() + index).toISOString(),
+            accountId: uid,
+            refund,
+          });
+        }),
+      );
+      expect(results).toHaveLength(workers.length);
+      expect(results.every((result) => result.handled && result.action === "refund_clawback")).toBe(
+        true,
+      );
+      expect((await cm.getBalance(uid)).balance.toString()).toBe("0");
+
+      const counts = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM bursar.billing_refunds
+            WHERE provider = $1 AND provider_refund_id = $2) AS refund_count,
+           (SELECT COUNT(*)::int FROM bursar.billing_refund_grants AS allocation
+            JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+            WHERE refund.provider = $1 AND refund.provider_refund_id = $2) AS allocation_count,
+           (SELECT COUNT(*)::int FROM bursar.credit_ledger_entries AS ledger
+            JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+            WHERE account.subject_id = $3 AND ledger.kind = 'refund_clawback') AS ledger_count`,
+        [PROVIDER, refund.providerRefundId, uid],
+      );
+      expect(counts.rows[0]).toEqual({
+        refund_count: 1,
+        allocation_count: 1,
+        ledger_count: 1,
+      });
+    } finally {
+      await Promise.all(workers.map((worker) => worker.end()));
+    }
+  }, 30000);
+
+  it("cumulative partial refunds reach an exact six-decimal full clawback", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const preciseConfig = structuredClone(PRICING_DICT);
+    preciseConfig.commerce!.offers.standard_topup.credits_per_unit = "1234.567892";
+    await cm.publishAndActivateCatalog(preciseConfig);
+
+    const uid = USER_ID2;
+    const paymentId = "py_refund_cumulative_precision";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund_cumulative_precision",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 1000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("1234.567892");
+
+    const refunds = [
+      { amountMinor: 333, creditAmount: "411.111108" },
+      { amountMinor: 333, creditAmount: "411.111108" },
+      { amountMinor: 334, creditAmount: "412.345676" },
+    ];
+    for (const [index, expected] of refunds.entries()) {
+      const result = await bm.ingestBillingEvent({
+        provider: PROVIDER,
+        eventId: `evt_refund_cumulative_precision_${index}`,
+        eventType: "refund.created",
+        occurredAt: new Date(Date.now() + index).toISOString(),
+        accountId: uid,
+        refund: {
+          providerRefundId: `refund_cumulative_precision_${index}`,
+          providerPaymentId: paymentId,
+          amountMinor: expected.amountMinor,
+          currency: "USD",
+          status: "succeeded",
+        },
+      });
+      expect(result).toEqual({ handled: true, action: "refund_clawback" });
+    }
+
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("0");
+    const allocations = await pool.query(
+      `SELECT refund.amount_minor, allocation.credit_amount
+       FROM bursar.billing_refund_grants AS allocation
+       JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+       WHERE refund.provider = $1 AND refund.payment_id = (
+         SELECT id FROM bursar.billing_payments
+         WHERE provider = $1 AND provider_payment_id = $2
+       )
+       ORDER BY refund.amount_minor, refund.provider_refund_id`,
+      [PROVIDER, paymentId],
+    );
+    expect(allocations.rows).toEqual([
+      { amount_minor: "333", credit_amount: "411.111108" },
+      { amount_minor: "333", credit_amount: "411.111108" },
+      { amount_minor: "334", credit_amount: "412.345676" },
+    ]);
+    const ledger = await pool.query(
+      `SELECT COUNT(*)::int AS ledger_count, COALESCE(SUM(amount), 0)::text AS clawback_total
+       FROM bursar.credit_ledger_entries AS entry
+       JOIN bursar.credit_accounts AS account ON account.id = entry.account_id
+       WHERE account.subject_id = $1 AND entry.kind = 'refund_clawback'`,
+      [uid],
+    );
+    expect(ledger.rows[0]).toEqual({
+      ledger_count: 3,
+      clawback_total: "-1234.567892",
+    });
+  });
+
+  it("pending refund records no clawback until succeeded, then replay stays idempotent", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const uid = USER_ID3;
+    const paymentId = "py_refund_pending_lifecycle";
+    const refundId = "refund_pending_lifecycle";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund_pending_lifecycle",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 1000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+    const pending = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_pending_lifecycle_created",
+      eventType: "refund.created",
+      occurredAt: "2025-01-01T00:00:00.000Z",
+      accountId: uid,
+      refund: {
+        providerRefundId: refundId,
+        providerPaymentId: paymentId,
+        amountMinor: 1000,
+        currency: "USD",
+        status: "pending",
+      },
+    });
+    expect(pending).toEqual({ handled: true, action: "refund_recorded" });
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("1000");
+    const pendingCounts = await pool.query(
+      `SELECT
+         (SELECT status FROM bursar.billing_refunds
+          WHERE provider = $1 AND provider_refund_id = $2) AS status,
+         (SELECT COUNT(*)::int FROM bursar.billing_refund_grants AS allocation
+          JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+          WHERE refund.provider = $1 AND refund.provider_refund_id = $2) AS allocation_count`,
+      [PROVIDER, refundId],
+    );
+    expect(pendingCounts.rows[0]).toEqual({
+      status: "pending",
+      allocation_count: 0,
+    });
+
+    const succeeded = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_pending_lifecycle_succeeded",
+      eventType: "refund.updated",
+      occurredAt: "2025-01-02T00:00:00.000Z",
+      accountId: uid,
+      refund: {
+        providerRefundId: refundId,
+        providerPaymentId: paymentId,
+        amountMinor: 1000,
+        currency: "USD",
+        status: "succeeded",
+      },
+    });
+    expect(succeeded).toEqual({ handled: true, action: "refund_clawback" });
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("0");
+
+    const replay = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_pending_lifecycle_replay",
+      eventType: "refund.updated",
+      occurredAt: "2025-01-03T00:00:00.000Z",
+      accountId: uid,
+      refund: {
+        providerRefundId: refundId,
+        providerPaymentId: paymentId,
+        amountMinor: 1000,
+        currency: "USD",
+        status: "succeeded",
+      },
+    });
+    expect(replay).toEqual({ handled: true, action: "refund_clawback" });
+    const finalCounts = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM bursar.billing_refunds
+          WHERE provider = $1 AND provider_refund_id = $2) AS refund_count,
+         (SELECT COUNT(*)::int FROM bursar.billing_refund_grants AS allocation
+          JOIN bursar.billing_refunds AS refund ON refund.id = allocation.refund_id
+          WHERE refund.provider = $1 AND refund.provider_refund_id = $2) AS allocation_count,
+         (SELECT COUNT(*)::int FROM bursar.credit_ledger_entries AS entry
+          JOIN bursar.credit_accounts AS account ON account.id = entry.account_id
+          WHERE account.subject_id = $3 AND entry.kind = 'refund_clawback') AS ledger_count`,
+      [PROVIDER, refundId, uid],
+    );
+    expect(finalCounts.rows[0]).toEqual({
+      refund_count: 1,
+      allocation_count: 1,
+      ledger_count: 1,
+    });
+  });
+
+  it("over-refund delivery is rejected without a second credit mutation", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const uid = USER_ID3;
+    const paymentId = "py_refund_overallocation";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund_overallocation",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 2000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+    const first = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_overallocation_1",
+      eventType: "refund.created",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      refund: {
+        providerRefundId: "refund_overallocation_1",
+        providerPaymentId: paymentId,
+        amountMinor: 1500,
+        currency: "USD",
+        status: "succeeded",
+      },
+    });
+    const second = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_overallocation_2",
+      eventType: "refund.created",
+      occurredAt: new Date().toISOString(),
+      accountId: uid,
+      refund: {
+        providerRefundId: "refund_overallocation_2",
+        providerPaymentId: paymentId,
+        amountMinor: 600,
+        currency: "USD",
+        status: "succeeded",
+      },
+    });
+    expect(first.handled).toBe(true);
+    expect(second.handled).toBe(false);
+    expect(second.error).toBeTruthy();
+    expect((await cm.getBalance(uid)).balance.toString()).toBe("500");
+
+    const counts = await pool.query(
+      `SELECT COUNT(*)::int AS refund_count
+       FROM bursar.billing_refunds
+       WHERE provider = $1 AND payment_id = (
+         SELECT id FROM bursar.billing_payments
+         WHERE provider = $1 AND provider_payment_id = $2
+       ) AND status = 'succeeded'`,
+      [PROVIDER, paymentId],
+    );
+    expect(counts.rows[0]?.refund_count).toBe(1);
+    const ledger = await pool.query(
+      `SELECT COUNT(*)::int AS ledger_count
+       FROM bursar.credit_ledger_entries AS ledger
+       JOIN bursar.credit_accounts AS account ON account.id = ledger.account_id
+       WHERE account.subject_id = $1 AND ledger.kind = 'refund_clawback'`,
+      [uid],
+    );
+    expect(ledger.rows[0]?.ledger_count).toBe(1);
   });
 
   it("cycle grant replace prior", async () => {
@@ -1310,7 +1992,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         status: "active",
         periodStart: "2025-06-01T00:00:00Z",
         periodEnd: "2025-07-01T00:00:00Z",
-        refs: { productId: "prod_cycle_grant", priceId: "price_cycle_grant_5000" },
+        refs: {
+          productId: "prod_cycle_grant",
+          priceId: "price_cycle_grant_5000",
+        },
         interval: "month",
         intervalCount: 1,
       },
@@ -1331,7 +2016,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         status: "active",
         periodStart: "2025-07-01T00:00:00Z",
         periodEnd: "2025-08-01T00:00:00Z",
-        refs: { productId: "prod_cycle_grant", priceId: "price_cycle_grant_5000" },
+        refs: {
+          productId: "prod_cycle_grant",
+          priceId: "price_cycle_grant_5000",
+        },
         interval: "month",
         intervalCount: 1,
       },
@@ -1490,7 +2178,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   // ── Customer deleted ────────────────────────────────────────────────────
 
   it("customer deleted revokes plan", async () => {
-    const { cm, bm } = await makePgComponents(pool);
+    const { cm, bm, bs } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cus_del_1",
@@ -1513,6 +2201,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       },
     });
     expect((await cm.getUserPlan(USER_ID)).planId).not.toBeNull();
+    expect(await bm.listCancellableProviderSubscriptionIds(USER_ID)).toEqual(["sub_del_test"]);
+    expect(await bm.listCancellableSubscriptions(USER_ID)).toHaveLength(1);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cus_del_2",
@@ -1522,6 +2212,21 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       customer: { providerCustomerId: "cus_del_test" },
     });
     expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
+
+    await cm.setUserPlan(USER_ID, "pro");
+    const terminalPlanBilling = new BillingService(bs, {
+      provisioning: cm,
+      terminalPlanKey: "free",
+    });
+    await terminalPlanBilling.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_del_terminal",
+      eventType: "customer.deleted",
+      occurredAt: new Date().toISOString(),
+      accountId: USER_ID,
+      customer: { providerCustomerId: "cus_del_test" },
+    });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("free");
   });
 
   // ── Checkout completed ──────────────────────────────────────────────────
@@ -1544,6 +2249,57 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(result.handled).toBe(true);
     const plan = await cm.getUserPlan(USER_ID);
     expect(plan.planId).not.toBeNull();
+  });
+
+  it("reconciles a subscription payment, cycle grant, and invoice together", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const subscriptionId = "sub_payment_invoice_history";
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_payment_invoice_subscription",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { priceId: "price_cycle_grant_5000" },
+      },
+    });
+
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_payment_invoice_succeeded",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: USER_ID,
+      payment: {
+        providerPaymentId: "py_payment_invoice_history",
+        amountMinor: 5000,
+        taxMinor: 0,
+        currency: "USD",
+        purpose: "subscription",
+        status: "succeeded",
+      },
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { priceId: "price_cycle_grant_5000" },
+      },
+    });
+
+    expect(result).toMatchObject({ handled: true, action: "payment_succeeded" });
+    expect(await bm.listBillingInvoices(USER_ID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerInvoiceId: "py_payment_invoice_history",
+          status: "paid",
+          amountPaidMinor: 5000,
+        }),
+      ]),
+    );
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+    expect((await cm.getBalance(USER_ID)).balance.toString()).toBe("5000");
   });
 
   it("checkout completed without subscription", async () => {
@@ -1740,6 +2496,250 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(await bm.expirePastDueGracePeriods(new Date(now))).toBe(0);
   });
 
+  it("quotes and retries durable auto-recharge attempts across provider outcomes", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    const config: BursarConfigData = structuredClone(PRICING_DICT);
+    const commerce = config.commerce;
+    if (!commerce) throw new Error("expected commerce configuration");
+    commerce.auto_recharge = {
+      eligible_topups: ["standard_topup"],
+      balance_below: { minimum: "100", maximum: "5000", default: "1000" },
+      rearm_above: "6000",
+      quantity: { minimum: 1, maximum: 3, default: 1 },
+      limits: {
+        max_purchases: 3,
+        window: { type: "rolling", duration: { unit: "day", count: 30 } },
+        max_charge_minor: 1000,
+        cooldown: { unit: "hour", count: 1 },
+      },
+    };
+    await cm.publishAndActivateCatalog(config);
+
+    const outcomes = [
+      {
+        providerPaymentId: "auto_processing_initial",
+        status: "processing" as const,
+        amountMinor: 1000,
+        currency: "USD",
+      },
+    ];
+    const provider = {
+      provider: PROVIDER,
+      createCheckoutSession: vi.fn(),
+      handleWebhook: vi.fn(),
+      listPaymentMethods: vi.fn().mockResolvedValue([
+        {
+          id: "pm_auto",
+          last4: "4242",
+          brand: "visa",
+          expiryMonth: 12,
+          expiryYear: 2030,
+          isDefault: true,
+        },
+      ]),
+      previewSavedPaymentCharge: vi.fn().mockResolvedValue({
+        amountMinor: 1000,
+        currency: "USD",
+      }),
+      chargeSavedPaymentMethod: vi.fn().mockImplementation(async () => outcomes.shift()),
+    } satisfies PaymentProvider;
+    await bs.upsertBillingCustomer(PROVIDER, "cus_auto_integration", USER_ID, "auto@example.com");
+
+    await expect(bm.autoRecharge.quote({ userId: USER_ID, provider })).resolves.toEqual({
+      amountMinor: 1000,
+      currency: "USD",
+    });
+    await expect(bm.autoRecharge.getStatus({ userId: USER_ID, provider })).resolves.toMatchObject({
+      enabled: false,
+      state: "disabled",
+      paymentMethodLast4: null,
+    });
+
+    const enabled = await bm.autoRecharge.enable({
+      userId: USER_ID,
+      provider,
+      balance: new Decimal(2000),
+    });
+    expect(enabled).toMatchObject({ enabled: true, state: "active", quoteAmountMinor: 1000 });
+    await expect(
+      bm.autoRecharge.processIfNeeded({ userId: USER_ID, provider, balance: new Decimal(0) }),
+    ).resolves.toMatchObject({ outcome: "submitted" });
+    await expect(
+      bm.autoRecharge.retry({ userId: USER_ID, provider, balance: new Decimal(0) }),
+    ).resolves.toMatchObject({ outcome: "already_processing" });
+    await expect(
+      bm.ingestBillingEvent({
+        provider: PROVIDER,
+        eventId: "evt_auto_recharge_succeeded",
+        eventType: "payment.succeeded",
+        occurredAt: new Date().toISOString(),
+        accountId: USER_ID,
+        payment: {
+          providerPaymentId: "auto_processing_initial",
+          amountMinor: 1000,
+          taxMinor: 0,
+          currency: "USD",
+          refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+          purpose: "credit_topup",
+          status: "succeeded",
+        },
+      }),
+    ).resolves.toMatchObject({ handled: true, action: "payment_succeeded" });
+    expect((await cm.getBalance(USER_ID)).balance.toString()).toBe("1000");
+    await expect(
+      bm.autoRecharge.processIfNeeded({ userId: USER_ID, provider, balance: new Decimal(2000) }),
+    ).resolves.toEqual({ outcome: "above_threshold" });
+
+    await bm.autoRecharge.disable(USER_ID);
+    await expect(
+      bm.autoRecharge.retry({ userId: USER_ID, provider, balance: new Decimal(0) }),
+    ).rejects.toThrow("disabled");
+  });
+
+  it("retries a failed auto-recharge with a fresh attempt and settles its provider payment", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    const config: BursarConfigData = structuredClone(PRICING_DICT);
+    const commerce = config.commerce;
+    if (!commerce) throw new Error("expected commerce configuration");
+    commerce.auto_recharge = {
+      eligible_topups: ["standard_topup"],
+      balance_below: { minimum: "100", maximum: "5000", default: "1000" },
+      rearm_above: "6000",
+      quantity: { minimum: 1, maximum: 3, default: 1 },
+      limits: {
+        max_purchases: 3,
+        window: { type: "rolling", duration: { unit: "day", count: 30 } },
+        max_charge_minor: 1000,
+        cooldown: { unit: "hour", count: 1 },
+      },
+    };
+    await cm.publishAndActivateCatalog(config);
+
+    const charges = [
+      {
+        providerPaymentId: "auto_failed_first",
+        status: "failed" as const,
+        amountMinor: 1000,
+        currency: "USD",
+      },
+      {
+        providerPaymentId: "auto_retry_submitted",
+        status: "succeeded" as const,
+        amountMinor: 1000,
+        currency: "USD",
+      },
+    ];
+    const provider = {
+      provider: PROVIDER,
+      createCheckoutSession: vi.fn(),
+      handleWebhook: vi.fn(),
+      listPaymentMethods: vi.fn().mockResolvedValue([
+        {
+          id: "pm_auto_retry",
+          last4: "4242",
+          brand: "visa",
+          expiryMonth: 12,
+          expiryYear: 2030,
+          isDefault: true,
+        },
+      ]),
+      chargeSavedPaymentMethod: vi.fn().mockImplementation(async () => charges.shift()),
+    } satisfies PaymentProvider;
+    await bs.upsertBillingCustomer(PROVIDER, "cus_auto_retry", USER_ID2, "retry@example.com");
+
+    await expect(
+      bm.autoRecharge.enable({ userId: USER_ID2, provider, balance: new Decimal(0) }),
+    ).resolves.toMatchObject({ enabled: true, state: "active" });
+    await expect(
+      pool.query(
+        `SELECT state, failure_code
+         FROM bursar.billing_auto_recharge_attempts
+         WHERE subject_id = $1
+         ORDER BY created_at`,
+        [USER_ID2],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ state: "failed", failure_code: "payment_failed" }],
+    });
+
+    await expect(
+      bm.autoRecharge.retry({ userId: USER_ID2, provider, balance: new Decimal(0) }),
+    ).resolves.toMatchObject({ outcome: "submitted" });
+    const attempts = await pool.query(
+      `SELECT state, provider_attempt_id
+       FROM bursar.billing_auto_recharge_attempts
+       WHERE subject_id = $1
+       ORDER BY created_at`,
+      [USER_ID2],
+    );
+    expect(attempts.rows).toEqual([
+      { state: "failed", provider_attempt_id: "auto_failed_first" },
+      { state: "processing", provider_attempt_id: "auto_retry_submitted" },
+    ]);
+
+    await expect(
+      bm.ingestBillingEvent({
+        provider: PROVIDER,
+        eventId: "evt_auto_retry_settled",
+        eventType: "payment.succeeded",
+        occurredAt: new Date().toISOString(),
+        accountId: USER_ID2,
+        payment: {
+          providerPaymentId: "auto_retry_submitted",
+          amountMinor: 1000,
+          taxMinor: 0,
+          currency: "USD",
+          refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+          purpose: "credit_topup",
+          status: "succeeded",
+        },
+      }),
+    ).resolves.toMatchObject({ handled: true, action: "payment_succeeded" });
+    expect((await cm.getBalance(USER_ID2)).balance.toString()).toBe("1000");
+    await expect(
+      pool.query(
+        `SELECT state FROM bursar.billing_auto_recharge_attempts
+         WHERE subject_id = $1 AND provider_attempt_id = $2`,
+        [USER_ID2, "auto_retry_submitted"],
+      ),
+    ).resolves.toMatchObject({ rows: [{ state: "succeeded" }] });
+  });
+
+  it("records a standalone invoice while rejecting a subscription-linked invoice before persistence", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await expect(
+      bs.upsertBillingInvoice({
+        provider: PROVIDER,
+        providerInvoiceId: "in_missing_subscription",
+        providerSubscriptionId: "sub_missing_invoice",
+        userId: USER_ID4,
+        status: "open",
+        amountDueMinor: 1000,
+        amountPaidMinor: 0,
+        currency: "USD",
+        providerUpdatedAt: TEST_INSTANT,
+      }),
+    ).rejects.toMatchObject({ code: "STORE_ERROR", retryable: true });
+
+    await bs.upsertBillingInvoice({
+      provider: PROVIDER,
+      providerInvoiceId: "in_standalone",
+      userId: USER_ID4,
+      status: "open",
+      amountDueMinor: 1000,
+      amountPaidMinor: 0,
+      currency: "USD",
+      metadata: { source: "manual_reconciliation" },
+      providerUpdatedAt: TEST_INSTANT,
+    });
+    await expect(bm.listBillingInvoices(USER_ID4)).resolves.toMatchObject([
+      expect.objectContaining({
+        providerInvoiceId: "in_standalone",
+        status: "open",
+      }),
+    ]);
+  });
+
   it("pseudonymizes mutable financial identity data without deleting records", async () => {
     const { bm, bs } = await makePgComponents(pool);
     await bs.upsertBillingCustomer(PROVIDER, "cus_pseudonymize", USER_ID4, "pii@example.com");
@@ -1865,6 +2865,28 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(closed.action).toBe("dispute_closed");
   });
 
+  it("fails closed when a dispute references an unknown payment", async () => {
+    const { bm } = await makePgComponents(pool);
+    await expect(
+      bm.ingestBillingEvent({
+        provider: PROVIDER,
+        eventId: "evt_dispute_unknown_payment",
+        eventType: "dispute.created",
+        occurredAt: new Date().toISOString(),
+        accountId: USER_ID,
+        dispute: {
+          providerDisputeId: "dp_unknown_payment",
+          providerPaymentId: "py_unknown_payment",
+          status: "needs_response",
+          reason: "fraudulent",
+        },
+      }),
+    ).resolves.toMatchObject({
+      handled: false,
+      error: "billing_event_processing_failed:STORE_ERROR",
+    });
+  });
+
   // ── Invoice.paid ────────────────────────────────────────────────────────
 
   it("invoice paid records invoice and renews subscription", async () => {
@@ -1966,7 +2988,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   // ── Subscription updated ────────────────────────────────────────────────
 
   it("subscription updated upserts state", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+    const { cm, bm, bs } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_up_1",
@@ -1993,6 +3015,21 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     });
     const sub = await bs.getBillingSubscription(PROVIDER, "sub_up");
     expect(sub!.status).toBe("active");
+
+    const unmapped = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_up_unmapped_lookup",
+      eventType: "subscription.updated",
+      occurredAt: new Date().toISOString(),
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_up",
+        status: "active",
+        refs: { lookupKey: "provider-plan-slug-not-yet-catalogued" },
+      },
+    });
+    expect(unmapped).toEqual({ handled: true, action: "subscription_updated" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
   });
 
   // ── Subscription plan changed ───────────────────────────────────────────
@@ -2041,6 +3078,52 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(plan.planAssignedAt?.toISOString()).toBe(originalPlan.planAssignedAt?.toISOString());
     expect(await bm.getOpenBillingSubscriptionChange(PROVIDER, "sub_pc")).toBeNull();
     expect((await bm.getActiveSubscription(USER_ID))?.offerKey).toBe("enterprise_yearly");
+  });
+
+  it("does not advance a pending plan change from a stale provider event", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pc_stale_created",
+      eventType: BillingEventType.SUBSCRIPTION_CREATED,
+      occurredAt: "2026-08-20T12:00:02.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pc_stale",
+        status: "active",
+        periodStart: TEST_INSTANT,
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const target = await bs.resolveBillingOffer(PROVIDER, null, "price_yearly_10000");
+    expect(target).not.toBeNull();
+    const pending = await bm.createBillingSubscriptionChange({
+      provider: PROVIDER,
+      providerSubscriptionId: "sub_pc_stale",
+      toOfferId: target!.offerId,
+      effectiveAt: "2030-01-01T00:00:00.000Z",
+      effective: "immediate",
+      idempotencyKey: "change:sub_pc_stale:enterprise",
+    });
+
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pc_stale_change",
+      eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
+      occurredAt: "2026-08-20T12:00:01.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pc_stale",
+        status: "active",
+        refs: { priceId: "price_yearly_10000" },
+      },
+    });
+
+    expect(result.action).toBe("stale_subscription_event");
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+    expect((await bm.getOpenBillingSubscriptionChange(PROVIDER, "sub_pc_stale"))?.id).toBe(
+      pending.id,
+    );
   });
 
   // ── Ignored event types ─────────────────────────────────────────────────
@@ -2101,6 +3184,32 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       },
     });
     expect(result.action).toBe("payment_succeeded");
+  });
+
+  it("rejects a top-up payment above the configured quantity ceiling", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_topup_over_max",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      accountId: USER_ID,
+      payment: {
+        providerPaymentId: "py_topup_over_max",
+        amountMinor: 101_000,
+        taxMinor: 0,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+        status: "succeeded",
+      },
+    });
+
+    expect(result).toMatchObject({
+      handled: true,
+      action: "payment_succeeded_out_of_bounds",
+    });
+    expect((await cm.getBalance(USER_ID)).balance.toString()).toBe("0");
   });
 
   // ── Manager no-creditManager edge cases ─────────────────────────────────
@@ -2225,5 +3334,276 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(result.handled).toBe(true);
     const uid = await bs.getBillingCustomer(PROVIDER, "cus_upd");
     expect(uid).toBe(USER_ID);
+  });
+
+  it("resolves webhook identity from durable references and preserves subscription status transitions", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_identity_customer",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      accountId: USER_ID,
+      customer: { providerCustomerId: "cus_identity" },
+    });
+
+    const created = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_identity_subscription",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      customer: { providerCustomerId: "cus_identity" },
+      subscription: {
+        providerSubscriptionId: "sub_identity",
+        status: "active",
+        refs: { priceId: PRICE_ID },
+      },
+    });
+    expect(created).toMatchObject({ handled: true, action: "subscription_created" });
+
+    const paused = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_identity_paused",
+      eventType: "subscription.paused",
+      occurredAt: new Date().toISOString(),
+      subscription: { providerSubscriptionId: "sub_identity" },
+    });
+    expect(paused).toMatchObject({ handled: true, action: "subscription_paused" });
+    expect((await bs.getBillingSubscription(PROVIDER, "sub_identity"))?.status).toBe("paused");
+
+    const resumed = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_identity_resumed",
+      eventType: "subscription.resumed",
+      occurredAt: new Date().toISOString(),
+      subscription: {
+        providerSubscriptionId: "sub_identity",
+        refs: { priceId: PRICE_ID },
+      },
+    });
+    expect(resumed).toMatchObject({ handled: true, action: "subscription_resumed" });
+    expect((await bs.getBillingSubscription(PROVIDER, "sub_identity"))?.status).toBe("active");
+
+    await bs.upsertBillingPayment({
+      provider: PROVIDER,
+      providerPaymentId: "py_identity",
+      userId: USER_ID,
+      amountMinor: 1000,
+      taxMinor: 0,
+      currency: "USD",
+      purpose: "subscription",
+      status: "failed",
+      providerUpdatedAt: TEST_INSTANT,
+    });
+    const failed = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_identity_payment_failed",
+      eventType: "payment.failed",
+      occurredAt: new Date().toISOString(),
+      payment: {
+        providerPaymentId: "py_identity",
+        amountMinor: 1000,
+        taxMinor: 0,
+        currency: "USD",
+        purpose: "subscription",
+        status: "failed",
+      },
+    });
+    expect(failed).toMatchObject({ handled: true, action: "payment_failed_recorded" });
+  });
+
+  it("rejects subscription events without a resolvable account", async () => {
+    const { bm } = await makePgComponents(pool);
+    const eventTypes = [
+      "subscription.created",
+      "subscription.updated",
+      "subscription.canceled",
+    ] as const;
+
+    for (const [index, eventType] of eventTypes.entries()) {
+      const withoutAccount = await bm.ingestBillingEvent({
+        provider: PROVIDER,
+        eventId: `evt_missing_account_${index}`,
+        eventType,
+        occurredAt: new Date().toISOString(),
+        subscription: { providerSubscriptionId: "sub-missing-account" },
+      });
+      expect(withoutAccount).toMatchObject({ handled: false, error: "account_not_found" });
+    }
+  });
+
+  it("converts a concurrent subscription uniqueness race into a durable conflict", async () => {
+    const { cm, bs: firstStore, bm: firstManager } = await makePgComponents(pool);
+    const originalFirstUpsert = firstStore.upsertBillingSubscription.bind(firstStore);
+    const secondManager = new BillingService(firstStore, { provisioning: cm });
+    let arrivals = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pauseBeforeUpsert = async (state: BillingSubscriptionState): Promise<void> => {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await gate;
+      if (state.providerSubscriptionId === "sub_race_1") {
+        await originalFirstUpsert(state);
+        return;
+      }
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const persisted = await pool.query(
+          `SELECT 1
+           FROM bursar.billing_subscriptions
+           WHERE provider = $1 AND provider_subscription_id = $2
+           LIMIT 1`,
+          [PROVIDER, "sub_race_1"],
+        );
+        if (persisted.rowCount) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      throw Object.assign(new Error("simulated unique constraint race"), { code: "23505" });
+    };
+    vi.spyOn(firstStore, "upsertBillingSubscription").mockImplementation((state) =>
+      pauseBeforeUpsert(state),
+    );
+
+    try {
+      const [first, second] = await Promise.all([
+        firstManager.ingestBillingEvent({
+          provider: PROVIDER,
+          eventId: "evt_race_subscription_1",
+          eventType: "subscription.created",
+          occurredAt: new Date().toISOString(),
+          accountId: USER_ID,
+          subscription: {
+            providerSubscriptionId: "sub_race_1",
+            status: "active",
+            refs: { priceId: PRICE_ID },
+          },
+        }),
+        secondManager.ingestBillingEvent({
+          provider: PROVIDER,
+          eventId: "evt_race_subscription_2",
+          eventType: "subscription.created",
+          occurredAt: new Date().toISOString(),
+          accountId: USER_ID,
+          subscription: {
+            providerSubscriptionId: "sub_race_2",
+            status: "active",
+            refs: { priceId: PRICE_ID },
+          },
+        }),
+      ]);
+      expect([first.handled, second.handled].sort()).toEqual([false, true]);
+      expect([first.error, second.error].filter(Boolean)).toEqual(["subscription_conflict"]);
+      const subscriptions = await firstStore.getUserSubscriptions(USER_ID);
+      expect(subscriptions.filter((subscription) => subscription.status === "active")).toHaveLength(
+        1,
+      );
+      const conflicts = await pool.query(
+        `SELECT duplicate_provider_subscription_id
+         FROM bursar.billing_subscription_conflicts`,
+      );
+      expect(conflicts.rows).toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  it("re-evaluates access across provider subscription state transitions", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    const subscriptionId = "sub_access_transitions";
+    const created = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_access_created",
+      eventType: "subscription.created",
+      occurredAt: "2026-08-19T13:00:00.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { priceId: PRICE_ID },
+      },
+    });
+    expect(created).toMatchObject({ handled: true, action: "subscription_created" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+
+    const refreshed = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_access_updated_without_refs",
+      eventType: "subscription.updated",
+      occurredAt: "2026-08-19T13:00:01.000Z",
+      accountId: USER_ID,
+      subscription: { providerSubscriptionId: subscriptionId, status: "active" },
+    });
+    expect(refreshed).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+
+    const grace = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_access_past_due",
+      eventType: "subscription.updated",
+      occurredAt: "2026-08-19T13:00:02.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "past_due",
+        refs: { priceId: PRICE_ID },
+      },
+    });
+    expect(grace).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+
+    const unmappedGrace = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_access_past_due_unmapped",
+      eventType: "subscription.updated",
+      occurredAt: "2026-08-19T13:00:03.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "past_due",
+        refs: { lookupKey: "provider-plan-slug-not-yet-catalogued" },
+      },
+    });
+    expect(unmappedGrace).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+
+    const storedGrace = await bs.getBillingSubscription(PROVIDER, subscriptionId);
+    if (!storedGrace) throw new Error("expected persisted past-due subscription");
+    await bs.upsertBillingSubscription({
+      ...storedGrace,
+      graceEndsAt: new Date(Date.now() - 1_000).toISOString(),
+      graceExpiredAt: null,
+      providerUpdatedAt: "2026-08-19T13:00:04.000Z",
+    });
+    await expect(bm.expirePastDueGracePeriods()).resolves.toBe(1);
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBeNull();
+    const expiredGrace = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_access_past_due_expired",
+      eventType: "subscription.updated",
+      occurredAt: "2026-08-19T13:00:05.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "past_due",
+      },
+    });
+    expect(expiredGrace).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBeNull();
+
+    const canceled = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_access_canceled",
+      eventType: "subscription.updated",
+      occurredAt: "2026-08-19T13:00:06.000Z",
+      accountId: USER_ID,
+      subscription: { providerSubscriptionId: subscriptionId, status: "canceled" },
+    });
+    expect(canceled).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBeNull();
+    await expect(bs.getBillingSubscription(PROVIDER, subscriptionId)).resolves.toMatchObject({
+      status: "canceled",
+    });
   });
 });
