@@ -73,10 +73,7 @@ func TestOperatorMaintenanceMapsCompletedAndPartitionResults(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	maintenance, err := newBursarOperatorMaintenance(caller)
-	if err != nil {
-		t.Fatal(err)
-	}
+	maintenance := &BursarOperatorMaintenance{client: caller}
 	result := maintenance.RunOnce(context.Background(), OperatorMaintenanceRunOptions{Mode: OperatorMaintenanceForce, Now: now})
 	if result.Status != StorageMaintenanceCompleted || result.Count != 36 || result.BatchSize == nil || *result.BatchSize != 100 || !result.HasMore {
 		t.Fatalf("storage result = %#v", result)
@@ -107,10 +104,7 @@ func TestOperatorMaintenanceFailureIsSafe(t *testing.T) {
 	caller := &storageCallerStub{call: func(context.Context, string, ...any) ([]map[string]any, error) {
 		return nil, errors.New("postgresql://user:password@example.test/secret")
 	}}
-	maintenance, err := newBursarOperatorMaintenance(caller)
-	if err != nil {
-		t.Fatal(err)
-	}
+	maintenance := &BursarOperatorMaintenance{client: caller}
 	result := maintenance.RunOnce(context.Background(), OperatorMaintenanceRunOptions{})
 	if result.Status != StorageMaintenanceFailed || result.Error == nil || *result.Error != "storage_maintenance_failed:Error" {
 		t.Fatalf("result = %#v", result)
@@ -202,10 +196,7 @@ func TestOperatorMaintenanceConstructorsAndMalformedResponses(t *testing.T) {
 	caller := &storageCallerStub{call: func(context.Context, string, ...any) ([]map[string]any, error) {
 		return []map[string]any{{"maintenance_result": json.Number("1")}}, nil
 	}}
-	maintenance, err := newBursarOperatorMaintenance(caller)
-	if err != nil {
-		t.Fatal(err)
-	}
+	maintenance := &BursarOperatorMaintenance{client: caller}
 	for _, mode := range []OperatorMaintenanceMode{"bad", "force"} {
 		got := maintenance.RunOnce(context.Background(), OperatorMaintenanceRunOptions{Mode: mode})
 		if mode == "bad" && got.Status != StorageMaintenanceFailed {

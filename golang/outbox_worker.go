@@ -109,6 +109,39 @@ type OutboxRunResult struct {
 	ClaimLost int `json:"claim_lost"`
 }
 
+// OutboxWorkerLifecycle describes the local worker lifecycle. It is a
+// process-local snapshot; it never performs a store or network operation.
+type OutboxWorkerLifecycle string
+
+const (
+	OutboxWorkerNotConfigured OutboxWorkerLifecycle = "not_configured"
+	OutboxWorkerNotStarted    OutboxWorkerLifecycle = "not_started"
+	OutboxWorkerRunning       OutboxWorkerLifecycle = "running"
+	OutboxWorkerStopped       OutboxWorkerLifecycle = "stopped"
+)
+
+type OutboxWorkerRunSnapshot struct {
+	Source      string
+	Status      string
+	StartedAt   time.Time
+	CompletedAt time.Time
+	Result      *OutboxRunResult
+	Error       string
+}
+
+type OutboxWorkerErrorSnapshot struct {
+	At    time.Time
+	Error string
+}
+
+// OutboxWorkerSnapshot is a race-safe local lifecycle and run snapshot.
+type OutboxWorkerSnapshot struct {
+	Configured bool
+	Lifecycle  OutboxWorkerLifecycle
+	LastRun    *OutboxWorkerRunSnapshot
+	LastError  *OutboxWorkerErrorSnapshot
+}
+
 type outboxActiveRun struct {
 	done   chan struct{}
 	cancel context.CancelFunc
@@ -131,6 +164,8 @@ type OutboxWorker struct {
 	loopCancel context.CancelFunc
 	loopDone   chan struct{}
 	active     *outboxActiveRun
+	lastRun    *OutboxWorkerRunSnapshot
+	lastError  *OutboxWorkerErrorSnapshot
 }
 
 var _ RuntimeComponent = (*OutboxWorker)(nil)
@@ -179,6 +214,9 @@ func (w *OutboxWorker) Start(ctx context.Context) error {
 	if w == nil {
 		return outboxConfigError("outbox worker is not initialized")
 	}
+	if ctx == nil {
+		return outboxConfigError("outbox worker context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -209,6 +247,9 @@ func (w *OutboxWorker) RunOnce(ctx context.Context) (OutboxRunResult, error) {
 }
 
 func (w *OutboxWorker) runOnce(ctx context.Context, detachFromParent bool) (OutboxRunResult, error) {
+	if ctx == nil {
+		return OutboxRunResult{}, outboxConfigError("outbox worker context is required")
+	}
 	w.mu.Lock()
 	if w.stopped {
 		w.mu.Unlock()
@@ -227,9 +268,29 @@ func (w *OutboxWorker) runOnce(ctx context.Context, detachFromParent bool) (Outb
 	w.active = current
 	w.mu.Unlock()
 
+	startedAt := time.Now().UTC()
 	current.result, current.err = w.dispatchOnce(runContext)
+	completedAt := time.Now().UTC()
 	cancel()
 	w.mu.Lock()
+	if current.err != nil {
+		message := persistedDiagnosticSummary(current.err, "outbox_worker_failed")
+		w.lastError = &OutboxWorkerErrorSnapshot{At: completedAt, Error: message}
+		if !detachFromParent {
+			w.lastRun = &OutboxWorkerRunSnapshot{
+				Source: "manual", Status: "failed",
+				StartedAt: startedAt, CompletedAt: completedAt,
+				Error: message,
+			}
+		}
+	} else if !detachFromParent {
+		result := current.result
+		w.lastRun = &OutboxWorkerRunSnapshot{
+			Source: "manual", Status: "completed",
+			StartedAt: startedAt, CompletedAt: completedAt,
+			Result: &result,
+		}
+	}
 	if w.active == current {
 		w.active = nil
 	}
@@ -252,9 +313,16 @@ func (w *OutboxWorker) Flush(ctx context.Context) error {
 	return err
 }
 
-func (w *OutboxWorker) Close(ctx context.Context) error {
+// Stop stops polling and waits for the current delivery pass. It is
+// idempotent and intentionally does not close the underlying OutboxStore, so
+// callers may retain ownership of that store for later shutdown. A stopped
+// worker cannot be started again; use a new worker for a new lifecycle.
+func (w *OutboxWorker) Stop(ctx context.Context) error {
 	if w == nil {
 		return nil
+	}
+	if ctx == nil {
+		return errors.New("outbox worker context is required")
 	}
 	w.mu.Lock()
 	if !w.stopped {
@@ -296,6 +364,41 @@ func (w *OutboxWorker) Close(ctx context.Context) error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// Close is the final RuntimeComponent lifecycle method. OutboxWorker does
+// not own the durable store, so final close is equivalent to Stop while
+// retaining the explicit API used by RuntimeComponent owners.
+func (w *OutboxWorker) Close(ctx context.Context) error {
+	return w.Stop(ctx)
+}
+
+// Snapshot returns local worker state without touching the underlying store.
+func (w *OutboxWorker) Snapshot() OutboxWorkerSnapshot {
+	if w == nil {
+		return OutboxWorkerSnapshot{Lifecycle: OutboxWorkerNotConfigured}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	snapshot := OutboxWorkerSnapshot{Configured: true, Lifecycle: OutboxWorkerNotStarted}
+	if w.stopped {
+		snapshot.Lifecycle = OutboxWorkerStopped
+	} else if w.started {
+		snapshot.Lifecycle = OutboxWorkerRunning
+	}
+	if w.lastRun != nil {
+		lastRun := *w.lastRun
+		if lastRun.Result != nil {
+			result := *lastRun.Result
+			lastRun.Result = &result
+		}
+		snapshot.LastRun = &lastRun
+	}
+	if w.lastError != nil {
+		lastError := *w.lastError
+		snapshot.LastError = &lastError
+	}
+	return snapshot
 }
 
 func (w *OutboxWorker) Health(context.Context) error {

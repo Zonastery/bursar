@@ -77,7 +77,6 @@ async function seedStorageRows(pool: pg.Pool): Promise<{
     await client.query("BEGIN");
     await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
     await client.query("SELECT set_config('bursar.provider_environment', 'test', true)");
-    await client.query("SELECT set_config('bursar.provider_environment', 'test', true)");
     const billingClaim = await client.query(
       `
       SELECT *

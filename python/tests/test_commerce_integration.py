@@ -510,7 +510,18 @@ async def test_checkout_reconciles_terminal_provider_and_local_expiry_states(
         provider.checkout_status = None
         commerce.options.checkout_intent_ttl_ms = 2_000
         expired = await commerce.create_checkout(expired_input)
-        await asyncio.sleep(2.1)
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE bursar.billing_checkout_intents
+                SET created_at = now() - interval '2 seconds',
+                    expires_at = now() - interval '1 second'
+                WHERE id = %s::uuid
+                  AND subject_id = %s::uuid
+                """,
+                (expired.intent_id, USER_ID3),
+            )
+            assert cursor.rowcount == 1
         with pytest.raises(CheckoutConflictError, match="expired"):
             await commerce.create_checkout(expired_input)
         assert commerce.get_checkout_status(expired.intent_id, USER_ID3).status == "expired"

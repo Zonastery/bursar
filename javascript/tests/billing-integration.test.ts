@@ -655,6 +655,191 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect(plan2.planId).toBeNull();
   });
 
+  it("fences stale terminal and positive subscription events", async () => {
+    const { bs, cm, bm } = await makePgComponents(pool);
+    const subscriptionId = "sub_stale_entitlement";
+
+    const active = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_stale_entitlement_active",
+      eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+      occurredAt: "2026-08-20T10:00:02.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(active.action).toBe("subscription_renewed");
+    expect((await cm.getUserPlan(USER_ID4)).planKey).toBe("pro");
+
+    const staleCancel = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_stale_entitlement_cancel",
+      eventType: BillingEventType.SUBSCRIPTION_CANCELED,
+      occurredAt: "2026-08-20T10:00:01.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "canceled",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(staleCancel.action).toBe("stale_subscription_event");
+    expect((await cm.getUserPlan(USER_ID4)).planKey).toBe("pro");
+
+    const canceled = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_current_entitlement_cancel",
+      eventType: BillingEventType.SUBSCRIPTION_CANCELED,
+      occurredAt: "2026-08-20T10:00:03.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "canceled",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(canceled.action).toBe("subscription_canceled");
+    expect((await cm.getUserPlan(USER_ID4)).planId).toBeNull();
+
+    const staleResume = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_stale_entitlement_resume",
+      eventType: BillingEventType.SUBSCRIPTION_RESUMED,
+      occurredAt: "2026-08-20T10:00:02.000Z",
+      accountId: USER_ID4,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(staleResume.action).toBe("stale_subscription_event");
+    expect((await cm.getUserPlan(USER_ID4)).planId).toBeNull();
+    expect((await bs.getBillingSubscription(PROVIDER, subscriptionId))?.status).toBe("canceled");
+  });
+
+  it("fences distinct equal-timestamp events while replaying the reconciled event", async () => {
+    const { bs, cm } = await makePgComponents(pool);
+    const timestamp = "2026-08-20T10:01:00.000Z";
+    const subscriptionId = "sub_equal_timestamp";
+    const callbacks: string[] = [];
+    const bm = new BillingService(bs, {
+      provisioning: cm,
+      eventHandlers: {
+        [BillingEventType.SUBSCRIPTION_RENEWED]: async (billingEvent) => {
+          callbacks.push(billingEvent.eventId);
+        },
+      },
+    });
+    const renewal = (eventId: string): BillingEvent => ({
+      provider: PROVIDER,
+      eventId,
+      eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+      occurredAt: timestamp,
+      accountId: USER_ID5,
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+
+    const first = await bm.ingestBillingEvent(renewal("evt_equal_timestamp_first"));
+    const second = await bm.ingestBillingEvent(renewal("evt_equal_timestamp_second"));
+    expect(first.action).toBe("subscription_renewed");
+    expect(second.action).toBe("stale_subscription_event");
+    expect(callbacks).toEqual(["evt_equal_timestamp_first"]);
+
+    const subscription = await bs.getBillingSubscription(PROVIDER, subscriptionId);
+    expect(subscription?.subscriptionId).toBeTruthy();
+    const eventRow = await pool.query<{ id: string }>(
+      `SELECT id
+         FROM bursar.billing_events
+        WHERE tenant_id = $1::uuid
+          AND provider = $2
+          AND provider_environment = 'test'
+          AND provider_event_id = $3`,
+      [TEST_TENANT_ID, PROVIDER, "evt_equal_timestamp_first"],
+    );
+    expect(eventRow.rows).toHaveLength(1);
+    await expect(
+      bs.reconcileSubscriptionEntitlement(
+        USER_ID5,
+        subscription!.subscriptionId!,
+        eventRow.rows[0]!.id,
+        "active",
+        timestamp,
+        null,
+        true,
+        null,
+        "subscription_active",
+      ),
+    ).resolves.toBe("applied");
+  });
+
+  it("converges to the newer terminal state under concurrent webhook delivery", async () => {
+    const { bs, cm } = await makePgComponents(pool);
+    const subscriptionId = "sub_concurrent_entitlement";
+    const localPools = [
+      new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+      new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+    ];
+    const provisioning = {
+      getUserPlan: vi.fn().mockResolvedValue(null),
+      setUserPlan: vi.fn().mockResolvedValue(undefined),
+      unsetUserPlan: vi.fn().mockResolvedValue(undefined),
+    };
+    try {
+      const stores = localPools.map(
+        (postgres) =>
+          new PostgresBillingStore({
+            postgres,
+            tenantId: TEST_TENANT_ID,
+            providerEnvironment: "test",
+          }),
+      );
+      const services = stores.map(
+        (billingStore) => new BillingService(billingStore, { provisioning }),
+      );
+      const [older, newer] = await Promise.all([
+        services[0]!.ingestBillingEvent({
+          provider: PROVIDER,
+          eventId: "evt_concurrent_entitlement_active",
+          eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+          occurredAt: "2026-08-20T10:02:00.000Z",
+          accountId: USER_ID4,
+          subscription: {
+            providerSubscriptionId: subscriptionId,
+            status: "active",
+            refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+          },
+        }),
+        services[1]!.ingestBillingEvent({
+          provider: PROVIDER,
+          eventId: "evt_concurrent_entitlement_canceled",
+          eventType: BillingEventType.SUBSCRIPTION_CANCELED,
+          occurredAt: "2026-08-20T10:02:01.000Z",
+          accountId: USER_ID4,
+          subscription: {
+            providerSubscriptionId: subscriptionId,
+            status: "canceled",
+            refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+          },
+        }),
+      ]);
+      expect(older.handled).toBe(true);
+      expect(newer.handled).toBe(true);
+    } finally {
+      await Promise.all(localPools.map((localPool) => localPool.end()));
+    }
+
+    expect((await bs.getBillingSubscription(PROVIDER, subscriptionId))?.status).toBe("canceled");
+    expect((await cm.getUserPlan(USER_ID4)).planId).toBeNull();
+  });
+
   it("does not revoke a newer active subscription when an older one is cancelled", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
 
@@ -766,7 +951,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
       },
     });
-    expect(first).toEqual({ handled: true, action: "subscription_created" });
+    expect(first).toMatchObject({ handled: true, action: "subscription_created" });
     expect(second).toEqual({ handled: false, error: "subscription_conflict" });
     expect(await bs.getBillingSubscription(PROVIDER, "sub_conflict_second")).toBeNull();
     const conflicts = await pool.query(
@@ -2895,6 +3080,52 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     expect((await bm.getActiveSubscription(USER_ID))?.offerKey).toBe("enterprise_yearly");
   });
 
+  it("does not advance a pending plan change from a stale provider event", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pc_stale_created",
+      eventType: BillingEventType.SUBSCRIPTION_CREATED,
+      occurredAt: "2026-08-20T12:00:02.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pc_stale",
+        status: "active",
+        periodStart: TEST_INSTANT,
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const target = await bs.resolveBillingOffer(PROVIDER, null, "price_yearly_10000");
+    expect(target).not.toBeNull();
+    const pending = await bm.createBillingSubscriptionChange({
+      provider: PROVIDER,
+      providerSubscriptionId: "sub_pc_stale",
+      toOfferId: target!.offerId,
+      effectiveAt: "2030-01-01T00:00:00.000Z",
+      effective: "immediate",
+      idempotencyKey: "change:sub_pc_stale:enterprise",
+    });
+
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_pc_stale_change",
+      eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
+      occurredAt: "2026-08-20T12:00:01.000Z",
+      accountId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pc_stale",
+        status: "active",
+        refs: { priceId: "price_yearly_10000" },
+      },
+    });
+
+    expect(result.action).toBe("stale_subscription_event");
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
+    expect((await bm.getOpenBillingSubscriptionChange(PROVIDER, "sub_pc_stale"))?.id).toBe(
+      pending.id,
+    );
+  });
+
   // ── Ignored event types ─────────────────────────────────────────────────
 
   it("checkout.expired is ignored", async () => {
@@ -3285,7 +3516,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       provider: PROVIDER,
       eventId: "evt_access_created",
       eventType: "subscription.created",
-      occurredAt: new Date().toISOString(),
+      occurredAt: "2026-08-19T13:00:00.000Z",
       accountId: USER_ID,
       subscription: {
         providerSubscriptionId: subscriptionId,
@@ -3300,7 +3531,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       provider: PROVIDER,
       eventId: "evt_access_updated_without_refs",
       eventType: "subscription.updated",
-      occurredAt: new Date().toISOString(),
+      occurredAt: "2026-08-19T13:00:01.000Z",
       accountId: USER_ID,
       subscription: { providerSubscriptionId: subscriptionId, status: "active" },
     });
@@ -3311,7 +3542,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       provider: PROVIDER,
       eventId: "evt_access_past_due",
       eventType: "subscription.updated",
-      occurredAt: new Date().toISOString(),
+      occurredAt: "2026-08-19T13:00:02.000Z",
       accountId: USER_ID,
       subscription: {
         providerSubscriptionId: subscriptionId,
@@ -3326,7 +3557,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       provider: PROVIDER,
       eventId: "evt_access_past_due_unmapped",
       eventType: "subscription.updated",
-      occurredAt: new Date().toISOString(),
+      occurredAt: "2026-08-19T13:00:03.000Z",
       accountId: USER_ID,
       subscription: {
         providerSubscriptionId: subscriptionId,
@@ -3343,13 +3574,15 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       ...storedGrace,
       graceEndsAt: new Date(Date.now() - 1_000).toISOString(),
       graceExpiredAt: null,
-      providerUpdatedAt: new Date().toISOString(),
+      providerUpdatedAt: "2026-08-19T13:00:04.000Z",
     });
+    await expect(bm.expirePastDueGracePeriods()).resolves.toBe(1);
+    expect((await cm.getUserPlan(USER_ID)).planKey).toBeNull();
     const expiredGrace = await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_access_past_due_expired",
       eventType: "subscription.updated",
-      occurredAt: new Date().toISOString(),
+      occurredAt: "2026-08-19T13:00:05.000Z",
       accountId: USER_ID,
       subscription: {
         providerSubscriptionId: subscriptionId,
@@ -3363,7 +3596,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       provider: PROVIDER,
       eventId: "evt_access_canceled",
       eventType: "subscription.updated",
-      occurredAt: new Date().toISOString(),
+      occurredAt: "2026-08-19T13:00:06.000Z",
       accountId: USER_ID,
       subscription: { providerSubscriptionId: subscriptionId, status: "canceled" },
     });

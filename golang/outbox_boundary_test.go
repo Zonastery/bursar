@@ -81,6 +81,14 @@ func TestOutboxWorkerLifecycleAndFailureBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	//lint:ignore SA1012 This boundary test intentionally verifies nil-context rejection.
+	if err := worker.Start(nil); err == nil {
+		t.Fatal("nil Start context accepted")
+	}
+	//lint:ignore SA1012 This boundary test intentionally verifies nil-context rejection.
+	if _, err := worker.RunOnce(nil); err == nil {
+		t.Fatal("nil RunOnce context accepted")
+	}
 	if err := worker.Health(context.Background()); err == nil {
 		t.Fatal("unstarted outbox worker reported healthy")
 	}

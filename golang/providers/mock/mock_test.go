@@ -155,12 +155,21 @@ func TestProviderCoversCustomerCheckoutCommerceAndValidationFlows(t *testing.T) 
 	}
 
 	for _, invalid := range []func() error{
-		func() error { _, err := provider.CreateCheckoutSession(ctx, bursar.CheckoutSessionRequest{}); return err },
+		func() error {
+			_, err := provider.CreateCheckoutSession(ctx, bursar.CheckoutSessionRequest{})
+			return err
+		},
 		func() error { _, err := provider.CreateCustomerPortalSession(ctx, "", "return"); return err },
 		func() error { _, err := provider.CreatePaymentMethodSetupSession(ctx, "cus", "return", ""); return err },
 		func() error { return provider.CancelSubscription(ctx, "", "key") },
-		func() error { _, err := provider.PreviewSavedPaymentCharge(ctx, bursar.SavedPaymentChargeParams{}); return err },
-		func() error { _, err := provider.PreviewPlanChange(ctx, bursar.ProviderPlanChangeRequest{}); return err },
+		func() error {
+			_, err := provider.PreviewSavedPaymentCharge(ctx, bursar.SavedPaymentChargeParams{})
+			return err
+		},
+		func() error {
+			_, err := provider.PreviewPlanChange(ctx, bursar.ProviderPlanChangeRequest{})
+			return err
+		},
 	} {
 		if err := invalid(); err == nil {
 			t.Fatal("expected validation error")
@@ -231,10 +240,22 @@ func TestProviderNilAndInputEdges(t *testing.T) {
 		func() error { _, err := provider.GetInvoiceURL(ctx, ""); return err },
 		func() error { _, err := provider.CreateCustomerPortalSession(ctx, "", "return"); return err },
 		func() error { _, err := provider.ListPaymentMethods(ctx, ""); return err },
-		func() error { _, err := provider.PreviewPlanChange(ctx, bursar.ProviderPlanChangeRequest{ProviderSubscriptionID: "sub", ProductID: "prod", Quantity: 0}); return err },
-		func() error { _, err := provider.ChangePlan(ctx, bursar.ProviderPlanChangeRequest{ProviderSubscriptionID: "sub", ProductID: "prod", Quantity: 1}); return err },
-		func() error { _, err := provider.PreviewSavedPaymentCharge(ctx, bursar.SavedPaymentChargeParams{CustomerID: "cus", PaymentMethodID: "pm", ProductID: "prod", Quantity: 0}); return err },
-		func() error { _, err := provider.ChargeSavedPaymentMethod(ctx, bursar.SavedPaymentChargeParams{CustomerID: "cus", PaymentMethodID: "pm", ProductID: "prod", Quantity: 1}); return err },
+		func() error {
+			_, err := provider.PreviewPlanChange(ctx, bursar.ProviderPlanChangeRequest{ProviderSubscriptionID: "sub", ProductID: "prod", Quantity: 0})
+			return err
+		},
+		func() error {
+			_, err := provider.ChangePlan(ctx, bursar.ProviderPlanChangeRequest{ProviderSubscriptionID: "sub", ProductID: "prod", Quantity: 1})
+			return err
+		},
+		func() error {
+			_, err := provider.PreviewSavedPaymentCharge(ctx, bursar.SavedPaymentChargeParams{CustomerID: "cus", PaymentMethodID: "pm", ProductID: "prod", Quantity: 0})
+			return err
+		},
+		func() error {
+			_, err := provider.ChargeSavedPaymentMethod(ctx, bursar.SavedPaymentChargeParams{CustomerID: "cus", PaymentMethodID: "pm", ProductID: "prod", Quantity: 1})
+			return err
+		},
 		func() error { return provider.CancelScheduledPlanChange(ctx, "", "schedule", "key") },
 		func() error { return provider.QueueEvent(bursar.BillingEvent{EventID: "bad"}) },
 	} {

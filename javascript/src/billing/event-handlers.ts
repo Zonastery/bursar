@@ -9,6 +9,7 @@ import type {
   BillingOfferResult,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
+  SubscriptionEntitlementOutcome,
 } from "./types/index.js";
 import { BillingEventType } from "./types/index.js";
 import { BillingFinancialEventHandlers } from "./financial-event-handlers.js";
@@ -26,6 +27,28 @@ interface OfferContext {
   priceId: string | null;
 }
 
+interface SubscriptionEventOptions {
+  action: string;
+  status?: BillingSubscriptionStatus | null;
+  cancelAtPeriodEnd?: boolean | null;
+  resolveOffers?: boolean;
+  graceEndsAt?: string | null;
+  graceExpiredAt?: string | null;
+}
+
+interface SubscriptionStateOverrides {
+  status?: BillingSubscriptionStatus | null;
+  cancelAtPeriodEnd?: boolean | null;
+  offerKey?: string | null;
+  offerId?: string | null;
+  plan?: string | null;
+  interval?: string | null;
+  intervalCount?: number | null;
+  metadata?: JsonObject | null;
+  graceEndsAt?: string | null;
+  graceExpiredAt?: string | null;
+}
+
 export class BillingEventHandlers {
   private readonly provisioning: BillingProvisioningPort | null;
   private readonly autoSelectEntitlementSource: boolean;
@@ -38,6 +61,10 @@ export class BillingEventHandlers {
 
   get hasProvisioning(): boolean {
     return this.provisioning !== null;
+  }
+
+  get terminalPlan(): string | null {
+    return this.terminalPlanKey;
   }
 
   constructor(
@@ -72,9 +99,13 @@ export class BillingEventHandlers {
       (event) => this.resolveAccountId(event),
       (event) => this.handleSubscriptionRenewed(event),
       (event, status) => this.updateCheckoutIntentFromEvent(event, status),
-      (event) => this.getExistingSubscription(event),
-      (event, userId, existing, overrides) =>
-        this.buildSubscriptionState(event, userId, existing, overrides),
+      (event, graceEndsAt) =>
+        this.applySubscriptionEvent(event, {
+          action: "payment_failed_recorded",
+          status: "past_due",
+          graceEndsAt,
+          graceExpiredAt: null,
+        }),
     );
     this.handlerMap = {
       [BillingEventType.CUSTOMER_CREATED]: this.handleCustomerCreated.bind(this),
@@ -208,7 +239,7 @@ export class BillingEventHandlers {
     if (event.customer?.providerCustomerId) {
       const uid = await this.resolveAccountId(event);
       if (uid && this.provisioning) {
-        await this.revokeSubscription(uid);
+        await this.revokeCustomerAccess(uid);
       }
     }
     return { handled: true, action: "customer_deleted" };
@@ -252,18 +283,7 @@ export class BillingEventHandlers {
     event: BillingEvent,
     userId: string,
     existing: BillingSubscriptionState | null,
-    overrides?: {
-      status?: BillingSubscriptionStatus | null;
-      cancelAtPeriodEnd?: boolean | null;
-      offerKey?: string | null;
-      offerId?: string | null;
-      plan?: string | null;
-      interval?: string | null;
-      intervalCount?: number | null;
-      metadata?: JsonObject | null;
-      graceEndsAt?: string | null;
-      graceExpiredAt?: string | null;
-    },
+    overrides?: SubscriptionStateOverrides,
   ): BillingSubscriptionState {
     if (!event.subscription) {
       throw new TypeError("billing subscription event requires subscription data");
@@ -284,12 +304,20 @@ export class BillingEventHandlers {
       currentPeriodEnd: sub.periodEnd ?? existing?.currentPeriodEnd ?? null,
       trialEnd: sub.trialEnd ?? existing?.trialEnd ?? null,
       cancelAt: sub.cancelAt ?? existing?.cancelAt ?? null,
-      endedAt: sub.endedAt ?? existing?.endedAt ?? null,
+      endedAt: ["incomplete_expired", "canceled", "expired"].includes(status)
+        ? (sub.endedAt ?? existing?.endedAt ?? null)
+        : null,
       graceEndsAt:
-        status === "past_due" ? (overrides?.graceEndsAt ?? existing?.graceEndsAt ?? null) : null,
+        status === "past_due"
+          ? overrides && "graceEndsAt" in overrides
+            ? (overrides.graceEndsAt ?? null)
+            : (existing?.graceEndsAt ?? null)
+          : null,
       graceExpiredAt:
         status === "past_due"
-          ? (overrides?.graceExpiredAt ?? existing?.graceExpiredAt ?? null)
+          ? overrides && "graceExpiredAt" in overrides
+            ? (overrides.graceExpiredAt ?? null)
+            : (existing?.graceExpiredAt ?? null)
           : null,
       providerUpdatedAt: event.occurredAt,
       cancelAtPeriodEnd:
@@ -358,6 +386,148 @@ export class BillingEventHandlers {
     }
 
     return { offer: null, offerId: null, offerKey: null, plan: null };
+  }
+
+  private subscriptionPlanAnchor(
+    event: BillingEvent,
+    preserveAllowanceAnchor: boolean,
+    preservedAllowanceAnchor: Date | string | null,
+  ): Date | null {
+    if (preserveAllowanceAnchor) {
+      if (preservedAllowanceAnchor === null) return null;
+      const anchor = new Date(preservedAllowanceAnchor);
+      if (Number.isNaN(anchor.getTime())) return null;
+      return anchor.getTime() > Date.now() ? new Date() : anchor;
+    }
+
+    const periodStart = event.subscription?.periodStart;
+    if (!periodStart) return null;
+    const anchor = new Date(periodStart);
+    if (Number.isNaN(anchor.getTime())) {
+      this.logger.warn("[BillingService] invalid periodStart; using database assignment time", {
+        periodStart,
+        userId: event.accountId ?? null,
+      });
+      return null;
+    }
+    return anchor;
+  }
+
+  private async reconcileSubscriptionEvent(
+    uid: string,
+    event: BillingEvent,
+    expected: BillingSubscriptionState,
+    options?: {
+      preserveAllowanceAnchor?: boolean;
+      preservedAllowanceAnchor?: Date | string | null;
+    },
+  ): Promise<SubscriptionEntitlementOutcome> {
+    if (!event.subscription || !event.billingEventId) {
+      throw new StoreError("subscription reconciliation requires a claimed billing event", {
+        indeterminate: true,
+        details: { provider: event.provider, providerEventId: event.eventId },
+      });
+    }
+
+    const persisted = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (!persisted?.subscriptionId) {
+      throw new StoreError("subscription reconciliation requires persisted subscription identity", {
+        indeterminate: true,
+        details: {
+          provider: event.provider,
+          providerSubscriptionId: event.subscription.providerSubscriptionId,
+        },
+      });
+    }
+
+    const applyEntitlement = this.provisioning !== null && this.autoSelectEntitlementSource;
+    const planAssignedAt = this.subscriptionPlanAnchor(
+      event,
+      options?.preserveAllowanceAnchor ?? false,
+      options?.preservedAllowanceAnchor ?? null,
+    );
+    const outcome = await this.store.reconcileSubscriptionEntitlement(
+      uid,
+      persisted.subscriptionId,
+      event.billingEventId,
+      expected.status,
+      expected.providerUpdatedAt,
+      planAssignedAt,
+      applyEntitlement,
+      this.terminalPlanKey,
+      `subscription_${expected.status}`,
+    );
+    this.logger.info("[BillingService] reconciled subscription entitlement", {
+      applyEntitlement,
+      outcome,
+      provider: event.provider,
+      providerSubscriptionId: event.subscription.providerSubscriptionId,
+      userId: uid,
+    });
+    return outcome;
+  }
+
+  private async applySubscriptionEvent(
+    event: BillingEvent,
+    options: SubscriptionEventOptions,
+  ): Promise<BillingEventResult> {
+    const uid = await this.resolveAccountId(event);
+    if (!uid) return { handled: false, error: "account_not_found" };
+    if (!event.subscription?.providerSubscriptionId) {
+      return { handled: false, error: "no_subscription_data" };
+    }
+
+    const existing = await this.getExistingSubscription(event);
+    const resolved =
+      options.resolveOffers === false
+        ? { offer: null, offerId: null, offerKey: null, plan: null }
+        : await this.resolveOfferAndKeys(event);
+    const isPlanChange = options.action === "subscription_plan_changed";
+    const preservedAllowanceAnchor =
+      isPlanChange && this.provisioning !== null
+        ? ((await this.provisioning.getUserPlan(uid))?.planAssignedAt ?? null)
+        : null;
+    const pending = isPlanChange
+      ? await this.store.getOpenBillingSubscriptionChange(
+          event.provider,
+          event.subscription.providerSubscriptionId,
+        )
+      : null;
+    const metadata = isPlanChange
+      ? {
+          ...(existing?.metadata ?? {}),
+          ...(event.metadata ?? {}),
+          pendingPlanChange: null,
+        }
+      : undefined;
+    const stateOverrides: SubscriptionStateOverrides = {
+      status: options.status,
+      cancelAtPeriodEnd: options.cancelAtPeriodEnd,
+      offerKey: resolved.offerKey ?? existing?.offerKey ?? null,
+      offerId: resolved.offerId ?? existing?.offerId ?? null,
+      plan: resolved.plan ?? existing?.plan ?? null,
+      interval: resolved.offer?.interval,
+      intervalCount: resolved.offer?.intervalCount,
+      metadata,
+    };
+    if (options.graceEndsAt !== undefined) stateOverrides.graceEndsAt = options.graceEndsAt;
+    if (options.graceExpiredAt !== undefined) {
+      stateOverrides.graceExpiredAt = options.graceExpiredAt;
+    }
+    const subscriptionState = this.buildSubscriptionState(event, uid, existing, stateOverrides);
+    await this.store.upsertBillingSubscription(subscriptionState);
+    const outcome = await this.reconcileSubscriptionEvent(uid, event, subscriptionState, {
+      preserveAllowanceAnchor: isPlanChange,
+      preservedAllowanceAnchor,
+    });
+    if (outcome === "stale") return { handled: true, action: "stale_subscription_event" };
+    if (pending) {
+      await this.store.updateBillingSubscriptionChange(pending.id, { state: "applied" });
+    }
+    return { handled: true, action: options.action };
   }
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
@@ -442,17 +612,19 @@ export class BillingEventHandlers {
       });
       return { handled: false, error: "subscription_conflict" };
     }
-    if (
-      this.provisioning &&
-      event.subscription.status &&
-      ["active", "trialing"].includes(event.subscription.status)
-    ) {
-      await this.provisionSubscription(uid, offer, event);
+    const outcome = await this.reconcileSubscriptionEvent(uid, event, subscriptionState);
+    if (outcome === "stale") {
+      return {
+        handled: true,
+        action: "stale_subscription_event",
+        subscriptionId,
+      };
     }
-    if (["active", "trialing"].includes(event.subscription.status ?? "")) {
+    const status = event.subscription.status;
+    if (["active", "trialing"].includes(status ?? "")) {
       await this.updateCheckoutIntentFromEvent(event, "completed");
     }
-    return { handled: true, action: "subscription_created" };
+    return { handled: true, action: "subscription_created", subscriptionId };
   }
 
   private async handleSubscriptionUpdated(event: BillingEvent): Promise<BillingEventResult> {
@@ -461,28 +633,11 @@ export class BillingEventHandlers {
       eventId: event.eventId,
       subId: event.subscription?.providerSubscriptionId,
     });
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: event.subscription.status ?? existing?.status ?? "incomplete",
-        cancelAtPeriodEnd:
-          event.subscription.cancelAtPeriodEnd ?? existing?.cancelAtPeriodEnd ?? false,
-        offerKey: offerKey ?? existing?.offerKey ?? null,
-        offerId: offerId ?? existing?.offerId ?? null,
-        plan: plan ?? existing?.plan ?? null,
-        interval: offer?.interval,
-        intervalCount: offer?.intervalCount,
-      }),
-    );
-    if (this.provisioning) {
-      await this.reEvaluateAccess(uid, event);
-    }
-    return { handled: true, action: "subscription_updated" };
+    return this.applySubscriptionEvent(event, {
+      action: "subscription_updated",
+      status: event.subscription?.status,
+      cancelAtPeriodEnd: event.subscription?.cancelAtPeriodEnd,
+    });
   }
 
   private async handleSubscriptionActivated(event: BillingEvent): Promise<BillingEventResult> {
@@ -490,133 +645,45 @@ export class BillingEventHandlers {
       provider: event.provider,
       eventId: event.eventId,
     });
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: "active",
-        offerKey: offerKey ?? existing?.offerKey ?? null,
-        offerId: offerId ?? existing?.offerId ?? null,
-        plan: plan ?? existing?.plan ?? null,
-        interval: offer?.interval,
-        intervalCount: offer?.intervalCount,
-      }),
-    );
-    if (this.provisioning) {
-      await this.provisionSubscription(uid, offer, event);
-    }
-    return { handled: true, action: "subscription_activated" };
+    return this.applySubscriptionEvent(event, {
+      action: "subscription_activated",
+      status: "active",
+    });
   }
 
   private async handleSubscriptionRenewed(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
-    const resolvedPlanKey = plan ?? existing?.plan ?? null;
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: "active",
-        offerKey: offerKey ?? existing?.offerKey ?? null,
-        offerId: offerId ?? existing?.offerId ?? null,
-        plan: resolvedPlanKey,
-        interval: offer?.interval,
-        intervalCount: offer?.intervalCount,
-      }),
-    );
-    if (this.provisioning && resolvedPlanKey) {
-      await this.provisionSubscription(uid, offer, event);
+    const result = await this.applySubscriptionEvent(event, {
+      action: "subscription_renewed",
+      status: "active",
+    });
+    if (result.handled && result.action !== "stale_subscription_event") {
+      const { offer } = await this.resolveOfferAndKeys(event);
+      await this.grantSubscriptionCycle(event, offer);
     }
-    await this.grantSubscriptionCycle(event, offer);
-    return { handled: true, action: "subscription_renewed" };
+    return result;
   }
 
   private async handleSubscriptionPlanChanged(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
-    // Capture the current allowance anchor before advancing the durable
-    // change. The Postgres transition updates the assignment atomically, so
-    // reading it afterwards would return the new assignment's timestamp and
-    // silently reset the learner's current allowance window.
-    const preservedAllowanceAnchor = this.provisioning
-      ? ((await this.provisioning.getUserPlan(uid))?.planAssignedAt ?? null)
-      : undefined;
-    const pending = await this.store.getOpenBillingSubscriptionChange(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (pending) {
-      await this.store.updateBillingSubscriptionChange(pending.id, {
-        state: "applied",
-      });
-    }
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: event.subscription.status ?? "active",
-        offerKey: offerKey ?? existing?.offerKey ?? null,
-        offerId: offerId ?? existing?.offerId ?? null,
-        plan: plan ?? existing?.plan ?? null,
-        interval: offer?.interval,
-        intervalCount: offer?.intervalCount,
-        metadata: {
-          ...(existing?.metadata ?? {}),
-          ...(event.metadata ?? {}),
-          pendingPlanChange: null,
-        },
-      }),
-    );
-    if (this.provisioning && (plan ?? existing?.plan)) {
-      // Plan-change: prefer new plan over existing (renewal at L422 correctly keeps existing).
-      await this.provisionSubscription(
-        uid,
-        offer,
-        event,
-        plan ?? existing?.plan ?? undefined,
-        true,
-        preservedAllowanceAnchor,
-      );
-    }
-    return { handled: true, action: "subscription_plan_changed" };
+    return this.applySubscriptionEvent(event, {
+      action: "subscription_plan_changed",
+      status: event.subscription?.status ?? "active",
+    });
   }
 
   private async handleCancellationScheduled(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: existing?.status ?? event.subscription.status ?? "active",
-        cancelAtPeriodEnd: true,
-      }),
-    );
-    return { handled: true, action: "cancellation_scheduled" };
+    return this.applySubscriptionEvent(event, {
+      action: "cancellation_scheduled",
+      cancelAtPeriodEnd: true,
+      resolveOffers: false,
+    });
   }
 
   private async handleCancellationUnscheduled(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: existing?.status ?? event.subscription.status ?? "active",
-        cancelAtPeriodEnd: false,
-      }),
-    );
-    return { handled: true, action: "cancellation_unscheduled" };
+    return this.applySubscriptionEvent(event, {
+      action: "cancellation_unscheduled",
+      cancelAtPeriodEnd: false,
+      resolveOffers: false,
+    });
   }
 
   private async handleSubscriptionCanceled(event: BillingEvent): Promise<BillingEventResult> {
@@ -642,146 +709,50 @@ export class BillingEventHandlers {
         },
       );
     }
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: "canceled",
-        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
-        offerKey: resolved?.offerKey ?? existing?.offerKey ?? null,
-        offerId: resolved?.offerId ?? existing?.offerId ?? null,
-        plan: resolved?.plan ?? existing?.plan ?? null,
-        interval: resolved?.offer?.interval,
-        intervalCount: resolved?.offer?.intervalCount,
-      }),
-    );
-    if (this.provisioning) {
-      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
-    }
+    const subscriptionState = this.buildSubscriptionState(event, uid, existing, {
+      status: "canceled",
+      cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
+      offerKey: resolved?.offerKey ?? existing?.offerKey ?? null,
+      offerId: resolved?.offerId ?? existing?.offerId ?? null,
+      plan: resolved?.plan ?? existing?.plan ?? null,
+      interval: resolved?.offer?.interval,
+      intervalCount: resolved?.offer?.intervalCount,
+    });
+    await this.store.upsertBillingSubscription(subscriptionState);
+    const outcome = await this.reconcileSubscriptionEvent(uid, event, subscriptionState);
+    if (outcome === "stale") return { handled: true, action: "stale_subscription_event" };
     return { handled: true, action: "subscription_canceled" };
   }
 
   private async handleSubscriptionExpired(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: "expired",
-        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
-      }),
-    );
-    if (this.provisioning) {
-      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
-    }
-    return { handled: true, action: "subscription_expired" };
+    return this.applySubscriptionEvent(event, {
+      action: "subscription_expired",
+      status: "expired",
+      cancelAtPeriodEnd: event.subscription?.cancelAtPeriodEnd ?? true,
+      resolveOffers: false,
+    });
   }
 
   private async handleSubscriptionPaused(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: "paused",
-        cancelAtPeriodEnd: existing?.cancelAtPeriodEnd ?? false,
-      }),
-    );
-    if (this.provisioning) {
-      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
-    }
-    return { handled: true, action: "subscription_paused" };
+    return this.applySubscriptionEvent(event, {
+      action: "subscription_paused",
+      status: "paused",
+      resolveOffers: false,
+    });
   }
 
   private async handleSubscriptionResumed(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveAccountId(event);
-    if (!uid) return { handled: false, error: "account_not_found" };
-    if (!event.subscription?.providerSubscriptionId)
-      return { handled: false, error: "no_subscription_data" };
-    const existing = await this.getExistingSubscription(event);
-    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: "active",
-        cancelAtPeriodEnd: false,
-        offerKey: offerKey ?? existing?.offerKey ?? null,
-        plan: plan ?? existing?.plan ?? null,
-      }),
-    );
-    if (this.provisioning) {
-      await this.provisionSubscription(uid, offer, event);
-    }
-    return { handled: true, action: "subscription_resumed" };
+    return this.applySubscriptionEvent(event, {
+      action: "subscription_resumed",
+      status: "active",
+      cancelAtPeriodEnd: false,
+    });
   }
 
   private async handleTrialWillEnd(event: BillingEvent): Promise<BillingEventResult> {
     // Resolve userId so routeEvent's blanket fireEventCallback has a useful value.
     await this.resolveAccountId(event);
     return { handled: true, action: "trial_will_end_notified" };
-  }
-
-  private async provisionSubscription(
-    uid: string,
-    offer: BillingOfferResult | null,
-    event: BillingEvent,
-    planKeyOverride?: string,
-    preserveAllowanceAnchor = false,
-    preservedAllowanceAnchor?: Date | string | null,
-  ): Promise<void> {
-    if (!this.provisioning) {
-      this.logger.debug(
-        `[BillingService] provisionSubscription: no provisioning capability for user ${uid}`,
-      );
-      return;
-    }
-    const plan = planKeyOverride ?? offer?.plan;
-    if (!plan) {
-      this.logger.debug("[BillingService] provisionSubscription skipped (no plan)", { uid });
-      return;
-    }
-    this.logger.debug("[BillingService] provisionSubscription setting plan", { uid, plan });
-    let periodStart: Date | string | null | undefined;
-    if (preserveAllowanceAnchor) {
-      const existingAnchor =
-        preservedAllowanceAnchor !== undefined
-          ? preservedAllowanceAnchor
-          : (await this.provisioning.getUserPlan(uid))?.planAssignedAt;
-      if (existingAnchor) {
-        const anchor = new Date(existingAnchor);
-        // A provider's subscription period start may actually be its next
-        // renewal date. Never let a future anchor hide an already-active
-        // entitlement after a plan change.
-        if (!Number.isNaN(anchor.getTime()) && anchor.getTime() <= Date.now()) {
-          periodStart = anchor;
-        }
-      }
-    } else {
-      periodStart = event.subscription?.periodStart;
-    }
-    const planAssignedAt = periodStart
-      ? (() => {
-          const d = new Date(periodStart);
-          return Number.isNaN(d.getTime()) ? undefined : d;
-        })()
-      : preserveAllowanceAnchor
-        ? new Date()
-        : undefined;
-    await this.provisioning.setUserPlan(uid, plan, planAssignedAt);
-
-    if (this.autoSelectEntitlementSource && event.provider) {
-      const selected = await this.store.selectSubscriptionEntitlementSource(
-        uid,
-        event.provider,
-        event.subscription?.providerSubscriptionId,
-      );
-      if (selected) {
-        this.logger.debug(
-          `[BillingService] selected ${event.provider} subscription as entitlement source for user ${uid}`,
-        );
-      }
-    }
   }
 
   private async grantSubscriptionCycle(
@@ -818,79 +789,12 @@ export class BillingEventHandlers {
     await this.store.grantBillingCredit(grantId, `billing:${event.eventId}:subscription-cycle`);
   }
 
-  private async revokeSubscription(uid: string): Promise<void> {
+  private async revokeCustomerAccess(uid: string): Promise<void> {
     if (!this.provisioning) return;
     if (this.terminalPlanKey) {
       await this.provisioning.setUserPlan(uid, this.terminalPlanKey);
       return;
     }
     await this.provisioning.unsetUserPlan(uid);
-  }
-
-  /**
-   * Do not revoke access because a stale subscription record ended while a
-   * newer subscription for the same user is still active.
-   */
-  async revokeIfCurrentSubscription(uid: string, subscriptionId: string): Promise<void> {
-    const current = await this.store.getUserSubscription(uid, ["active", "trialing", "past_due"]);
-    if (!current || current.providerSubscriptionId === subscriptionId) {
-      await this.revokeSubscription(uid);
-    }
-  }
-
-  private async reEvaluateAccess(uid: string, event: BillingEvent): Promise<void> {
-    if (!this.provisioning || !event.subscription) return;
-    const status = event.subscription.status;
-    // Provider retries (Stripe past_due, Dodo on_hold mapped to past_due)
-    // are a grace period. Keep the last paid entitlements until the provider
-    // reaches a terminal state instead of revoking access on the first miss.
-    if (status && ["active", "trialing"].includes(status)) {
-      const offer = await this.resolveOfferFromEvent(event);
-      if (offer) {
-        await this.provisionSubscription(uid, offer, event);
-      } else {
-        const existing = await this.store.getBillingSubscription(
-          event.provider,
-          event.subscription.providerSubscriptionId,
-        );
-        if (existing?.plan) {
-          await this.provisionSubscription(uid, null, event, existing.plan);
-        }
-      }
-    } else if (status === "past_due") {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      const graceHasExpired =
-        Boolean(existing?.graceExpiredAt) ||
-        (Boolean(existing?.graceEndsAt) &&
-          new Date(existing!.graceEndsAt!).getTime() <= Date.now());
-      if (graceHasExpired) {
-        await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
-      } else {
-        const offer = await this.resolveOfferFromEvent(event);
-        if (offer) {
-          await this.provisionSubscription(uid, offer, event);
-        } else if (existing?.plan) {
-          await this.provisionSubscription(uid, null, event, existing.plan);
-        }
-      }
-    } else if (
-      status &&
-      ["canceled", "expired", "unpaid", "paused", "incomplete_expired"].includes(status)
-    ) {
-      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
-    }
-  }
-
-  private async resolveOfferFromEvent(event: BillingEvent): Promise<BillingOfferResult | null> {
-    const refs = event.subscription?.refs;
-    if (!refs) return null;
-    return this.resolveBillingOfferCached(
-      event.provider,
-      refs.productId ?? null,
-      refs.priceId ?? null,
-    );
   }
 }

@@ -830,7 +830,9 @@ func (s *BillingService) Ingest(ctx context.Context, event BillingEvent) (result
 		return result, fmt.Errorf("bursar: billing event %s completion claim was lost", event.canonicalEventID())
 	}
 	if lifecycleResult != nil {
-		s.fireEventHandler(ctx, event, lifecycleResult.AccountID)
+		if !lifecycleResult.Ignored {
+			s.fireEventHandler(ctx, event, lifecycleResult.AccountID)
+		}
 		return *lifecycleResult, nil
 	}
 	s.fireEventHandler(ctx, event, accountID)

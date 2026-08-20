@@ -167,11 +167,10 @@ type billingPseudonymizer interface {
 
 type billingGraceStateStore interface {
 	ListExpiredGraceSubscriptions(context.Context, time.Time, int) ([]CommerceSubscription, error)
-	MarkSubscriptionGraceExpired(context.Context, string, time.Time, time.Time) (bool, error)
 }
 
-type billingSubscriptionLookup interface {
-	GetBillingSubscriptionByProvider(context.Context, string, string) (*CommerceSubscription, error)
+type billingGraceExpiryStore interface {
+	expirePastDueGracePeriod(context.Context, CommerceSubscription, time.Time, string) (bool, error)
 }
 
 type autoRechargeProviderPaymentUpdater interface {
@@ -510,7 +509,7 @@ func (s *BillingService) CountAutoRechargeAttempts(ctx context.Context, accountI
 }
 
 func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time.Time, limit int) (int, error) {
-	if s == nil || s.provisioning == nil {
+	if s == nil || s.provisioning == nil || !s.autoSelectEntitlementSource {
 		return 0, nil
 	}
 	state, ok := s.store.(billingGraceStateStore)
@@ -530,26 +529,16 @@ func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time
 	if err != nil {
 		return 0, err
 	}
-	lookup, ok := s.store.(billingSubscriptionLookup)
+	expirer, ok := s.store.(billingGraceExpiryStore)
 	if !ok {
-		return 0, NewError("billing subscription lookup is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+		return 0, NewError("atomic billing grace-period expiry is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
 	}
 	expired := 0
 	for _, candidate := range candidates {
-		if candidate.ID == "" || candidate.GraceEndsAt == nil {
+		if candidate.ID == "" || candidate.GraceEndsAt == nil || candidate.Status != "past_due" || candidate.GraceExpiredAt != nil {
 			continue
 		}
-		current, lookupErr := lookup.GetBillingSubscriptionByProvider(ctx, candidate.Provider, candidate.ProviderSubscriptionID)
-		if lookupErr != nil {
-			return expired, lookupErr
-		}
-		if current == nil || current.Status != "past_due" || current.GraceEndsAt == nil || current.GraceExpiredAt != nil || !current.GraceEndsAt.Equal(*candidate.GraceEndsAt) {
-			continue
-		}
-		if err := s.revokeIfCurrentSubscription(ctx, current.AccountID, current.ProviderSubscriptionID); err != nil {
-			return expired, err
-		}
-		marked, markErr := state.MarkSubscriptionGraceExpired(ctx, current.ID, *current.GraceEndsAt, now)
+		marked, markErr := expirer.expirePastDueGracePeriod(ctx, candidate, now, s.terminalPlanKey)
 		if markErr != nil {
 			return expired, markErr
 		}
@@ -561,17 +550,14 @@ func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time
 }
 
 func (s *BillingService) expireGraceIfNeeded(ctx context.Context, subscription *CommerceSubscription, now time.Time) (*CommerceSubscription, error) {
-	if subscription == nil || s == nil || s.provisioning == nil || subscription.Status != "past_due" || subscription.GraceExpiredAt != nil || subscription.GraceEndsAt == nil || subscription.GraceEndsAt.After(now) || subscription.ID == "" {
+	if subscription == nil || s == nil || s.provisioning == nil || !s.autoSelectEntitlementSource || subscription.Status != "past_due" || subscription.GraceExpiredAt != nil || subscription.GraceEndsAt == nil || subscription.GraceEndsAt.After(now) || subscription.ID == "" {
 		return subscription, nil
 	}
-	state, ok := s.store.(billingGraceStateStore)
+	expirer, ok := s.store.(billingGraceExpiryStore)
 	if !ok {
-		return nil, NewError("billing grace-period maintenance is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
+		return nil, NewError("atomic billing grace-period expiry is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
 	}
-	if err := s.revokeIfCurrentSubscription(ctx, subscription.AccountID, subscription.ProviderSubscriptionID); err != nil {
-		return nil, err
-	}
-	marked, err := state.MarkSubscriptionGraceExpired(ctx, subscription.ID, *subscription.GraceEndsAt, now)
+	marked, err := expirer.expirePastDueGracePeriod(ctx, *subscription, now, s.terminalPlanKey)
 	if err != nil {
 		return nil, err
 	}
@@ -582,29 +568,6 @@ func (s *BillingService) expireGraceIfNeeded(ctx context.Context, subscription *
 	copy := *subscription
 	copy.GraceExpiredAt = &value
 	return &copy, nil
-}
-
-func (s *BillingService) revokeIfCurrentSubscription(ctx context.Context, accountID, providerSubscriptionID string) error {
-	store, err := s.stateStore()
-	if err != nil {
-		return err
-	}
-	current, err := store.GetBillingSubscription(ctx, accountID, []string{"active", "trialing", "past_due"})
-	if err != nil {
-		return err
-	}
-	if current != nil && current.ProviderSubscriptionID != providerSubscriptionID {
-		return nil
-	}
-	if s.provisioning == nil {
-		return nil
-	}
-	if s.terminalPlanKey != "" {
-		_, err = s.provisioning.SetUserPlan(ctx, accountID, s.terminalPlanKey, SetUserPlanOptions{})
-		return err
-	}
-	_, err = s.provisioning.UnsetUserPlan(ctx, accountID)
-	return err
 }
 
 func (s *BillingService) PseudonymizeFinancialSubject(ctx context.Context, accountID string) error {

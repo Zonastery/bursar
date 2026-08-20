@@ -145,7 +145,9 @@ func (s *creditsSurfaceStore) GetActiveCatalog(context.Context) (*CatalogRevisio
 	}
 	return &CatalogRevision{ID: "catalog-1", Version: 1, Config: map[string]any{}}, nil
 }
-func (s *creditsSurfaceStore) PublishAndActivateCatalog(context.Context, map[string]any, string, CatalogRollout) (string, error) {
+
+func (s *creditsSurfaceStore) PublishAndActivateCatalog(_ context.Context, config map[string]any, _ string, _ CatalogRollout) (string, error) {
+	s.activeCatalog = &CatalogRevision{ID: "catalog-2", Version: 2, Config: config}
 	return "catalog-2", nil
 }
 func (s *creditsSurfaceStore) PublishCatalogDraft(context.Context, map[string]any, string) (string, error) {
@@ -333,13 +335,14 @@ func TestCreditsServiceDelegatesPersistenceAndReadSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	catalog := financialCatalogConfig(t)
 	for _, call := range []func() error{
 		func() error { _, e := service.GetActiveCatalog(ctx); return e },
 		func() error {
-			_, e := service.PublishAndActivateCatalog(ctx, map[string]any{}, "label", CatalogRollout{})
+			_, e := service.PublishAndActivateCatalog(ctx, catalog, "label", CatalogRollout{})
 			return e
 		},
-		func() error { _, e := service.PublishCatalogDraft(ctx, map[string]any{}, "label"); return e },
+		func() error { _, e := service.PublishCatalogDraft(ctx, catalog, "label"); return e },
 		func() error { _, e := service.GetCatalogHistory(ctx); return e },
 		func() error { _, e := service.GetCatalogRevision(ctx, 1); return e },
 		func() error { _, e := service.ActivateCatalogRevision(ctx, 1, CatalogRollout{}); return e },
@@ -347,6 +350,10 @@ func TestCreditsServiceDelegatesPersistenceAndReadSurfaces(t *testing.T) {
 		if err := call(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	grant := store.activeCatalog.Config["commerce"].(map[string]any)["offers"].(map[string]any)["pro_month"].(map[string]any)["cycle_grant"].(map[string]any)
+	if grant["expiry"].(map[string]any)["type"] != "subscription_end" {
+		t.Fatalf("credits catalog publishing omitted canonical defaults: %#v", grant)
 	}
 
 	if _, err := service.ListLedgerEntries(ctx, user, ListLedgerEntriesOptions{}); err != nil {

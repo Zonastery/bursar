@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"strings"
 	"sync"
 	"time"
@@ -233,6 +234,7 @@ type adapter struct {
 	statePrefix string
 	mu          sync.Mutex
 	active      map[activeKey]string
+	stateLocks  [64]sync.Mutex
 }
 
 func (a *adapter) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
@@ -262,8 +264,13 @@ func (a *adapter) beforeModel(ctx agent.Context, request *model.LLMRequest) (*mo
 		a.complete(ctx, userID, state, invocationID, receipt, nil, "")
 	}
 	a.settleReady(ctx, state, userID)
-	a.releaseUnpriced(state, userID, invocationID)
-	operationKey := a.options.OperationKeyPrefix + ":" + invocationID + ":" + randomID()
+	a.releaseUnpriced(ctx, state, userID, invocationID)
+	nonce, nonceErr := randomID()
+	if nonceErr != nil {
+		a.options.Logger.Error("adk_billing_operation_key_failed", map[string]any{"error_type": fmt.Sprintf("%T", nonceErr)})
+		return a.admissionDenied(nonceErr)
+	}
+	operationKey := a.options.OperationKeyPrefix + ":" + invocationID + ":" + nonce
 	estimate := a.estimateForModel(request)
 	metadata, metadataErr := a.baseMetadata(ctx, invocationID)
 	if metadataErr != nil {
@@ -275,13 +282,17 @@ func (a *adapter) beforeModel(ctx agent.Context, request *model.LLMRequest) (*mo
 		return a.admissionDenied(err)
 	}
 	entry := leaseEntry{LeaseID: operation.LeaseID(), OperationKey: operationKey, Metadata: metadata}
+	currentKey := activeKey{InvocationID: invocationID, ContextID: contextID(ctx)}
+	a.mu.Lock()
+	a.active[currentKey] = operationKey
+	a.mu.Unlock()
 	if err := a.appendEntry(state, a.leaseKey(invocationID), entry); err != nil {
+		a.mu.Lock()
+		delete(a.active, currentKey)
+		a.mu.Unlock()
 		_, _ = operation.Release(ctx)
 		return a.admissionDenied(err)
 	}
-	a.mu.Lock()
-	a.active[activeKey{InvocationID: invocationID, ContextID: contextID(ctx)}] = operationKey
-	a.mu.Unlock()
 	a.beginReceipt()
 	return nil, nil
 }
@@ -320,8 +331,8 @@ func (a *adapter) afterRun(ctx agent.InvocationContext) {
 		a.complete(ctx, userID, state, invocationID(ctx), receipt, nil, "")
 	}
 	a.settleReady(ctx, state, userID)
-	a.releaseUnpriced(state, userID, invocationID(ctx))
 	a.clearActive(invocationID(ctx), "")
+	a.releaseUnpriced(ctx, state, userID, invocationID(ctx))
 }
 
 func (a *adapter) admissionDenied(err error) (*model.LLMResponse, error) {
@@ -342,18 +353,29 @@ func (a *adapter) complete(ctx agent.InvocationContext, userID string, state ses
 		return
 	}
 	key := a.leaseKey(invocation)
-	entries := a.loadEntries(state, key)
 	operationKey := a.activeOperation(invocation, contextID(ctx))
+	lock := a.stateLock(key)
+	lock.Lock()
+	entries, err := a.loadEntries(state, key)
+	if err != nil {
+		lock.Unlock()
+		a.logStateFailure("load", err)
+		return
+	}
 	index := activeEntryIndex(entries, operationKey)
 	if index < 0 {
+		lock.Unlock()
 		return
 	}
 	metrics := a.actualMetrics(receipt, response, requestModel)
 	entries[index].Metrics = &metrics
 	entries[index].Metadata = settlementMetadata(entries[index].Metadata, receipt)
 	if err := a.saveEntries(state, key, entries); err != nil {
+		lock.Unlock()
+		a.logStateFailure("save", err)
 		return
 	}
+	lock.Unlock()
 	a.clearActive(invocation, contextID(ctx))
 	a.settleReady(ctx, state, userID, key)
 }
@@ -365,15 +387,27 @@ func (a *adapter) releaseActive(ctx agent.Context) {
 		return
 	}
 	key := a.leaseKey(invocation)
-	entries := a.loadEntries(state, key)
-	index := activeEntryIndex(entries, a.activeOperation(invocation, contextID(ctx)))
+	operationKey := a.activeOperation(invocation, contextID(ctx))
+	lock := a.stateLock(key)
+	lock.Lock()
+	entries, err := a.loadEntries(state, key)
+	if err != nil {
+		lock.Unlock()
+		a.logStateFailure("load", err)
+		return
+	}
+	index := activeEntryIndex(entries, operationKey)
 	if index < 0 {
+		lock.Unlock()
 		return
 	}
 	if a.releaseLease(ctx, userID, entries[index].LeaseID) {
 		entries = append(entries[:index], entries[index+1:]...)
-		a.saveEntries(state, key, entries)
+		if err := a.saveEntries(state, key, entries); err != nil {
+			a.logStateFailure("save", err)
+		}
 	}
+	lock.Unlock()
 	a.clearActive(invocation, contextID(ctx))
 }
 
@@ -386,7 +420,14 @@ func (a *adapter) settleReady(ctx agent.InvocationContext, state session.State, 
 		if !strings.HasPrefix(key, a.statePrefix) {
 			continue
 		}
-		entries := a.loadEntries(state, key)
+		lock := a.stateLock(key)
+		lock.Lock()
+		entries, err := a.loadEntries(state, key)
+		if err != nil {
+			lock.Unlock()
+			a.logStateFailure("load", err)
+			continue
+		}
 		for index := 0; index < len(entries); {
 			entry := entries[index]
 			if entry.Invalid {
@@ -412,20 +453,39 @@ func (a *adapter) settleReady(ctx agent.InvocationContext, state session.State, 
 			}
 			index++
 		}
-		_ = a.saveEntries(state, key, entries)
+		if err := a.saveEntries(state, key, entries); err != nil {
+			a.logStateFailure("save", err)
+		}
+		lock.Unlock()
 	}
 }
 
-func (a *adapter) releaseUnpriced(state session.State, userID, invocation string) {
+func (a *adapter) releaseUnpriced(ctx context.Context, state session.State, userID, invocation string) {
 	key := a.leaseKey(invocation)
-	entries := a.loadEntries(state, key)
+	active := a.activeOperations(invocation)
+	lock := a.stateLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	entries, err := a.loadEntries(state, key)
+	if err != nil {
+		a.logStateFailure("load", err)
+		return
+	}
 	for index := len(entries) - 1; index >= 0; index-- {
-		if entries[index].Metrics != nil || !a.releaseLease(context.Background(), userID, entries[index].LeaseID) {
+		if entries[index].Metrics != nil {
+			continue
+		}
+		if _, inFlight := active[entries[index].OperationKey]; inFlight {
+			continue
+		}
+		if !a.releaseLease(ctx, userID, entries[index].LeaseID) {
 			continue
 		}
 		entries = append(entries[:index], entries[index+1:]...)
 	}
-	_ = a.saveEntries(state, key, entries)
+	if err := a.saveEntries(state, key, entries); err != nil {
+		a.logStateFailure("save", err)
+	}
 }
 
 func (a *adapter) releaseLease(ctx context.Context, userID, leaseID string) bool {
@@ -583,6 +643,17 @@ func (a *adapter) activeOperation(invocation, context string) string {
 	defer a.mu.Unlock()
 	return a.active[activeKey{InvocationID: invocation, ContextID: context}]
 }
+func (a *adapter) activeOperations(invocation string) map[string]struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	operations := make(map[string]struct{})
+	for key, operation := range a.active {
+		if key.InvocationID == invocation && operation != "" {
+			operations[operation] = struct{}{}
+		}
+	}
+	return operations
+}
 func (a *adapter) clearActive(invocation, context string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -597,6 +668,14 @@ func (a *adapter) clearActive(invocation, context string) {
 	}
 }
 
+func (a *adapter) stateLock(key string) *sync.Mutex {
+	return &a.stateLocks[crc32.ChecksumIEEE([]byte(key))%uint32(len(a.stateLocks))]
+}
+
+func (a *adapter) logStateFailure(action string, err error) {
+	a.options.Logger.Error("adk_billing_state_"+action+"_failed", map[string]any{"error_type": fmt.Sprintf("%T", err)})
+}
+
 type leaseEntry struct {
 	LeaseID      string                `json:"lease_id"`
 	OperationKey string                `json:"operation_key"`
@@ -605,10 +684,16 @@ type leaseEntry struct {
 	Invalid      bool
 }
 
-func (a *adapter) loadEntries(state session.State, key string) []leaseEntry {
+func (a *adapter) loadEntries(state session.State, key string) ([]leaseEntry, error) {
 	value, err := state.Get(key)
 	if err != nil {
-		return nil
+		if errors.Is(err, session.ErrStateKeyNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("googleadk: read lease state: %w", err)
+	}
+	if value == nil {
+		return nil, nil
 	}
 	raw, ok := value.([]any)
 	if !ok {
@@ -619,15 +704,22 @@ func (a *adapter) loadEntries(state session.State, key string) []leaseEntry {
 			}
 		} else {
 			if typed, yes := value.([]leaseEntry); yes {
-				return typed
+				entries := append([]leaseEntry(nil), typed...)
+				for _, entry := range entries {
+					if strings.TrimSpace(entry.LeaseID) == "" || strings.TrimSpace(entry.OperationKey) == "" {
+						return nil, errors.New("googleadk: lease state contains an entry without an identity")
+					}
+				}
+				return entries, nil
 			}
+			return nil, fmt.Errorf("googleadk: lease state has unsupported type %T", value)
 		}
 	}
 	entries := make([]leaseEntry, 0, len(raw))
 	for _, candidate := range raw {
 		payload, ok := candidate.(map[string]any)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("googleadk: lease state contains unsupported entry type %T", candidate)
 		}
 		entry := leaseEntry{}
 		if value, ok := payload["lease_id"].(string); ok {
@@ -637,10 +729,17 @@ func (a *adapter) loadEntries(state session.State, key string) []leaseEntry {
 			entry.OperationKey = value
 		}
 		if entry.LeaseID == "" || entry.OperationKey == "" {
-			continue
+			return nil, errors.New("googleadk: lease state contains an entry without an identity")
 		}
-		if metadata, ok := payload["metadata"].(map[string]any); ok {
-			entry.Metadata = bursar.CreditMetadata(metadata)
+		if metadataValue, exists := payload["metadata"]; exists && metadataValue != nil {
+			switch metadata := metadataValue.(type) {
+			case map[string]any:
+				entry.Metadata = bursar.CreditMetadata(metadata)
+			case bursar.CreditMetadata:
+				entry.Metadata = metadata.Clone()
+			default:
+				return nil, errors.New("googleadk: lease state contains invalid metadata")
+			}
 		}
 		if metrics, ok := payload["metrics"].(map[string]any); ok {
 			if parsed, err := decodeMetrics(metrics); err == nil {
@@ -653,7 +752,7 @@ func (a *adapter) loadEntries(state session.State, key string) []leaseEntry {
 		}
 		entries = append(entries, entry)
 	}
-	return entries
+	return entries, nil
 }
 func (a *adapter) saveEntries(state session.State, key string, entries []leaseEntry) error {
 	if len(entries) == 0 {
@@ -673,12 +772,21 @@ func (a *adapter) saveEntries(state session.State, key string, entries []leaseEn
 	return state.Set(key, payload)
 }
 func (a *adapter) appendEntry(state session.State, key string, entry leaseEntry) error {
-	entries := a.loadEntries(state, key)
+	lock := a.stateLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	entries, err := a.loadEntries(state, key)
+	if err != nil {
+		return err
+	}
 	entries = append(entries, entry)
 	if err := a.saveEntries(state, key, entries); err != nil {
 		return err
 	}
-	persisted := a.loadEntries(state, key)
+	persisted, err := a.loadEntries(state, key)
+	if err != nil {
+		return err
+	}
 	found := false
 	for _, candidate := range persisted {
 		if candidate.LeaseID == entry.LeaseID && candidate.OperationKey == entry.OperationKey {
@@ -755,13 +863,18 @@ func activeEntryIndex(entries []leaseEntry, operationKey string) int {
 				return index
 			}
 		}
+		return -1
 	}
+	candidate := -1
 	for index := range entries {
 		if entries[index].Metrics == nil {
-			return index
+			if candidate >= 0 {
+				return -1
+			}
+			candidate = index
 		}
 	}
-	return -1
+	return candidate
 }
 func requestModel(request *model.LLMRequest) string {
 	if request == nil {
@@ -785,12 +898,12 @@ func operationType(options Options, estimate bursar.UsageMetrics) string {
 	}
 	return estimate.Operation
 }
-func randomID() string {
+func randomID() (string, error) {
 	var bytes [16]byte
 	if _, err := rand.Read(bytes[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		return "", fmt.Errorf("googleadk: generate operation key nonce: %w", err)
 	}
-	return hex.EncodeToString(bytes[:])
+	return hex.EncodeToString(bytes[:]), nil
 }
 func nonNegative(value any) bursar.Amount {
 	text := fmt.Sprint(value)

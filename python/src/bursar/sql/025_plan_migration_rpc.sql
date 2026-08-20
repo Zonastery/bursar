@@ -17,11 +17,14 @@
 -- Assign one exact plan to a tenant-owned subject, closing prior history and
 -- carrying compatible allowance/quota state into the new effective interval.
 
-CREATE FUNCTION bursar.assign_plan(
+CREATE FUNCTION bursar.apply_plan_assignment(
     p_subject_id uuid,
     p_plan_id uuid,
-    p_starts_at timestamptz DEFAULT NULL,
-    p_ends_at timestamptz DEFAULT NULL
+    p_starts_at timestamptz,
+    p_ends_at timestamptz,
+    p_source_type text,
+    p_source_id uuid,
+    p_reason text
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -36,6 +39,10 @@ DECLARE
 BEGIN
     IF p_subject_id IS NULL
        OR p_plan_id IS NULL
+       OR p_source_type NOT IN ('manual', 'subscription')
+       OR (p_source_type = 'manual' AND p_source_id IS NOT NULL)
+       OR (p_source_type = 'subscription' AND p_source_id IS NULL)
+       OR NOT bursar.is_nonempty_bounded_text(p_reason, 255)
        OR NOT bursar.is_finite_timestamptz(v_starts_at)
        OR (
            p_ends_at IS NOT NULL
@@ -74,19 +81,23 @@ BEGIN
     THEN
         PERFORM set_config(
             'bursar.assignment_reason',
-            'same_plan_reassignment',
+            p_reason,
             true
         );
 
         UPDATE bursar.account_plan_assignments
-        SET starts_at = COALESCE(p_starts_at, starts_at),
+        SET source_type = p_source_type,
+            source_id = p_source_id,
+            starts_at = COALESCE(p_starts_at, starts_at),
             ends_at = CASE
                 WHEN p_starts_at IS NULL AND p_ends_at IS NULL
                     THEN ends_at
                 ELSE p_ends_at
             END
         WHERE account_id = v_account
-          AND ROW(starts_at, ends_at) IS DISTINCT FROM ROW(
+          AND ROW(source_type, source_id, starts_at, ends_at) IS DISTINCT FROM ROW(
+              p_source_type,
+              p_source_id,
               COALESCE(p_starts_at, starts_at),
               CASE
                   WHEN p_starts_at IS NULL AND p_ends_at IS NULL
@@ -122,7 +133,7 @@ BEGIN
             'manual',
             'next_renewal',
             p_starts_at,
-            'manual_schedule'
+            p_reason
         )
         ON CONFLICT (account_id, change_kind) WHERE state = 'scheduled' DO UPDATE
         SET from_plan_id = EXCLUDED.from_plan_id,
@@ -135,7 +146,7 @@ BEGIN
         RETURN true;
     END IF;
 
-    PERFORM set_config('bursar.assignment_reason', 'manual_assignment', true);
+    PERFORM set_config('bursar.assignment_reason', p_reason, true);
 
     INSERT INTO bursar.account_plan_assignments(
         account_id,
@@ -144,6 +155,7 @@ BEGIN
         plan_key,
         catalog_revision_pinned,
         source_type,
+        source_id,
         starts_at,
         ends_at
     )
@@ -153,7 +165,8 @@ BEGIN
         v_plan.catalog_revision_id,
         v_plan.plan_key,
         false,
-        'manual',
+        p_source_type,
+        p_source_id,
         v_starts_at,
         p_ends_at
     )
@@ -163,12 +176,36 @@ BEGIN
         plan_key = EXCLUDED.plan_key,
         catalog_revision_pinned = false,
         source_type = EXCLUDED.source_type,
-        source_id = NULL,
+        source_id = EXCLUDED.source_id,
         starts_at = EXCLUDED.starts_at,
         ends_at = EXCLUDED.ends_at;
 
     RETURN true;
 END
+$$;
+
+-- Keep manual callers on the stable four-argument API while the internal
+-- assignment primitive records the durable business source in the same write.
+CREATE FUNCTION bursar.assign_plan(
+    p_subject_id uuid,
+    p_plan_id uuid,
+    p_starts_at timestamptz DEFAULT NULL,
+    p_ends_at timestamptz DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT bursar.apply_plan_assignment(
+        p_subject_id,
+        p_plan_id,
+        p_starts_at,
+        p_ends_at,
+        'manual',
+        NULL,
+        'manual_assignment'
+    )
 $$;
 
 -- Public, key-based assignment boundary used by the SDK. Resolution and
@@ -226,6 +263,17 @@ BEGIN
             USING ERRCODE = 'P0001';
     END IF;
 
+    UPDATE bursar.account_plan_assignments AS assignment
+    SET source_type = 'manual',
+        source_id = NULL
+    FROM bursar.credit_accounts AS account
+    WHERE assignment.account_id = account.id
+      AND account.subject_id = p_subject_id
+      AND account.account_kind = 'personal'
+      AND assignment.plan_key = v_plan.plan_key
+      AND ROW(assignment.source_type, assignment.source_id)
+          IS DISTINCT FROM ROW('manual'::text, NULL::uuid);
+
     IF p_starts_at IS NOT NULL AND p_starts_at > now() THEN
         RETURN QUERY SELECT
             p_subject_id,
@@ -277,7 +325,18 @@ BEGIN
         RETURN false;
     END IF;
 
-    v_account := bursar.account_for_subject(p_subject_id);
+    -- Unassignment must never provision an account: account creation can run
+    -- account_created grant programs and is not a revocation side effect.
+    SELECT account.id
+    INTO v_account
+    FROM bursar.credit_accounts AS account
+    WHERE account.subject_id = p_subject_id
+      AND account.account_kind = 'personal'
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN true;
+    END IF;
 
     PERFORM 1
     FROM bursar.account_plan_assignments
@@ -292,6 +351,495 @@ BEGIN
 
     DELETE FROM bursar.account_plan_assignments
     WHERE account_id = v_account;
+
+    RETURN true;
+END
+$$;
+
+-- End a subject plan assignment only while its durable source identity still
+-- matches. This compare-and-delete boundary lets asynchronous billing
+-- maintenance avoid revoking a later manual or replacement assignment.
+CREATE FUNCTION bursar.unassign_plan_if_source(
+    p_subject_id uuid,
+    p_source_type text,
+    p_source_id uuid,
+    p_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_account uuid;
+BEGIN
+    IF p_subject_id IS NULL
+       OR p_source_id IS NULL
+       OR p_source_type NOT IN ('manual', 'subscription', 'migration', 'system')
+       OR NOT bursar.is_nonempty_bounded_text(p_reason, 255)
+    THEN
+        RETURN false;
+    END IF;
+
+    -- Revocation is never an account-provisioning boundary: creating a missing
+    -- account here would also execute account_created grant programs.
+    SELECT account.id
+    INTO v_account
+    FROM bursar.credit_accounts AS account
+    WHERE account.subject_id = p_subject_id
+      AND account.account_kind = 'personal'
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM set_config('bursar.assignment_reason', p_reason, true);
+
+    DELETE FROM bursar.account_plan_assignments
+    WHERE account_id = v_account
+      AND source_type = p_source_type
+      AND source_id = p_source_id;
+
+    RETURN FOUND;
+END
+$$;
+
+-- Replace a subscription-owned assignment only while its durable source still
+-- matches. Applying the optional terminal plan in this same statement ensures
+-- a failed replacement rolls the source deletion back.
+CREATE FUNCTION bursar.replace_subscription_entitlement_if_source(
+    p_subject_id uuid,
+    p_subscription_id uuid,
+    p_terminal_plan_key text,
+    p_reason text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_replaced boolean;
+BEGIN
+    -- Keep the shared subject -> account lock order used by subscription
+    -- upserts before unassign_plan_if_source locks the personal account.
+    PERFORM 1
+    FROM bursar.subjects AS subject
+    WHERE subject.id = p_subject_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_replaced := bursar.unassign_plan_if_source(
+        p_subject_id,
+        'subscription',
+        p_subscription_id,
+        p_reason
+    );
+
+    IF NOT v_replaced THEN
+        RETURN false;
+    END IF;
+
+    IF NULLIF(btrim(p_terminal_plan_key), '') IS NOT NULL THEN
+        PERFORM 1
+        FROM bursar.set_subject_plan(
+            p_subject_id,
+            btrim(p_terminal_plan_key),
+            NULL
+        );
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'terminal plan assignment returned no result'
+                USING ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    RETURN true;
+END
+$$;
+
+-- Reconcile the entitlement effect of one exact persisted provider update.
+-- The expected status and provider timestamp fence a caller that lost a race
+-- to a newer webhook; provider environment and tenant authority come only
+-- from transaction-local database context. The lock order matches provider
+-- subscription upserts: subject -> personal account -> subscription.
+CREATE FUNCTION bursar.reconcile_subscription_entitlement(
+    p_subject_id uuid,
+    p_subscription_id uuid,
+    p_billing_event_id uuid,
+    p_expected_status bursar.billing_subscription_status,
+    p_expected_provider_updated_at timestamptz,
+    p_plan_assigned_at timestamptz,
+    p_apply_entitlement boolean,
+    p_terminal_plan_key text,
+    p_reason text
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_tenant_id uuid := bursar.require_tenant_id();
+    v_environment text := bursar.current_provider_environment();
+    v_subscription bursar.billing_subscriptions;
+    v_account_id uuid;
+    v_plan_id uuid;
+    v_plan_key text;
+    v_replaced boolean;
+BEGIN
+    IF p_subject_id IS NULL
+       OR p_subscription_id IS NULL
+       OR p_billing_event_id IS NULL
+       OR p_expected_status IS NULL
+       OR p_apply_entitlement IS NULL
+       OR NOT bursar.is_finite_timestamptz(
+           p_expected_provider_updated_at
+       )
+       OR (
+           p_plan_assigned_at IS NOT NULL
+           AND NOT bursar.is_finite_timestamptz(p_plan_assigned_at)
+       )
+       OR (
+           p_terminal_plan_key IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(
+               p_terminal_plan_key,
+               255
+           )
+       )
+       OR NOT bursar.is_nonempty_bounded_text(p_reason, 255)
+    THEN
+        RAISE EXCEPTION 'invalid subscription entitlement reconciliation'
+            USING ERRCODE = '22023';
+    END IF;
+
+    PERFORM 1
+    FROM bursar.billing_events AS event
+    WHERE event.tenant_id = v_tenant_id
+      AND event.id = p_billing_event_id
+      AND event.provider_environment = v_environment
+      AND (
+          event.subject_id IS NULL
+          OR event.subject_id = p_subject_id
+      );
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'billing event does not belong to reconciliation context'
+            USING ERRCODE = '22023';
+    END IF;
+
+    PERFORM 1
+    FROM bursar.subjects AS subject
+    WHERE subject.tenant_id = v_tenant_id
+      AND subject.id = p_subject_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN 'stale';
+    END IF;
+
+    -- Read the exact version while holding the subject lock. Any competing
+    -- upsert for this subject must wait, so this decides whether provisioning
+    -- an absent personal account is an eligible side effect.
+    SELECT subscription.*
+    INTO v_subscription
+    FROM bursar.billing_subscriptions AS subscription
+    WHERE subscription.tenant_id = v_tenant_id
+      AND subscription.id = p_subscription_id
+      AND subscription.subject_id = p_subject_id
+      AND subscription.provider_environment = v_environment
+      AND subscription.status = p_expected_status
+      AND subscription.provider_updated_at IS NOT DISTINCT FROM
+          p_expected_provider_updated_at;
+
+    IF NOT FOUND THEN
+        RETURN 'stale';
+    END IF;
+
+    IF p_apply_entitlement
+       AND p_expected_status IN ('active', 'trialing')
+    THEN
+        v_account_id := bursar.account_for_subject(p_subject_id);
+    ELSE
+        -- Revocation and preservation never provision an account because
+        -- account creation can execute account-created grant programs.
+        SELECT account.id
+        INTO v_account_id
+        FROM bursar.credit_accounts AS account
+        WHERE account.tenant_id = v_tenant_id
+          AND account.subject_id = p_subject_id
+          AND account.account_kind = 'personal'
+        FOR UPDATE;
+    END IF;
+
+    SELECT subscription.*
+    INTO v_subscription
+    FROM bursar.billing_subscriptions AS subscription
+    WHERE subscription.tenant_id = v_tenant_id
+      AND subscription.id = p_subscription_id
+      AND subscription.subject_id = p_subject_id
+      AND subscription.provider_environment = v_environment
+      AND subscription.status = p_expected_status
+      AND subscription.provider_updated_at IS NOT DISTINCT FROM
+          p_expected_provider_updated_at
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN 'stale';
+    END IF;
+
+    PERFORM 1
+    FROM bursar.billing_events AS event
+    WHERE event.tenant_id = v_tenant_id
+      AND event.id = p_billing_event_id
+      AND event.provider = v_subscription.provider
+      AND event.provider_environment = v_environment
+      AND (
+          event.subject_id IS NULL
+          OR event.subject_id = p_subject_id
+      );
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'billing event provider does not match subscription'
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF v_subscription.entitlement_provider_updated_at IS NOT NULL
+       AND v_subscription.entitlement_provider_updated_at =
+           p_expected_provider_updated_at
+    THEN
+        IF v_subscription.entitlement_billing_event_id = p_billing_event_id THEN
+            RETURN v_subscription.entitlement_reconciliation_outcome;
+        END IF;
+        RETURN 'stale';
+    END IF;
+
+    IF v_subscription.entitlement_provider_updated_at IS NOT NULL
+       AND v_subscription.entitlement_provider_updated_at >
+           p_expected_provider_updated_at
+    THEN
+        RETURN 'stale';
+    END IF;
+
+    IF NOT p_apply_entitlement THEN
+        UPDATE bursar.billing_subscriptions
+        SET entitlement_provider_updated_at = p_expected_provider_updated_at,
+            entitlement_billing_event_id = p_billing_event_id,
+            entitlement_reconciliation_outcome = 'preserved'
+        WHERE id = p_subscription_id;
+
+        RETURN 'preserved';
+    END IF;
+
+    IF p_expected_status IN ('active', 'trialing') THEN
+        SELECT plan.id, plan.plan_key
+        INTO v_plan_id, v_plan_key
+        FROM bursar.catalog_offers AS offer
+        JOIN bursar.catalog_plans AS plan
+          ON plan.catalog_revision_id = offer.catalog_revision_id
+         AND plan.plan_key = offer.plan_key
+        WHERE offer.id = v_subscription.offer_id
+          AND offer.catalog_revision_id =
+              v_subscription.catalog_revision_id;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'subscription offer has no matching plan'
+                USING ERRCODE = 'P0001';
+        END IF;
+
+        IF NOT bursar.apply_plan_assignment(
+            p_subject_id,
+            v_plan_id,
+            CASE
+                WHEN p_plan_assigned_at IS NULL THEN NULL
+                ELSE LEAST(p_plan_assigned_at, now())
+            END,
+            NULL,
+            'subscription',
+            p_subscription_id,
+            p_reason
+        )
+        THEN
+            RAISE EXCEPTION 'subscription plan assignment was rejected'
+                USING ERRCODE = 'P0001';
+        END IF;
+
+        PERFORM 1
+        FROM bursar.account_plan_assignments AS assignment
+        WHERE assignment.account_id = v_account_id
+          AND assignment.plan_key = v_plan_key
+          AND assignment.source_type = 'subscription'
+          AND assignment.source_id = p_subscription_id;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'subscription plan source was not committed'
+                USING ERRCODE = 'P0001';
+        END IF;
+
+        UPDATE bursar.billing_entitlement_sources AS source
+        SET selected = false,
+            deselected_at = now()
+        WHERE source.tenant_id = v_tenant_id
+          AND source.subject_id = p_subject_id
+          AND source.provider_environment = v_environment
+          AND source.selected;
+
+        INSERT INTO bursar.billing_entitlement_sources(
+            subject_id,
+            provider_environment,
+            subscription_id,
+            selected,
+            selected_at
+        )
+        VALUES (
+            p_subject_id,
+            v_environment,
+            p_subscription_id,
+            true,
+            now()
+        )
+        ON CONFLICT (
+            tenant_id,
+            subject_id,
+            provider_environment,
+            subscription_id
+        )
+        DO UPDATE
+        SET selected = true,
+            selected_at = now(),
+            deselected_at = NULL;
+
+        UPDATE bursar.billing_subscriptions
+        SET entitlement_provider_updated_at = p_expected_provider_updated_at,
+            entitlement_billing_event_id = p_billing_event_id,
+            entitlement_reconciliation_outcome = 'applied'
+        WHERE id = p_subscription_id;
+
+        RETURN 'applied';
+    END IF;
+
+    IF p_expected_status IN (
+        'incomplete_expired',
+        'paused',
+        'canceled',
+        'unpaid',
+        'expired'
+    )
+    THEN
+        v_replaced := bursar.replace_subscription_entitlement_if_source(
+            p_subject_id,
+            p_subscription_id,
+            p_terminal_plan_key,
+            p_reason
+        );
+
+        UPDATE bursar.billing_entitlement_sources AS source
+        SET selected = false,
+            deselected_at = now()
+        WHERE source.tenant_id = v_tenant_id
+          AND source.subject_id = p_subject_id
+          AND source.provider_environment = v_environment
+          AND source.subscription_id = p_subscription_id
+          AND source.selected;
+
+        UPDATE bursar.billing_subscriptions
+        SET entitlement_provider_updated_at = p_expected_provider_updated_at,
+            entitlement_billing_event_id = p_billing_event_id,
+            entitlement_reconciliation_outcome = CASE
+                WHEN v_replaced THEN 'revoked'
+                ELSE 'preserved'
+            END
+        WHERE id = p_subscription_id;
+
+        RETURN CASE WHEN v_replaced THEN 'revoked' ELSE 'preserved' END;
+    END IF;
+
+    -- past_due retains access through grace, while incomplete has not earned
+    -- positive entitlement. Neither state may replace a manual assignment.
+    UPDATE bursar.billing_subscriptions
+    SET entitlement_provider_updated_at = p_expected_provider_updated_at,
+        entitlement_billing_event_id = p_billing_event_id,
+        entitlement_reconciliation_outcome = 'preserved'
+    WHERE id = p_subscription_id;
+
+    RETURN 'preserved';
+END
+$$;
+
+-- Atomically mark one still-current grace deadline and replace only the plan
+-- assignment owned by that exact subscription. The subject check prevents a
+-- caller from combining another subject with a tenant-visible subscription.
+-- A true result means the grace marker committed; source mismatch or a missing
+-- account intentionally does not turn a successfully marked expiry into false.
+CREATE FUNCTION bursar.expire_subscription_grace_period(
+    p_subject_id uuid,
+    p_subscription_id uuid,
+    p_expected_grace_ends_at timestamptz,
+    p_expired_at timestamptz,
+    p_terminal_plan_key text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_marked boolean;
+BEGIN
+    IF p_subject_id IS NULL OR p_subscription_id IS NULL THEN
+        RETURN false;
+    END IF;
+
+    -- Match subscription upserts' subject -> account -> subscription order so
+    -- webhook persistence and grace maintenance cannot deadlock each other.
+    PERFORM 1
+    FROM bursar.subjects AS subject
+    WHERE subject.id = p_subject_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM 1
+    FROM bursar.credit_accounts AS account
+    WHERE account.subject_id = p_subject_id
+      AND account.account_kind = 'personal'
+    FOR UPDATE;
+
+    PERFORM 1
+    FROM bursar.billing_subscriptions AS subscription
+    WHERE subscription.id = p_subscription_id
+      AND subscription.subject_id = p_subject_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_marked := COALESCE(
+        bursar.mark_subscription_grace_expired(
+            p_subscription_id,
+            p_expected_grace_ends_at,
+            p_expired_at
+        ),
+        false
+    );
+
+    IF NOT v_marked THEN
+        RETURN false;
+    END IF;
+
+    PERFORM bursar.replace_subscription_entitlement_if_source(
+        p_subject_id,
+        p_subscription_id,
+        p_terminal_plan_key,
+        'subscription_grace_expired'
+    );
 
     RETURN true;
 END
@@ -705,7 +1253,7 @@ BEGIN
               AND source.provider_environment =
                   bursar.current_provider_environment()
               AND subscription.status IN (
-                  'trialing', 'active', 'past_due', 'paused'
+                  'trialing', 'active', 'past_due'
               )
             ORDER BY subscription.current_period_end DESC NULLS LAST
             LIMIT 1;
@@ -1214,9 +1762,6 @@ AS $$
 DECLARE
     change_row bursar.billing_subscription_changes;
     subscription_row bursar.billing_subscriptions;
-    target_offer bursar.catalog_offers;
-    target_plan bursar.catalog_plans;
-    v_account uuid;
     v_subject uuid;
     v_error_message text;
 BEGIN
@@ -1307,73 +1852,30 @@ BEGIN
         WHERE id = change_row.subscription_id
         FOR UPDATE;
 
+        IF ROW(
+            subscription_row.offer_id,
+            subscription_row.catalog_revision_id
+        ) IS DISTINCT FROM ROW(
+            change_row.from_offer_id,
+            change_row.from_catalog_revision_id
+        )
+           AND ROW(
+               subscription_row.offer_id,
+               subscription_row.catalog_revision_id
+           ) IS DISTINCT FROM ROW(
+               change_row.to_offer_id,
+               change_row.to_catalog_revision_id
+           )
+        THEN
+            RETURN false;
+        END IF;
+
         UPDATE bursar.billing_subscriptions
         SET offer_id = change_row.to_offer_id,
             catalog_revision_id = change_row.to_catalog_revision_id
         WHERE id = change_row.subscription_id
           AND offer_id = change_row.from_offer_id
           AND catalog_revision_id = change_row.from_catalog_revision_id;
-
-        IF NOT FOUND THEN
-            RETURN false;
-        END IF;
-
-        SELECT *
-        INTO target_offer
-        FROM bursar.catalog_offers
-        WHERE id = change_row.to_offer_id
-          AND catalog_revision_id = change_row.to_catalog_revision_id;
-
-        SELECT *
-        INTO target_plan
-        FROM bursar.catalog_plans
-        WHERE catalog_revision_id = target_offer.catalog_revision_id
-          AND plan_key = target_offer.plan_key;
-
-        SELECT id
-        INTO v_account
-        FROM bursar.credit_accounts
-        WHERE subject_id = subscription_row.subject_id
-          AND account_kind = 'personal'
-        FOR UPDATE;
-
-        IF v_account IS NOT NULL THEN
-            PERFORM set_config(
-                'bursar.assignment_reason',
-                'subscription_offer_change',
-                true
-            );
-
-            INSERT INTO bursar.account_plan_assignments(
-                account_id,
-                plan_id,
-                catalog_revision_id,
-                plan_key,
-                catalog_revision_pinned,
-                source_type,
-                source_id,
-                starts_at
-            )
-            VALUES (
-                v_account,
-                target_plan.id,
-                target_plan.catalog_revision_id,
-                target_plan.plan_key,
-                false,
-                'subscription',
-                subscription_row.id,
-                COALESCE(change_row.effective_at, now())
-            )
-            ON CONFLICT (account_id) DO UPDATE
-            SET plan_id = EXCLUDED.plan_id,
-                catalog_revision_id = EXCLUDED.catalog_revision_id,
-                plan_key = EXCLUDED.plan_key,
-                catalog_revision_pinned = false,
-                source_type = EXCLUDED.source_type,
-                source_id = EXCLUDED.source_id,
-                starts_at = EXCLUDED.starts_at,
-                ends_at = NULL;
-        END IF;
     END IF;
 
     UPDATE bursar.billing_subscription_changes

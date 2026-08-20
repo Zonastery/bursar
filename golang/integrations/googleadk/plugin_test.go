@@ -3,6 +3,7 @@ package googleadk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"sync"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/Zonastery/bursar/golang/v2"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
@@ -18,6 +21,7 @@ import (
 type fakeState struct {
 	mu        sync.Mutex
 	values    map[string]any
+	getErr    error
 	setErr    error
 	ignoreSet bool
 }
@@ -27,6 +31,9 @@ func newFakeState() *fakeState { return &fakeState{values: make(map[string]any)}
 func (s *fakeState) Get(key string) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
 	value, ok := s.values[key]
 	if !ok {
 		return nil, session.ErrStateKeyNotExist
@@ -252,6 +259,73 @@ func TestPluginAdmissionDenialAndRelease(t *testing.T) {
 	}
 }
 
+func TestRunnerReleasesLeaseWhenAgentRunFails(t *testing.T) {
+	credits := &fakeCredits{}
+	billingPlugin, err := New(testOptions(credits, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := errors.New("agent run failed")
+	testAgent, err := agent.New(agent.Config{
+		Name: "failing_agent",
+		Run: func(invocation agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				response, reserveErr := billingPlugin.BeforeModelCallback()(
+					agent.NewContext(invocation),
+					&model.LLMRequest{Model: "gemini-test"},
+				)
+				if reserveErr != nil {
+					yield(nil, reserveErr)
+					return
+				}
+				if response != nil {
+					yield(nil, errors.New("billing unexpectedly denied the model call"))
+					return
+				}
+				yield(nil, runErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.InMemoryService()
+	if _, err := sessions.Create(context.Background(), &session.CreateRequest{
+		AppName: "bursar-test", UserID: "user-1", SessionID: "session-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	adkRunner, err := runner.New(runner.Config{
+		AppName:        "bursar-test",
+		Agent:          testAgent,
+		SessionService: sessions,
+		PluginConfig: runner.PluginConfig{
+			Plugins: []*plugin.Plugin{billingPlugin},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed error
+	for _, err := range adkRunner.Run(
+		context.Background(),
+		"user-1",
+		"session-1",
+		genai.NewContentFromText("test", genai.RoleUser),
+		agent.RunConfig{},
+	) {
+		if err != nil {
+			observed = err
+		}
+	}
+	if !errors.Is(observed, runErr) {
+		t.Fatalf("runner error = %v, want %v", observed, runErr)
+	}
+	if credits.releases != 1 {
+		t.Fatalf("lease releases = %d, want 1", credits.releases)
+	}
+}
+
 func TestPluginWaitsForFinalResponseAndReplaysReadySettlement(t *testing.T) {
 	credits := &fakeCredits{}
 	p, err := New(testOptions(credits, nil))
@@ -332,5 +406,70 @@ func TestPluginReleasesLeaseWhenStatePersistenceFails(t *testing.T) {
 	response, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{Model: "model"})
 	if err != nil || response == nil || credits.operation == nil || credits.operation.release != 1 {
 		t.Fatalf("state failure = response %v, error %v, operation %+v", response, err, credits.operation)
+	}
+}
+
+func TestPluginStateUpdatesAreAtomicAndDoNotReleaseActiveConcurrentLeases(t *testing.T) {
+	state := newFakeState()
+	credits := &fakeCredits{}
+	adapter := &adapter{
+		client:      credits,
+		options:     Options{Retry: bursar.DefaultBursarRetryOptions(), Logger: noopLogger{}},
+		statePrefix: "_bursar_model_leases:test:",
+		active:      map[activeKey]string{{InvocationID: "invocation-1", ContextID: "active-context"}: "active-op"},
+	}
+	key := adapter.leaseKey("invocation-1")
+	if err := state.Set(key, []map[string]any{
+		{"lease_id": "active-lease", "operation_key": "active-op"},
+		{"lease_id": "orphaned-lease", "operation_key": "orphaned-op"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	adapter.releaseUnpriced(context.Background(), state, "user-1", "invocation-1")
+	entries, err := adapter.loadEntries(state, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].OperationKey != "active-op" || credits.releases != 1 {
+		t.Fatalf("entries = %+v, releases = %d", entries, credits.releases)
+	}
+
+	const additions = 32
+	var wait sync.WaitGroup
+	for index := 0; index < additions; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			entry := leaseEntry{LeaseID: fmt.Sprintf("lease-%d", index), OperationKey: fmt.Sprintf("operation-%d", index)}
+			if err := adapter.appendEntry(state, key, entry); err != nil {
+				t.Errorf("append entry: %v", err)
+			}
+		}(index)
+	}
+	wait.Wait()
+	entries, err = adapter.loadEntries(state, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != additions+1 {
+		t.Fatalf("persisted entries = %d, want %d", len(entries), additions+1)
+	}
+}
+
+func TestPluginFailsClosedWhenLeaseStateCannotBeRead(t *testing.T) {
+	credits := &fakeCredits{}
+	plugin, err := New(testOptions(credits, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	state.getErr = errors.New("state unavailable")
+	ctx := newFakeContext(state, "invocation-1")
+	response, callbackErr := plugin.BeforeModelCallback()(ctx, &model.LLMRequest{Model: "model"})
+	if callbackErr != nil || response == nil || response.ErrorCode != "ADMISSION_DENIED" {
+		t.Fatalf("before model = (%v, %v)", response, callbackErr)
+	}
+	if credits.operation == nil || credits.operation.release != 1 {
+		t.Fatalf("reserved lease was not released after state read failure: %+v", credits.operation)
 	}
 }

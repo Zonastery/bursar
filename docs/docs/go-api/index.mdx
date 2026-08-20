@@ -90,6 +90,10 @@ func main() {
 constructs the facade, recovery and maintenance handles, optional
 ClickHouse/S3 projections, and the outbox worker. Its `Start`, `Health`,
 `State`, `CheckDependencies`, `Flush`, and `Close` methods own that lifecycle.
+`Health` and `State` are race-safe local snapshots and never perform network or
+database I/O. Use `CheckDependencies` when a probe should actively verify
+PostgreSQL, the loaded catalog revision, bounded outbox status, dead letters,
+and configured component health.
 The operator connection is deliberately unscoped and separate from the
 tenant-bound primary connection.
 
@@ -253,8 +257,12 @@ worker, err := bursar.NewOutboxWorker(
 
 `OutboxWorker` is a bounded, concurrent `RuntimeComponent` with claim
 heartbeats, exponential retry delays, single-flight flushes, claim-loss
-reporting, and dead-letter limits. The two supplied handlers project only
-canonical records reloaded from PostgreSQL when necessary.
+reporting, and dead-letter limits. `Snapshot` exposes local lifecycle, the last
+manual run, and the last sanitized worker error without touching the store.
+`Stop` idempotently stops polling while leaving the caller-owned store open;
+`Close` provides the final `RuntimeComponent` shutdown alias. The two supplied
+handlers project only canonical records reloaded from PostgreSQL when
+necessary.
 
 `UsageChargeOutboxHandler` detects the optional `BatchUsageEventSink`
 capability. With a batch sink, concurrent deliveries coalesce over a small

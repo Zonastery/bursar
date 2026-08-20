@@ -473,76 +473,6 @@ BEGIN
     RETURN v_id;
 END $$;
 
--- Select one tenant-owned subscription as the subject's entitlement source while
--- preserving the single-current-source invariant.
-CREATE FUNCTION bursar.select_entitlement_source(
-    p_subject_id uuid,
-    p_subscription_id uuid
-)
-RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-DECLARE
-    v_environment text := bursar.current_provider_environment();
-BEGIN
-    IF p_subject_id IS NULL OR p_subscription_id IS NULL THEN
-        RETURN false;
-    END IF;
-
-    -- The selected-source uniqueness constraint is subject scoped. Lock that
-    -- logical scope before touching a subscription so concurrent selections of
-    -- different subscriptions cannot race into the partial unique index.
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(
-            'bursar.tenant:'
-            || bursar.require_tenant_id()::text
-            || ':entitlement:'
-            || p_subject_id::text
-            || ':'
-            || v_environment,
-            0
-        )
-    );
-
-    PERFORM 1
-    FROM bursar.billing_subscriptions
-    WHERE id = p_subscription_id
-      AND subject_id = p_subject_id
-      AND provider_environment = v_environment
-    FOR UPDATE;
-
-    IF NOT FOUND THEN RETURN false;
- END IF;
-
-    UPDATE bursar.billing_entitlement_sources
-    SET selected = false,
-        deselected_at = now()
-    WHERE subject_id = p_subject_id
-      AND provider_environment = v_environment
-      AND selected;
-
-    INSERT INTO bursar.billing_entitlement_sources(
-        subject_id,
-        provider_environment,
-        subscription_id,
-        selected,
-        selected_at
-    )
-    VALUES (p_subject_id, v_environment, p_subscription_id, true, now())
-    ON CONFLICT (
-        tenant_id,
-        subject_id,
-        provider_environment,
-        subscription_id
-    )
-    DO UPDATE
-    SET selected = true,
-        selected_at = now(),
-        deselected_at = NULL;
-
-    RETURN true;
-
-END $$;
-
 -- === Credit grants and refunds ===
 
 -- Post one billing grant into its subject account using caller-supplied ledger
@@ -602,7 +532,7 @@ BEGIN
 
     IF g.ledger_entry_id IS NOT NULL THEN
         RETURN QUERY
-        SELECT g.ledger_entry_id,e.balance_after,true,NULL::text
+        SELECT g.ledger_entry_id,e.balance_after::numeric,true,NULL::text
         FROM bursar.credit_ledger_entries e
         WHERE e.id=g.ledger_entry_id;
 

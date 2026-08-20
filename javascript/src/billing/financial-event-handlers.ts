@@ -1,19 +1,7 @@
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { BillingStore } from "./billing-store.js";
 import type { JsonObject } from "../shared/json.js";
-import type {
-  BillingEvent,
-  BillingEventResult,
-  BillingSubscriptionState,
-  BillingSubscriptionStatus,
-  BillingTopupResult,
-} from "./types/index.js";
-
-export interface FinancialSubscriptionOverrides {
-  status?: BillingSubscriptionStatus | null;
-  graceEndsAt?: string | null;
-  graceExpiredAt?: string | null;
-}
+import type { BillingEvent, BillingEventResult, BillingTopupResult } from "./types/index.js";
 
 export class BillingFinancialEventHandlers {
   constructor(
@@ -28,15 +16,10 @@ export class BillingFinancialEventHandlers {
       event: BillingEvent,
       status: "completed" | "failed" | "expired",
     ) => Promise<void>,
-    private readonly getExistingSubscription: (
+    private readonly applyPastDueSubscription: (
       event: BillingEvent,
-    ) => Promise<BillingSubscriptionState | null>,
-    private readonly buildSubscriptionState: (
-      event: BillingEvent,
-      userId: string,
-      existing: BillingSubscriptionState | null,
-      overrides?: FinancialSubscriptionOverrides,
-    ) => BillingSubscriptionState,
+      graceEndsAt: string,
+    ) => Promise<BillingEventResult>,
   ) {}
 
   async handleInvoicePaid(event: BillingEvent): Promise<BillingEventResult> {
@@ -50,6 +33,7 @@ export class BillingFinancialEventHandlers {
       ? await this.handleSubscriptionRenewed(event)
       : { handled: true, action: "invoice_paid" };
     if (!renewalResult.handled) return renewalResult;
+    if (renewalResult.action === "stale_subscription_event") return renewalResult;
     const uid = await this.resolveAccountId(event);
     if (uid) {
       await this.store.upsertBillingInvoice({
@@ -114,6 +98,7 @@ export class BillingFinancialEventHandlers {
       if (event.payment.purpose === "subscription" && event.subscription) {
         const renewalResult = await this.handleSubscriptionRenewed(event);
         if (!renewalResult.handled) return renewalResult;
+        if (renewalResult.action === "stale_subscription_event") return renewalResult;
         await this.store.upsertBillingInvoice({
           provider: event.provider,
           providerInvoiceId: event.payment.providerPaymentId,
@@ -191,17 +176,15 @@ export class BillingFinancialEventHandlers {
       });
     }
     if (uid && event.subscription) {
-      const existing = await this.getExistingSubscription(event);
       const occurredAt = new Date(event.occurredAt);
       if (Number.isNaN(occurredAt.getTime())) {
         throw new TypeError("billing event occurredAt must be a valid instant");
       }
-      const pastDue = this.buildSubscriptionState(event, uid, existing, {
-        status: "past_due",
-        graceEndsAt: new Date(occurredAt.getTime() + this.pastDueGracePeriodMs).toISOString(),
-        graceExpiredAt: null,
-      });
-      await this.store.upsertBillingSubscription(pastDue);
+      const subscriptionResult = await this.applyPastDueSubscription(
+        event,
+        new Date(occurredAt.getTime() + this.pastDueGracePeriodMs).toISOString(),
+      );
+      if (subscriptionResult.action === "stale_subscription_event") return subscriptionResult;
     }
     await this.store.updateAutoRechargeAttemptByProviderPayment({
       provider: event.provider,

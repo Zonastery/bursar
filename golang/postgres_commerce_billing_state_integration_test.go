@@ -275,10 +275,6 @@ func TestPostgresCommerceAndBillingStateSurface(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record subscription conflict: %v", err)
 	}
-	if _, err := store.SelectSubscriptionEntitlementSource(ctx, accountID, subscriptionID); err != nil {
-		t.Fatalf("select entitlement source: %v", err)
-	}
-
 	changed, err := store.PseudonymizeFinancialSubject(ctx, accountID)
 	if err != nil || !changed {
 		t.Fatalf("pseudonymize subject = %v, error = %v", changed, err)

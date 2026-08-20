@@ -153,7 +153,7 @@ func TestPostgresStoreAmountAndJSONBoundaries(t *testing.T) {
 			t.Fatalf("jsonMap(%T) = %#v, %v", value, mapped, err)
 		}
 	}
-	for _, value := range []any{"[]", 42, "{"} {
+	for _, value := range []any{"[]", 42, "{", `{"valid":true} {"trailing":true}`} {
 		if _, err := jsonMap(value, "document"); err == nil {
 			t.Errorf("jsonMap(%#v) accepted", value)
 		}

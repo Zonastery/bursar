@@ -272,13 +272,6 @@ func NewBursarOperatorMaintenance(client *PostgresClient) (*BursarOperatorMainte
 	return &BursarOperatorMaintenance{client: client}, nil
 }
 
-func newBursarOperatorMaintenance(client storagePostgresCaller) (*BursarOperatorMaintenance, error) {
-	if client == nil {
-		return nil, outboxConfigError("operator PostgreSQL client is required")
-	}
-	return &BursarOperatorMaintenance{client: client}, nil
-}
-
 func (m *BursarOperatorMaintenance) RunOnce(ctx context.Context, options OperatorMaintenanceRunOptions) StorageMaintenanceResult {
 	if m == nil || m.client == nil {
 		return failedStorageMaintenance(outboxConfigError("operator maintenance is not initialized"))

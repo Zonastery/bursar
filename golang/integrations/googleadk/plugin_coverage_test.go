@@ -3,6 +3,7 @@ package googleadk
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,32 @@ func TestOptionsRejectInvalidConfiguration(t *testing.T) {
 	}
 	if plugin, err := NewWithCredits(credits, options); err != nil || plugin == nil {
 		t.Fatalf("NewWithCredits = (%v, %v)", plugin, err)
+	}
+}
+
+func TestPluginDefaultsOperationKeyAndStateNamespace(t *testing.T) {
+	t.Parallel()
+	credits := &fakeCredits{}
+	options := testOptions(credits, nil)
+	options.OperationKeyPrefix = ""
+	options.StateNamespace = ""
+	p, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	ctx := newFakeContext(state, "invocation-defaults")
+	if response, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{Model: "model"}); err != nil || response != nil {
+		t.Fatalf("before model = (%v, %v)", response, err)
+	}
+	if !strings.HasPrefix(credits.lastOptions.OperationKey, "adk-model:invocation-defaults:") {
+		t.Fatalf("default operation key = %q", credits.lastOptions.OperationKey)
+	}
+	if _, err := state.Get("_bursar_model_leases:default:invocation-defaults"); err != nil {
+		t.Fatalf("default state namespace was not used: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("close plugin: %v", err)
 	}
 }
 
@@ -284,7 +311,65 @@ func TestSmallHelpersCoverDefensiveBoundaries(t *testing.T) {
 		t.Fatal("invalid persisted metrics were accepted")
 	}
 	entries := []leaseEntry{{OperationKey: "first"}, {OperationKey: "second", Metrics: &bursar.UsageMetrics{}}}
-	if activeEntryIndex(entries, "first") != 0 || activeEntryIndex(entries, "") != 0 || activeEntryIndex(entries, "missing") != 0 || activeEntryIndex(nil, "") != -1 {
+	if activeEntryIndex(entries, "first") != 0 || activeEntryIndex(entries, "") != 0 || activeEntryIndex(entries, "missing") != -1 || activeEntryIndex(nil, "") != -1 {
 		t.Fatal("active entry selection mismatch")
+	}
+	if activeEntryIndex([]leaseEntry{{OperationKey: "first"}, {OperationKey: "second"}}, "") != -1 {
+		t.Fatal("ambiguous active entry selection did not fail closed")
+	}
+}
+
+func TestLeaseStateDecoderAcceptsCanonicalFormsAndRejectsMalformedState(t *testing.T) {
+	t.Parallel()
+	adapter := &adapter{}
+	state := newFakeState()
+	const key = "lease-state"
+
+	if err := state.Set(key, nil); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := adapter.loadEntries(state, key); err != nil || entries != nil {
+		t.Fatalf("nil lease state = %+v, error = %v", entries, err)
+	}
+
+	typed := []leaseEntry{{LeaseID: "lease-1", OperationKey: "operation-1", Metadata: bursar.CreditMetadata{"source": "typed"}}}
+	if err := state.Set(key, typed); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := adapter.loadEntries(state, key); err != nil || len(entries) != 1 || entries[0].OperationKey != "operation-1" {
+		t.Fatalf("typed lease state = %+v, error = %v", entries, err)
+	}
+
+	validMapEntries := []any{
+		map[string]any{"lease_id": "lease-map", "operation_key": "operation-map", "metadata": map[string]any{"source": "map"}},
+		map[string]any{"lease_id": "lease-credit-metadata", "operation_key": "operation-credit-metadata", "metadata": bursar.CreditMetadata{"source": "typed-map"}},
+		map[string]any{"lease_id": "lease-invalid-metrics", "operation_key": "operation-invalid-metrics", "metrics": "not-an-object"},
+	}
+	if err := state.Set(key, validMapEntries); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := adapter.loadEntries(state, key)
+	if err != nil || len(entries) != 3 || entries[0].Metadata["source"] != "map" || entries[1].Metadata["source"] != "typed-map" || !entries[2].Invalid {
+		t.Fatalf("canonical map lease state = %+v, error = %v", entries, err)
+	}
+
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{"typed entry without identity", []leaseEntry{{LeaseID: "lease-only"}}},
+		{"unsupported container", "not-a-list"},
+		{"unsupported entry", []any{17}},
+		{"map entry without identity", []any{map[string]any{"lease_id": "lease-only"}}},
+		{"invalid metadata", []any{map[string]any{"lease_id": "lease-1", "operation_key": "operation-1", "metadata": 17}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := state.Set(key, test.value); err != nil {
+				t.Fatal(err)
+			}
+			if entries, err := adapter.loadEntries(state, key); err == nil || entries != nil {
+				t.Fatalf("malformed lease state = %+v, error = %v", entries, err)
+			}
+		})
 	}
 }

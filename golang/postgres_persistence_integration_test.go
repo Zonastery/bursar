@@ -41,6 +41,9 @@ func TestPostgresBillingPersistenceSurface(t *testing.T) {
 		"providers":        map[string]any{"alpha": map[string]any{"type": "stripe_price", "price_id": "alpha-pro-year"}},
 	}
 	if _, err := sdk.Credits.PublishAndActivateCatalog(ctx, catalog, "go-persistence-billing", newAssignmentsRollout(catalog)); err != nil {
+		if typed, ok := AsBursarError(err); ok && typed.Unwrap() != nil {
+			t.Fatalf("publish isolated change catalog: %v: %v", err, typed.Unwrap())
+		}
 		t.Fatalf("publish isolated change catalog: %v", err)
 	}
 	offer, err := sdk.Billing.ResolveOffer(ctx, "alpha", "", "alpha-pro-month")
@@ -60,6 +63,12 @@ func TestPostgresBillingPersistenceSurface(t *testing.T) {
 	bySubscription, err := store.GetBillingSubscriptionByProvider(ctx, "alpha", subscriptionID)
 	if err != nil || bySubscription == nil || bySubscription.AccountID != accountID {
 		t.Fatalf("provider subscription = %+v, error = %v", bySubscription, err)
+	}
+	resolvedAccountID, err := store.ResolveBillingEventAccount(ctx, BillingEvent{
+		Provider: "alpha", Subscription: &BillingSubscription{ProviderSubscriptionID: subscriptionID},
+	})
+	if err != nil || resolvedAccountID != accountID {
+		t.Fatalf("subscription webhook account = %q, error = %v; want %q", resolvedAccountID, err, accountID)
 	}
 	allSubscriptions, err := sdk.Billing.GetUserSubscription(ctx, accountID)
 	if err != nil || allSubscriptions == nil || allSubscriptions.ProviderSubscriptionID != subscriptionID {
@@ -81,6 +90,21 @@ func TestPostgresBillingPersistenceSurface(t *testing.T) {
 	openChange, err := sdk.Billing.GetOpenBillingSubscriptionChange(ctx, "alpha", subscriptionID)
 	if err != nil || openChange == nil || openChange.ID != change.ID {
 		t.Fatalf("open subscription change = %+v, error = %v", openChange, err)
+	}
+	if _, err := store.UpsertBillingSubscriptionState(ctx, CommerceSubscription{
+		Provider: "alpha", ProviderSubscriptionID: subscriptionID, AccountID: uuid.NewString(),
+		ProviderCustomerID: "cus-" + runID, OfferID: targetOffer.ID, Status: "active",
+		CurrentPeriodStart: &now, CurrentPeriodEnd: &periodEnd, ProviderUpdatedAt: now.Add(time.Second),
+	}); err == nil {
+		t.Fatal("subscription plan change committed despite a rejected subscription upsert")
+	}
+	rolledBackChange, err := sdk.Billing.GetOpenBillingSubscriptionChange(ctx, "alpha", subscriptionID)
+	if err != nil || rolledBackChange == nil || rolledBackChange.ID != change.ID || rolledBackChange.State != "scheduled" {
+		t.Fatalf("plan change after rolled-back upsert = %+v, error = %v", rolledBackChange, err)
+	}
+	rolledBackSubscription, err := store.GetBillingSubscriptionByProvider(ctx, "alpha", subscriptionID)
+	if err != nil || rolledBackSubscription == nil || rolledBackSubscription.OfferID != offer.ID {
+		t.Fatalf("subscription after rolled-back plan change = %+v, error = %v", rolledBackSubscription, err)
 	}
 	applied := "applied"
 	providerOperationID := "provider-op-" + runID

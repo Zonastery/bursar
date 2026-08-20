@@ -47,6 +47,7 @@ from bursar.billing.types import (
     BillingSubscriptionStatus,
     BillingTopupResult,
     CheckoutIntent,
+    SubscriptionEntitlementOutcome,
 )
 from bursar.errors import StoreError
 from bursar.shared.diagnostics import bounded_diagnostic_message, persisted_diagnostic_summary
@@ -280,15 +281,13 @@ class BillingService:
             expired = False
         if not expired:
             return subscription
-        self._revoke_if_current_subscription(
-            subscription.user_id,
-            subscription.provider_subscription_id,
-        )
         expired_at = datetime.now(UTC).isoformat()
-        marked = self._store.mark_subscription_grace_expired(
+        marked = self._store.expire_subscription_grace_period(
+            subscription.user_id,
             subscription.subscription_id,
             subscription.grace_ends_at,
             expired_at,
+            self._terminal_plan_key,
         )
         return subscription.model_copy(update={"grace_expired_at": expired_at}) if marked else subscription
 
@@ -296,7 +295,7 @@ class BillingService:
         self,
         now: datetime | None = None,
     ) -> int:
-        """Revoke and mark every still-current past-due grace period."""
+        """Atomically expire every still-current past-due grace period."""
         if self._provisioning is None:
             return 0
         effective_now = now or datetime.now(UTC)
@@ -305,25 +304,12 @@ class BillingService:
         for candidate in self._store.list_expired_grace_subscriptions(effective_now):
             if candidate.subscription_id is None or candidate.grace_ends_at is None:
                 continue
-            current = self._store.get_billing_subscription(
-                candidate.provider,
-                candidate.provider_subscription_id,
-            )
-            if (
-                current is None
-                or current.status != BillingSubscriptionStatus.past_due
-                or current.grace_ends_at != candidate.grace_ends_at
-                or current.grace_expired_at
-            ):
-                continue
-            self._revoke_if_current_subscription(
+            if self._store.expire_subscription_grace_period(
                 candidate.user_id,
-                candidate.provider_subscription_id,
-            )
-            if self._store.mark_subscription_grace_expired(
                 candidate.subscription_id,
                 candidate.grace_ends_at,
                 as_of,
+                self._terminal_plan_key,
             ):
                 expired_count += 1
         return expired_count
@@ -627,7 +613,7 @@ class BillingService:
             )
             return BillingEventResult(handled=False, error="unhandled_event_type")
         result = handler(event)
-        if result.handled:
+        if result.handled and result.action != "stale_subscription_event":
             self._fire_event_handlers(event, event.account_id)
         return result
 
@@ -768,7 +754,11 @@ class BillingService:
             current_period_end=sub.period_end or (existing.current_period_end if existing else None),
             trial_end=sub.trial_end or (existing.trial_end if existing else None),
             cancel_at=sub.cancel_at or (existing.cancel_at if existing else None),
-            ended_at=sub.ended_at or (existing.ended_at if existing else None),
+            ended_at=(
+                sub.ended_at or (existing.ended_at if existing else None)
+                if _status in {"incomplete_expired", "canceled", "expired"}
+                else None
+            ),
             grace_ends_at=(
                 grace_ends_at or (existing.grace_ends_at if existing else None)
                 if _status == BillingSubscriptionStatus.past_due.value
@@ -805,7 +795,6 @@ class BillingService:
         cancel_at_period_end: bool | None = None,
         resolve_offers: bool = True,
         action: str = "",
-        provision_on_positive: bool = True,
     ) -> BillingEventResult:
         """Common path for all subscription event handlers."""
         uid = self._resolve_account_id(event)
@@ -827,7 +816,7 @@ class BillingService:
             offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
 
         preserved_allowance_anchor = None
-        if action == "plan_changed" and self._provisioning:
+        if action == "plan_changed" and self._provisioning is not None:
             preserved_allowance_anchor = self._provisioning.get_user_plan(uid).plan_assigned_at
 
         pending = None
@@ -836,11 +825,6 @@ class BillingService:
                 event.provider,
                 event.subscription.provider_subscription_id,
             )
-            if pending:
-                self._store.update_billing_subscription_change(
-                    pending.id,
-                    BillingSubscriptionChangeUpdate(state="applied"),
-                )
 
         state_metadata = None
         if action == "plan_changed":
@@ -849,30 +833,34 @@ class BillingService:
                 **(event.metadata or {}),
                 "pendingPlanChange": None,
             }
-        self._store.upsert_billing_subscription(
-            self._subscription_state(
-                event,
-                uid,
-                existing,
-                status=status,
-                cancel_at_period_end=cancel_at_period_end,
-                offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
-                plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
-                offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
-                interval=offer.interval if offer else None,
-                interval_count=offer.interval_count if offer else None,
-                metadata=state_metadata,
-            )
+        subscription_state = self._subscription_state(
+            event,
+            uid,
+            existing,
+            status=status,
+            cancel_at_period_end=cancel_at_period_end,
+            offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
+            plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
+            offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
+            interval=offer.interval if offer else None,
+            interval_count=offer.interval_count if offer else None,
+            metadata=state_metadata,
         )
+        self._store.upsert_billing_subscription(subscription_state)
 
-        if self._provisioning and provision_on_positive:
-            self._provision_subscription(
-                uid,
-                offer,
-                event,
-                plan_key_override=plan_key if plan_key is not None else (existing.plan if existing else None),
-                preserve_allowance_anchor=action == "plan_changed",
-                preserved_allowance_anchor=preserved_allowance_anchor,
+        outcome = self._reconcile_subscription_event(
+            uid,
+            event,
+            subscription_state,
+            preserve_allowance_anchor=action == "plan_changed",
+            preserved_allowance_anchor=preserved_allowance_anchor,
+        )
+        if outcome == "stale":
+            return BillingEventResult(handled=True, action="stale_subscription_event")
+        if pending is not None:
+            self._store.update_billing_subscription_change(
+                pending.id,
+                BillingSubscriptionChangeUpdate(state="applied"),
             )
 
         return BillingEventResult(handled=True, action=action)
@@ -893,7 +881,7 @@ class BillingService:
     def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
             uid = self._resolve_account_id(event)
-            if uid and self._provisioning:
+            if uid and self._provisioning is not None:
                 self._revoke_subscription(uid)
         return BillingEventResult(handled=True, action="customer_deleted")
 
@@ -954,7 +942,7 @@ class BillingService:
             )
             return BillingEventResult(handled=False, error="subscription_conflict")
 
-        offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
+        _, offer_key, plan_key, offer_id = self._offer_for_event(event)
         st = event.subscription.status.value if event.subscription.status else None
         subscription_state = self._subscription_state(
             event,
@@ -996,11 +984,12 @@ class BillingService:
             )
             return BillingEventResult(handled=False, error="subscription_conflict")
 
-        if self._provisioning and st and st in ("active", "trialing"):
-            self._provision_subscription(
-                uid,
-                offer,
-                event,
+        outcome = self._reconcile_subscription_event(uid, event, subscription_state)
+        if outcome == "stale":
+            return BillingEventResult(
+                handled=True,
+                action="stale_subscription_event",
+                subscription_id=sub_id,
             )
         if st in ("active", "trialing"):
             self._update_checkout_intent_from_event(event, "completed")
@@ -1012,25 +1001,18 @@ class BillingService:
         )
 
     def _handle_subscription_updated(self, event: BillingEvent) -> BillingEventResult:
-        result = self._apply_subscription_event(
+        return self._apply_subscription_event(
             event,
             status=event.subscription.status.value if event.subscription and event.subscription.status else None,
             cancel_at_period_end=event.subscription.cancel_at_period_end if event.subscription else None,
             action="subscription_updated",
-            provision_on_positive=False,
         )
-        if result.handled:
-            uid = self._resolve_account_id(event)
-            if uid:
-                self._re_evaluate_access(uid, event)
-        return result
 
     def _handle_subscription_activated(self, event: BillingEvent) -> BillingEventResult:
         return self._apply_subscription_event(
             event,
             status="active",
             action="subscription_activated",
-            provision_on_positive=True,
         )
 
     def _handle_subscription_renewed(self, event: BillingEvent) -> BillingEventResult:
@@ -1038,9 +1020,8 @@ class BillingService:
             event,
             status="active",
             action="subscription_renewed",
-            provision_on_positive=True,
         )
-        if result.handled:
+        if result.handled and result.action != "stale_subscription_event":
             offer, _, _, _ = self._offer_for_event(event)
             self._grant_subscription_cycle(event, offer)
         return result
@@ -1051,7 +1032,6 @@ class BillingService:
             event,
             status=st,
             action="plan_changed",
-            provision_on_positive=True,
         )
 
     def _handle_cancellation_scheduled(self, event: BillingEvent) -> BillingEventResult:
@@ -1060,7 +1040,6 @@ class BillingService:
             cancel_at_period_end=True,
             resolve_offers=False,
             action="cancellation_scheduled",
-            provision_on_positive=False,
         )
 
     def _handle_cancellation_unscheduled(self, event: BillingEvent) -> BillingEventResult:
@@ -1069,7 +1048,6 @@ class BillingService:
             cancel_at_period_end=False,
             resolve_offers=False,
             action="cancellation_unscheduled",
-            provision_on_positive=False,
         )
 
     def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
@@ -1095,26 +1073,24 @@ class BillingService:
                     details={"provider": event.provider, "provider_subscription_id": sub_id},
                 )
 
-        self._store.upsert_billing_subscription(
-            self._subscription_state(
-                event,
-                uid,
-                existing,
-                status="canceled",
-                cancel_at_period_end=(
-                    event.subscription.cancel_at_period_end
-                    if event.subscription.cancel_at_period_end is not None
-                    else True
-                ),
-                offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
-                offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
-                plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
-                interval=offer.interval if offer is not None else None,
-                interval_count=offer.interval_count if offer is not None else None,
-            )
+        subscription_state = self._subscription_state(
+            event,
+            uid,
+            existing,
+            status="canceled",
+            cancel_at_period_end=(
+                event.subscription.cancel_at_period_end if event.subscription.cancel_at_period_end is not None else True
+            ),
+            offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
+            offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
+            plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
+            interval=offer.interval if offer is not None else None,
+            interval_count=offer.interval_count if offer is not None else None,
         )
-        if self._provisioning:
-            self._revoke_if_current_subscription(uid, sub_id)
+        self._store.upsert_billing_subscription(subscription_state)
+        outcome = self._reconcile_subscription_event(uid, event, subscription_state)
+        if outcome == "stale":
+            return BillingEventResult(handled=True, action="stale_subscription_event")
         return BillingEventResult(handled=True, action="subscription_canceled")
 
     def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
@@ -1124,33 +1100,21 @@ class BillingService:
             )
         else:
             cot = None
-        result = self._apply_subscription_event(
+        return self._apply_subscription_event(
             event,
             status="expired",
             cancel_at_period_end=cot,
             resolve_offers=False,
             action="subscription_expired",
-            provision_on_positive=False,
         )
-        if result.handled:
-            uid = self._resolve_account_id(event)
-            if uid and self._provisioning and event.subscription:
-                self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
-        return result
 
     def _handle_subscription_paused(self, event: BillingEvent) -> BillingEventResult:
-        result = self._apply_subscription_event(
+        return self._apply_subscription_event(
             event,
             status="paused",
             resolve_offers=False,
             action="subscription_paused",
-            provision_on_positive=False,
         )
-        if result.handled:
-            uid = self._resolve_account_id(event)
-            if uid and self._provisioning and event.subscription:
-                self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
-        return result
 
     def _handle_subscription_resumed(self, event: BillingEvent) -> BillingEventResult:
         return self._apply_subscription_event(
@@ -1158,7 +1122,6 @@ class BillingService:
             status="active",
             cancel_at_period_end=False,
             action="subscription_resumed",
-            provision_on_positive=True,
         )
 
     def _handle_trial_will_end(self, event: BillingEvent) -> BillingEventResult:
@@ -1420,23 +1383,14 @@ class BillingService:
         )
         return BillingEventResult(handled=True, action="dispute_closed")
 
-    def _provision_subscription(
+    def _subscription_plan_anchor(
         self,
         uid: str,
-        offer: BillingOfferResult | None,
         event: BillingEvent,
         *,
-        plan_key_override: str | None = None,
         preserve_allowance_anchor: bool = False,
         preserved_allowance_anchor: datetime | str | None = None,
-    ) -> None:
-        if not self._provisioning:
-            return
-
-        plan_key = plan_key_override or (offer.plan if offer else None)
-        if not plan_key:
-            return
-
+    ) -> datetime | None:
         period_start: datetime | None = None
         if preserve_allowance_anchor:
             if preserved_allowance_anchor:
@@ -1462,31 +1416,67 @@ class BillingService:
                         {"period_start": ps, "user_id": uid},
                     )
                     period_start = None
+        return period_start
 
-        self._provisioning.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
-
-        if self._auto_select_entitlement_source and event.provider:
-            selected = self._store.select_subscription_entitlement_source(
-                uid,
-                event.provider,
-                event.subscription.provider_subscription_id if event.subscription else None,
+    def _reconcile_subscription_event(
+        self,
+        uid: str,
+        event: BillingEvent,
+        expected: BillingSubscriptionState,
+        *,
+        preserve_allowance_anchor: bool = False,
+        preserved_allowance_anchor: datetime | str | None = None,
+    ) -> SubscriptionEntitlementOutcome:
+        if event.subscription is None or event.billing_event_id is None:
+            raise StoreError(
+                "subscription reconciliation requires a claimed billing event",
+                indeterminate=True,
+                details={"provider": event.provider, "provider_event_id": event.event_id},
             )
-            if selected:
-                self._logger.info(
-                    "selected subscription as entitlement source",
-                    {
-                        "provider": event.provider,
-                        "provider_subscription_id": (
-                            event.subscription.provider_subscription_id if event.subscription else None
-                        ),
-                        "user_id": uid,
-                    },
-                )
 
-        self._logger.info(
-            "provisioned plan",
-            {"plan_key": plan_key, "user_id": uid},
+        persisted = self._store.get_billing_subscription(
+            event.provider,
+            event.subscription.provider_subscription_id,
         )
+        if persisted is None or persisted.subscription_id is None:
+            raise StoreError(
+                "subscription reconciliation requires persisted subscription identity",
+                indeterminate=True,
+                details={
+                    "provider": event.provider,
+                    "provider_subscription_id": event.subscription.provider_subscription_id,
+                },
+            )
+
+        apply_entitlement = self._provisioning is not None and self._auto_select_entitlement_source
+        plan_assigned_at = self._subscription_plan_anchor(
+            uid,
+            event,
+            preserve_allowance_anchor=preserve_allowance_anchor,
+            preserved_allowance_anchor=preserved_allowance_anchor,
+        )
+        outcome = self._store.reconcile_subscription_entitlement(
+            uid,
+            persisted.subscription_id,
+            event.billing_event_id,
+            expected.status,
+            expected.provider_updated_at,
+            plan_assigned_at,
+            apply_entitlement,
+            self._terminal_plan_key,
+            f"subscription_{expected.status.value}",
+        )
+        self._logger.info(
+            "reconciled subscription entitlement",
+            {
+                "apply_entitlement": apply_entitlement,
+                "outcome": outcome,
+                "provider": event.provider,
+                "provider_subscription_id": event.subscription.provider_subscription_id,
+                "user_id": uid,
+            },
+        )
+        return outcome
 
     def _grant_subscription_cycle(self, event: BillingEvent, offer: BillingOfferResult | None) -> None:
         grant = offer.grant if offer else None
@@ -1529,40 +1519,10 @@ class BillingService:
         )
 
     def _revoke_subscription(self, uid: str) -> None:
-        if not self._provisioning:
+        if self._provisioning is None:
             return
         if self._terminal_plan_key:
             self._provisioning.set_user_plan(uid, self._terminal_plan_key)
         else:
             self._provisioning.unset_user_plan(uid)
         self._logger.info("revoked plan", {"user_id": uid})
-
-    def _revoke_if_current_subscription(self, uid: str, subscription_id: str) -> None:
-        current = self._store.get_user_subscription(uid, statuses=["active", "trialing"])
-        if not current or current.provider_subscription_id == subscription_id:
-            self._revoke_subscription(uid)
-
-    def _re_evaluate_access(self, uid: str, event: BillingEvent) -> None:
-        if not self._provisioning or not event.subscription:
-            return
-
-        status = event.subscription.status
-        status_value = status.value if status else None
-        if status_value in ("active", "trialing"):
-            offer, _, _, _ = self._offer_for_event(event)
-            if offer:
-                self._provision_subscription(uid, offer, event)
-            else:
-                existing = self._store.get_billing_subscription(
-                    event.provider,
-                    event.subscription.provider_subscription_id,
-                )
-                if existing and existing.plan:
-                    self._provision_subscription(
-                        uid,
-                        None,
-                        event,
-                        plan_key_override=existing.plan,
-                    )
-        elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
-            self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)

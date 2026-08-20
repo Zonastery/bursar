@@ -11,7 +11,8 @@ import (
 
 func TestPostgresBillingClaimAndAccountBoundaries(t *testing.T) {
 	now := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
-	base := BillingEvent{EventID: "evt_1", Provider: "stripe", Type: BillingEventPaymentSucceeded, OccurredAt: now, AccountID: storageTestTenant}
+	base := BillingEvent{EventID: "evt_1", Provider: "stripe", Type: BillingEventPaymentSucceeded, OccurredAt: now, AccountID: storageTestTenant,
+		Payment: &BillingPayment{ProviderPaymentID: "pay_1", AmountMinor: 1, Currency: "USD", Purpose: "subscription", Status: "succeeded"}}
 	for _, event := range []BillingEvent{
 		{},
 		{EventID: "evt", Provider: "stripe", Type: BillingEventPaymentSucceeded, OccurredAt: now},
@@ -245,6 +246,66 @@ func TestPostgresCommerceCheckoutDigestAndScalarBoundaries(t *testing.T) {
 	}
 	if _, err := store.checkoutIntent(context.Background(), tx, storageTestClaim, "not-a-uuid"); err == nil {
 		t.Fatal("malformed checkout subject ID accepted")
+	}
+}
+
+func TestCheckoutIntentProjectionRejectsIncompleteFinancialRows(t *testing.T) {
+	now := time.Date(2026, 8, 19, 4, 5, 6, 0, time.UTC)
+	valid := map[string]any{
+		"id": "00000000-0000-4000-8000-000000000301", "subject_id": storageTestTenant,
+		"provider": "stripe", "checkout_kind": "subscription", "product_key": "pro_month",
+		"status": "open", "expires_at": now.Add(time.Hour), "created_at": now, "updated_at": now,
+		"request_digest": make([]byte, sha256.Size),
+	}
+	intent, err := checkoutIntentFromRows([]map[string]any{valid})
+	if err != nil || intent == nil || intent.ProductKey != "pro_month" {
+		t.Fatalf("valid checkout projection = %+v, %v", intent, err)
+	}
+	if missing, err := checkoutIntentFromRows(nil); err != nil || missing != nil {
+		t.Fatalf("empty checkout projection = %+v, %v", missing, err)
+	}
+	if _, err := checkoutIntentFromRows([]map[string]any{nil}); err == nil {
+		t.Fatal("nil checkout projection row was accepted")
+	}
+
+	for _, key := range []string{
+		"id", "subject_id", "provider", "checkout_kind", "product_key", "status",
+		"expires_at", "created_at", "updated_at", "request_digest",
+	} {
+		t.Run(key, func(t *testing.T) {
+			row := cloneAnyMap(valid)
+			delete(row, key)
+			if _, err := checkoutIntentFromRows([]map[string]any{row}); err == nil {
+				t.Fatalf("checkout projection missing %s was accepted", key)
+			}
+		})
+	}
+}
+
+func TestCheckoutIntentIdentifierAcceptsDriverScalarNames(t *testing.T) {
+	const intentID = "00000000-0000-4000-8000-000000000301"
+	for name, rows := range map[string][]map[string]any{
+		"canonical": {{"create_checkout_intent": intentID}},
+		"driver":    {{"unnamed_scalar": intentID}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := checkoutIntentIDFromRows(rows)
+			if err != nil || got != intentID {
+				t.Fatalf("checkout intent ID = %q, %v", got, err)
+			}
+		})
+	}
+	for name, rows := range map[string][]map[string]any{
+		"missing row":      nil,
+		"nil row":          {nil},
+		"multiple columns": {{"first": intentID, "second": intentID}},
+		"blank scalar":     {{"unnamed_scalar": " "}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := checkoutIntentIDFromRows(rows); err == nil {
+				t.Fatal("invalid checkout intent result was accepted")
+			}
+		})
 	}
 }
 

@@ -78,6 +78,11 @@ func financialCatalogConfig(t *testing.T) map[string]any {
 	commerce["providers"].(map[string]any)["alpha"] = map[string]any{"type": "stripe"}
 	offers := commerce["offers"].(map[string]any)
 	proMonth := offers["pro_month"].(map[string]any)
+	proMonth["cycle_grant"] = map[string]any{
+		"amount":  "12.345678",
+		"bucket":  "general",
+		"renewal": "replace_previous",
+	}
 	proMonth["providers"] = map[string]any{
 		"alpha": map[string]any{
 			"type":     "stripe_price",
@@ -179,6 +184,67 @@ func financialContext(t *testing.T) (context.Context, context.CancelFunc, postgr
 	config := requirePostgresIntegration(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	return ctx, cancel, config
+}
+
+func TestPostgresSubscriptionCycleGrantIsExactAndReplaySafe(t *testing.T) {
+	ctx, cancel, config := financialContext(t)
+	defer cancel()
+	sdk, _ := newFinancialSDK(t, ctx, config, &financialProvider{name: "alpha"})
+	runID := uuid.NewString()
+	accountID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+	periodEnd := now.Add(30 * 24 * time.Hour)
+	subscription := &BillingSubscription{
+		ProviderSubscriptionID: "sub-cycle-" + runID,
+		Status:                 "active",
+		Interval:               "month",
+		IntervalCount:          1,
+		PeriodStart:            &now,
+		PeriodEnd:              &periodEnd,
+		Refs:                   &ProviderRef{PriceID: "alpha-pro-month"},
+	}
+
+	created := BillingEvent{
+		EventID: "evt-cycle-created-" + runID, Provider: "alpha", Type: BillingEventSubscriptionCreated,
+		OccurredAt: now, AccountID: accountID, Subscription: subscription,
+	}
+	if result, err := sdk.IngestBillingEvent(ctx, created); err != nil || result.Action != "subscription_created" {
+		t.Fatalf("create subscription = %+v, error = %v", result, err)
+	}
+
+	renew := func(eventID string, occurredAt time.Time) BillingEvent {
+		copy := *subscription
+		copy.PeriodStart = timePointer(occurredAt)
+		end := occurredAt.Add(30 * 24 * time.Hour)
+		copy.PeriodEnd = &end
+		return BillingEvent{
+			EventID: eventID, Provider: "alpha", Type: BillingEventSubscriptionRenewed,
+			OccurredAt: occurredAt, AccountID: accountID, Subscription: &copy,
+		}
+	}
+	firstRenewal := renew("evt-cycle-renewed-1-"+runID, now.Add(time.Hour))
+	if result, err := sdk.IngestBillingEvent(ctx, firstRenewal); err != nil || result.Action != "subscription_renewed" {
+		t.Fatalf("first renewal = %+v, error = %v", result, err)
+	}
+	assertBalance := func(want string) {
+		t.Helper()
+		balance, err := sdk.Credits.GetBalance(ctx, accountID)
+		if err != nil || !balance.Balance.Equal(MustAmount(want)) {
+			t.Fatalf("cycle balance = %s, error = %v; want %s", balance.Balance, err, want)
+		}
+	}
+	assertBalance("12.345678")
+
+	if replay, err := sdk.IngestBillingEvent(ctx, firstRenewal); err != nil || !replay.Duplicate {
+		t.Fatalf("renewal replay = %+v, error = %v", replay, err)
+	}
+	assertBalance("12.345678")
+
+	secondRenewal := renew("evt-cycle-renewed-2-"+runID, now.Add(31*24*time.Hour))
+	if result, err := sdk.IngestBillingEvent(ctx, secondRenewal); err != nil || result.Action != "subscription_renewed" {
+		t.Fatalf("second renewal = %+v, error = %v", result, err)
+	}
+	assertBalance("12.345678")
 }
 
 func TestPostgresCheckoutTopupRefundFinancialInvariants(t *testing.T) {

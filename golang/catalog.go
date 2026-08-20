@@ -284,10 +284,11 @@ func (s *CatalogService) PublishDraft(ctx context.Context, config map[string]any
 	if s == nil || s.store == nil {
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	if _, err := LoadConfigFromMap(config); err != nil {
+	parsed, err := LoadConfigFromMap(config)
+	if err != nil {
 		return "", err
 	}
-	return s.store.PublishCatalogDraft(ctx, config, label)
+	return s.store.PublishCatalogDraft(ctx, CanonicalParsedBursarConfigDict(parsed), label)
 }
 
 // Activate makes one existing revision active with the catalog-defined rollout
@@ -300,9 +301,11 @@ func (s *CatalogService) Activate(ctx context.Context, version int, rollout Cata
 	if err != nil {
 		return result, err
 	}
-	if err := s.Load(ctx); err != nil {
-		return result, err
-	}
+	// The activation is already durable at this point. Do not turn a cache
+	// refresh failure into an apparent mutation failure: callers could retry a
+	// successful activation and amplify side effects. Mark the cache stale so
+	// the next read performs the refresh and reports any read failure there.
+	s.Invalidate()
 	return result, nil
 }
 
@@ -312,16 +315,17 @@ func (s *CatalogService) PublishAndActivate(ctx context.Context, config map[stri
 	if s == nil || s.store == nil {
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	if _, err := LoadConfigFromMap(config); err != nil {
+	parsed, err := LoadConfigFromMap(config)
+	if err != nil {
 		return "", err
 	}
-	result, err := s.store.PublishAndActivateCatalog(ctx, config, label, rollout)
+	result, err := s.store.PublishAndActivateCatalog(ctx, CanonicalParsedBursarConfigDict(parsed), label, rollout)
 	if err != nil {
 		return result, err
 	}
-	if err := s.Load(ctx); err != nil {
-		return result, err
-	}
+	// Publishing and activation commit atomically in storage. Keep the mutation
+	// result unambiguous and make the following read refresh the local cache.
+	s.Invalidate()
 	return result, nil
 }
 

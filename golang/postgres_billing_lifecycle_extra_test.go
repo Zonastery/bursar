@@ -60,15 +60,21 @@ func TestPostgresBillingLifecycleEventMatrix(t *testing.T) {
 	if created.Action != "subscription_created" || created.SubscriptionID != subscriptionID {
 		t.Fatalf("created subscription result = %+v", created)
 	}
+	processor := postgresBillingLifecycle{store: store}
+	if got, err := processor.resolveAccount(ctx, BillingEvent{Provider: "alpha", Subscription: &BillingSubscription{ProviderSubscriptionID: subscriptionID}}, ""); err != nil || got != accountID {
+		t.Fatalf("subscription-key account = %q, error = %v; want %q", got, err, accountID)
+	}
+	statusOmitted := *subscription
+	statusOmitted.Refs = nil
+	statusOmitted.Status = ""
+	if result := process(BillingEvent{EventID: "evt-" + runID + "-subscription-status-omitted", Provider: "alpha", Type: BillingEventSubscriptionUpdated, OccurredAt: now.Add(30 * time.Second), Subscription: &statusOmitted}); result.Action != "subscription_updated" {
+		t.Fatalf("status-omitted subscription result = %+v", result)
+	}
 	conflict := *subscription
 	conflict.ProviderSubscriptionID = "sub-conflict-" + runID
 	if _, err := store.ProcessBillingEvent(ctx, BillingEvent{EventID: "evt-" + runID + "-subscription-conflict", Provider: "alpha", Type: BillingEventSubscriptionCreated, OccurredAt: now.Add(time.Second), AccountID: accountID, Subscription: &conflict}, accountID); err == nil {
 		t.Fatal("second current subscription was accepted")
 	}
-	if err := (postgresBillingLifecycle{store: store, provisioning: store}).revokeIfCurrent(ctx, accountID, "provider-subscription-that-is-not-current"); err != nil {
-		t.Fatalf("revoke non-current subscription: %v", err)
-	}
-
 	// These transitions exercise the provider-neutral vocabulary while each
 	// assertion remains against the committed PostgreSQL projection.
 	for index, eventType := range []BillingEventType{
@@ -175,7 +181,6 @@ func TestPostgresBillingLifecycleEventMatrix(t *testing.T) {
 	if !upcoming.Ignored {
 		t.Fatalf("invoice upcoming result = %+v, want ignored", upcoming)
 	}
-	process(BillingEvent{EventID: "evt-" + runID + "-invoice-paid-without-document", Provider: "alpha", Type: BillingEventInvoicePaid, OccurredAt: now, AccountID: accountID})
 	if _, err := store.ProcessBillingEvent(ctx, BillingEvent{EventID: "evt-" + runID + "-checkout-invalid-id", Provider: "alpha", Type: BillingEventCheckoutExpired, OccurredAt: now, AccountID: accountID, Metadata: map[string]any{"checkout_intent_id": "not-a-uuid"}}, accountID); err == nil {
 		t.Fatal("invalid checkout intent ID was accepted")
 	}
@@ -190,7 +195,7 @@ func TestPostgresBillingLifecycleEventMatrix(t *testing.T) {
 	paymentSubscription := *subscription
 	paymentSubscription.Refs = nil
 	paymentSubscription.Status = "active"
-	paymentSucceeded := process(BillingEvent{EventID: "evt-" + runID + "-payment-succeeded", Provider: "alpha", Type: BillingEventPaymentSucceeded, OccurredAt: now, AccountID: accountID, Payment: &BillingPayment{ProviderPaymentID: "pay-succeeded-" + runID, InvoiceID: "inv-payment-" + runID, Status: "succeeded", Currency: "USD", AmountMinor: 500, Purpose: "subscription", SubscriptionID: subscriptionID}, Subscription: &paymentSubscription})
+	paymentSucceeded := process(BillingEvent{EventID: "evt-" + runID + "-payment-succeeded", Provider: "alpha", Type: BillingEventPaymentSucceeded, OccurredAt: now.Add(22 * time.Minute), AccountID: accountID, Payment: &BillingPayment{ProviderPaymentID: "pay-succeeded-" + runID, InvoiceID: "inv-payment-" + runID, Status: "succeeded", Currency: "USD", AmountMinor: 500, Purpose: "subscription", SubscriptionID: subscriptionID}, Subscription: &paymentSubscription})
 	if paymentSucceeded.Action != "payment_succeeded" {
 		t.Fatalf("payment succeeded result = %+v", paymentSucceeded)
 	}

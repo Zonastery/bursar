@@ -80,21 +80,9 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 		if callErr != nil {
 			return callErr
 		}
-		row, rowErr := rowRequired(rows, "create_checkout_intent")
-		if rowErr != nil {
-			return rowErr
-		}
-		intentID, valueErr := requiredRowText(row, "create_checkout_intent", "create_checkout_intent")
+		intentID, valueErr := checkoutIntentIDFromRows(rows)
 		if valueErr != nil {
-			// A scalar function's output column name is driver-dependent.
-			value, scalarErr := firstScalar(row, "create_checkout_intent")
-			if scalarErr != nil {
-				return valueErr
-			}
-			intentID, valueErr = textFromScalar(value, "create_checkout_intent")
-			if valueErr != nil {
-				return valueErr
-			}
+			return valueErr
 		}
 		loaded, loadErr := s.checkoutIntent(ctx, tx, intentID, input.SubjectID)
 		if loadErr != nil {
@@ -107,6 +95,23 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 		return nil
 	})
 	return intent, err
+}
+
+func checkoutIntentIDFromRows(rows []map[string]any) (string, error) {
+	row, err := rowRequired(rows, "create_checkout_intent")
+	if err != nil {
+		return "", err
+	}
+	intentID, err := requiredRowText(row, "create_checkout_intent", "create_checkout_intent")
+	if err == nil {
+		return intentID, nil
+	}
+	// A scalar function's output column name is driver-dependent.
+	value, scalarErr := firstScalar(row, "create_checkout_intent")
+	if scalarErr != nil {
+		return "", err
+	}
+	return textFromScalar(value, "create_checkout_intent")
 }
 
 // UpdateCheckoutIntent advances a subject-scoped checkout intent after a
@@ -191,6 +196,13 @@ func (s *PostgresStore) checkoutIntent(ctx context.Context, tx *PostgresTransact
 	if err != nil {
 		return nil, err
 	}
+	return checkoutIntentFromRows(rows)
+}
+
+// checkoutIntentFromRows keeps projection validation independent from the
+// transport. PostgreSQL remains the integration boundary, while malformed or
+// incomplete rows can be verified deterministically without mocking pgx.
+func checkoutIntentFromRows(rows []map[string]any) (*CheckoutIntent, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}

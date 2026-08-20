@@ -892,21 +892,23 @@ func (s *CreditsService) GetActiveCatalog(ctx context.Context) (*CatalogRevision
 	return s.store.GetActiveCatalog(ctx)
 }
 
-// PublishAndActivateCatalog delegates revision validation/persistence to the
-// store and returns the committed revision ID.
+// PublishAndActivateCatalog validates, canonicalizes, and publishes through
+// the shared catalog service so every public publishing path persists the same
+// default-complete document and refreshes the in-process pricing cache.
 func (s *CreditsService) PublishAndActivateCatalog(ctx context.Context, config map[string]any, label string, rollout CatalogRollout) (string, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || s.catalog == nil {
 		return "", NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.PublishAndActivateCatalog(ctx, config, label, rollout)
+	return s.catalog.PublishAndActivate(ctx, config, label, rollout)
 }
 
-// PublishCatalogDraft writes an inactive catalog revision.
+// PublishCatalogDraft validates and canonicalizes an inactive revision through
+// the shared catalog service.
 func (s *CreditsService) PublishCatalogDraft(ctx context.Context, config map[string]any, label string) (string, error) {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || s.catalog == nil {
 		return "", NewError("credits service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	return s.store.PublishCatalogDraft(ctx, config, label)
+	return s.catalog.PublishDraft(ctx, config, label)
 }
 
 // GetCatalogHistory lists historical catalog revisions.

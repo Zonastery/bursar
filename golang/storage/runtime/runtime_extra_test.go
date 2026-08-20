@@ -48,15 +48,16 @@ func (runtimeArchiveComponent) Close(context.Context) error  { return nil }
 func (runtimeArchiveComponent) Health(context.Context) error { return nil }
 
 type runtimeErrorComponent struct {
-	startErr error
-	flushErr error
-	closeErr error
+	startErr  error
+	flushErr  error
+	closeErr  error
+	healthErr error
 }
 
 func (c *runtimeErrorComponent) Start(context.Context) error  { return c.startErr }
 func (c *runtimeErrorComponent) Flush(context.Context) error  { return c.flushErr }
 func (c *runtimeErrorComponent) Close(context.Context) error  { return c.closeErr }
-func (c *runtimeErrorComponent) Health(context.Context) error { return nil }
+func (c *runtimeErrorComponent) Health(context.Context) error { return c.healthErr }
 
 type runtimeCloseDuringStartComponent struct{ runtime *Runtime }
 
@@ -251,8 +252,8 @@ func TestRuntimeStartHealthAndDiagnosticsBranches(t *testing.T) {
 	if health := (&Runtime{Bursar: &bursar.Bursar{}, started: true}).Health(context.Background()); health.Ready || health.FinancialReady || !health.ProjectionReady || health.Degraded {
 		t.Fatalf("started but unloaded health = %#v", health)
 	}
-	if health := (&Runtime{Bursar: &bursar.Bursar{}, started: true, components: []runtimeComponent{{component: &componentStub{health: errors.New("down")}}}}).Health(context.Background()); health.ProjectionReady || health.Degraded {
-		t.Fatalf("degraded unloaded health = %#v", health)
+	if health := (&Runtime{Bursar: &bursar.Bursar{}, started: true, components: []runtimeComponent{{component: &componentStub{health: errors.New("down")}}}}).Health(context.Background()); !health.ProjectionReady || health.Degraded {
+		t.Fatalf("local health unexpectedly performed component I/O = %#v", health)
 	}
 
 	store := &runtimeCatalogStore{active: &bursar.CatalogRevision{ID: "catalog-1", Version: 1, Config: map[string]any{"version": 1, "credits": map[string]any{}}}}
@@ -282,6 +283,9 @@ func TestRuntimeStartHealthAndDiagnosticsBranches(t *testing.T) {
 	if !diagnostics.Catalog.OK || len(diagnostics.Components) != 1 || !diagnostics.Components[0].OK {
 		t.Fatalf("loaded diagnostics = %#v", diagnostics)
 	}
+	if !diagnostics.Ready || !diagnostics.FinancialReady || !diagnostics.ProjectionReady || diagnostics.Postgres.Status != DependencyUnsupported {
+		t.Fatalf("custom-store readiness = %#v", diagnostics)
+	}
 	if diagnostics.Catalog.Latency <= 0 {
 		t.Fatalf("catalog diagnostic latency = %v", diagnostics.Catalog.Latency)
 	}
@@ -289,6 +293,14 @@ func TestRuntimeStartHealthAndDiagnosticsBranches(t *testing.T) {
 	withoutCatalogDiagnostics := withoutCatalog.CheckDependencies(context.Background())
 	if withoutCatalogDiagnostics.Catalog.Error != "catalog is not configured" || len(withoutCatalogDiagnostics.Components) != 1 || !withoutCatalogDiagnostics.Components[0].Skipped {
 		t.Fatalf("without catalog diagnostics = %#v", withoutCatalogDiagnostics)
+	}
+	failingComponent := &Runtime{Bursar: loaded.Bursar, started: true, components: []runtimeComponent{{component: &runtimeErrorComponent{healthErr: errors.New("provider secret")}}}}
+	failingDiagnostics := failingComponent.CheckDependencies(context.Background())
+	if len(failingDiagnostics.Components) != 1 || failingDiagnostics.Components[0].Error != "dependency_check_failed:Error" {
+		t.Fatalf("unsafe component diagnostics = %#v", failingDiagnostics.Components)
+	}
+	if failingDiagnostics.Ready || failingDiagnostics.ProjectionReady || !failingDiagnostics.FinancialReady {
+		t.Fatalf("failing component readiness = %#v", failingDiagnostics)
 	}
 	if err := (&Runtime{}).Flush(context.Background()); err == nil || !strings.Contains(err.Error(), "not started") {
 		t.Fatalf("unstarted Flush() error = %v", err)
@@ -510,3 +522,65 @@ func TestRuntimeAddsProjectionWorkerWhenPortsAreConfigured(t *testing.T) {
 		t.Fatalf("worker dependency components = %d", len(dependencyRuntime.components))
 	}
 }
+
+func TestRuntimeDiagnosticsIncludesLocalWorkerAndOutboxSnapshots(t *testing.T) {
+	t.Parallel()
+	const tenantID = "00000000-0000-0000-0000-000000000001"
+	store := &runtimeCatalogStore{active: &bursar.CatalogRevision{ID: "catalog-1", Version: 3, Config: map[string]any{"version": 1, "credits": map[string]any{}}}}
+	credits, err := bursar.NewCreditsService(store, bursar.CreditsServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := bursar.NewOutboxWorker(runtimeRecoveryStub{}, []bursar.OutboxHandler{runtimeProjectionHandler{}}, bursar.OutboxWorkerOptions{PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &Runtime{
+		Bursar:   &bursar.Bursar{Credits: credits, Catalog: credits.Catalog()},
+		Recovery: runtimeRecoveryStub{}, Worker: worker, tenantID: tenantID,
+		components: []runtimeComponent{{component: worker}},
+	}
+	if err := runtime.Bursar.LoadCatalog(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := runtime.State()
+	if !state.Worker.Configured || state.Worker.Lifecycle != bursar.OutboxWorkerNotStarted {
+		t.Fatalf("worker state before Start = %#v", state.Worker)
+	}
+	if health := runtime.Health(context.Background()); health.ProjectionReady {
+		t.Fatalf("unstarted worker reported projection ready: %#v", health)
+	}
+	runtime.started = true
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state = runtime.State()
+	if state.Worker.LastRun == nil || state.Worker.LastRun.Source != "manual" || state.Worker.LastRun.Status != "completed" {
+		t.Fatalf("manual worker run snapshot = %#v", state.Worker.LastRun)
+	}
+	if state.Worker.LastRun.Result == nil || *state.Worker.LastRun.Result != (bursar.OutboxRunResult{}) {
+		t.Fatalf("manual worker result snapshot = %#v", state.Worker.LastRun.Result)
+	}
+	diagnostics := runtime.CheckDependencies(context.Background())
+	if diagnostics.Catalog.CurrentRevisionID != "catalog-1" || diagnostics.Catalog.CurrentRevision != 3 {
+		t.Fatalf("catalog diagnostic = %#v", diagnostics.Catalog)
+	}
+	if !diagnostics.Outbox.OK || diagnostics.Outbox.Snapshot == nil {
+		t.Fatalf("outbox diagnostic = %#v", diagnostics.Outbox)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	closedDiagnostics := runtime.CheckDependencies(context.Background())
+	if !closedDiagnostics.Postgres.Skipped || !closedDiagnostics.Catalog.Skipped || !closedDiagnostics.Outbox.Skipped {
+		t.Fatalf("closed dependency diagnostics = %#v", closedDiagnostics)
+	}
+}
+
+type runtimeProjectionHandler struct{}
+
+func (runtimeProjectionHandler) Topics() []string                                 { return []string{"runtime"} }
+func (runtimeProjectionHandler) Handle(context.Context, bursar.OutboxEvent) error { return nil }

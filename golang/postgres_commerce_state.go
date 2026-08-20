@@ -52,19 +52,21 @@ func (s *PostgresStore) UpsertBillingCustomer(ctx context.Context, customer Bill
 		if callErr != nil {
 			return callErr
 		}
-		row, rowErr := rowRequired(rows, "upsert_billing_customer")
-		if rowErr != nil {
-			return rowErr
-		}
-		value, valueErr := firstScalar(row, "upsert_billing_customer")
-		if valueErr != nil {
-			return valueErr
-		}
-		if _, valueErr = textFromScalar(value, "upsert_billing_customer"); valueErr != nil {
-			return valueErr
-		}
-		return nil
+		_, callErr = commerceStateRequiredTextResult(rows, "upsert_billing_customer")
+		return callErr
 	})
+}
+
+func commerceStateRequiredTextResult(rows []map[string]any, operation string) (string, error) {
+	row, err := rowRequired(rows, operation)
+	if err != nil {
+		return "", err
+	}
+	value, err := firstScalar(row, operation)
+	if err != nil {
+		return "", err
+	}
+	return textFromScalar(value, operation)
 }
 
 func (s *PostgresStore) GetBillingCustomer(ctx context.Context, accountID, provider string) (result *BillingCustomerRecord, err error) {
@@ -142,23 +144,9 @@ func (s *PostgresStore) GetBillingSubscription(ctx context.Context, accountID st
 		if callErr != nil {
 			return callErr
 		}
-		var selected map[string]any
-		var selectedUpdatedAt time.Time
-		for _, row := range rows {
-			status, statusErr := requiredRowText(row, "status", "list_billing_subscriptions")
-			if statusErr != nil {
-				return statusErr
-			}
-			updatedAt, timeErr := rowTime(row, "provider_updated_at", "list_billing_subscriptions")
-			if timeErr != nil {
-				return timeErr
-			}
-			if !allowed[status] {
-				continue
-			}
-			if selected == nil || updatedAt.After(selectedUpdatedAt) {
-				selected, selectedUpdatedAt = row, updatedAt
-			}
+		selected, selectErr := commerceStateSelectSubscriptionRow(rows, allowed, "list_billing_subscriptions")
+		if selectErr != nil {
+			return selectErr
 		}
 		if selected == nil {
 			return nil
@@ -174,6 +162,28 @@ func (s *PostgresStore) GetBillingSubscription(ctx context.Context, accountID st
 		return nil
 	})
 	return result, err
+}
+
+func commerceStateSelectSubscriptionRow(rows []map[string]any, allowed map[string]bool, operation string) (map[string]any, error) {
+	var selected map[string]any
+	var selectedUpdatedAt time.Time
+	for _, row := range rows {
+		status, err := requiredRowText(row, "status", operation)
+		if err != nil {
+			return nil, err
+		}
+		updatedAt, err := rowTime(row, "provider_updated_at", operation)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed[status] {
+			continue
+		}
+		if selected == nil || updatedAt.After(selectedUpdatedAt) {
+			selected, selectedUpdatedAt = row, updatedAt
+		}
+	}
+	return selected, nil
 }
 
 // ListBillingSubscriptions returns all persisted subscriptions visible to the
@@ -598,22 +608,22 @@ func (s *PostgresStore) GetOpenBillingSubscriptionChange(ctx context.Context, pr
 		return nil, err
 	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "get_open_billing_subscription_change", provider, providerSubscriptionID)
-		if callErr != nil {
-			return callErr
-		}
-		row := rowOptional(rows)
-		if row == nil {
-			return nil
-		}
-		mapped, mapErr := commerceStateSubscriptionChangeFromRow(ctx, tx, row, provider, providerSubscriptionID, "get_open_billing_subscription_change")
-		if mapErr != nil {
-			return mapErr
-		}
-		result = mapped
-		return nil
+		result, err = getOpenBillingSubscriptionChangeTx(ctx, tx, provider, providerSubscriptionID)
+		return err
 	})
 	return result, err
+}
+
+func getOpenBillingSubscriptionChangeTx(ctx context.Context, tx *PostgresTransaction, provider, providerSubscriptionID string) (*BillingSubscriptionChange, error) {
+	rows, err := tx.Call(ctx, "get_open_billing_subscription_change", provider, providerSubscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	row := rowOptional(rows)
+	if row == nil {
+		return nil, nil
+	}
+	return commerceStateSubscriptionChangeFromRow(ctx, tx, row, provider, providerSubscriptionID, "get_open_billing_subscription_change")
 }
 
 // UpdateBillingSubscriptionChange intentionally mirrors the established
@@ -646,22 +656,50 @@ func (s *PostgresStore) UpdateBillingSubscriptionChange(ctx context.Context, id 
 		return NewError("subscription change error message is too long", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "advance_subscription_change", changeID, state, nullableText(pointerText(update.ProviderOperationID)), nullableText(pointerText(update.ErrorMessage)))
-		if callErr != nil {
-			return callErr
+		return advanceBillingSubscriptionChangeTx(ctx, tx, id, changeID, state, update.ProviderOperationID, update.ErrorMessage)
+	})
+}
+
+func advanceBillingSubscriptionChangeTx(ctx context.Context, tx *PostgresTransaction, id string, changeID int64, state string, providerOperationID, errorMessage *string) error {
+	rows, err := tx.Call(ctx, "advance_subscription_change", changeID, state, nullableText(pointerText(providerOperationID)), nullableText(pointerText(errorMessage)))
+	if err != nil {
+		return err
+	}
+	advanced, err := commerceStateRequiredBoolResult(rows, "advance_subscription_change")
+	if err != nil {
+		return err
+	}
+	if !advanced {
+		return NewError("subscription change transition was rejected", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict, Details: map[string]any{"subscription_change_id": id}})
+	}
+	return nil
+}
+
+// applyOpenBillingSubscriptionChange marks only the pending transition whose
+// target offer matches provider truth already accepted by the version-fenced
+// entitlement reconciler. Advancing before that reconciliation would let a
+// stale webhook incorrectly complete a newer plan-change workflow.
+func (s *PostgresStore) applyOpenBillingSubscriptionChange(ctx context.Context, provider, providerSubscriptionID, expectedOfferID string) error {
+	var err error
+	if provider, err = requireText(provider, "subscription change provider"); err != nil {
+		return err
+	}
+	if providerSubscriptionID, err = requireText(providerSubscriptionID, "subscription change provider subscription ID"); err != nil {
+		return err
+	}
+	if expectedOfferID, err = requireText(expectedOfferID, "subscription change target offer ID"); err != nil {
+		return err
+	}
+	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		pending, txErr := getOpenBillingSubscriptionChangeTx(ctx, tx, provider, providerSubscriptionID)
+		if txErr != nil || pending == nil || pending.ToOfferID != expectedOfferID {
+			return txErr
 		}
-		row, rowErr := rowRequired(rows, "advance_subscription_change")
-		if rowErr != nil {
-			return rowErr
+		changeID, parseErr := commerceStateSubscriptionChangeID(pending.ID)
+		if parseErr != nil {
+			return parseErr
 		}
-		advanced, valueErr := scalarBoolFromRow(row, "advance_subscription_change")
-		if valueErr != nil {
-			return valueErr
-		}
-		if !advanced {
-			return NewError("subscription change transition was rejected", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict, Details: map[string]any{"subscription_change_id": id}})
-		}
-		return nil
+		return advanceBillingSubscriptionChangeTx(ctx, tx, pending.ID, changeID, "applied", nil, nil)
 	})
 }
 
@@ -773,6 +811,14 @@ func scalarBoolFromRow(row map[string]any, operation string) (bool, error) {
 	return scalarBool(value, operation)
 }
 
+func commerceStateRequiredBoolResult(rows []map[string]any, operation string) (bool, error) {
+	row, err := rowRequired(rows, operation)
+	if err != nil {
+		return false, err
+	}
+	return scalarBoolFromRow(row, operation)
+}
+
 func (s *PostgresStore) GetBillingPreferences(ctx context.Context, accountID string) (result *BillingPreferences, err error) {
 	accountID, err = requireText(accountID, "billing preferences account ID")
 	if err != nil {
@@ -861,11 +907,7 @@ func (s *PostgresStore) UpsertBillingPreferences(ctx context.Context, preference
 		if callErr != nil {
 			return callErr
 		}
-		row, rowErr := rowRequired(rows, "upsert_billing_preferences")
-		if rowErr != nil {
-			return rowErr
-		}
-		updated, valueErr := scalarBoolFromRow(row, "upsert_billing_preferences")
+		updated, valueErr := commerceStateRequiredBoolResult(rows, "upsert_billing_preferences")
 		if valueErr != nil {
 			return valueErr
 		}
@@ -1037,28 +1079,32 @@ func (s *PostgresStore) ResolveAutoRechargeTopup(ctx context.Context, lookup Aut
 		if callErr != nil {
 			return callErr
 		}
-		if len(rows) > 1 {
-			return NewStoreError("resolve_catalog_topup returned multiple top-ups", ErrorOptions{Details: map[string]any{"provider": lookup.Provider, "lookup_type": lookupType}})
-		}
-		row := rowOptional(rows)
-		if row == nil {
-			return nil
-		}
-		resolvedKey, keyErr := requiredRowText(row, "topup_key", "resolve_catalog_topup")
-		if keyErr != nil {
-			return keyErr
-		}
-		if resolvedKey != lookup.OfferKey {
-			return nil
-		}
-		id, valueErr := requiredRowText(row, "id", "resolve_catalog_topup")
-		if valueErr != nil {
-			return valueErr
-		}
-		result = &AutoRechargeTopup{ID: id, ProductID: productID}
-		return nil
+		result, callErr = commerceStateAutoRechargeTopupFromRows(rows, lookup.Provider, lookupType, lookup.OfferKey, productID)
+		return callErr
 	})
 	return result, err
+}
+
+func commerceStateAutoRechargeTopupFromRows(rows []map[string]any, provider, lookupType, offerKey, productID string) (*AutoRechargeTopup, error) {
+	if len(rows) > 1 {
+		return nil, NewStoreError("resolve_catalog_topup returned multiple top-ups", ErrorOptions{Details: map[string]any{"provider": provider, "lookup_type": lookupType}})
+	}
+	row := rowOptional(rows)
+	if row == nil {
+		return nil, nil
+	}
+	resolvedKey, err := requiredRowText(row, "topup_key", "resolve_catalog_topup")
+	if err != nil {
+		return nil, err
+	}
+	if resolvedKey != offerKey {
+		return nil, nil
+	}
+	id, err := requiredRowText(row, "id", "resolve_catalog_topup")
+	if err != nil {
+		return nil, err
+	}
+	return &AutoRechargeTopup{ID: id, ProductID: productID}, nil
 }
 
 func commerceStateProviderReferenceLookup(reference ProviderReference) (string, string) {
@@ -1256,11 +1302,7 @@ func (s *PostgresStore) UpsertAutoRechargeProfile(ctx context.Context, profile A
 		if callErr != nil {
 			return callErr
 		}
-		row, rowErr := rowRequired(rows, "upsert_auto_recharge_profile")
-		if rowErr != nil {
-			return rowErr
-		}
-		updated, valueErr := scalarBoolFromRow(row, "upsert_auto_recharge_profile")
+		updated, valueErr := commerceStateRequiredBoolResult(rows, "upsert_auto_recharge_profile")
 		if valueErr != nil {
 			return valueErr
 		}
@@ -1478,11 +1520,7 @@ func (s *PostgresStore) UpdateAutoRechargeAttempt(ctx context.Context, update Au
 			if advanceErr != nil {
 				return advanceErr
 			}
-			advancedRow, rowErr := rowRequired(advancedRows, "advance_auto_recharge_attempt")
-			if rowErr != nil {
-				return rowErr
-			}
-			advanced, valueErr := scalarBoolFromRow(advancedRow, "advance_auto_recharge_attempt")
+			advanced, valueErr := commerceStateRequiredBoolResult(advancedRows, "advance_auto_recharge_attempt")
 			if valueErr != nil {
 				return valueErr
 			}
@@ -1555,22 +1593,27 @@ func (s *PostgresStore) CountAutoRechargeAttempts(ctx context.Context, userID st
 		if callErr != nil {
 			return callErr
 		}
-		row, rowErr := rowRequired(rows, "count_auto_recharge_attempts")
-		if rowErr != nil {
-			return rowErr
-		}
-		value, valueErr := firstScalar(row, "count_auto_recharge_attempts")
-		if valueErr != nil {
-			return valueErr
-		}
-		result, valueErr = scalarInt(value, "count_auto_recharge_attempts")
-		if valueErr != nil {
-			return valueErr
-		}
-		if result < 0 {
-			return NewStoreError("count_auto_recharge_attempts returned a negative count", ErrorOptions{})
-		}
-		return nil
+		result, callErr = commerceStateCountResult(rows, "count_auto_recharge_attempts")
+		return callErr
 	})
 	return result, err
+}
+
+func commerceStateCountResult(rows []map[string]any, operation string) (int, error) {
+	row, err := rowRequired(rows, operation)
+	if err != nil {
+		return 0, err
+	}
+	value, err := firstScalar(row, operation)
+	if err != nil {
+		return 0, err
+	}
+	result, err := scalarInt(value, operation)
+	if err != nil {
+		return 0, err
+	}
+	if result < 0 {
+		return 0, NewStoreError(operation+" returned a negative count", ErrorOptions{})
+	}
+	return result, nil
 }

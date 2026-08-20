@@ -321,6 +321,126 @@ func TestManagementCoverageCommandCapabilityErrors(t *testing.T) {
 	}
 }
 
+func TestManagementCoveragePureCommerceBranches(t *testing.T) {
+	if got := overviewDocuments(nil, []LedgerEntry{{EntryID: "without-document"}}); len(got) != 0 {
+		t.Fatalf("document without provider identity = %+v", got)
+	}
+	first := LedgerEntry{EntryID: "z", EntryType: "purchase", Amount: MustAmount("1")}
+	first.Metadata = CreditMetadata{}
+	first.Metadata["provider"] = "stripe"
+	first.Metadata["provider_invoice_id"] = "inv-z"
+	second := LedgerEntry{EntryID: "a", EntryType: "purchase", Amount: MustAmount("1")}
+	second.Metadata = CreditMetadata{}
+	second.Metadata["provider"] = "stripe"
+	second.Metadata["provider_invoice_id"] = "inv-a"
+	entries := []LedgerEntry{first, second}
+	documents := overviewDocuments(nil, entries)
+	if len(documents) != 2 || documents[0].LedgerEntryID != "z" || documents[0].ProviderDocumentID != "inv-z" || documents[1].LedgerEntryID != "a" || documents[1].ProviderDocumentID != "inv-a" {
+		t.Fatalf("ledger documents = %+v", documents)
+	}
+	if _, err := classifyPlanChange(&BursarConfig{Plans: map[string]PlanDefinition{"starter": {Rank: 1}}}, "missing", "month", "starter", "month"); err == nil {
+		t.Fatal("plan absent from catalog was accepted")
+	}
+	trueValue := true
+	defaults := defaultBillingPreferences("account", PreferencePatch{EmailNotifications: &trueValue, UsageAlerts: &trueValue, InvoiceReminders: &trueValue})
+	if defaults.AccountID != "account" || defaults.AutoRecharge || !defaults.OverageProtection || !defaults.EmailNotifications || !defaults.UsageAlerts || !defaults.InvoiceReminders {
+		t.Fatalf("preference defaults = %+v", defaults)
+	}
+	configForSort := checkoutTestConfig(t)
+	sortStore := &overviewStoreStub{config: configForSort, balance: BalanceResult{Balance: MustAmount("1")}, available: AvailableResult{Available: MustAmount("1")}, buckets: BucketBalancesResult{Buckets: []BucketBalance{{BucketKey: "alpha", Priority: 1, Balance: MustAmount("1")}, {BucketKey: "beta", Priority: 1, Balance: MustAmount("1")}}}, plan: GetUserPlanResult{Allowance: &PlanAllowancePolicy{Amount: MustAmount("1"), Priority: 1}}}
+	sortProvider := &overviewProviderStub{name: "stripe"}
+	sortService := newOverviewService(t, sortStore, sortProvider)
+	overview, err := sortService.GetAccountOverview(context.Background(), "account-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.Credits.SpendOrder) != 3 || overview.Credits.SpendOrder[0].Type != "allowance" || overview.Credits.SpendOrder[1].Key != "alpha" || overview.Credits.SpendOrder[2].Key != "beta" {
+		t.Fatalf("deterministic spend order = %+v", overview.Credits.SpendOrder)
+	}
+
+	service, _, _, accountID := commerceWavePlanFixture(t)
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{}); err == nil {
+		t.Fatal("empty plan preview was accepted")
+	}
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID}); err == nil {
+		t.Fatal("plan preview without target offer was accepted")
+	}
+	service.state = nil
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("plan preview without state was accepted")
+	}
+	service, _, _, accountID = commerceWavePlanFixture(t)
+	failingFactory, err := NewProviderRegistry(ProviderFactoryContext{ProviderEnvironment: ProviderEnvironmentTest}, map[string]ProviderFactory{
+		"stripe": func(context.Context, ProviderFactoryContext) (PaymentProvider, error) {
+			return nil, errors.New("provider lookup failed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.providers = failingFactory
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("provider lookup failure was ignored")
+	}
+	service, _, _, accountID = commerceWavePlanFixture(t)
+	planErrors := &managementCoveragePlanErrorCredits{commerceWaveCreditStore: service.credits.store.(*commerceWaveCreditStore), err: errors.New("entitlement read failed")}
+	service.credits.store = planErrors
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("entitlement read failure was ignored")
+	}
+	service, _, _, accountID = commerceWavePlanFixture(t)
+	service.state = nil
+	if _, err := service.CancelSubscription(context.Background(), SubscriptionCommandInput{AccountID: accountID, SubscriptionID: "sub-1", OperationKey: "state-missing"}); err == nil {
+		t.Fatal("command without state was accepted")
+	}
+	service, state, _, accountID := commerceWavePlanFixture(t)
+	state.subscription.PlanKey = ""
+	service.credits.store.(*commerceWaveCreditStore).plan = GetUserPlanResult{}
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("subscription without current plan was accepted")
+	}
+	service, state, _, accountID = commerceWavePlanFixture(t)
+	state.subscription.PlanKey = "unknown-plan"
+	service.credits.store.(*commerceWaveCreditStore).plan = GetUserPlanResult{}
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("subscription plan absent from catalog was accepted")
+	}
+	service, _, _, accountID = commerceWavePlanFixture(t)
+	config := service.credits.store.(*commerceWaveCreditStore).active.Config
+	delete(config["commerce"].(map[string]any)["subscription_changes"].(map[string]any), string(PlanChangeCadenceChange))
+	if _, err := service.PreviewPlanChange(context.Background(), PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("plan change without policy was accepted")
+	}
+}
+
+type managementCoveragePlanErrorCredits struct {
+	*commerceWaveCreditStore
+	err error
+}
+
+type managementCoverageBillingStateError struct {
+	*billingManagementStore
+}
+
+func (s *managementCoverageBillingStateError) GetBillingSubscription(context.Context, string, []string) (*CommerceSubscription, error) {
+	return nil, errors.New("subscription read failed")
+}
+
+func TestManagementCoverageBillingSubscriptionReadFailure(t *testing.T) {
+	store := &managementCoverageBillingStateError{billingManagementStore: &billingManagementStore{billingLifecycleStoreStub: &billingLifecycleStoreStub{environment: ProviderEnvironmentTest}, checkoutStoreStub: &checkoutStoreStub{}}}
+	service, err := NewBillingService(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.GetUserSubscription(context.Background(), "account"); err == nil {
+		t.Fatal("subscription read failure was ignored")
+	}
+}
+
+func (s *managementCoveragePlanErrorCredits) GetUserPlan(context.Context, string) (GetUserPlanResult, error) {
+	return GetUserPlanResult{}, s.err
+}
+
 type managementCoverageCheckoutStore struct {
 	*checkoutStoreStub
 	intentErr error

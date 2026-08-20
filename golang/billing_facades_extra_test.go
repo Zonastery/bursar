@@ -179,15 +179,15 @@ func TestBillingManagementCapabilityAndGraceBoundaries(t *testing.T) {
 	}
 	provisioning := &billingProvisioningStub{}
 	service.provisioning = provisioning
-	if count, err := service.ExpirePastDueGracePeriods(ctx, time.Now(), 10); err != nil || count != 1 || provisioning.unset != 1 {
-		t.Fatalf("grace expiry = %d, %v unset=%d", count, err, provisioning.unset)
+	if count, err := service.ExpirePastDueGracePeriods(ctx, time.Now(), 10); err != nil || count != 1 || store.graceExpired != 1 || provisioning.unset != 0 {
+		t.Fatalf("grace expiry = %d, %v atomic=%d unset=%d", count, err, store.graceExpired, provisioning.unset)
 	}
 	if _, err := service.GetBlockingSubscription(ctx, "a"); err != nil {
 		t.Fatal(err)
 	}
 	service.terminalPlanKey = "free"
-	if err := service.revokeIfCurrentSubscription(ctx, "a", "sub-1"); err != nil || provisioning.set != 1 {
-		t.Fatalf("terminal revoke = %v set=%d", err, provisioning.set)
+	if _, err := service.expireGraceIfNeeded(ctx, store.subscription, time.Now()); err != nil || store.terminalPlanKey != "free" || provisioning.set != 0 {
+		t.Fatalf("terminal grace expiry = %v key=%q set=%d", err, store.terminalPlanKey, provisioning.set)
 	}
 }
 
@@ -252,8 +252,10 @@ type billingManagementStore struct {
 	*billingLifecycleStoreStub
 	*checkoutStoreStub
 	*autoRechargeStoreStub
-	activeCatalog *CatalogRevision
-	expired       []CommerceSubscription
+	activeCatalog   *CatalogRevision
+	expired         []CommerceSubscription
+	graceExpired    int
+	terminalPlanKey string
 }
 
 func (s *billingManagementStore) GetActiveCatalog(context.Context) (*CatalogRevision, error) {
@@ -301,7 +303,9 @@ func (s *billingManagementStore) PseudonymizeFinancialSubject(context.Context, s
 func (s *billingManagementStore) ListExpiredGraceSubscriptions(context.Context, time.Time, int) ([]CommerceSubscription, error) {
 	return s.expired, nil
 }
-func (s *billingManagementStore) MarkSubscriptionGraceExpired(context.Context, string, time.Time, time.Time) (bool, error) {
+func (s *billingManagementStore) expirePastDueGracePeriod(_ context.Context, _ CommerceSubscription, _ time.Time, terminalPlanKey string) (bool, error) {
+	s.graceExpired++
+	s.terminalPlanKey = terminalPlanKey
 	return true, nil
 }
 func (s *billingManagementStore) GetBillingSubscriptionByProvider(context.Context, string, string) (*CommerceSubscription, error) {

@@ -1,5 +1,9 @@
 import { z } from "zod";
-import type { BillingSubscriptionState } from "../../types/subscriptions.js";
+import type {
+  BillingSubscriptionState,
+  BillingSubscriptionStatus,
+  SubscriptionEntitlementOutcome,
+} from "../../types/subscriptions.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
 import type { JsonObject, PostgresRow } from "../../../shared/json.js";
 import { StoreError } from "../../../errors.js";
@@ -28,6 +32,7 @@ const SubscriptionStatusSchema = z.enum([
   "paused",
   "expired",
 ]);
+const SubscriptionEntitlementOutcomeSchema = z.enum(["applied", "revoked", "preserved", "stale"]);
 const PersistedSubscriptionRowSchema = z
   .object({
     id: postgresUuid,
@@ -350,20 +355,71 @@ export class BillingSubscriptionRepository {
     return enriched.map((row) => this.map(row));
   }
 
-  async markGraceExpired(
+  async reconcileEntitlement(
+    subjectId: string,
     subscriptionId: string,
-    expectedGraceEndsAt: string,
-    expiredAt: string,
-  ): Promise<boolean> {
+    billingEventId: string,
+    expectedStatus: BillingSubscriptionStatus,
+    expectedProviderUpdatedAt: string,
+    planAssignedAt: Date | string | null,
+    applyEntitlement: boolean,
+    terminalPlanKey: string | null,
+    reason: string,
+  ): Promise<SubscriptionEntitlementOutcome> {
+    const expectedTimestamp = safeParse(
+      timestamp,
+      expectedProviderUpdatedAt,
+      "BillingSubscriptionRepository.reconcileEntitlement.expectedProviderUpdatedAt",
+    );
+    const assignmentTimestamp =
+      planAssignedAt === null
+        ? null
+        : safeParse(
+            timestamp,
+            planAssignedAt,
+            "BillingSubscriptionRepository.reconcileEntitlement.planAssignedAt",
+          );
     const rows = await this.query(
-      `SELECT bursar.mark_subscription_grace_expired($1::uuid, $2, $3) AS marked`,
-      [subscriptionId, expectedGraceEndsAt, expiredAt],
+      `SELECT bursar.reconcile_subscription_entitlement(
+         $1::uuid, $2::uuid, $3::uuid, $4::bursar.billing_subscription_status,
+         $5::timestamptz, $6::timestamptz, $7, $8, $9
+       ) AS outcome`,
+      [
+        subjectId,
+        subscriptionId,
+        billingEventId,
+        expectedStatus,
+        expectedTimestamp,
+        assignmentTimestamp,
+        applyEntitlement,
+        terminalPlanKey,
+        reason,
+      ],
     );
     return requireResultField(
       rows,
-      "marked",
+      "outcome",
+      SubscriptionEntitlementOutcomeSchema,
+      "BillingSubscriptionRepository.reconcileEntitlement",
+    );
+  }
+
+  async expireGracePeriod(
+    subjectId: string,
+    subscriptionId: string,
+    expectedGraceEndsAt: string,
+    expiredAt: string,
+    terminalPlanKey: string | null,
+  ): Promise<boolean> {
+    const rows = await this.query(
+      `SELECT bursar.expire_subscription_grace_period($1::uuid, $2::uuid, $3, $4, $5) AS expired`,
+      [subjectId, subscriptionId, expectedGraceEndsAt, expiredAt, terminalPlanKey],
+    );
+    return requireResultField(
+      rows,
+      "expired",
       pgBoolean,
-      "BillingSubscriptionRepository.markGraceExpired",
+      "BillingSubscriptionRepository.expireGracePeriod",
     );
   }
 
@@ -394,50 +450,5 @@ export class BillingSubscriptionRepository {
       z.union([z.string().min(1), z.number().int()]).transform(String),
       "BillingSubscriptionRepository.recordConflict",
     );
-  }
-
-  /** Select a provider subscription without modifying provider-reported state. */
-  async selectEntitlementSource(
-    userId: string,
-    provider: string,
-    providerSubscriptionId?: string | null,
-  ): Promise<boolean> {
-    const eligibleStatuses = new Set(["trialing", "active", "past_due", "paused"]);
-    const rows = await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
-      userId,
-    ]);
-    const replacement = rows
-      .map((row) =>
-        persistedSubscription(row, "BillingSubscriptionRepository.selectEntitlementSource"),
-      )
-      .filter(
-        (row) =>
-          row.provider === provider &&
-          eligibleStatuses.has(row.status) &&
-          (!providerSubscriptionId || row.provider_subscription_id === providerSubscriptionId),
-      )
-      .sort(
-        (left, right) =>
-          Date.parse(right.provider_updated_at) - Date.parse(left.provider_updated_at),
-      )[0];
-
-    if (replacement?.id == null) return false;
-
-    const selectedRows = await this.query(
-      `SELECT bursar.select_entitlement_source($1::uuid, $2::uuid) AS selected`,
-      [userId, replacement.id],
-    );
-    if (
-      !requireResultField(
-        selectedRows,
-        "selected",
-        pgBoolean,
-        "BillingSubscriptionRepository.selectEntitlementSource",
-      )
-    ) {
-      throw new StoreError("subscription entitlement source selection was rejected");
-    }
-
-    return true;
   }
 }

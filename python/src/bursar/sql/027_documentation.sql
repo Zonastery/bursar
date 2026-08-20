@@ -291,8 +291,6 @@ COMMENT ON FUNCTION bursar.fail_billing_event(text, text, uuid, text) IS
 COMMENT ON FUNCTION bursar.attribute_billing_event_subject(uuid, uuid) IS
 'Compare-and-set durable event attribution and immediately scrub retained local '
 'envelopes when the subject was already pseudonymized.';
-COMMENT ON FUNCTION bursar.select_entitlement_source(uuid, uuid) IS
-'Select one tenant-owned subscription as the subject current entitlement source.';
 COMMENT ON FUNCTION bursar.grant_billing_credit(uuid, text) IS
 'Post one grant with caller-supplied ledger idempotency or replay its persisted ledger linkage.';
 COMMENT ON FUNCTION bursar.post_billing_refund(uuid, uuid, bigint, text) IS
@@ -424,10 +422,29 @@ COMMENT ON FUNCTION bursar.get_billing_credit_grant_by_payment(uuid) IS
 
 COMMENT ON FUNCTION bursar.assign_plan(uuid, uuid, timestamptz, timestamptz) IS
 'Assign one exact plan while closing prior history and carrying compatible policy-window state.';
+COMMENT ON FUNCTION bursar.apply_plan_assignment(
+    uuid, uuid, timestamptz, timestamptz, text, uuid, text
+) IS
+'Internal assignment primitive that commits plan policy and durable business-source ownership together.';
 COMMENT ON FUNCTION bursar.set_subject_plan(uuid, text, timestamptz) IS
-'Resolve and assign an active plan key atomically against one catalog revision.';
+'Assign the active plan for a key and record explicit SDK assignment ownership as manual.';
 COMMENT ON FUNCTION bursar.unassign_plan(uuid, text) IS
-'End a subject active plan assignment with an audited reason.';
+'End an existing subject plan assignment with an audited reason without provisioning an account.';
+COMMENT ON FUNCTION bursar.unassign_plan_if_source(uuid, text, uuid, text) IS
+'End a subject plan assignment only while its durable source identity still matches.';
+COMMENT ON FUNCTION bursar.replace_subscription_entitlement_if_source(
+    uuid, uuid, text, text
+) IS
+'Atomically replace only the plan assignment owned by one exact subscription source.';
+COMMENT ON FUNCTION bursar.reconcile_subscription_entitlement(
+    uuid, uuid, uuid, bursar.billing_subscription_status,
+    timestamptz, timestamptz, boolean, text, text
+) IS
+'Fence one exact provider subscription version and atomically apply, preserve, or revoke its entitlement.';
+COMMENT ON FUNCTION bursar.expire_subscription_grace_period(
+    uuid, uuid, timestamptz, timestamptz, text
+) IS
+'Atomically commit one expected grace marker and replace its source-owned assignment when still matched.';
 COMMENT ON FUNCTION bursar.set_plan_revision_pin(uuid, boolean) IS
 'Pin or unpin a subject against automatic catalog plan rollouts.';
 COMMENT ON FUNCTION bursar.carry_catalog_plan_revision_state(

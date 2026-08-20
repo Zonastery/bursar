@@ -162,7 +162,7 @@ const CONFIG: BursarConfigData = {
   },
 };
 
-describe("production pricing integration", () => {
+describe.runIf(DATABASE_URL)("production pricing integration", () => {
   const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
   const store = new PostgresStore({
     postgres: pool,

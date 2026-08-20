@@ -5,8 +5,12 @@ package bursar
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestPostgresStorePlanProjectionMappers(t *testing.T) {
@@ -64,9 +68,12 @@ func TestPostgresStorePlanProjectionMappers(t *testing.T) {
 		t.Fatalf("credit/revision projection = %+v", got)
 	}
 
-	for _, value := range []any{nil, `[]`, map[string]any{"enabled": true}} {
-		if _, err := entitlementMap(value, "entitlement"); value == nil && err != nil {
-			t.Fatalf("nil entitlement map: %v", err)
+	if got, err := entitlementMap(nil, "entitlement"); err != nil || len(got) != 0 {
+		t.Fatalf("nil entitlement map = %#v, error = %v", got, err)
+	}
+	for _, value := range []any{`[]`, map[string]any{"enabled": true}} {
+		if _, err := entitlementMap(value, "entitlement"); err == nil {
+			t.Errorf("invalid entitlement shape accepted: %#v", value)
 		}
 	}
 	for name, value := range map[string]any{
@@ -148,6 +155,21 @@ func TestPostgresStoreLedgerAndUsageMappers(t *testing.T) {
 		if _, err := usageChargeFromRow(row, "usage"); err == nil {
 			t.Errorf("usage row missing %s accepted", key)
 		}
+	}
+	if value, err := jsonValue([]byte(`false`), "feature"); err != nil || value != false {
+		t.Fatalf("json false value = %#v, error = %v", value, err)
+	}
+	if value, err := jsonValue([]byte(`1.25`), "feature"); err != nil || value != json.Number("1.25") {
+		t.Fatalf("json numeric value = %#v, error = %v", value, err)
+	}
+	if values, err := floatSlice([]byte(`[50,90]`), "thresholds"); err != nil || len(values) != 2 || values[1] != 90 {
+		t.Fatalf("JSON threshold values = %#v, error = %v", values, err)
+	}
+	if values, err := floatSlice([]int32{50, 90}, "thresholds"); err != nil || len(values) != 2 || values[1] != 90 {
+		t.Fatalf("integer threshold values = %#v, error = %v", values, err)
+	}
+	if values, err := floatSlice(pgtype.FlatArray[int32]{50, 90}, "thresholds"); err != nil || len(values) != 2 || values[1] != 90 {
+		t.Fatalf("pgx threshold values = %#v, error = %v", values, err)
 	}
 }
 
@@ -242,9 +264,12 @@ func TestPostgresStoreFeatureQuotaAndMigrationPostgres(t *testing.T) {
 		t.Fatalf("publish feature/quota catalog: %v", err)
 	}
 
-	proUser, starterUser := "store-wave8-pro", "store-wave8-starter"
+	proUser, starterUser := uuid.NewString(), uuid.NewString()
 	assignedPro, err := sdk.Credits.SetUserPlan(ctx, proUser, "pro", SetUserPlanOptions{})
 	if err != nil || assignedPro.PlanID == "" {
+		if typed, ok := AsBursarError(err); ok && typed.Unwrap() != nil {
+			t.Fatalf("assign pro = %+v, error = %v: %v", assignedPro, err, typed.Unwrap())
+		}
 		t.Fatalf("assign pro = %+v, error = %v", assignedPro, err)
 	}
 	assignedStarter, err := sdk.Credits.SetUserPlan(ctx, starterUser, "starter", SetUserPlanOptions{})

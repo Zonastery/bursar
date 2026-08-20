@@ -118,6 +118,14 @@ func TestOutboxWorkerDispatchesFailuresAndClaimLoss(t *testing.T) {
 	if result != (OutboxRunResult{Claimed: 3, Delivered: 1, Failed: 2, ClaimLost: 1}) {
 		t.Fatalf("result = %#v", result)
 	}
+	snapshot := worker.Snapshot()
+	if snapshot.LastRun == nil || snapshot.LastRun.Result == nil {
+		t.Fatalf("successful run snapshot = %#v", snapshot.LastRun)
+	}
+	snapshot.LastRun.Result.Claimed = 0
+	if fresh := worker.Snapshot(); fresh.LastRun == nil || fresh.LastRun.Result == nil || fresh.LastRun.Result.Claimed != 3 {
+		t.Fatalf("caller mutated retained worker snapshot: %#v", fresh.LastRun)
+	}
 	if failedSummary != "outbox_delivery_failed:Error" {
 		t.Fatalf("unsafe or unexpected summary = %q", failedSummary)
 	}
@@ -244,6 +252,86 @@ func TestOutboxWorkerRuntimeLifecycle(t *testing.T) {
 	}
 	if err := worker.Start(context.Background()); err == nil {
 		t.Fatal("closed worker restarted")
+	}
+}
+
+func TestOutboxWorkerStopIsIdempotentAndSnapshotsLocalState(t *testing.T) {
+	worker, err := NewOutboxWorker(
+		&outboxStoreStub{},
+		[]OutboxHandler{&outboxHandlerStub{topics: []string{"one"}}},
+		OutboxWorkerOptions{PollInterval: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := worker.Snapshot(); !snapshot.Configured || snapshot.Lifecycle != OutboxWorkerNotStarted {
+		t.Fatalf("initial snapshot = %#v", snapshot)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := worker.Snapshot(); snapshot.Lifecycle != OutboxWorkerRunning {
+		t.Fatalf("running snapshot = %#v", snapshot)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+	if snapshot := worker.Snapshot(); snapshot.Lifecycle != OutboxWorkerStopped {
+		t.Fatalf("stopped snapshot = %#v", snapshot)
+	}
+	if err := worker.Close(context.Background()); err != nil {
+		t.Fatalf("Close() after Stop() error = %v", err)
+	}
+}
+
+func TestOutboxWorkerBackgroundRunDoesNotReplaceManualSnapshot(t *testing.T) {
+	claimStarted := make(chan struct{})
+	errorReported := make(chan struct{})
+	var claimCalls atomic.Int32
+	store := &outboxStoreStub{claim: func(context.Context, []string, int, int) ([]OutboxEvent, error) {
+		switch claimCalls.Add(1) {
+		case 1:
+			return nil, errors.New("manual provider secret")
+		case 2:
+			close(claimStarted)
+			return nil, errors.New("background provider secret")
+		}
+		return nil, nil
+	}}
+	worker, err := NewOutboxWorker(store, []OutboxHandler{&outboxHandlerStub{topics: []string{"one"}}}, OutboxWorkerOptions{
+		PollInterval: time.Hour,
+		OnError:      func(error) { close(errorReported) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.RunOnce(context.Background()); err == nil {
+		t.Fatal("manual run unexpectedly succeeded")
+	}
+	manual := worker.Snapshot()
+	if manual.LastRun == nil || manual.LastRun.Source != "manual" || manual.LastRun.Error != "outbox_worker_failed:Error" {
+		t.Fatalf("manual snapshot = %#v", manual.LastRun)
+	}
+	if manual.LastRun.Result != nil {
+		t.Fatalf("failed manual run unexpectedly has a result: %#v", manual.LastRun.Result)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-claimStarted
+	<-errorReported
+	snapshot := worker.Snapshot()
+	if snapshot.LastRun == nil || snapshot.LastRun.Source != "manual" {
+		t.Fatalf("background run replaced manual snapshot: %#v", snapshot.LastRun)
+	}
+	if snapshot.LastError == nil || snapshot.LastError.Error != "outbox_worker_failed:Error" {
+		t.Fatalf("background error snapshot = %#v", snapshot.LastError)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

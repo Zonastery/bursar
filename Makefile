@@ -105,6 +105,14 @@ test-go:                             ## Go tests (mock; Postgres only when DATAB
 	cd golang && go test -race ./...
 
 test-go-coverage:                    ## Go SDK race tests and 90% package/total coverage gate (supply DATABASE_URL)
+	if [ -z "$${DATABASE_URL:-}" ]; then
+	  echo "DATABASE_URL is required for the Go PostgreSQL coverage gate" >&2
+	  exit 1
+	fi
+	if [ "$${BURSAR_REQUIRE_POSTGRES_TESTS:-}" != "1" ]; then
+	  echo "BURSAR_REQUIRE_POSTGRES_TESTS=1 is required for the Go PostgreSQL coverage gate" >&2
+	  exit 1
+	fi
 	cd golang
 	mkdir -p coverage
 	go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/core.out ./...

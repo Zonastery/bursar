@@ -1154,7 +1154,7 @@ class TestFinancialReadModels:
                 checkout_kind="subscription",
                 product_key="pro_monthly",
                 request_digest="33" * 32,
-                expires_at="2026-08-20T00:00:00Z",
+                expires_at=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
             )
         )
         payment_event = BillingEvent(
@@ -1398,6 +1398,10 @@ class TestFinancialReadModels:
         assert paused.action == "subscription_updated"
         assert credits.get_user_plan(USER_ID3).plan_key == "free"
 
+        # A later manual assignment is not owned by the paused subscription;
+        # terminal events must preserve that override.
+        credits.set_user_plan(USER_ID3, "enterprise")
+
         expired = service.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
@@ -1412,7 +1416,7 @@ class TestFinancialReadModels:
             )
         )
         assert expired.action == "subscription_expired"
-        assert credits.get_user_plan(USER_ID3).plan_key == "free"
+        assert credits.get_user_plan(USER_ID3).plan_key == "enterprise"
         stored = bs.get_billing_subscription(PROVIDER, subscription_id)
         assert stored is not None
         assert stored.status == BillingSubscriptionStatus.expired
@@ -1479,7 +1483,7 @@ class TestFinancialReadModels:
                     checkout_kind="credit_topup",
                     product_key="standard_topup",
                     request_digest="44" * 32,
-                    expires_at="2026-08-20T00:00:00Z",
+                    expires_at=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
                 )
             ).id
 
@@ -2156,6 +2160,237 @@ class TestBillingServiceLifecycle:
 
         plan2 = cm.get_user_plan(USER_ID)
         assert plan2.plan_id is None
+
+    def test_stale_subscription_events_cannot_revoke_or_resurrect_access(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        active_at = "2026-08-20T10:00:02+00:00"
+        canceled_at = "2026-08-20T10:00:03+00:00"
+        stale_at = "2026-08-20T10:00:01+00:00"
+        subscription_id = "sub_stale_entitlement"
+
+        active = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_stale_entitlement_active",
+                event_type=BillingEventType.subscription_renewed,
+                occurred_at=active_at,
+                account_id=USER_ID4,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        assert active.action == "subscription_renewed"
+        assert cm.get_user_plan(USER_ID4).plan_key == "pro"
+
+        stale_cancel = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_stale_entitlement_cancel",
+                event_type=BillingEventType.subscription_canceled,
+                occurred_at=stale_at,
+                account_id=USER_ID4,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.canceled,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        assert stale_cancel.action == "stale_subscription_event"
+        assert cm.get_user_plan(USER_ID4).plan_key == "pro"
+
+        canceled = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_current_entitlement_cancel",
+                event_type=BillingEventType.subscription_canceled,
+                occurred_at=canceled_at,
+                account_id=USER_ID4,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.canceled,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        assert canceled.action == "subscription_canceled"
+        assert cm.get_user_plan(USER_ID4).plan_id is None
+
+        stale_resume = sink.ingest_billing_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_stale_entitlement_resume",
+                event_type=BillingEventType.subscription_resumed,
+                occurred_at=active_at,
+                account_id=USER_ID4,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+        )
+        assert stale_resume.action == "stale_subscription_event"
+        assert cm.get_user_plan(USER_ID4).plan_id is None
+        stored = bs.get_billing_subscription(PROVIDER, subscription_id)
+        assert stored is not None
+        assert stored.status == BillingSubscriptionStatus.canceled
+
+    def test_equal_timestamp_distinct_event_is_fenced_but_same_event_replays(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        bs, _cm, sink = _make_components(pg_database_url, pg_store)
+        timestamp = "2026-08-20T10:01:00+00:00"
+        subscription_id = "sub_equal_timestamp"
+        callbacks: list[str] = []
+        sink = BillingService(
+            bs,
+            provisioning=object(),  # type: ignore[arg-type]
+            event_handlers={
+                BillingEventType.subscription_renewed: (lambda event, _user_id: callbacks.append(event.event_id))
+            },
+        )
+
+        def renewal(event_id: str) -> BillingEvent:
+            return BillingEvent(
+                provider=PROVIDER,
+                event_id=event_id,
+                event_type=BillingEventType.subscription_renewed,
+                occurred_at=timestamp,
+                account_id=USER_ID5,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id=subscription_id,
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                ),
+            )
+
+        first = sink.ingest_billing_event(renewal("evt_equal_timestamp_first"))
+        second = sink.ingest_billing_event(renewal("evt_equal_timestamp_second"))
+
+        assert first.action == "subscription_renewed"
+        assert second.action == "stale_subscription_event"
+        assert callbacks == ["evt_equal_timestamp_first"]
+
+        subscription = bs.get_billing_subscription(PROVIDER, subscription_id)
+        assert subscription is not None
+        assert subscription.subscription_id is not None
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT id
+                FROM bursar.billing_events
+                WHERE provider = %s
+                  AND provider_environment = 'test'
+                  AND provider_event_id = %s
+                """,
+                (PROVIDER, "evt_equal_timestamp_first"),
+            )
+            billing_event_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        assert (
+            bs.reconcile_subscription_entitlement(
+                USER_ID5,
+                subscription.subscription_id,
+                billing_event_id,
+                BillingSubscriptionStatus.active,
+                timestamp,
+                None,
+                True,
+                None,
+                "subscription_active",
+            )
+            == "applied"
+        )
+
+    @pytest.mark.concurrency
+    def test_concurrent_stale_active_and_newer_terminal_event_converge_terminal(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bs, cm, _sink = _make_components(pg_database_url, pg_store)
+        barrier = Barrier(2)
+        subscription_id = "sub_concurrent_entitlement"
+
+        def ingest(*, event_id: str, event_type: BillingEventType, status: BillingSubscriptionStatus, at: str):
+            local_store = PostgresBillingStore(
+                pg_database_url,
+                tenant_id=TEST_TENANT_ID,
+                provider_environment="test",
+            )
+            local_sink = BillingService(local_store, provisioning=object())  # type: ignore[arg-type]
+            try:
+                barrier.wait(timeout=30)
+                return local_sink.ingest_billing_event(
+                    BillingEvent(
+                        provider=PROVIDER,
+                        event_id=event_id,
+                        event_type=event_type,
+                        occurred_at=at,
+                        account_id=USER_ID4,
+                        subscription=BillingSubscriptionInfo(
+                            provider_subscription_id=subscription_id,
+                            status=status,
+                            refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
+                        ),
+                    )
+                )
+            finally:
+                local_store.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            older = executor.submit(
+                ingest,
+                event_id="evt_concurrent_entitlement_active",
+                event_type=BillingEventType.subscription_renewed,
+                status=BillingSubscriptionStatus.active,
+                at="2026-08-20T10:02:00+00:00",
+            )
+            newer = executor.submit(
+                ingest,
+                event_id="evt_concurrent_entitlement_canceled",
+                event_type=BillingEventType.subscription_canceled,
+                status=BillingSubscriptionStatus.canceled,
+                at="2026-08-20T10:02:01+00:00",
+            )
+            results = [older.result(timeout=60), newer.result(timeout=60)]
+
+        assert all(result.handled for result in results)
+        assert cm.get_user_plan(USER_ID4).plan_id is None
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT subscription.status, assignment.source_type, source.selected
+                FROM bursar.billing_subscriptions AS subscription
+                LEFT JOIN bursar.credit_accounts AS account
+                  ON account.subject_id = subscription.subject_id
+                 AND account.account_kind = 'personal'
+                LEFT JOIN bursar.account_plan_assignments AS assignment
+                  ON assignment.account_id = account.id
+                LEFT JOIN bursar.billing_entitlement_sources AS source
+                  ON source.subscription_id = subscription.id
+                WHERE subscription.provider = %s
+                  AND subscription.provider_subscription_id = %s
+                """,
+                (PROVIDER, subscription_id),
+            )
+            row = cursor.fetchone()
+            assert row is not None
+            status, source_type, selected = row
+            assert status == "canceled"
+            assert source_type is None
+            assert selected in {None, False}
 
     def test_topup_credit_grant(self, pg_database_url: str, pg_store: object) -> None:
         _bs, cm, sink = _make_components(pg_database_url, pg_store)

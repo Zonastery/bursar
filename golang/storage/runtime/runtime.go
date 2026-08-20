@@ -23,6 +23,7 @@ import (
 )
 
 var tenantSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$`)
+var diagnosticCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
 
 // Options configures a complete tenant runtime. The primary connection is
 // used for all financial and tenant-scoped operations. The operator
@@ -90,23 +91,57 @@ type RuntimeState struct {
 	CatalogLoaded  bool
 	Components     int
 	DependenciesOK bool
+	Worker         bursar.OutboxWorkerSnapshot
 }
 
-// DependencyCheck is one best-effort readiness check.
+// DependencyStatus is the outcome of an explicit dependency check.
+type DependencyStatus string
+
+const (
+	DependencyOK          DependencyStatus = "ok"
+	DependencyError       DependencyStatus = "error"
+	DependencySkipped     DependencyStatus = "skipped"
+	DependencyUnsupported DependencyStatus = "unsupported"
+)
+
+// DependencyCheck is one best-effort readiness check. Health and State never
+// populate this type because they intentionally do not perform I/O.
 type DependencyCheck struct {
 	Name    string
 	OK      bool
 	Latency time.Duration
 	Error   string
 	Skipped bool
+	Status  DependencyStatus
+	Reason  string
+}
+
+type CatalogDependencyCheck struct {
+	DependencyCheck
+	Loaded            bool
+	CurrentRevisionID string
+	CurrentRevision   int
+}
+
+type OutboxDependencyCheck struct {
+	DependencyCheck
+	Snapshot *bursar.OutboxStats
+	Limit    int
 }
 
 // Diagnostics combines state with dependency outcomes.
 type Diagnostics struct {
-	CheckedAt  time.Time
-	Health     RuntimeHealth
-	Catalog    DependencyCheck
-	Components []DependencyCheck
+	CheckedAt       time.Time
+	Health          RuntimeHealth
+	Ready           bool
+	FinancialReady  bool
+	ProjectionReady bool
+	Degraded        bool
+	State           RuntimeState
+	Postgres        DependencyCheck
+	Catalog         CatalogDependencyCheck
+	Outbox          OutboxDependencyCheck
+	Components      []DependencyCheck
 }
 
 type runtimeComponent struct {
@@ -577,25 +612,16 @@ func (r *Runtime) verifyTenantIdentity(ctx context.Context) error {
 	return nil
 }
 
-// Health reports readiness. A configured projection is ready only when its
-// component health check succeeds.
-func (r *Runtime) Health(ctx context.Context) RuntimeHealth {
+// Health reports a local readiness snapshot. It never calls component health
+// checks or touches PostgreSQL, allowing probes to be used safely on hot paths.
+// The context parameter remains for source compatibility and is ignored.
+func (r *Runtime) Health(_ context.Context) RuntimeHealth {
 	if r == nil {
 		return RuntimeHealth{Closed: true}
 	}
 	state := r.State()
-	projectionReady := state.Started && !state.Closed
-	if projectionReady {
-		for _, component := range r.components {
-			checker, ok := component.component.(bursar.RuntimeHealthChecker)
-			if !ok {
-				continue
-			}
-			if err := checker.Health(ctx); err != nil {
-				projectionReady = false
-			}
-		}
-	}
+	projectionReady := state.Started && !state.Closed &&
+		(!state.Worker.Configured || state.Worker.Lifecycle == bursar.OutboxWorkerRunning)
 	financialReady := state.Started && state.CatalogLoaded && !state.Closed
 	return RuntimeHealth{
 		Ready:           financialReady && projectionReady,
@@ -617,43 +643,121 @@ func (r *Runtime) State() RuntimeState {
 	started, closed := r.started, r.closed
 	r.mu.Unlock()
 	loaded := r.Bursar != nil && r.Bursar.Catalog != nil && r.Bursar.Catalog.IsLoaded()
-	return RuntimeState{Started: started, Closed: closed, CatalogLoaded: loaded, Components: len(r.components), DependenciesOK: started && !closed}
+	worker := bursar.OutboxWorkerSnapshot{Lifecycle: bursar.OutboxWorkerNotConfigured}
+	if r.Worker != nil {
+		worker = r.Worker.Snapshot()
+	}
+	return RuntimeState{Started: started, Closed: closed, CatalogLoaded: loaded, Components: len(r.components), DependenciesOK: started && !closed, Worker: worker}
 }
 
-// CheckDependencies performs best-effort catalog and component checks.
+// CheckDependencies performs explicit active dependency checks. Unlike Health,
+// this method may query PostgreSQL, the catalog, outbox status, and component
+// health implementations.
 func (r *Runtime) CheckDependencies(ctx context.Context) Diagnostics {
 	checked := time.Now().UTC()
 	diagnostics := Diagnostics{CheckedAt: checked, Health: r.Health(ctx)}
-	start := time.Now()
 	if r == nil {
-		diagnostics.Catalog = DependencyCheck{Name: "catalog", Error: "catalog is not configured", Latency: time.Since(start)}
+		diagnostics.Catalog = CatalogDependencyCheck{DependencyCheck: DependencyCheck{Name: "catalog", Error: "catalog is not configured", Status: DependencyError}}
+		diagnostics.Postgres = DependencyCheck{Name: "postgres", Error: "postgres is not configured", Status: DependencyUnsupported, Reason: "primary PostgreSQL store is not configured"}
+		diagnostics.Outbox = OutboxDependencyCheck{DependencyCheck: DependencyCheck{Name: "outbox", Status: DependencyUnsupported, Reason: "outbox status is not configured"}, Limit: 100}
 		return diagnostics
 	}
-	if r.Bursar == nil || r.Bursar.Catalog == nil {
-		diagnostics.Catalog = DependencyCheck{Name: "catalog", Error: "catalog is not configured", Latency: time.Since(start)}
+	diagnostics.State = r.State()
+	if diagnostics.State.Closed {
+		return r.skippedDiagnostics(diagnostics)
+	}
+	if r.PrimaryStore == nil {
+		diagnostics.Postgres = DependencyCheck{Name: "postgres", Status: DependencyUnsupported, Reason: "primary PostgreSQL store is not configured"}
 	} else {
-		_, err := r.Bursar.Catalog.GetActive(ctx)
-		diagnostics.Catalog = dependencyCheck("catalog", start, err)
+		start := time.Now()
+		_, err := r.PrimaryStore.GetActiveCatalog(ctx)
+		diagnostics.Postgres = dependencyCheck("postgres", start, err)
+	}
+	if r.Bursar == nil || r.Bursar.Catalog == nil {
+		diagnostics.Catalog = CatalogDependencyCheck{DependencyCheck: DependencyCheck{Name: "catalog", Error: "catalog is not configured", Status: DependencyError}, Loaded: diagnostics.State.CatalogLoaded}
+	} else {
+		start := time.Now()
+		revision, err := r.Bursar.Catalog.GetActive(ctx)
+		catalogCheck := dependencyCheck("catalog", start, err)
+		diagnostics.Catalog = CatalogDependencyCheck{DependencyCheck: catalogCheck, Loaded: diagnostics.State.CatalogLoaded}
+		if revision != nil {
+			diagnostics.Catalog.CurrentRevisionID = revision.ID
+			diagnostics.Catalog.CurrentRevision = revision.Version
+		}
+	}
+	if r.Recovery == nil {
+		diagnostics.Outbox = OutboxDependencyCheck{DependencyCheck: DependencyCheck{Name: "outbox", Status: DependencyUnsupported, Reason: "the configured outbox store does not expose bounded status"}, Limit: 100}
+	} else {
+		start := time.Now()
+		stats, err := r.Recovery.Stats(ctx)
+		outboxCheck := dependencyCheck("outbox", start, err)
+		diagnostics.Outbox = OutboxDependencyCheck{DependencyCheck: outboxCheck, Limit: 100}
+		if err == nil {
+			diagnostics.Outbox.Snapshot = &stats
+		}
 	}
 	diagnostics.Components = make([]DependencyCheck, 0, len(r.components))
+	componentsReady := true
 	for index, component := range r.components {
 		checker, ok := component.component.(bursar.RuntimeHealthChecker)
 		if !ok {
-			diagnostics.Components = append(diagnostics.Components, DependencyCheck{Name: fmt.Sprintf("component_%d", index), Skipped: true})
+			diagnostics.Components = append(diagnostics.Components, DependencyCheck{Name: fmt.Sprintf("component_%d", index), Status: DependencySkipped, Skipped: true, Reason: "component does not expose an active health check"})
 			continue
 		}
 		started := time.Now()
-		diagnostics.Components = append(diagnostics.Components, dependencyCheck(fmt.Sprintf("component_%d", index), started, checker.Health(ctx)))
+		check := dependencyCheck(fmt.Sprintf("component_%d", index), started, checker.Health(ctx))
+		diagnostics.Components = append(diagnostics.Components, check)
+		if !check.OK {
+			componentsReady = false
+		}
 	}
+	postgresReady := diagnostics.Postgres.OK || (r.PrimaryStore == nil && diagnostics.Postgres.Status == DependencyUnsupported)
+	diagnostics.FinancialReady = diagnostics.Health.FinancialReady && postgresReady && diagnostics.Catalog.OK
+	diagnostics.ProjectionReady = diagnostics.Health.ProjectionReady && componentsReady && (!diagnostics.State.Worker.Configured || (diagnostics.Outbox.OK && diagnostics.Outbox.Snapshot != nil && diagnostics.Outbox.Snapshot.DeadLetterCount == 0))
+	diagnostics.Ready = diagnostics.FinancialReady && diagnostics.ProjectionReady
+	diagnostics.Degraded = diagnostics.FinancialReady && !diagnostics.ProjectionReady
 	return diagnostics
 }
 
 func dependencyCheck(name string, started time.Time, err error) DependencyCheck {
-	check := DependencyCheck{Name: name, OK: err == nil, Latency: time.Since(started)}
+	check := DependencyCheck{Name: name, OK: err == nil, Latency: time.Since(started), Status: DependencyOK}
 	if err != nil {
-		check.Error = err.Error()
+		check.Error = dependencyDiagnosticSummary(err, dependencyFailureFallback(name))
+		check.Status = DependencyError
 	}
 	return check
+}
+
+func dependencyFailureFallback(name string) string {
+	switch name {
+	case "postgres":
+		return "postgres_check_failed"
+	case "catalog":
+		return "catalog_check_failed"
+	case "outbox":
+		return "outbox_check_failed"
+	default:
+		return "dependency_check_failed"
+	}
+}
+
+func dependencyDiagnosticSummary(err error, fallback string) string {
+	code := "Error"
+	if bursarErr, ok := bursar.AsBursarError(err); ok && diagnosticCodePattern.MatchString(string(bursarErr.Code)) {
+		code = string(bursarErr.Code)
+	}
+	return fallback + ":" + code
+}
+
+func (r *Runtime) skippedDiagnostics(diagnostics Diagnostics) Diagnostics {
+	diagnostics.Postgres = DependencyCheck{Name: "postgres", Status: DependencySkipped, Skipped: true, Reason: "runtime is closed"}
+	diagnostics.Catalog = CatalogDependencyCheck{DependencyCheck: DependencyCheck{Name: "catalog", Status: DependencySkipped, Skipped: true, Reason: "runtime is closed"}, Loaded: diagnostics.State.CatalogLoaded}
+	diagnostics.Outbox = OutboxDependencyCheck{DependencyCheck: DependencyCheck{Name: "outbox", Status: DependencySkipped, Skipped: true, Reason: "runtime is closed"}, Limit: 100}
+	diagnostics.Components = make([]DependencyCheck, len(r.components))
+	for index := range r.components {
+		diagnostics.Components[index] = DependencyCheck{Name: fmt.Sprintf("component_%d", index), Status: DependencySkipped, Skipped: true, Reason: "runtime is closed"}
+	}
+	return diagnostics
 }
 
 // Flush runs one bounded pass for each started component in reverse order.
@@ -716,8 +820,14 @@ func (r *Runtime) Close(ctx context.Context) error {
 	var failures []error
 	for index := len(components) - 1; index >= 0; index-- {
 		if started {
-			if err := components[index].component.Flush(ctx); err != nil {
-				failures = append(failures, err)
+			shouldFlush := true
+			if worker, ok := components[index].component.(*bursar.OutboxWorker); ok && worker.Snapshot().Lifecycle == bursar.OutboxWorkerStopped {
+				shouldFlush = false
+			}
+			if shouldFlush {
+				if err := components[index].component.Flush(ctx); err != nil {
+					failures = append(failures, err)
+				}
 			}
 		}
 		if components[index].owned {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Decimal } from "decimal.js";
 import type { BillingStore } from "../src/billing/billing-store.js";
 import {
   boundedDiagnosticMessage,
@@ -7,6 +8,7 @@ import {
 import { BillingEventHandlers } from "../src/billing/event-handlers.js";
 import { BillingEventProcessor } from "../src/billing/event-processor.js";
 import { BillingEventRepository } from "../src/billing/postgres/repositories/event.js";
+import { BillingSubscriptionRepository } from "../src/billing/postgres/repositories/subscription.js";
 import type {
   BillingEvent,
   BillingEventClaim,
@@ -247,36 +249,267 @@ describe("billing diagnostic and repository boundaries", () => {
       ).rejects.toMatchObject({ name: StoreError.name, indeterminate: true });
     },
   );
+
+  it("calls and validates the canonical nine-argument entitlement RPC", async () => {
+    const query = vi.fn().mockResolvedValue([{ outcome: "applied" }]);
+    const repository = new BillingSubscriptionRepository(query);
+
+    await expect(
+      repository.reconcileEntitlement(
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+        BILLING_EVENT_ID,
+        "active",
+        "2026-08-05T00:00:00Z",
+        null,
+        true,
+        null,
+        "subscription_active",
+      ),
+    ).resolves.toBe("applied");
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]?.[0]).toContain("reconcile_subscription_entitlement");
+    expect(query.mock.calls[0]?.[1]).toHaveLength(9);
+
+    query.mockResolvedValueOnce([{ outcome: "unexpected" }]);
+    await expect(
+      repository.reconcileEntitlement(
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+        BILLING_EVENT_ID,
+        "active",
+        "2026-08-05T00:00:00Z",
+        null,
+        true,
+        null,
+        "subscription_active",
+      ),
+    ).rejects.toMatchObject({ name: StoreError.name, indeterminate: true });
+  });
 });
 
 describe("subscription plan-change provisioning", () => {
+  it("reconciles terminal creation through the atomic entitlement boundary", async () => {
+    const reconcileSubscriptionEntitlement = vi.fn().mockResolvedValue("revoked");
+    const upsertBillingSubscription = vi.fn().mockResolvedValue(undefined);
+    const persisted = {
+      userId: "user-1",
+      provider: "stripe",
+      providerSubscriptionId: "sub-terminal",
+      subscriptionId: "00000000-0000-0000-0000-000000000001",
+      offerId: "00000000-0000-0000-0000-000000000010",
+      offerKey: "pro_monthly",
+      plan: "pro",
+      status: "canceled" as const,
+      providerUpdatedAt: "2026-08-05T00:00:00.000Z",
+      cancelAtPeriodEnd: true,
+    };
+    const handlers = new BillingEventHandlers(
+      testStore({
+        getBillingSubscription: vi.fn().mockResolvedValue(persisted),
+        getUserSubscriptions: vi.fn().mockResolvedValue([]),
+        upsertBillingSubscription,
+        reconcileSubscriptionEntitlement,
+      }),
+      {
+        terminalPlanKey: "free",
+        provisioning: {
+          getUserPlan: vi.fn(),
+          setUserPlan: vi.fn(),
+          unsetUserPlan: vi.fn(),
+        },
+      },
+    );
+
+    const handler = handlers.getHandler(BillingEventType.SUBSCRIPTION_CREATED);
+    await expect(
+      handler?.({
+        provider: "stripe",
+        eventId: "evt_terminal_created",
+        eventType: BillingEventType.SUBSCRIPTION_CREATED,
+        occurredAt: "2026-08-05T00:00:00Z",
+        accountId: "user-1",
+        billingEventId: BILLING_EVENT_ID,
+        subscription: {
+          providerSubscriptionId: "sub-terminal",
+          status: "canceled",
+        },
+      }),
+    ).resolves.toMatchObject({ handled: true, action: "subscription_created" });
+    expect(upsertBillingSubscription).toHaveBeenCalledOnce();
+    expect(reconcileSubscriptionEntitlement).toHaveBeenCalledWith(
+      "user-1",
+      "00000000-0000-0000-0000-000000000001",
+      BILLING_EVENT_ID,
+      "canceled",
+      "2026-08-05T00:00:00Z",
+      null,
+      true,
+      "free",
+      "subscription_canceled",
+    );
+  });
+
+  it("suppresses cycle grants and callbacks for a stale renewal", async () => {
+    const store = claimedStore();
+    const callback = vi.fn().mockResolvedValue(undefined);
+    const grant = vi.fn().mockResolvedValue("grant-1");
+    Object.assign(store, {
+      getBillingSubscription: vi.fn().mockResolvedValue({
+        userId: "user-1",
+        provider: "stripe",
+        providerSubscriptionId: "sub-stale",
+        subscriptionId: "00000000-0000-0000-0000-000000000002",
+        offerId: "00000000-0000-0000-0000-000000000010",
+        offerKey: "cycle_monthly",
+        plan: "pro",
+        status: "active",
+        providerUpdatedAt: "2026-08-06T00:00:00.000Z",
+        cancelAtPeriodEnd: false,
+      }),
+      resolveBillingOffer: vi.fn().mockResolvedValue({
+        offerId: "00000000-0000-0000-0000-000000000010",
+        offerKey: "cycle_monthly",
+        plan: "pro",
+        interval: "month",
+        intervalCount: 1,
+        grant: { mode: "cycle_grant", credits: new Decimal("10") },
+      }),
+      upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
+      reconcileSubscriptionEntitlement: vi.fn().mockResolvedValue("stale"),
+      createBillingCreditGrant: grant,
+    });
+    const processor = new BillingEventProcessor(testStore(store), {
+      provisioning: {
+        getUserPlan: vi.fn(),
+        setUserPlan: vi.fn(),
+        unsetUserPlan: vi.fn(),
+      },
+      eventHandlers: { [BillingEventType.SUBSCRIPTION_RENEWED]: callback },
+    });
+
+    await expect(
+      processor.ingestBillingEvent({
+        provider: "stripe",
+        eventId: "evt-stale",
+        eventType: BillingEventType.SUBSCRIPTION_RENEWED,
+        occurredAt: "2026-08-05T00:00:00Z",
+        accountId: "user-1",
+        subscription: {
+          providerSubscriptionId: "sub-stale",
+          status: "active",
+          refs: { priceId: "price-cycle" },
+        },
+      }),
+    ).resolves.toEqual({ handled: true, action: "stale_subscription_event" });
+    expect(grant).not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+    expect(store.completeBillingEvent).toHaveBeenCalledOnce();
+  });
+
+  it("suppresses composite invoice and checkout effects for a stale subscription payment", async () => {
+    const store = claimedStore();
+    const updateCheckoutIntent = vi.fn().mockResolvedValue(undefined);
+    const upsertBillingInvoice = vi.fn().mockResolvedValue(undefined);
+    const callback = vi.fn().mockResolvedValue(undefined);
+    Object.assign(store, {
+      getBillingSubscription: vi.fn().mockResolvedValue({
+        userId: "user-1",
+        provider: "stripe",
+        providerSubscriptionId: "sub-stale-payment",
+        subscriptionId: "00000000-0000-0000-0000-000000000002",
+        offerId: "00000000-0000-0000-0000-000000000010",
+        offerKey: "pro_monthly",
+        plan: "pro",
+        status: "active",
+        providerUpdatedAt: "2026-08-06T00:00:00.000Z",
+        cancelAtPeriodEnd: false,
+      }),
+      resolveBillingOffer: vi.fn().mockResolvedValue({
+        offerId: "00000000-0000-0000-0000-000000000010",
+        offerKey: "pro_monthly",
+        plan: "pro",
+        interval: "month",
+        intervalCount: 1,
+      }),
+      upsertBillingPayment: vi.fn().mockResolvedValue("payment-1"),
+      upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
+      reconcileSubscriptionEntitlement: vi.fn().mockResolvedValue("stale"),
+      updateCheckoutIntent,
+      upsertBillingInvoice,
+    });
+    const processor = new BillingEventProcessor(testStore(store), {
+      provisioning: {
+        getUserPlan: vi.fn(),
+        setUserPlan: vi.fn(),
+        unsetUserPlan: vi.fn(),
+      },
+      eventHandlers: { [BillingEventType.PAYMENT_SUCCEEDED]: callback },
+    });
+
+    await expect(
+      processor.ingestBillingEvent({
+        provider: "stripe",
+        eventId: "evt-stale-payment",
+        eventType: BillingEventType.PAYMENT_SUCCEEDED,
+        occurredAt: "2026-08-05T00:00:00Z",
+        accountId: "user-1",
+        metadata: { checkout_intent_id: "00000000-0000-0000-0000-000000000020" },
+        subscription: {
+          providerSubscriptionId: "sub-stale-payment",
+          status: "active",
+          refs: { priceId: "price-pro" },
+        },
+        payment: {
+          providerPaymentId: "pay-stale",
+          amountMinor: 1000,
+          taxMinor: 0,
+          currency: "USD",
+          purpose: "subscription",
+          status: "succeeded",
+        },
+      }),
+    ).resolves.toEqual({ handled: true, action: "stale_subscription_event" });
+    expect(updateCheckoutIntent).not.toHaveBeenCalled();
+    expect(upsertBillingInvoice).not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it("captures the allowance anchor before advancing the durable change", async () => {
     const anchor = new Date("2026-07-01T00:00:00.000Z");
-    const setUserPlan = vi.fn().mockResolvedValue(undefined);
     const updateBillingSubscriptionChange = vi.fn().mockResolvedValue(undefined);
+    const upsertBillingSubscription = vi.fn().mockResolvedValue(undefined);
+    const reconcileSubscriptionEntitlement = vi.fn().mockResolvedValue("applied");
     const getUserPlan = vi.fn().mockResolvedValue({ planAssignedAt: anchor });
     const store = {
       getBillingSubscription: vi.fn().mockResolvedValue({
         userId: "user-1",
         provider: "dodo",
         providerSubscriptionId: "sub-1",
+        subscriptionId: "00000000-0000-0000-0000-000000000011",
+        offerId: "00000000-0000-0000-0000-000000000012",
+        offerKey: "monk_monthly",
+        plan: "monk",
         status: "active",
+        providerUpdatedAt: "2026-08-04T00:00:00.000Z",
+        cancelAtPeriodEnd: false,
       }),
       resolveBillingOffer: vi.fn().mockResolvedValue({
-        offerId: "offer-sage",
+        offerId: "00000000-0000-0000-0000-000000000013",
         offerKey: "sage_monthly",
         plan: "sage",
       }),
       getOpenBillingSubscriptionChange: vi.fn().mockResolvedValue({ id: "change-1" }),
       updateBillingSubscriptionChange,
-      upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
+      upsertBillingSubscription,
+      reconcileSubscriptionEntitlement,
     };
 
     const handlers = new BillingEventHandlers(testStore(store), {
       autoSelectEntitlementSource: false,
       provisioning: {
         getUserPlan,
-        setUserPlan,
+        setUserPlan: vi.fn(),
         unsetUserPlan: vi.fn(),
       },
     });
@@ -288,6 +521,7 @@ describe("subscription plan-change provisioning", () => {
       eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
       occurredAt: "2026-08-05T00:00:00Z",
       accountId: "user-1",
+      billingEventId: BILLING_EVENT_ID,
       subscription: {
         providerSubscriptionId: "sub-1",
         status: "active",
@@ -297,34 +531,57 @@ describe("subscription plan-change provisioning", () => {
 
     expect(getUserPlan).toHaveBeenCalledTimes(1);
     expect(getUserPlan.mock.invocationCallOrder[0]).toBeLessThan(
+      upsertBillingSubscription.mock.invocationCallOrder[0]!,
+    );
+    expect(upsertBillingSubscription.mock.invocationCallOrder[0]).toBeLessThan(
+      reconcileSubscriptionEntitlement.mock.invocationCallOrder[0]!,
+    );
+    expect(reconcileSubscriptionEntitlement.mock.invocationCallOrder[0]).toBeLessThan(
       updateBillingSubscriptionChange.mock.invocationCallOrder[0]!,
     );
-    expect(setUserPlan).toHaveBeenCalledWith("user-1", "sage", anchor);
+    expect(reconcileSubscriptionEntitlement).toHaveBeenCalledWith(
+      "user-1",
+      "00000000-0000-0000-0000-000000000011",
+      BILLING_EVENT_ID,
+      "active",
+      "2026-08-05T00:00:00Z",
+      anchor,
+      false,
+      null,
+      "subscription_active",
+    );
   });
 
-  it("starts immediately when the existing allowance anchor is unavailable", async () => {
-    const setUserPlan = vi.fn().mockResolvedValue(undefined);
+  it("still versions plan changes when automatic entitlement is disabled", async () => {
+    const reconcileSubscriptionEntitlement = vi.fn().mockResolvedValue("preserved");
     const store = {
       getBillingSubscription: vi.fn().mockResolvedValue({
         userId: "user-1",
         provider: "dodo",
         providerSubscriptionId: "sub-1",
+        subscriptionId: "00000000-0000-0000-0000-000000000011",
+        offerId: "00000000-0000-0000-0000-000000000012",
+        offerKey: "monk_monthly",
+        plan: "monk",
         status: "active",
+        providerUpdatedAt: "2026-08-04T00:00:00.000Z",
+        cancelAtPeriodEnd: false,
       }),
       resolveBillingOffer: vi.fn().mockResolvedValue({
-        offerId: "offer-sage",
+        offerId: "00000000-0000-0000-0000-000000000013",
         offerKey: "sage_monthly",
         plan: "sage",
       }),
       getOpenBillingSubscriptionChange: vi.fn().mockResolvedValue(null),
       upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
+      reconcileSubscriptionEntitlement,
     };
 
     const handlers = new BillingEventHandlers(testStore(store), {
       autoSelectEntitlementSource: false,
       provisioning: {
         getUserPlan: vi.fn().mockResolvedValue(null),
-        setUserPlan,
+        setUserPlan: vi.fn(),
         unsetUserPlan: vi.fn(),
       },
     });
@@ -336,6 +593,7 @@ describe("subscription plan-change provisioning", () => {
       eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
       occurredAt: "2026-08-05T00:00:00Z",
       accountId: "user-1",
+      billingEventId: BILLING_EVENT_ID,
       subscription: {
         providerSubscriptionId: "sub-1",
         status: "active",
@@ -344,9 +602,8 @@ describe("subscription plan-change provisioning", () => {
       },
     });
 
-    expect(setUserPlan).toHaveBeenCalledTimes(1);
-    const assignedAt = setUserPlan.mock.calls[0]?.[2];
-    if (!(assignedAt instanceof Date)) throw new Error("expected a Date assignment anchor");
-    expect(assignedAt.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(reconcileSubscriptionEntitlement).toHaveBeenCalledOnce();
+    expect(reconcileSubscriptionEntitlement.mock.calls[0]?.[6]).toBe(false);
+    expect(reconcileSubscriptionEntitlement.mock.calls[0]?.[5]).toBeNull();
   });
 });

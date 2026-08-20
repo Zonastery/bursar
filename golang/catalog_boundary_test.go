@@ -23,6 +23,7 @@ type catalogBoundaryStore struct {
 	activateErr error
 	publishedID string
 	activatedID string
+	published   map[string]any
 }
 
 func (s *catalogBoundaryStore) GetActiveCatalog(context.Context) (*CatalogRevision, error) {
@@ -41,16 +42,39 @@ func (s *catalogBoundaryStore) GetCatalogRevision(context.Context, int) (*Catalo
 	return s.revision, s.revisionErr
 }
 
-func (s *catalogBoundaryStore) PublishCatalogDraft(context.Context, map[string]any, string) (string, error) {
+func (s *catalogBoundaryStore) PublishCatalogDraft(_ context.Context, config map[string]any, _ string) (string, error) {
+	s.published = config
 	return s.publishedID, s.publishErr
 }
 
-func (s *catalogBoundaryStore) PublishAndActivateCatalog(context.Context, map[string]any, string, CatalogRollout) (string, error) {
+func (s *catalogBoundaryStore) PublishAndActivateCatalog(_ context.Context, config map[string]any, _ string, _ CatalogRollout) (string, error) {
+	s.published = config
 	return s.publishedID, s.publishErr
 }
 
 func (s *catalogBoundaryStore) ActivateCatalogRevision(context.Context, int, CatalogRollout) (string, error) {
 	return s.activatedID, s.activateErr
+}
+
+func TestCatalogPublishingPersistsCanonicalDefaults(t *testing.T) {
+	config := checkoutTestConfig(t)
+	offer := config["commerce"].(map[string]any)["offers"].(map[string]any)["pro_month"].(map[string]any)
+	offer["cycle_grant"] = map[string]any{
+		"amount": "1.250000", "bucket": "general", "renewal": "replace_previous",
+	}
+	store := &catalogBoundaryStore{publishedID: "draft"}
+	service, err := NewCatalogServiceWithOptions(store, CatalogServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PublishDraft(context.Background(), config, "canonical-defaults"); err != nil {
+		t.Fatal(err)
+	}
+	grant := store.published["commerce"].(map[string]any)["offers"].(map[string]any)["pro_month"].(map[string]any)["cycle_grant"].(map[string]any)
+	expiry := grant["expiry"].(map[string]any)
+	if expiry["type"] != "subscription_end" {
+		t.Fatalf("canonical cycle grant expiry = %#v", expiry)
+	}
 }
 
 func TestCatalogBoundaryErrorsNeverUseStaleFinancialState(t *testing.T) {
@@ -126,5 +150,22 @@ func TestCatalogBoundaryErrorsNeverUseStaleFinancialState(t *testing.T) {
 	store.activateErr = storeError
 	if _, err := service.Activate(ctx, 2, CatalogRollout{}); !errors.Is(err, storeError) {
 		t.Fatalf("activate storage error = %v", err)
+	}
+
+	// Once storage reports a successful mutation, a transient follow-up read
+	// must not make the committed write look failed and invite a duplicate
+	// publish/activation retry. The cache remains explicitly stale instead.
+	store.activateErr = nil
+	store.activatedID = "activation-committed"
+	store.publishedID = "publish-committed"
+	store.activeErr = storeError
+	if result, err := service.Activate(ctx, 2, CatalogRollout{}); err != nil || result != "activation-committed" {
+		t.Fatalf("committed activation = %q, error = %v", result, err)
+	}
+	if result, err := service.PublishAndActivate(ctx, valid, "active", CatalogRollout{}); err != nil || result != "publish-committed" {
+		t.Fatalf("committed publish = %q, error = %v", result, err)
+	}
+	if err := service.Load(ctx); !errors.Is(err, storeError) {
+		t.Fatalf("explicit reload after committed mutation = %v", err)
 	}
 }

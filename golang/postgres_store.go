@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"strconv"
 	"strings"
@@ -467,7 +469,34 @@ func jsonMap(value any, field string) (map[string]any, error) {
 func decodeJSONUseNumber(data []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	return decoder.Decode(destination)
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON contains multiple values")
+		}
+		return err
+	}
+	return nil
+}
+
+func jsonValue(value any, field string) (any, error) {
+	var raw []byte
+	switch typed := value.(type) {
+	case []byte:
+		raw = typed
+	case string:
+		raw = []byte(typed)
+	default:
+		return value, nil
+	}
+	var decoded any
+	if err := decodeJSONUseNumber(raw, &decoded); err != nil {
+		return nil, NewStoreError("PostgreSQL returned invalid JSON for "+field, ErrorOptions{Cause: err})
+	}
+	return decoded, nil
 }
 
 func amountMap(value any, field string) (map[string]Amount, error) {
@@ -533,8 +562,16 @@ func floatSlice(value any, field string) ([]float64, error) {
 			return float64(number), nil
 		case int:
 			return float64(number), nil
+		case int8:
+			return float64(number), nil
+		case int16:
+			return float64(number), nil
+		case int32:
+			return float64(number), nil
 		case int64:
 			return float64(number), nil
+		case json.Number:
+			return strconv.ParseFloat(number.String(), 64)
 		case string:
 			return strconv.ParseFloat(number, 64)
 		case []byte:
@@ -543,10 +580,59 @@ func floatSlice(value any, field string) ([]float64, error) {
 			return 0, fmt.Errorf("invalid number")
 		}
 	}
+	if encoded, ok := value.([]byte); ok {
+		var items []any
+		if err := decodeJSONUseNumber(encoded, &items); err != nil {
+			return nil, NewStoreError("PostgreSQL returned an invalid "+field, ErrorOptions{Cause: err})
+		}
+		return floatSlice(items, field)
+	}
+	if encoded, ok := value.(string); ok {
+		var items []any
+		if err := decodeJSONUseNumber([]byte(encoded), &items); err != nil {
+			return nil, NewStoreError("PostgreSQL returned an invalid "+field, ErrorOptions{Cause: err})
+		}
+		return floatSlice(items, field)
+	}
 	items, ok := value.([]any)
 	if !ok {
 		if numbers, ok := value.([]float64); ok {
 			return append([]float64(nil), numbers...), nil
+		}
+		if numbers, ok := value.([]int); ok {
+			result := make([]float64, len(numbers))
+			for index, number := range numbers {
+				result[index] = float64(number)
+			}
+			return result, nil
+		}
+		if numbers, ok := value.([]int32); ok {
+			result := make([]float64, len(numbers))
+			for index, number := range numbers {
+				result[index] = float64(number)
+			}
+			return result, nil
+		}
+		if numbers, ok := value.([]int64); ok {
+			result := make([]float64, len(numbers))
+			for index, number := range numbers {
+				result[index] = float64(number)
+			}
+			return result, nil
+		}
+		if numbers, ok := value.(pgtype.FlatArray[int32]); ok {
+			result := make([]float64, len(numbers))
+			for index, number := range numbers {
+				result[index] = float64(number)
+			}
+			return result, nil
+		}
+		if numbers, ok := value.(pgtype.FlatArray[int64]); ok {
+			result := make([]float64, len(numbers))
+			for index, number := range numbers {
+				result[index] = float64(number)
+			}
+			return result, nil
 		}
 		return nil, NewStoreError("PostgreSQL returned an invalid "+field, ErrorOptions{})
 	}
@@ -665,6 +751,25 @@ func balanceFromState(userID string, state map[string]any, operation string) (Ba
 	return BalanceResult{UserID: userID, Balance: balance, LifetimePurchased: lifetime}, nil
 }
 
+func availableFromState(userID string, state map[string]any, operation string) (AvailableResult, error) {
+	if state == nil {
+		return AvailableResult{UserID: userID, Balance: DecimalZero, Reserved: DecimalZero, Available: DecimalZero}, nil
+	}
+	balance, err := rowAmount(state, "balance", operation)
+	if err != nil {
+		return AvailableResult{}, err
+	}
+	reserved, err := rowAmount(state, "reserved", operation)
+	if err != nil {
+		return AvailableResult{}, err
+	}
+	available, err := rowAmount(state, "available", operation)
+	if err != nil {
+		return AvailableResult{}, err
+	}
+	return AvailableResult{UserID: userID, Balance: balance, Reserved: reserved, Available: available}, nil
+}
+
 // GetBalance returns a tenant-scoped committed credit balance.
 func (s *PostgresStore) GetBalance(ctx context.Context, userID string) (result BalanceResult, err error) {
 	userID, err = requireText(userID, "user ID")
@@ -693,24 +798,8 @@ func (s *PostgresStore) GetAvailable(ctx context.Context, userID string) (result
 		if err != nil {
 			return err
 		}
-		if state == nil {
-			result = AvailableResult{UserID: userID, Balance: DecimalZero, Reserved: DecimalZero, Available: DecimalZero}
-			return nil
-		}
-		balance, err := rowAmount(state, "balance", "get_credit_state")
-		if err != nil {
-			return err
-		}
-		reserved, err := rowAmount(state, "reserved", "get_credit_state")
-		if err != nil {
-			return err
-		}
-		available, err := rowAmount(state, "available", "get_credit_state")
-		if err != nil {
-			return err
-		}
-		result = AvailableResult{UserID: userID, Balance: balance, Reserved: reserved, Available: available}
-		return nil
+		result, err = availableFromState(userID, state, "get_credit_state")
+		return err
 	})
 	return result, err
 }
@@ -766,56 +855,62 @@ func (s *PostgresStore) AddCredits(ctx context.Context, userID string, amount Am
 		if err != nil {
 			return err
 		}
-		if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
-			return NewStoreError("post_credit failed: "+errorCode, ErrorOptions{Details: map[string]any{"error_code": errorCode}})
-		}
-		entryID, err := requiredRowText(row, "entry_id", "post_credit")
-		if err != nil {
-			return err
-		}
-		newBalance, err := rowAmount(row, "balance_after", "post_credit")
-		if err != nil {
-			return err
-		}
-		idempotent, err := rowBool(row, "replayed", "post_credit")
-		if err != nil {
+		if optionalRowText(row, "error_code") != "" {
+			result, err = addCreditsResultFromRows(userID, amount, row, nil, nil)
 			return err
 		}
 		state, err := s.creditState(ctx, tx, userID)
 		if err != nil {
 			return err
 		}
-		balance, err := balanceFromState(userID, state, "get_credit_state")
-		if err != nil {
-			return err
-		}
-		bucket := ""
+		var grant map[string]any
 		if amount.GreaterThan(DecimalZero) {
+			entryID, err := requiredRowText(row, "entry_id", "post_credit")
+			if err != nil {
+				return err
+			}
 			grantRows, err := tx.Call(ctx, "get_credit_grant_details", userID, entryID)
 			if err != nil {
 				return err
 			}
-			if grant := rowOptional(grantRows); grant != nil {
-				bucket = optionalRowText(grant, "bucket_key")
-				if bucket == "" {
-					if scalar, scalarErr := firstScalar(grant, "get_credit_grant_details"); scalarErr == nil {
-						bucket, _ = textValue(scalar)
-					}
-				}
-			}
+			grant = rowOptional(grantRows)
 		}
-		result = AddCreditsResult{
-			EntryID:           entryID,
-			UserID:            userID,
-			Amount:            QuantizeMoney(amount),
-			NewBalance:        newBalance,
-			LifetimePurchased: balance.LifetimePurchased,
-			Bucket:            bucket,
-			Idempotent:        idempotent,
-		}
-		return nil
+		result, err = addCreditsResultFromRows(userID, amount, row, state, grant)
+		return err
 	})
 	return result, err
+}
+
+func addCreditsResultFromRows(userID string, amount Amount, row, state, grant map[string]any) (AddCreditsResult, error) {
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		return AddCreditsResult{}, NewStoreError("post_credit failed: "+errorCode, ErrorOptions{Details: map[string]any{"error_code": errorCode}})
+	}
+	entryID, err := requiredRowText(row, "entry_id", "post_credit")
+	if err != nil {
+		return AddCreditsResult{}, err
+	}
+	newBalance, err := rowAmount(row, "balance_after", "post_credit")
+	if err != nil {
+		return AddCreditsResult{}, err
+	}
+	idempotent, err := rowBool(row, "replayed", "post_credit")
+	if err != nil {
+		return AddCreditsResult{}, err
+	}
+	balance, err := balanceFromState(userID, state, "get_credit_state")
+	if err != nil {
+		return AddCreditsResult{}, err
+	}
+	bucket := ""
+	if grant != nil {
+		bucket = optionalRowText(grant, "bucket_key")
+		if bucket == "" {
+			if scalar, scalarErr := firstScalar(grant, "get_credit_grant_details"); scalarErr == nil {
+				bucket, _ = textValue(scalar)
+			}
+		}
+	}
+	return AddCreditsResult{EntryID: entryID, UserID: userID, Amount: QuantizeMoney(amount), NewBalance: newBalance, LifetimePurchased: balance.LifetimePurchased, Bucket: bucket, Idempotent: idempotent}, nil
 }
 
 // DeductWithAllowance atomically consumes allowance and debits the remaining
@@ -863,65 +958,63 @@ func (s *PostgresStore) DeductWithAllowance(ctx context.Context, userID string, 
 		if err != nil {
 			return err
 		}
-		charged, err := rowAmount(row, "charged", "charge_usage_for_operation")
-		if err != nil {
-			return err
-		}
-		allowance, err := rowAmount(row, "allowance_covered", "charge_usage_for_operation")
-		if err != nil {
-			return err
-		}
-		errorCode := optionalRowText(row, "error_code")
-		if errorCode != "" {
-			result = DeductionResult{
-				UserID:            userID,
-				Amount:            charged,
-				AllowanceConsumed: allowance,
-				ErrorCode:         errorCode,
+		var details map[string]any
+		if optionalRowText(row, "error_code") == "" {
+			entryID, err := requiredRowText(row, "ledger_entry_id", "charge_usage_for_operation")
+			if err != nil {
+				return err
 			}
-			return nil
+			detailsRows, err := tx.Call(ctx, "get_credit_operation_details", userID, entryID, idempotencyKey)
+			if err != nil {
+				return err
+			}
+			details, err = rowRequired(detailsRows, "get_credit_operation_details")
+			if err != nil {
+				return err
+			}
 		}
-		entryID, err := requiredRowText(row, "ledger_entry_id", "charge_usage_for_operation")
-		if err != nil {
-			return err
-		}
-		chargeID, err := requiredRowText(row, "charge_id", "charge_usage_for_operation")
-		if err != nil {
-			return err
-		}
-		idempotent, err := rowBool(row, "replayed", "charge_usage_for_operation")
-		if err != nil {
-			return err
-		}
-		detailsRows, err := tx.Call(ctx, "get_credit_operation_details", userID, entryID, idempotencyKey)
-		if err != nil {
-			return err
-		}
-		details, err := rowRequired(detailsRows, "get_credit_operation_details")
-		if err != nil {
-			return err
-		}
-		balanceAfter, err := rowAmount(details, "balance_after", "get_credit_operation_details")
-		if err != nil {
-			return err
-		}
-		breakdown, err := amountMap(rowValue(details, "bucket_breakdown"), "get_credit_operation_details.bucket_breakdown")
-		if err != nil {
-			return err
-		}
-		result = DeductionResult{
-			EntryID:           entryID,
-			UsageChargeID:     chargeID,
-			UserID:            userID,
-			Amount:            charged,
-			BalanceAfter:      creditAmountPointer(balanceAfter),
-			AllowanceConsumed: allowance,
-			Idempotent:        idempotent,
-			BucketBreakdown:   breakdown,
-		}
-		return nil
+		result, err = deductionResultFromRows(userID, row, details)
+		return err
 	})
 	return result, err
+}
+
+func deductionResultFromRows(userID string, row, details map[string]any) (DeductionResult, error) {
+	charged, err := rowAmount(row, "charged", "charge_usage_for_operation")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	allowance, err := rowAmount(row, "allowance_covered", "charge_usage_for_operation")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		return DeductionResult{UserID: userID, Amount: charged, AllowanceConsumed: allowance, ErrorCode: errorCode}, nil
+	}
+	entryID, err := requiredRowText(row, "ledger_entry_id", "charge_usage_for_operation")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	chargeID, err := requiredRowText(row, "charge_id", "charge_usage_for_operation")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	idempotent, err := rowBool(row, "replayed", "charge_usage_for_operation")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	if details == nil {
+		return DeductionResult{}, NewStoreError("get_credit_operation_details returned no result", ErrorOptions{})
+	}
+	balanceAfter, err := rowAmount(details, "balance_after", "get_credit_operation_details")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	breakdown, err := amountMap(rowValue(details, "bucket_breakdown"), "get_credit_operation_details.bucket_breakdown")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	return DeductionResult{EntryID: entryID, UsageChargeID: chargeID, UserID: userID, Amount: charged, BalanceAfter: creditAmountPointer(balanceAfter), AllowanceConsumed: allowance, Idempotent: idempotent, BucketBreakdown: breakdown}, nil
 }
 
 // RecordUsage writes a priced usage receipt without a second account debit.
@@ -954,27 +1047,29 @@ func (s *PostgresStore) RecordUsage(ctx context.Context, userID, operation strin
 		if err != nil {
 			return err
 		}
-		actualRequested, err := rowAmount(row, "requested", "record_usage")
-		if err != nil {
-			return err
-		}
-		errorCode := optionalRowText(row, "error_code")
-		if errorCode != "" {
-			result = UsageRecordResult{UserID: userID, Requested: actualRequested, ErrorCode: errorCode}
-			return nil
-		}
-		usageID, err := requiredRowText(row, "charge_id", "record_usage")
-		if err != nil {
-			return err
-		}
-		idempotent, err := rowBool(row, "replayed", "record_usage")
-		if err != nil {
-			return err
-		}
-		result = UsageRecordResult{UsageID: usageID, UserID: userID, Requested: actualRequested, Idempotent: idempotent}
-		return nil
+		result, err = usageRecordFromRow(userID, row)
+		return err
 	})
 	return result, err
+}
+
+func usageRecordFromRow(userID string, row map[string]any) (UsageRecordResult, error) {
+	requested, err := rowAmount(row, "requested", "record_usage")
+	if err != nil {
+		return UsageRecordResult{}, err
+	}
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		return UsageRecordResult{UserID: userID, Requested: requested, ErrorCode: errorCode}, nil
+	}
+	usageID, err := requiredRowText(row, "charge_id", "record_usage")
+	if err != nil {
+		return UsageRecordResult{}, err
+	}
+	idempotent, err := rowBool(row, "replayed", "record_usage")
+	if err != nil {
+		return UsageRecordResult{}, err
+	}
+	return UsageRecordResult{UsageID: usageID, UserID: userID, Requested: requested, Idempotent: idempotent}, nil
 }
 
 // CreateLease atomically reserves an amount through the database admission
@@ -1047,81 +1142,64 @@ func (s *PostgresStore) CreateLease(ctx context.Context, userID string, amount A
 		if err != nil {
 			return err
 		}
-		available := AvailableResult{UserID: userID, Balance: DecimalZero, Reserved: DecimalZero, Available: DecimalZero}
-		if availabilityState != nil {
-			available.Balance, err = rowAmount(availabilityState, "balance", "get_credit_state")
+		available, err := availableFromState(userID, availabilityState, "get_credit_state")
+		if err != nil {
+			return err
+		}
+		var lease map[string]any
+		if optionalRowText(row, "error_code") == "" {
+			leaseID, err := requiredRowText(row, "lease_id", "create_lease_for_operation")
 			if err != nil {
 				return err
 			}
-			available.Reserved, err = rowAmount(availabilityState, "reserved", "get_credit_state")
+			leaseRows, err := tx.Call(ctx, "get_credit_lease", userID, leaseID)
 			if err != nil {
 				return err
 			}
-			available.Available, err = rowAmount(availabilityState, "available", "get_credit_state")
+			lease, err = rowRequired(leaseRows, "get_credit_lease")
 			if err != nil {
 				return err
 			}
 		}
-		if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
-			var reserved *Amount
-			if rowValue(row, "reserved_amount") != nil {
-				reserved, err = optionalRowAmount(row, "reserved_amount", "create_lease_for_operation")
-				if err != nil {
-					return err
-				}
-			}
-			result = LeaseResult{
-				UserID:        userID,
-				Amount:        reserved,
-				Available:     available.Available,
-				ReservedTotal: available.Reserved,
-				BillingMode:   mode,
-				ErrorCode:     errorCode,
-			}
-			return nil
-		}
-		leaseID, err := requiredRowText(row, "lease_id", "create_lease_for_operation")
-		if err != nil {
-			return err
-		}
-		reserved, err := rowAmount(row, "reserved_amount", "create_lease_for_operation")
-		if err != nil {
-			return err
-		}
-		leaseRows, err := tx.Call(ctx, "get_credit_lease", userID, leaseID)
-		if err != nil {
-			return err
-		}
-		lease, err := rowRequired(leaseRows, "get_credit_lease")
-		if err != nil {
-			return err
-		}
-		expiresAt, err := rowTime(lease, "expires_at", "get_credit_lease")
-		if err != nil {
-			return err
-		}
-		minimumBalance, err := rowAmount(lease, "minimum_balance", "get_credit_lease")
-		if err != nil {
-			return err
-		}
-		if minimumBalance.IsNegative() {
-			mode = BillingModeOverdraft
-		} else {
-			mode = BillingModeStrict
-		}
-		result = LeaseResult{
-			LeaseID:        leaseID,
-			UserID:         userID,
-			Amount:         creditAmountPointer(reserved),
-			Available:      available.Available,
-			ReservedTotal:  available.Reserved,
-			MinimumBalance: creditAmountPointer(minimumBalance),
-			BillingMode:    mode,
-			ExpiresAt:      timePointer(expiresAt),
-		}
-		return nil
+		result, err = createLeaseResultFromRows(userID, mode, row, available, lease)
+		return err
 	})
 	return result, err
+}
+
+func createLeaseResultFromRows(userID string, mode BillingMode, row map[string]any, available AvailableResult, lease map[string]any) (LeaseResult, error) {
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		reserved, err := optionalRowAmount(row, "reserved_amount", "create_lease_for_operation")
+		if err != nil {
+			return LeaseResult{}, err
+		}
+		return LeaseResult{UserID: userID, Amount: reserved, Available: available.Available, ReservedTotal: available.Reserved, BillingMode: mode, ErrorCode: errorCode}, nil
+	}
+	leaseID, err := requiredRowText(row, "lease_id", "create_lease_for_operation")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	reserved, err := rowAmount(row, "reserved_amount", "create_lease_for_operation")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	if lease == nil {
+		return LeaseResult{}, NewStoreError("get_credit_lease returned no result", ErrorOptions{})
+	}
+	expiresAt, err := rowTime(lease, "expires_at", "get_credit_lease")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	minimumBalance, err := rowAmount(lease, "minimum_balance", "get_credit_lease")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	if minimumBalance.IsNegative() {
+		mode = BillingModeOverdraft
+	} else {
+		mode = BillingModeStrict
+	}
+	return LeaseResult{LeaseID: leaseID, UserID: userID, Amount: creditAmountPointer(reserved), Available: available.Available, ReservedTotal: available.Reserved, MinimumBalance: creditAmountPointer(minimumBalance), BillingMode: mode, ExpiresAt: timePointer(expiresAt)}, nil
 }
 
 // SettleLease atomically charges actual usage and finalizes a reservation. It
@@ -1172,67 +1250,67 @@ func (s *PostgresStore) SettleLease(ctx context.Context, userID, leaseID string,
 		if err != nil {
 			return err
 		}
-		settled, err := rowAmount(row, "settled_amount", "settle_lease")
-		if err != nil {
-			return err
-		}
-		errorCode := optionalRowText(row, "error_code")
-		if errorCode != "" {
-			var balanceAfter *Amount
-			if rowValue(row, "balance_after") != nil {
-				balanceAfter, err = optionalRowAmount(row, "balance_after", "settle_lease")
-				if err != nil {
-					return err
-				}
+		var details map[string]any
+		if optionalRowText(row, "error_code") == "" {
+			entryID, err := requiredRowText(row, "ledger_entry_id", "settle_lease")
+			if err != nil {
+				return err
 			}
-			result = DeductionResult{UserID: userID, Amount: settled, BalanceAfter: balanceAfter, AllowanceConsumed: DecimalZero, ErrorCode: errorCode}
-			return nil
+			detailsRows, err := tx.Call(ctx, "get_credit_operation_details", userID, entryID, idempotencyKey)
+			if err != nil {
+				return err
+			}
+			details, err = rowRequired(detailsRows, "get_credit_operation_details")
+			if err != nil {
+				return err
+			}
 		}
-		entryID, err := requiredRowText(row, "ledger_entry_id", "settle_lease")
-		if err != nil {
-			return err
-		}
-		chargeID, err := requiredRowText(row, "charge_id", "settle_lease")
-		if err != nil {
-			return err
-		}
-		idempotent, err := rowBool(row, "replayed", "settle_lease")
-		if err != nil {
-			return err
-		}
-		detailsRows, err := tx.Call(ctx, "get_credit_operation_details", userID, entryID, idempotencyKey)
-		if err != nil {
-			return err
-		}
-		details, err := rowRequired(detailsRows, "get_credit_operation_details")
-		if err != nil {
-			return err
-		}
-		balanceAfter, err := rowAmount(details, "balance_after", "get_credit_operation_details")
-		if err != nil {
-			return err
-		}
-		allowance, err := rowAmount(details, "allowance_covered", "get_credit_operation_details")
-		if err != nil {
-			return err
-		}
-		breakdown, err := amountMap(rowValue(details, "bucket_breakdown"), "get_credit_operation_details.bucket_breakdown")
-		if err != nil {
-			return err
-		}
-		result = DeductionResult{
-			EntryID:           entryID,
-			UsageChargeID:     chargeID,
-			UserID:            userID,
-			Amount:            settled,
-			BalanceAfter:      creditAmountPointer(balanceAfter),
-			AllowanceConsumed: allowance,
-			Idempotent:        idempotent,
-			BucketBreakdown:   breakdown,
-		}
-		return nil
+		result, err = settlementResultFromRows(userID, row, details)
+		return err
 	})
 	return result, err
+}
+
+func settlementResultFromRows(userID string, row, details map[string]any) (DeductionResult, error) {
+	settled, err := rowAmount(row, "settled_amount", "settle_lease")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		balanceAfter, err := optionalRowAmount(row, "balance_after", "settle_lease")
+		if err != nil {
+			return DeductionResult{}, err
+		}
+		return DeductionResult{UserID: userID, Amount: settled, BalanceAfter: balanceAfter, AllowanceConsumed: DecimalZero, ErrorCode: errorCode}, nil
+	}
+	entryID, err := requiredRowText(row, "ledger_entry_id", "settle_lease")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	chargeID, err := requiredRowText(row, "charge_id", "settle_lease")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	idempotent, err := rowBool(row, "replayed", "settle_lease")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	if details == nil {
+		return DeductionResult{}, NewStoreError("get_credit_operation_details returned no result", ErrorOptions{})
+	}
+	balanceAfter, err := rowAmount(details, "balance_after", "get_credit_operation_details")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	allowance, err := rowAmount(details, "allowance_covered", "get_credit_operation_details")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	breakdown, err := amountMap(rowValue(details, "bucket_breakdown"), "get_credit_operation_details.bucket_breakdown")
+	if err != nil {
+		return DeductionResult{}, err
+	}
+	return DeductionResult{EntryID: entryID, UsageChargeID: chargeID, UserID: userID, Amount: settled, BalanceAfter: creditAmountPointer(balanceAfter), AllowanceConsumed: allowance, Idempotent: idempotent, BucketBreakdown: breakdown}, nil
 }
 
 // GetLeasePricingContext retrieves the immutable pricing snapshot captured at
@@ -1255,19 +1333,21 @@ func (s *PostgresStore) GetLeasePricingContext(ctx context.Context, userID, leas
 		if row == nil {
 			return nil
 		}
-		version, err := rowInt(row, "catalog_revision_no", "get_credit_lease_pricing_context")
-		if err != nil {
-			return err
-		}
-		result = &LeasePricingContext{
-			CatalogVersion: version,
-			PlanID:         optionalRowText(row, "plan_id"),
-			PlanKey:        optionalRowText(row, "plan_key"),
-			RateCard:       optionalRowText(row, "rate_card"),
-		}
-		return nil
+		result, err = leasePricingContextFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func leasePricingContextFromRow(row map[string]any) (*LeasePricingContext, error) {
+	if row == nil {
+		return nil, nil
+	}
+	version, err := rowInt(row, "catalog_revision_no", "get_credit_lease_pricing_context")
+	if err != nil {
+		return nil, err
+	}
+	return &LeasePricingContext{CatalogVersion: version, PlanID: optionalRowText(row, "plan_id"), PlanKey: optionalRowText(row, "plan_key"), RateCard: optionalRowText(row, "rate_card")}, nil
 }
 
 // ReleaseLease releases an active or expired lease without a debit. It is safe
@@ -1290,21 +1370,26 @@ func (s *PostgresStore) ReleaseLease(ctx context.Context, userID, leaseID string
 		if err != nil {
 			return err
 		}
-		value, err := firstScalar(row, "release_lease")
-		if err != nil {
-			return err
-		}
-		status, ok := textValue(value)
-		if !ok {
-			return NewStoreError("release_lease returned an invalid lease status", ErrorOptions{})
-		}
-		result = ReleaseResult{LeaseID: leaseID, UserID: userID, Released: status == "released"}
-		if !result.Released {
-			result.Reason = status
-		}
-		return nil
+		result, err = releaseResultFromRow(userID, leaseID, row)
+		return err
 	})
 	return result, err
+}
+
+func releaseResultFromRow(userID, leaseID string, row map[string]any) (ReleaseResult, error) {
+	value, err := firstScalar(row, "release_lease")
+	if err != nil {
+		return ReleaseResult{}, err
+	}
+	status, ok := textValue(value)
+	if !ok {
+		return ReleaseResult{}, NewStoreError("release_lease returned an invalid lease status", ErrorOptions{})
+	}
+	result := ReleaseResult{LeaseID: leaseID, UserID: userID, Released: status == "released"}
+	if !result.Released {
+		result.Reason = status
+	}
+	return result, nil
 }
 
 // RenewLease extends an active lease without changing its policy snapshot.
@@ -1333,53 +1418,59 @@ func (s *PostgresStore) RenewLease(ctx context.Context, userID, leaseID string, 
 		if err != nil {
 			return err
 		}
-		available := AvailableResult{UserID: userID, Balance: DecimalZero, Reserved: DecimalZero, Available: DecimalZero}
-		if availabilityState != nil {
-			available.Reserved, err = rowAmount(availabilityState, "reserved", "get_credit_state")
+		available, err := availableFromState(userID, availabilityState, "get_credit_state")
+		if err != nil {
+			return err
+		}
+		var lease map[string]any
+		if optionalRowText(row, "error_code") == "" {
+			activeLeaseID, err := requiredRowText(row, "lease_id", "renew_lease")
 			if err != nil {
 				return err
 			}
-			available.Available, err = rowAmount(availabilityState, "available", "get_credit_state")
+			leaseRows, err := tx.Call(ctx, "get_credit_lease", userID, activeLeaseID)
+			if err != nil {
+				return err
+			}
+			lease, err = rowRequired(leaseRows, "get_credit_lease")
 			if err != nil {
 				return err
 			}
 		}
-		if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
-			result = LeaseResult{UserID: userID, Available: available.Available, ReservedTotal: available.Reserved, ErrorCode: errorCode}
-			return nil
-		}
-		activeLeaseID, err := requiredRowText(row, "lease_id", "renew_lease")
-		if err != nil {
-			return err
-		}
-		amount, err := rowAmount(row, "reserved_amount", "renew_lease")
-		if err != nil {
-			return err
-		}
-		leaseRows, err := tx.Call(ctx, "get_credit_lease", userID, activeLeaseID)
-		if err != nil {
-			return err
-		}
-		lease, err := rowRequired(leaseRows, "get_credit_lease")
-		if err != nil {
-			return err
-		}
-		expiresAt, err := rowTime(lease, "expires_at", "get_credit_lease")
-		if err != nil {
-			return err
-		}
-		minimumBalance, err := rowAmount(lease, "minimum_balance", "get_credit_lease")
-		if err != nil {
-			return err
-		}
-		mode := BillingModeStrict
-		if minimumBalance.IsNegative() {
-			mode = BillingModeOverdraft
-		}
-		result = LeaseResult{LeaseID: activeLeaseID, UserID: userID, Amount: creditAmountPointer(amount), Available: available.Available, ReservedTotal: available.Reserved, MinimumBalance: creditAmountPointer(minimumBalance), BillingMode: mode, ExpiresAt: timePointer(expiresAt)}
-		return nil
+		result, err = renewedLeaseResultFromRows(userID, row, available, lease)
+		return err
 	})
 	return result, err
+}
+
+func renewedLeaseResultFromRows(userID string, row map[string]any, available AvailableResult, lease map[string]any) (LeaseResult, error) {
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		return LeaseResult{UserID: userID, Available: available.Available, ReservedTotal: available.Reserved, ErrorCode: errorCode}, nil
+	}
+	leaseID, err := requiredRowText(row, "lease_id", "renew_lease")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	amount, err := rowAmount(row, "reserved_amount", "renew_lease")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	if lease == nil {
+		return LeaseResult{}, NewStoreError("get_credit_lease returned no result", ErrorOptions{})
+	}
+	expiresAt, err := rowTime(lease, "expires_at", "get_credit_lease")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	minimumBalance, err := rowAmount(lease, "minimum_balance", "get_credit_lease")
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	mode := BillingModeStrict
+	if minimumBalance.IsNegative() {
+		mode = BillingModeOverdraft
+	}
+	return LeaseResult{LeaseID: leaseID, UserID: userID, Amount: creditAmountPointer(amount), Available: available.Available, ReservedTotal: available.Reserved, MinimumBalance: creditAmountPointer(minimumBalance), BillingMode: mode, ExpiresAt: timePointer(expiresAt)}, nil
 }
 
 // ExpireLeases runs a bounded server-side expiration batch.
@@ -1419,36 +1510,40 @@ func (s *PostgresStore) GetBucketBalances(ctx context.Context, userID string) (r
 		if err != nil {
 			return err
 		}
-		buckets := make([]BucketBalance, 0, len(rows))
-		total := DecimalZero
-		for _, row := range rows {
-			bucketKey, err := requiredRowText(row, "bucket_key", "get_credit_bucket_balances")
-			if err != nil {
-				return err
-			}
-			label, err := requiredRowText(row, "label", "get_credit_bucket_balances")
-			if err != nil {
-				return err
-			}
-			priority, err := rowInt(row, "priority", "get_credit_bucket_balances")
-			if err != nil {
-				return err
-			}
-			expires, err := rowBool(row, "expires", "get_credit_bucket_balances")
-			if err != nil {
-				return err
-			}
-			balance, err := rowAmount(row, "balance", "get_credit_bucket_balances")
-			if err != nil {
-				return err
-			}
-			buckets = append(buckets, BucketBalance{BucketKey: bucketKey, Label: label, Priority: priority, Expires: expires, Balance: balance})
-			total = total.Add(balance)
-		}
-		result = BucketBalancesResult{UserID: userID, Buckets: buckets, TotalBalance: total}
-		return nil
+		result, err = bucketBalancesFromRows(userID, rows)
+		return err
 	})
 	return result, err
+}
+
+func bucketBalancesFromRows(userID string, rows []map[string]any) (BucketBalancesResult, error) {
+	buckets := make([]BucketBalance, 0, len(rows))
+	total := DecimalZero
+	for _, row := range rows {
+		bucketKey, err := requiredRowText(row, "bucket_key", "get_credit_bucket_balances")
+		if err != nil {
+			return BucketBalancesResult{}, err
+		}
+		label, err := requiredRowText(row, "label", "get_credit_bucket_balances")
+		if err != nil {
+			return BucketBalancesResult{}, err
+		}
+		priority, err := rowInt(row, "priority", "get_credit_bucket_balances")
+		if err != nil {
+			return BucketBalancesResult{}, err
+		}
+		expires, err := rowBool(row, "expires", "get_credit_bucket_balances")
+		if err != nil {
+			return BucketBalancesResult{}, err
+		}
+		balance, err := rowAmount(row, "balance", "get_credit_bucket_balances")
+		if err != nil {
+			return BucketBalancesResult{}, err
+		}
+		buckets = append(buckets, BucketBalance{BucketKey: bucketKey, Label: label, Priority: priority, Expires: expires, Balance: balance})
+		total = total.Add(balance)
+	}
+	return BucketBalancesResult{UserID: userID, Buckets: buckets, TotalBalance: total}, nil
 }
 
 // ExecuteGrantProgram executes an idempotent configured award event and
@@ -1479,35 +1574,41 @@ func (s *PostgresStore) ExecuteGrantProgram(ctx context.Context, request Execute
 		if err != nil {
 			return err
 		}
-		result = make([]GrantProgramAwardResult, 0, len(rows))
-		for _, row := range rows {
-			errorCode := optionalRowText(row, "error_code")
-			var amount Amount
-			if rowValue(row, "amount") != nil {
-				amount, err = rowAmount(row, "amount", "execute_grant_program")
-				if err != nil {
-					return err
-				}
-			} else if errorCode == "" {
-				return NewStoreError("execute_grant_program returned no amount", ErrorOptions{})
-			}
-			idempotent, err := rowBool(row, "replayed", "execute_grant_program")
-			if err != nil {
-				return err
-			}
-			result = append(result, GrantProgramAwardResult{
-				GrantEventID:       optionalRowText(row, "grant_event_id"),
-				GrantAwardID:       optionalRowText(row, "grant_award_id"),
-				RecipientSubjectID: optionalRowText(row, "recipient_subject_id"),
-				LedgerEntryID:      optionalRowText(row, "ledger_entry_id"),
-				Amount:             amount,
-				Idempotent:         idempotent,
-				ErrorCode:          errorCode,
-			})
-		}
-		return nil
+		result, err = grantProgramAwardsFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func grantProgramAwardsFromRows(rows []map[string]any) ([]GrantProgramAwardResult, error) {
+	result := make([]GrantProgramAwardResult, 0, len(rows))
+	for _, row := range rows {
+		errorCode := optionalRowText(row, "error_code")
+		amount := DecimalZero
+		var err error
+		if rowValue(row, "amount") != nil {
+			amount, err = rowAmount(row, "amount", "execute_grant_program")
+			if err != nil {
+				return nil, err
+			}
+		} else if errorCode == "" {
+			return nil, NewStoreError("execute_grant_program returned no amount", ErrorOptions{})
+		}
+		idempotent, err := rowBool(row, "replayed", "execute_grant_program")
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, GrantProgramAwardResult{
+			GrantEventID:       optionalRowText(row, "grant_event_id"),
+			GrantAwardID:       optionalRowText(row, "grant_award_id"),
+			RecipientSubjectID: optionalRowText(row, "recipient_subject_id"),
+			LedgerEntryID:      optionalRowText(row, "ledger_entry_id"),
+			Amount:             amount,
+			Idempotent:         idempotent,
+			ErrorCode:          errorCode,
+		})
+	}
+	return result, nil
 }
 
 // SweepExpiredCredits asks PostgreSQL to identify or expire a bounded batch of
@@ -1532,22 +1633,26 @@ func (s *PostgresStore) SweepExpiredCredits(ctx context.Context, dryRun bool, us
 		if err != nil {
 			return err
 		}
-		count, err := rowInt(row, "expired_count", "sweep_expired_lots")
-		if err != nil {
-			return err
-		}
-		amount, err := rowAmount(row, "expired_amount", "sweep_expired_lots")
-		if err != nil {
-			return err
-		}
-		byBucket, err := amountMap(rowValue(row, "expired_by_bucket"), "sweep_expired_lots.expired_by_bucket")
-		if err != nil {
-			return err
-		}
-		result = SweepResult{ExpiredCount: count, ExpiredAmount: amount, DryRun: dryRun, ExpiredByBucket: byBucket}
-		return nil
+		result, err = sweepResultFromRow(row, dryRun)
+		return err
 	})
 	return result, err
+}
+
+func sweepResultFromRow(row map[string]any, dryRun bool) (SweepResult, error) {
+	count, err := rowInt(row, "expired_count", "sweep_expired_lots")
+	if err != nil {
+		return SweepResult{}, err
+	}
+	amount, err := rowAmount(row, "expired_amount", "sweep_expired_lots")
+	if err != nil {
+		return SweepResult{}, err
+	}
+	byBucket, err := amountMap(rowValue(row, "expired_by_bucket"), "sweep_expired_lots.expired_by_bucket")
+	if err != nil {
+		return SweepResult{}, err
+	}
+	return SweepResult{ExpiredCount: count, ExpiredAmount: amount, DryRun: dryRun, ExpiredByBucket: byBucket}, nil
 }
 
 // RevokeCreditsByEntryType removes remaining lots attributable to an operation
@@ -1570,21 +1675,25 @@ func (s *PostgresStore) RevokeCreditsByEntryType(ctx context.Context, userID, en
 		if err != nil {
 			return err
 		}
-		if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
-			return NewStoreError("revoke_subject_credits_by_operation failed: "+errorCode, ErrorOptions{Details: map[string]any{"error_code": errorCode}})
-		}
-		revoked, err := rowAmount(row, "revoked", "revoke_subject_credits_by_operation")
-		if err != nil {
-			return err
-		}
-		balanceAfter, err := rowAmount(row, "balance_after", "revoke_subject_credits_by_operation")
-		if err != nil {
-			return err
-		}
-		result = RevokeCreditsResult{UserID: userID, EntryType: entryType, Revoked: revoked, BalanceAfter: balanceAfter}
-		return nil
+		result, err = revokeCreditsResultFromRow(userID, entryType, row)
+		return err
 	})
 	return result, err
+}
+
+func revokeCreditsResultFromRow(userID, entryType string, row map[string]any) (RevokeCreditsResult, error) {
+	if errorCode := optionalRowText(row, "error_code"); errorCode != "" {
+		return RevokeCreditsResult{}, NewStoreError("revoke_subject_credits_by_operation failed: "+errorCode, ErrorOptions{Details: map[string]any{"error_code": errorCode}})
+	}
+	revoked, err := rowAmount(row, "revoked", "revoke_subject_credits_by_operation")
+	if err != nil {
+		return RevokeCreditsResult{}, err
+	}
+	balanceAfter, err := rowAmount(row, "balance_after", "revoke_subject_credits_by_operation")
+	if err != nil {
+		return RevokeCreditsResult{}, err
+	}
+	return RevokeCreditsResult{UserID: userID, EntryType: entryType, Revoked: revoked, BalanceAfter: balanceAfter}, nil
 }
 
 func catalogRevisionFromRow(row map[string]any, operation string) (CatalogRevision, error) {
@@ -1728,31 +1837,30 @@ func (s *PostgresStore) GetCatalogHistory(ctx context.Context) (result []Catalog
 		if err != nil {
 			return err
 		}
-		result = make([]CatalogRevisionSummary, 0, len(rows))
-		for _, row := range rows {
-			id, err := requiredRowText(row, "id", "list_catalog_revisions")
-			if err != nil {
-				return err
-			}
-			version, err := rowInt(row, "revision_no", "list_catalog_revisions")
-			if err != nil {
-				return err
-			}
-			createdAt, err := rowTime(row, "created_at", "list_catalog_revisions")
-			if err != nil {
-				return err
-			}
-			result = append(result, CatalogRevisionSummary{
-				ID:        id,
-				Version:   version,
-				Label:     optionalRowText(row, "label"),
-				Active:    optionalRowText(row, "status") == "active",
-				CreatedAt: createdAt,
-			})
-		}
-		return nil
+		result, err = catalogRevisionSummariesFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func catalogRevisionSummariesFromRows(rows []map[string]any) ([]CatalogRevisionSummary, error) {
+	result := make([]CatalogRevisionSummary, 0, len(rows))
+	for _, row := range rows {
+		id, err := requiredRowText(row, "id", "list_catalog_revisions")
+		if err != nil {
+			return nil, err
+		}
+		version, err := rowInt(row, "revision_no", "list_catalog_revisions")
+		if err != nil {
+			return nil, err
+		}
+		createdAt, err := rowTime(row, "created_at", "list_catalog_revisions")
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, CatalogRevisionSummary{ID: id, Version: version, Label: optionalRowText(row, "label"), Active: optionalRowText(row, "status") == "active", CreatedAt: createdAt})
+	}
+	return result, nil
 }
 
 // GetCatalogRevision reads a historical revision by version number.
@@ -2003,7 +2111,10 @@ func (s *PostgresStore) CheckFeature(ctx context.Context, userID, feature string
 			if optionalRowText(row, "feature_key") != feature {
 				continue
 			}
-			value := rowValue(row, "feature_value")
+			value, valueErr := jsonValue(rowValue(row, "feature_value"), "get_subject_entitlements.feature_value")
+			if valueErr != nil {
+				return valueErr
+			}
 			result.Value = value
 			if value == nil {
 				return nil
@@ -2038,14 +2149,18 @@ func (s *PostgresStore) SetUserPlan(ctx context.Context, userID, planKey string,
 		if err != nil {
 			return err
 		}
-		assignedAt, err := rowTime(row, "plan_assigned_at", "set_subject_plan")
-		if err != nil {
-			return err
-		}
-		result = SetUserPlanResult{UserID: userID, PlanID: optionalRowText(row, "plan_id"), PlanKey: optionalRowText(row, "plan_key"), PlanAssignedAt: assignedAt, AssignmentState: optionalRowText(row, "assignment_state")}
-		return nil
+		result, err = setUserPlanResultFromRow(userID, row)
+		return err
 	})
 	return result, err
+}
+
+func setUserPlanResultFromRow(userID string, row map[string]any) (SetUserPlanResult, error) {
+	assignedAt, err := rowTime(row, "plan_assigned_at", "set_subject_plan")
+	if err != nil {
+		return SetUserPlanResult{}, err
+	}
+	return SetUserPlanResult{UserID: userID, PlanID: optionalRowText(row, "plan_id"), PlanKey: optionalRowText(row, "plan_key"), PlanAssignedAt: assignedAt, AssignmentState: optionalRowText(row, "assignment_state")}, nil
 }
 
 // UnsetUserPlan removes an assignment through the public unassign RPC.
@@ -2151,22 +2266,26 @@ func (s *PostgresStore) StartPlanMigration(ctx context.Context, fromPlanID, toPl
 		if err != nil {
 			return err
 		}
-		value, err := firstScalar(row, "start_plan_migration")
-		if err != nil {
-			return err
-		}
-		migrationID, ok := textValue(value)
-		if !ok {
-			return NewStoreError("start_plan_migration returned an invalid migration ID", ErrorOptions{})
-		}
-		migrationID, err = normalizeTenantID(migrationID)
-		if err != nil {
-			return NewStoreError("start_plan_migration returned an invalid migration ID", ErrorOptions{Cause: err, Indeterminate: true})
-		}
-		result = PlanMigrationStartResult{MigrationID: migrationID}
-		return nil
+		result, err = planMigrationStartFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func planMigrationStartFromRow(row map[string]any) (PlanMigrationStartResult, error) {
+	value, err := firstScalar(row, "start_plan_migration")
+	if err != nil {
+		return PlanMigrationStartResult{}, err
+	}
+	migrationID, ok := textValue(value)
+	if !ok {
+		return PlanMigrationStartResult{}, NewStoreError("start_plan_migration returned an invalid migration ID", ErrorOptions{})
+	}
+	migrationID, err = normalizeTenantID(migrationID)
+	if err != nil {
+		return PlanMigrationStartResult{}, NewStoreError("start_plan_migration returned an invalid migration ID", ErrorOptions{Cause: err, Indeterminate: true})
+	}
+	return PlanMigrationStartResult{MigrationID: migrationID}, nil
 }
 
 // MigratePlanBatch advances one bounded migration batch.
@@ -2188,18 +2307,22 @@ func (s *PostgresStore) MigratePlanBatch(ctx context.Context, migrationID string
 		if err != nil {
 			return err
 		}
-		migrated, err := rowInt(row, "migrated", "migrate_plan_batch")
-		if err != nil {
-			return err
-		}
-		done, err := rowBool(row, "done", "migrate_plan_batch")
-		if err != nil {
-			return err
-		}
-		result = PlanMigrationBatchResult{Migrated: migrated, Done: done, NextCursor: optionalRowText(row, "next_cursor")}
-		return nil
+		result, err = planMigrationBatchFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func planMigrationBatchFromRow(row map[string]any) (PlanMigrationBatchResult, error) {
+	migrated, err := rowInt(row, "migrated", "migrate_plan_batch")
+	if err != nil {
+		return PlanMigrationBatchResult{}, err
+	}
+	done, err := rowBool(row, "done", "migrate_plan_batch")
+	if err != nil {
+		return PlanMigrationBatchResult{}, err
+	}
+	return PlanMigrationBatchResult{Migrated: migrated, Done: done, NextCursor: optionalRowText(row, "next_cursor")}, nil
 }
 
 // GetQuotaState retrieves current quota windows for a subject.
@@ -2213,59 +2336,50 @@ func (s *PostgresStore) GetQuotaState(ctx context.Context, userID, quotaKey stri
 		if err != nil {
 			return err
 		}
-		result = make([]QuotaState, 0, len(rows))
-		for _, row := range rows {
-			limit, err := rowAmount(row, "quota_limit", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			consumed, err := rowAmount(row, "consumed", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			reserved, err := rowAmount(row, "reserved", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			remaining, err := rowAmount(row, "remaining", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			overage, err := rowAmount(row, "overage", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			windowStart, err := rowTime(row, "window_start", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			windowEnd, err := rowTime(row, "window_end", "get_subject_quota_state")
-			if err != nil {
-				return err
-			}
-			emitAt, err := floatSlice(rowValue(row, "emit_at_percent"), "get_subject_quota_state.emit_at_percent")
-			if err != nil {
-				return err
-			}
-			result = append(result, QuotaState{
-				UserID:        optionalRowText(row, "user_id"),
-				QuotaKey:      optionalRowText(row, "quota_key"),
-				Operation:     optionalRowText(row, "operation_key"),
-				Measure:       optionalRowText(row, "measure_key"),
-				Limit:         limit,
-				Consumed:      consumed,
-				Reserved:      reserved,
-				Remaining:     remaining,
-				Overage:       overage,
-				Enforcement:   optionalRowText(row, "enforcement"),
-				WindowStart:   windowStart,
-				WindowEnd:     windowEnd,
-				EmitAtPercent: emitAt,
-			})
-		}
-		return nil
+		result, err = quotaStatesFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func quotaStatesFromRows(rows []map[string]any) ([]QuotaState, error) {
+	result := make([]QuotaState, 0, len(rows))
+	for _, row := range rows {
+		limit, err := rowAmount(row, "quota_limit", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		consumed, err := rowAmount(row, "consumed", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		reserved, err := rowAmount(row, "reserved", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		remaining, err := rowAmount(row, "remaining", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		overage, err := rowAmount(row, "overage", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		windowStart, err := rowTime(row, "window_start", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		windowEnd, err := rowTime(row, "window_end", "get_subject_quota_state")
+		if err != nil {
+			return nil, err
+		}
+		emitAt, err := floatSlice(rowValue(row, "emit_at_percent"), "get_subject_quota_state.emit_at_percent")
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, QuotaState{UserID: optionalRowText(row, "user_id"), QuotaKey: optionalRowText(row, "quota_key"), Operation: optionalRowText(row, "operation_key"), Measure: optionalRowText(row, "measure_key"), Limit: limit, Consumed: consumed, Reserved: reserved, Remaining: remaining, Overage: overage, Enforcement: optionalRowText(row, "enforcement"), WindowStart: windowStart, WindowEnd: windowEnd, EmitAtPercent: emitAt})
+	}
+	return result, nil
 }
 
 // CheckAllowance returns the database-owned active allowance window, if any.
@@ -2283,22 +2397,29 @@ func (s *PostgresStore) CheckAllowance(ctx context.Context, userID string) (resu
 		if row == nil {
 			return nil
 		}
-		remaining, err := rowAmount(row, "allowance_remaining", "get_subject_allowance")
-		if err != nil {
-			return err
-		}
-		periodStart, err := rowTime(row, "period_start", "get_subject_allowance")
-		if err != nil {
-			return err
-		}
-		periodEnd, err := rowTime(row, "period_end", "get_subject_allowance")
-		if err != nil {
-			return err
-		}
-		result = &AllowanceResult{PlanID: optionalRowText(row, "plan_id"), AllowanceRemaining: remaining, PeriodStart: periodStart, PeriodEnd: periodEnd}
-		return nil
+		result, err = allowanceFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func allowanceFromRow(row map[string]any) (*AllowanceResult, error) {
+	if row == nil {
+		return nil, nil
+	}
+	remaining, err := rowAmount(row, "allowance_remaining", "get_subject_allowance")
+	if err != nil {
+		return nil, err
+	}
+	periodStart, err := rowTime(row, "period_start", "get_subject_allowance")
+	if err != nil {
+		return nil, err
+	}
+	periodEnd, err := rowTime(row, "period_end", "get_subject_allowance")
+	if err != nil {
+		return nil, err
+	}
+	return &AllowanceResult{PlanID: optionalRowText(row, "plan_id"), AllowanceRemaining: remaining, PeriodStart: periodStart, PeriodEnd: periodEnd}, nil
 }
 
 // ListQuotaEvents returns a stable tenant-scoped history of quota events.
@@ -2319,35 +2440,30 @@ func (s *PostgresStore) ListQuotaEvents(ctx context.Context, userID string, opti
 		if err != nil {
 			return err
 		}
-		result = make([]QuotaEvent, 0, len(rows))
-		for _, row := range rows {
-			createdAt, err := rowTime(row, "created_at", "list_subject_quota_events")
-			if err != nil {
-				return err
-			}
-			var threshold *float64
-			if raw := rowValue(row, "threshold_percent"); raw != nil {
-				values, err := floatSlice([]any{raw}, "list_subject_quota_events.threshold_percent")
-				if err != nil {
-					return err
-				}
-				threshold = &values[0]
-			}
-			result = append(result, QuotaEvent{
-				EventID:          optionalRowText(row, "event_id"),
-				QuotaKey:         optionalRowText(row, "quota_key"),
-				Operation:        optionalRowText(row, "operation_key"),
-				Measure:          optionalRowText(row, "measure_key"),
-				EventType:        optionalRowText(row, "event_type"),
-				ThresholdPercent: threshold,
-				IdempotencyKey:   optionalRowText(row, "idempotency_key"),
-				UsageChargeID:    optionalRowText(row, "usage_charge_id"),
-				CreatedAt:        createdAt,
-			})
-		}
-		return nil
+		result, err = quotaEventsFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func quotaEventsFromRows(rows []map[string]any) ([]QuotaEvent, error) {
+	result := make([]QuotaEvent, 0, len(rows))
+	for _, row := range rows {
+		createdAt, err := rowTime(row, "created_at", "list_subject_quota_events")
+		if err != nil {
+			return nil, err
+		}
+		var threshold *float64
+		if raw := rowValue(row, "threshold_percent"); raw != nil {
+			values, err := floatSlice([]any{raw}, "list_subject_quota_events.threshold_percent")
+			if err != nil {
+				return nil, err
+			}
+			threshold = &values[0]
+		}
+		result = append(result, QuotaEvent{EventID: optionalRowText(row, "event_id"), QuotaKey: optionalRowText(row, "quota_key"), Operation: optionalRowText(row, "operation_key"), Measure: optionalRowText(row, "measure_key"), EventType: optionalRowText(row, "event_type"), ThresholdPercent: threshold, IdempotencyKey: optionalRowText(row, "idempotency_key"), UsageChargeID: optionalRowText(row, "usage_charge_id"), CreatedAt: createdAt})
+	}
+	return result, nil
 }
 
 // RefundCredits posts an idempotent entry-scoped refund through the database.
@@ -2382,29 +2498,27 @@ func (s *PostgresStore) RefundCredits(ctx context.Context, entryID string, amoun
 		if err != nil {
 			return err
 		}
-		errorCode := optionalRowText(row, "error_code")
-		refunded, err := optionalRowAmount(row, "amount", "refund_credit_by_entry")
-		if err != nil {
-			return err
-		}
-		balanceAfter, err := optionalRowAmount(row, "balance_after", "refund_credit_by_entry")
-		if err != nil {
-			return err
-		}
-		result = RefundResult{
-			RefundEntryID:   optionalRowText(row, "entry_id"),
-			OriginalEntryID: entryID,
-			UserID:          optionalRowText(row, "subject_id"),
-			Amount:          refunded,
-			NewBalance:      balanceAfter,
-			ErrorCode:       errorCode,
-		}
-		if errorCode != "" {
-			result.RefundEntryID = ""
-		}
-		return nil
+		result, err = refundResultFromRow(entryID, row)
+		return err
 	})
 	return result, err
+}
+
+func refundResultFromRow(originalEntryID string, row map[string]any) (RefundResult, error) {
+	refunded, err := optionalRowAmount(row, "amount", "refund_credit_by_entry")
+	if err != nil {
+		return RefundResult{}, err
+	}
+	balanceAfter, err := optionalRowAmount(row, "balance_after", "refund_credit_by_entry")
+	if err != nil {
+		return RefundResult{}, err
+	}
+	errorCode := optionalRowText(row, "error_code")
+	entryID := optionalRowText(row, "entry_id")
+	if errorCode != "" {
+		entryID = ""
+	}
+	return RefundResult{RefundEntryID: entryID, OriginalEntryID: originalEntryID, UserID: optionalRowText(row, "subject_id"), Amount: refunded, NewBalance: balanceAfter, ErrorCode: errorCode}, nil
 }
 
 func requireTimeRange(start, end time.Time, operation string) error {
@@ -2435,24 +2549,29 @@ func (s *PostgresStore) SpendByUser(ctx context.Context, start, end time.Time) (
 		if err != nil {
 			return err
 		}
-		result = make([]SpendByUserRow, 0, len(rows))
-		for _, row := range rows {
-			amount, err := rowAmount(row, "total_spend", "spend_by_user")
-			if err != nil {
-				return err
-			}
-			count, err := rowInt(row, "charge_count", "spend_by_user")
-			if err != nil {
-				count, err = rowInt(row, "entry_count", "spend_by_user")
-				if err != nil {
-					return err
-				}
-			}
-			result = append(result, SpendByUserRow{UserID: rowTextFallback(row, "subject_id", "user_id"), TotalSpend: amount, EntryCount: count})
-		}
-		return nil
+		result, err = spendByUserFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func spendByUserFromRows(rows []map[string]any) ([]SpendByUserRow, error) {
+	result := make([]SpendByUserRow, 0, len(rows))
+	for _, row := range rows {
+		amount, err := rowAmount(row, "total_spend", "spend_by_user")
+		if err != nil {
+			return nil, err
+		}
+		count, err := rowInt(row, "charge_count", "spend_by_user")
+		if err != nil {
+			count, err = rowInt(row, "entry_count", "spend_by_user")
+			if err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, SpendByUserRow{UserID: rowTextFallback(row, "subject_id", "user_id"), TotalSpend: amount, EntryCount: count})
+	}
+	return result, nil
 }
 
 // SpendByModel aggregates spend for a tenant-scoped time range.
@@ -2465,24 +2584,29 @@ func (s *PostgresStore) SpendByModel(ctx context.Context, start, end time.Time) 
 		if err != nil {
 			return err
 		}
-		result = make([]SpendByModelRow, 0, len(rows))
-		for _, row := range rows {
-			amount, err := rowAmount(row, "total_spend", "spend_by_model")
-			if err != nil {
-				return err
-			}
-			count, err := rowInt(row, "charge_count", "spend_by_model")
-			if err != nil {
-				count, err = rowInt(row, "entry_count", "spend_by_model")
-				if err != nil {
-					return err
-				}
-			}
-			result = append(result, SpendByModelRow{Model: optionalRowText(row, "model"), TotalSpend: amount, EntryCount: count})
-		}
-		return nil
+		result, err = spendByModelFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func spendByModelFromRows(rows []map[string]any) ([]SpendByModelRow, error) {
+	result := make([]SpendByModelRow, 0, len(rows))
+	for _, row := range rows {
+		amount, err := rowAmount(row, "total_spend", "spend_by_model")
+		if err != nil {
+			return nil, err
+		}
+		count, err := rowInt(row, "charge_count", "spend_by_model")
+		if err != nil {
+			count, err = rowInt(row, "entry_count", "spend_by_model")
+			if err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, SpendByModelRow{Model: optionalRowText(row, "model"), TotalSpend: amount, EntryCount: count})
+	}
+	return result, nil
 }
 
 // TopUsers returns the highest-spend subjects, preserving the canonical
@@ -2503,17 +2627,22 @@ func (s *PostgresStore) TopUsers(ctx context.Context, limit int, start, end time
 		if len(rows) > limit {
 			rows = rows[:limit]
 		}
-		result = make([]TopUserRow, 0, len(rows))
-		for _, row := range rows {
-			amount, err := rowAmount(row, "total_spend", "spend_by_user")
-			if err != nil {
-				return err
-			}
-			result = append(result, TopUserRow{UserID: rowTextFallback(row, "subject_id", "user_id"), TotalSpend: amount})
-		}
-		return nil
+		result, err = topUsersFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func topUsersFromRows(rows []map[string]any) ([]TopUserRow, error) {
+	result := make([]TopUserRow, 0, len(rows))
+	for _, row := range rows {
+		amount, err := rowAmount(row, "total_spend", "spend_by_user")
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, TopUserRow{UserID: rowTextFallback(row, "subject_id", "user_id"), TotalSpend: amount})
+	}
+	return result, nil
 }
 
 func rowCalendarDate(row map[string]any, key, operation string) (time.Time, error) {
@@ -2542,31 +2671,36 @@ func (s *PostgresStore) DailySpend(ctx context.Context, start, end time.Time) (r
 		if err != nil {
 			return err
 		}
-		result = make([]DailySpendRow, 0, len(rows))
-		for _, row := range rows {
-			date, err := rowCalendarDate(row, "day", "daily_spend")
-			if err != nil {
-				date, err = rowCalendarDate(row, "date", "daily_spend")
-				if err != nil {
-					return err
-				}
-			}
-			amount, err := rowAmount(row, "total_spend", "daily_spend")
-			if err != nil {
-				return err
-			}
-			count, err := rowInt(row, "charge_count", "daily_spend")
-			if err != nil {
-				count, err = rowInt(row, "entry_count", "daily_spend")
-				if err != nil {
-					return err
-				}
-			}
-			result = append(result, DailySpendRow{Date: date, TotalSpend: amount, EntryCount: count})
-		}
-		return nil
+		result, err = dailySpendFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func dailySpendFromRows(rows []map[string]any) ([]DailySpendRow, error) {
+	result := make([]DailySpendRow, 0, len(rows))
+	for _, row := range rows {
+		date, err := rowCalendarDate(row, "day", "daily_spend")
+		if err != nil {
+			date, err = rowCalendarDate(row, "date", "daily_spend")
+			if err != nil {
+				return nil, err
+			}
+		}
+		amount, err := rowAmount(row, "total_spend", "daily_spend")
+		if err != nil {
+			return nil, err
+		}
+		count, err := rowInt(row, "charge_count", "daily_spend")
+		if err != nil {
+			count, err = rowInt(row, "entry_count", "daily_spend")
+			if err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, DailySpendRow{Date: date, TotalSpend: amount, EntryCount: count})
+	}
+	return result, nil
 }
 
 // AggregateStats returns the standard tenant-spend rollup.
@@ -2583,22 +2717,26 @@ func (s *PostgresStore) AggregateStats(ctx context.Context, start, end time.Time
 		if err != nil {
 			return err
 		}
-		consumed, err := rowAmount(row, "total_credits_consumed", "aggregate_usage_stats")
-		if err != nil {
-			return err
-		}
-		activeUsers, err := rowInt(row, "active_users", "aggregate_usage_stats")
-		if err != nil {
-			return err
-		}
-		average, err := rowAmount(row, "avg_daily_spend", "aggregate_usage_stats")
-		if err != nil {
-			return err
-		}
-		result = AggregateStats{TotalCreditsConsumed: consumed, ActiveUsers: activeUsers, AverageDailySpend: average, TopModel: optionalRowText(row, "top_model"), TopUser: optionalRowText(row, "top_user")}
-		return nil
+		result, err = aggregateStatsFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func aggregateStatsFromRow(row map[string]any) (AggregateStats, error) {
+	consumed, err := rowAmount(row, "total_credits_consumed", "aggregate_usage_stats")
+	if err != nil {
+		return AggregateStats{}, err
+	}
+	activeUsers, err := rowInt(row, "active_users", "aggregate_usage_stats")
+	if err != nil {
+		return AggregateStats{}, err
+	}
+	average, err := rowAmount(row, "avg_daily_spend", "aggregate_usage_stats")
+	if err != nil {
+		return AggregateStats{}, err
+	}
+	return AggregateStats{TotalCreditsConsumed: consumed, ActiveUsers: activeUsers, AverageDailySpend: average, TopModel: optionalRowText(row, "top_model"), TopUser: optionalRowText(row, "top_user")}, nil
 }
 
 func ledgerEntryFromRow(row map[string]any, operation string) (LedgerEntry, error) {
@@ -2878,22 +3016,26 @@ func (s *PostgresStore) CreateTeam(ctx context.Context, ownerUserID, name string
 		if err != nil {
 			return err
 		}
-		teamID, err := requiredRowText(row, "team_id", "create_team")
-		if err != nil {
-			return err
-		}
-		teamName, err := requiredRowText(row, "name", "create_team")
-		if err != nil {
-			return err
-		}
-		idempotent, err := rowBool(row, "idempotent", "create_team")
-		if err != nil {
-			return err
-		}
-		result = CreateTeamResult{TeamID: teamID, Name: teamName, Idempotent: idempotent}
-		return nil
+		result, err = createTeamResultFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func createTeamResultFromRow(row map[string]any) (CreateTeamResult, error) {
+	teamID, err := requiredRowText(row, "team_id", "create_team")
+	if err != nil {
+		return CreateTeamResult{}, err
+	}
+	name, err := requiredRowText(row, "name", "create_team")
+	if err != nil {
+		return CreateTeamResult{}, err
+	}
+	idempotent, err := rowBool(row, "idempotent", "create_team")
+	if err != nil {
+		return CreateTeamResult{}, err
+	}
+	return CreateTeamResult{TeamID: teamID, Name: name, Idempotent: idempotent}, nil
 }
 
 // GetTeamBalance returns nil for a missing team.
@@ -2911,18 +3053,25 @@ func (s *PostgresStore) GetTeamBalance(ctx context.Context, teamID string) (resu
 		if row == nil {
 			return nil
 		}
-		balance, err := rowAmount(row, "balance", "get_team_balance")
-		if err != nil {
-			return err
-		}
-		memberCount, err := rowInt(row, "member_count", "get_team_balance")
-		if err != nil {
-			return err
-		}
-		result = &TeamBalanceResult{TeamID: optionalRowText(row, "team_id"), Name: optionalRowText(row, "name"), Balance: balance, MemberCount: memberCount}
-		return nil
+		result, err = teamBalanceFromRow(row)
+		return err
 	})
 	return result, err
+}
+
+func teamBalanceFromRow(row map[string]any) (*TeamBalanceResult, error) {
+	if row == nil {
+		return nil, nil
+	}
+	balance, err := rowAmount(row, "balance", "get_team_balance")
+	if err != nil {
+		return nil, err
+	}
+	memberCount, err := rowInt(row, "member_count", "get_team_balance")
+	if err != nil {
+		return nil, err
+	}
+	return &TeamBalanceResult{TeamID: optionalRowText(row, "team_id"), Name: optionalRowText(row, "name"), Balance: balance, MemberCount: memberCount}, nil
 }
 
 // AddTeamMember assigns a role and optional per-member spending cap.
@@ -2958,21 +3107,25 @@ func (s *PostgresStore) AddTeamMember(ctx context.Context, teamID, userID string
 		if err != nil {
 			return err
 		}
-		value, err := firstScalar(row, "set_team_member")
-		if err != nil {
-			return err
-		}
-		added, err := scalarBool(value, "set_team_member")
-		if err != nil {
-			return err
-		}
-		if !added {
-			return NewStoreError("set_team_member returned false", ErrorOptions{})
-		}
-		result = AddTeamMemberResult{TeamID: teamID, UserID: userID, Role: role}
-		return nil
+		result, err = addTeamMemberResultFromRow(teamID, userID, role, row)
+		return err
 	})
 	return result, err
+}
+
+func addTeamMemberResultFromRow(teamID, userID string, role TeamRole, row map[string]any) (AddTeamMemberResult, error) {
+	value, err := firstScalar(row, "set_team_member")
+	if err != nil {
+		return AddTeamMemberResult{}, err
+	}
+	added, err := scalarBool(value, "set_team_member")
+	if err != nil {
+		return AddTeamMemberResult{}, err
+	}
+	if !added {
+		return AddTeamMemberResult{}, NewStoreError("set_team_member returned false", ErrorOptions{})
+	}
+	return AddTeamMemberResult{TeamID: teamID, UserID: userID, Role: role}, nil
 }
 
 // GetTeamMembers returns current membership and per-member usage totals.
@@ -2986,25 +3139,30 @@ func (s *PostgresStore) GetTeamMembers(ctx context.Context, teamID string) (resu
 		if err != nil {
 			return err
 		}
-		result = make([]TeamMember, 0, len(rows))
-		for _, row := range rows {
-			spendCap, err := optionalRowAmount(row, "spend_cap", "list_team_members")
-			if err != nil {
-				return err
-			}
-			totalSpent, err := rowAmount(row, "total_spent", "list_team_members")
-			if err != nil {
-				return err
-			}
-			role := TeamRole(optionalRowText(row, "role"))
-			if role != TeamRoleOwner && role != TeamRoleAdmin && role != TeamRoleMember {
-				return NewStoreError("list_team_members returned an invalid role", ErrorOptions{})
-			}
-			result = append(result, TeamMember{UserID: optionalRowText(row, "user_id"), Role: role, SpendCap: spendCap, TotalSpent: totalSpent})
-		}
-		return nil
+		result, err = teamMembersFromRows(rows)
+		return err
 	})
 	return result, err
+}
+
+func teamMembersFromRows(rows []map[string]any) ([]TeamMember, error) {
+	result := make([]TeamMember, 0, len(rows))
+	for _, row := range rows {
+		spendCap, err := optionalRowAmount(row, "spend_cap", "list_team_members")
+		if err != nil {
+			return nil, err
+		}
+		totalSpent, err := rowAmount(row, "total_spent", "list_team_members")
+		if err != nil {
+			return nil, err
+		}
+		role := TeamRole(optionalRowText(row, "role"))
+		if role != TeamRoleOwner && role != TeamRoleAdmin && role != TeamRoleMember {
+			return nil, NewStoreError("list_team_members returned an invalid role", ErrorOptions{})
+		}
+		result = append(result, TeamMember{UserID: optionalRowText(row, "user_id"), Role: role, SpendCap: spendCap, TotalSpent: totalSpent})
+	}
+	return result, nil
 }
 
 // RemoveTeamMember returns false when the member is absent or the final owner.
@@ -3070,35 +3228,29 @@ func (s *PostgresStore) DeductTeam(ctx context.Context, teamID, userID string, a
 		if err != nil {
 			return err
 		}
-		committedAmount, err := rowAmount(row, "amount", "deduct_team")
-		if err != nil {
-			return err
-		}
-		errorCode := optionalRowText(row, "error_code")
-		var balanceAfter *Amount
-		if rowValue(row, "balance_after") != nil {
-			balanceAfter, err = optionalRowAmount(row, "balance_after", "deduct_team")
-			if err != nil {
-				return err
-			}
-		}
-		idempotent, err := rowBool(row, "replayed", "deduct_team")
-		if err != nil {
-			return err
-		}
-		if errorCode == "" && !committedAmount.Equal(QuantizeMoney(amount)) {
-			return NewStoreError("deduct_team committed amount differs from request", ErrorOptions{Indeterminate: true})
-		}
-		result = TeamDeductionResult{
-			EntryID:          optionalRowText(row, "entry_id"),
-			TeamID:           optionalRowText(row, "team_id"),
-			UserID:           optionalRowText(row, "subject_id"),
-			Amount:           QuantizeMoney(amount),
-			TeamBalanceAfter: balanceAfter,
-			Idempotent:       idempotent,
-			ErrorCode:        errorCode,
-		}
-		return nil
+		result, err = teamDeductionResultFromRow(amount, row)
+		return err
 	})
 	return result, err
+}
+
+func teamDeductionResultFromRow(requested Amount, row map[string]any) (TeamDeductionResult, error) {
+	committed, err := rowAmount(row, "amount", "deduct_team")
+	if err != nil {
+		return TeamDeductionResult{}, err
+	}
+	balanceAfter, err := optionalRowAmount(row, "balance_after", "deduct_team")
+	if err != nil {
+		return TeamDeductionResult{}, err
+	}
+	idempotent, err := rowBool(row, "replayed", "deduct_team")
+	if err != nil {
+		return TeamDeductionResult{}, err
+	}
+	errorCode := optionalRowText(row, "error_code")
+	requested = QuantizeMoney(requested)
+	if errorCode == "" && !committed.Equal(requested) {
+		return TeamDeductionResult{}, NewStoreError("deduct_team committed amount differs from request", ErrorOptions{Indeterminate: true})
+	}
+	return TeamDeductionResult{EntryID: optionalRowText(row, "entry_id"), TeamID: optionalRowText(row, "team_id"), UserID: optionalRowText(row, "subject_id"), Amount: requested, TeamBalanceAfter: balanceAfter, Idempotent: idempotent, ErrorCode: errorCode}, nil
 }

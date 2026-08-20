@@ -77,6 +77,9 @@ class BillingSubscriptionStatus(StrEnum):
     expired = "expired"
 
 
+SubscriptionEntitlementOutcome = Literal["applied", "revoked", "preserved", "stale"]
+
+
 class ProviderRef(BaseModel):
     product_id: NonEmptyString | None = None
     price_id: NonEmptyString | None = None

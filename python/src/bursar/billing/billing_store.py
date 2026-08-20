@@ -30,8 +30,10 @@ from bursar.billing.types import (
     BillingSubscriptionChange,
     BillingSubscriptionChangeInput,
     BillingSubscriptionState,
+    BillingSubscriptionStatus,
     BillingTopupResult,
     CheckoutIntent,
+    SubscriptionEntitlementOutcome,
 )
 
 
@@ -257,11 +259,27 @@ class BillingStore(ABC):
     ) -> list[BillingSubscriptionState]: ...
 
     @abstractmethod
-    def mark_subscription_grace_expired(self, id: str, expected_grace_ends_at: str, expired_at: str) -> bool: ...
+    def reconcile_subscription_entitlement(
+        self,
+        subject_id: str,
+        subscription_id: str,
+        billing_event_id: str,
+        expected_status: BillingSubscriptionStatus,
+        expected_provider_updated_at: str,
+        plan_assigned_at: datetime | str | None,
+        apply_entitlement: bool,
+        terminal_plan_key: str | None,
+        reason: str,
+    ) -> SubscriptionEntitlementOutcome: ...
 
     @abstractmethod
-    def select_subscription_entitlement_source(
-        self, user_id: str, provider: str, subscription_id: str | None = None
+    def expire_subscription_grace_period(
+        self,
+        subject_id: str,
+        subscription_id: str,
+        expected_grace_ends_at: str,
+        expired_at: str,
+        terminal_plan_key: str | None,
     ) -> bool: ...
 
     @abstractmethod

@@ -312,7 +312,7 @@ func TestDependencyRuntimeHealthReportsComponentFailure(t *testing.T) {
 	if len(diagnostics.Components) != 1 || diagnostics.Components[0].OK {
 		t.Fatalf("unexpected component diagnostics: %#v", diagnostics.Components)
 	}
-	if diagnostics.Components[0].Error != "projection unavailable" {
+	if diagnostics.Components[0].Error != "dependency_check_failed:Error" {
 		t.Fatalf("component error = %q", diagnostics.Components[0].Error)
 	}
 }

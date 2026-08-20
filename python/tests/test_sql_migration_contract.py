@@ -85,6 +85,76 @@ def test_greenfield_idempotency_contracts_are_defined_at_their_origins() -> None
     assert "CREATE FUNCTION bursar.requeue_outbox_dead_letter(" in outbox_rpc_sql
 
 
+def test_greenfield_billing_fixes_are_defined_at_their_origins() -> None:
+    billing_sql = (SQL_DIR / "019_billing_lifecycle_rpc.sql").read_text(encoding="utf-8")
+    billing_tables_sql = (SQL_DIR / "004_billing_tables.sql").read_text(encoding="utf-8")
+    plan_sql = (SQL_DIR / "025_plan_migration_rpc.sql").read_text(encoding="utf-8")
+    security_sql = (SQL_DIR / "029_multitenancy_security.sql").read_text(encoding="utf-8")
+    generic_unassign_sql = plan_sql.split("CREATE FUNCTION bursar.unassign_plan(", 1)[1].split(
+        "CREATE FUNCTION bursar.unassign_plan_if_source(", 1
+    )[0]
+    source_unassign_sql = plan_sql.split("CREATE FUNCTION bursar.unassign_plan_if_source(", 1)[1].split(
+        "CREATE FUNCTION bursar.replace_subscription_entitlement_if_source(", 1
+    )[0]
+
+    assert "CREATE FUNCTION bursar.select_entitlement_source(" not in billing_sql
+    assert "e.balance_after::numeric" in billing_sql
+
+    assert "SET source_type = 'manual'" in plan_sql
+    assert "source_id = NULL" in plan_sql
+    assert "FROM bursar.credit_accounts AS account" in generic_unassign_sql
+    assert "bursar.account_for_subject" not in generic_unassign_sql
+    assert "CREATE FUNCTION bursar.unassign_plan_if_source(" in plan_sql
+    assert "FROM bursar.credit_accounts AS account" in source_unassign_sql
+    assert "bursar.account_for_subject" not in source_unassign_sql
+    assert "AND source_type = p_source_type" in source_unassign_sql
+    assert "AND source_id = p_source_id" in source_unassign_sql
+    assert "CREATE FUNCTION bursar.replace_subscription_entitlement_if_source(" in plan_sql
+    assert "CREATE FUNCTION bursar.reconcile_subscription_entitlement(" in plan_sql
+    assert "p_billing_event_id uuid" in plan_sql
+    assert "subscription.status = p_expected_status" in plan_sql
+    assert "subscription.provider_updated_at IS NOT DISTINCT FROM" in plan_sql
+    assert "RETURN 'stale'" in plan_sql
+    assert "RETURN 'applied'" in plan_sql
+    assert "RETURN CASE WHEN v_replaced THEN 'revoked' ELSE 'preserved' END" in plan_sql
+    assert "entitlement_billing_event_id" in billing_tables_sql
+    assert "entitlement_provider_updated_at" in billing_tables_sql
+    reconcile_sql = plan_sql.split("CREATE FUNCTION bursar.reconcile_subscription_entitlement(", 1)[1].split(
+        "CREATE FUNCTION bursar.expire_subscription_grace_period(", 1
+    )[0]
+    assert reconcile_sql.index("FROM bursar.subjects AS subject") < reconcile_sql.index(
+        "FROM bursar.credit_accounts AS account"
+    )
+    assert reconcile_sql.index("FROM bursar.credit_accounts AS account") < reconcile_sql.index(
+        "FROM bursar.billing_subscriptions AS subscription",
+        reconcile_sql.index("FROM bursar.credit_accounts AS account"),
+    )
+    advance_sql = plan_sql.split("CREATE FUNCTION bursar.advance_subscription_change(", 1)[1]
+    assert "bursar.account_plan_assignments" not in advance_sql
+    assert "CREATE FUNCTION bursar.expire_subscription_grace_period(" in plan_sql
+    assert "bursar.mark_subscription_grace_expired(" in plan_sql
+    expiry_sql = plan_sql.split("CREATE FUNCTION bursar.expire_subscription_grace_period(", 1)[1].split(
+        "CREATE FUNCTION bursar.set_plan_revision_pin(", 1
+    )[0]
+    assert expiry_sql.index("FROM bursar.subjects AS subject") < expiry_sql.index(
+        "FROM bursar.credit_accounts AS account"
+    )
+    assert expiry_sql.index("FROM bursar.credit_accounts AS account") < expiry_sql.index(
+        "FROM bursar.billing_subscriptions AS subscription"
+    )
+
+    assert "'bursar.unassign_plan_if_source(uuid,text,uuid,text)'" not in security_sql
+    assert "'bursar.replace_subscription_entitlement_if_source(uuid,uuid,text,text)'" not in security_sql
+    assert "'bursar.mark_subscription_grace_expired(uuid,timestamptz,timestamptz)'" not in security_sql
+    assert (
+        "'bursar.reconcile_subscription_entitlement(uuid,uuid,uuid,"
+        "bursar.billing_subscription_status,timestamptz,timestamptz,boolean,text,text)'" in security_sql
+    )
+    assert "'bursar.expire_subscription_grace_period(uuid,uuid,timestamptz,timestamptz,text)'" in security_sql
+    assert not (SQL_DIR / "031_subscription_entitlement_source_rpc.sql").exists()
+    assert not (SQL_DIR / "032_grant_billing_credit_replay_cast.sql").exists()
+
+
 def test_migration_ledger_exactly_matches_the_greenfield_baseline(
     pg_database_url: str,
 ) -> None:
@@ -175,6 +245,7 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
             "bursar.bucket_expiry_at(uuid,uuid,text)",
             "bursar.provision_subject_account_on_insert()",
             "bursar.secure_tenant_partition(regclass)",
+            "bursar.unassign_plan_if_source(uuid,text,uuid,text)",
         ):
             cursor.execute(
                 """
