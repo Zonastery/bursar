@@ -24,11 +24,38 @@ export const noopLogger: NormalizedLogger = {
   error: () => {},
 };
 
+function isolateLoggerMethod(method: LoggerMethod, receiver: Logger): LoggerMethod {
+  return (message, context) => {
+    let result: void | PromiseLike<void>;
+    try {
+      result = method.call(receiver, message, context);
+    } catch {
+      return;
+    }
+    // Logging is diagnostic side effect only. A rejected injected logger must
+    // never become an unhandled rejection or change billing behavior.
+    if (result != null) void Promise.resolve(result).catch(() => {});
+  };
+}
+
 export function normalizeLogger(logger?: Logger | null): NormalizedLogger {
+  const source: Logger = logger ?? {};
   return {
-    debug: logger?.debug ?? noopLogger.debug,
-    info: logger?.info ?? noopLogger.info,
-    warn: logger?.warn ?? noopLogger.warn,
-    error: logger?.error ?? noopLogger.error,
+    debug:
+      typeof source.debug === "function"
+        ? isolateLoggerMethod(source.debug, source)
+        : noopLogger.debug,
+    info:
+      typeof source.info === "function"
+        ? isolateLoggerMethod(source.info, source)
+        : noopLogger.info,
+    warn:
+      typeof source.warn === "function"
+        ? isolateLoggerMethod(source.warn, source)
+        : noopLogger.warn,
+    error:
+      typeof source.error === "function"
+        ? isolateLoggerMethod(source.error, source)
+        : noopLogger.error,
   };
 }
