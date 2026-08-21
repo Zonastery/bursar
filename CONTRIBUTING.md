@@ -33,7 +33,7 @@ uv sync --group dev
 
 ```bash
 cd bursar/javascript
-bun ci                        # Bun 1.3.14; installs the committed bun.lock
+bun ci                        # Bun 1.4.0; installs the committed bun.lock
 ```
 
 The published SDK remains ESM for Node.js 22 or newer. Bun manages development
