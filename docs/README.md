@@ -37,7 +37,7 @@ Generated paths are build artifacts. Edit their source instead.
 Install these runtimes:
 
 - Node.js 22 or newer and npm
-- Bun 1.3.14 (the JavaScript SDK's pinned `packageManager`; TypeDoc runs from this directory's own dependencies)
+- Bun 1.4.0 (the JavaScript SDK's pinned `packageManager`; TypeDoc runs from this directory's own dependencies)
 - Python 3.12 or 3.13 with the Bursar development group, Sphinx, and `sphinx-markdown-builder`
 
 Install dependencies from the repository root and package directories:
