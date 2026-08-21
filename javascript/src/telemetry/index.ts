@@ -4,7 +4,7 @@ import { z } from "zod";
 import { diagnosticErrorCode, diagnosticErrorType } from "../shared/diagnostics.js";
 
 export const BURSAR_INSTRUMENTATION_SCOPE = "@zonastery/bursar";
-export const BURSAR_INSTRUMENTATION_VERSION = "2.0.3";
+export const BURSAR_INSTRUMENTATION_VERSION = "2.0.4";
 
 export type TelemetryAttributeValue = string | number | boolean;
 export interface TelemetryAttributes {

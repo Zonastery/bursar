@@ -217,8 +217,8 @@ is distributed directly from an immutable nested-module tag:
 
 ```bash
 # tag and push (version must match python/pyproject.toml and javascript/package.json)
-git tag v2.0.3
-git push origin v2.0.3
+git tag v2.0.4
+git push origin v2.0.4
 ```
 
 On a `v*` tag, CI runs the full matrix, then the ordered publish jobs run under
@@ -234,8 +234,8 @@ The Go SDK lives in `golang/` as the nested module
 `github.com/Zonastery/bursar/golang/v2`. Its `/v2` semantic import suffix is
 verified against the shared release version before anything is published. Once
 the complete release preflight passes, `release-go-tag` creates
-`golang/v2.0.3` and `golang/integrations/googleadk/v2.0.3` at the exact commit
-referenced by `v2.0.3`. A rerun accepts an existing nested tag only when it
+`golang/v2.0.4` and `golang/integrations/googleadk/v2.0.4` at the exact commit
+referenced by `v2.0.4`. A rerun accepts an existing nested tag only when it
 resolves to that same commit; a conflicting tag fails the release. Maintainers
 create and push only the shared root tag—the workflow owns both nested tags. No
 separate Go registry or release CLI is needed.

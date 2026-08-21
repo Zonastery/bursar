@@ -6,7 +6,32 @@ page after the Python and TypeScript packages are published successfully.
 
 ## [Unreleased]
 
-See the [comparison with 2.0.3](https://github.com/Zonastery/bursar/compare/v2.0.3...HEAD).
+See the [comparison with 2.0.4](https://github.com/Zonastery/bursar/compare/v2.0.4...HEAD).
+
+## [2.0.4] - 2026-08-21
+
+### Added
+
+- Added the Go Google ADK integration module and expanded Go API and integration
+  documentation.
+- Added cross-SDK contract, package-smoke, and production-confidence coverage
+  for billing, commerce, storage, auto-recharge, entitlements, and financial
+  invariants.
+
+### Changed
+
+- Expanded and aligned the JavaScript, Python, and Go billing, commerce,
+  provider, storage, and PostgreSQL lifecycle contracts.
+- Standardized the JavaScript SDK quality toolchain on Oxlint and Oxfmt and
+  expanded the CI matrix across supported Node, Python, PostgreSQL, and Go
+  versions.
+
+### Fixed
+
+- Hardened billing event processing, subscription entitlement reconciliation,
+  provider error handling, storage maintenance, and PostgreSQL state boundaries.
+- Added release and parity gates that validate SDK versions, package artifacts,
+  and cross-SDK behavior before publishing.
 
 ## [2.0.3] - 2026-08-15
 
@@ -104,6 +129,7 @@ See the [comparison with 2.0.3](https://github.com/Zonastery/bursar/compare/v2.0
 - [0.0.2](https://github.com/Zonastery/bursar/compare/v0.0.1...v0.0.2)
 - [0.0.1](https://github.com/Zonastery/bursar/releases/tag/v0.0.1)
 
+[2.0.4]: https://github.com/Zonastery/bursar/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/Zonastery/bursar/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/Zonastery/bursar/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/Zonastery/bursar/compare/v2.0.0...v2.0.1
