@@ -164,7 +164,7 @@
 
     "@dodopayments/core": ["@dodopayments/core@0.3.14", "", { "dependencies": { "dodopayments": "^2.46.0", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-x7gC2d3cY2PkPWHYDU2AKCZk5xgKDMJG5A0dj8m+9+3B7gLtprE3eoDnvPz2zVSccQVvvCd2nQfARjY3EIfwBQ=="],
 
-    "@dodopayments/nextjs": ["@dodopayments/nextjs@0.3.8", "", { "dependencies": { "@dodopayments/core": "^0.3.14" }, "peerDependencies": { "next": "^14.0.0 || ^15.0.0 || ^16.0.0", "zod": "^3.25.0 || ^4.0.0" } }, "sha512-dCjW1B283CpeuLBByCqB9XNkaPBZ60dWL+R7b/exC1GhRKtWo6E9g4YKNB4HFHJER/a7fotxafTKWCdrc7o3Gg=="],
+    "@dodopayments/nextjs": ["@dodopayments/nextjs@0.3.9", "", { "dependencies": { "@dodopayments/core": "^0.3.14" }, "peerDependencies": { "next": "^14.0.0 || ^15.0.0 || ^16.0.0", "zod": "^3.25.0 || ^4.0.0" } }, "sha512-AxKISyMwvtUxaNU9QYSIehLXYwG/cWlciQsg0ddfvQXS/jXD/0ArR7/Iys9tOOnXkBbORHbWyljzE1AlXqtk6w=="],
 
     "@dodopayments/react-native-checkout": ["@dodopayments/react-native-checkout@1.2.0", "", { "peerDependencies": { "react": "*", "react-native": ">=0.77.0" } }, "sha512-1mfaCwUW53HCicGKsoQBmLQj1CuyxmpxUXhOe8kNmOVyUj7QAIqEXTGOOtPkXPJhvychRR+VAsRlxO/THucuSQ=="],
 
