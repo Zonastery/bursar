@@ -1,0 +1,9 @@
+.git
+coverage/
+bin/
+*.out
+README.md
+Dockerfile
+.dockerignore
+.testcoverage.yml
+Makefile
