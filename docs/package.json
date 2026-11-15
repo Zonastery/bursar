@@ -28,28 +28,28 @@
     "check": "npm run format:check && npm run typecheck && npm run smoke && npm run build"
   },
   "dependencies": {
-    "@docusaurus/core": "3.10.1",
-    "@docusaurus/preset-classic": "3.10.1",
-    "@docusaurus/theme-mermaid": "^3.10.1",
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@docusaurus/theme-mermaid": "^3.10.2",
     "@easyops-cn/docusaurus-search-local": "^0.55.3",
-    "@mdx-js/react": "^3.0.0",
-    "clsx": "^2.0.0",
-    "prism-react-renderer": "^2.3.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "@mdx-js/react": "^3.1.1",
+    "clsx": "^2.1.1",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@docusaurus/module-type-aliases": "3.10.1",
-    "@docusaurus/tsconfig": "3.10.1",
-    "@docusaurus/types": "3.10.1",
-    "@types/react": "^19.0.0",
-    "db-schema-toolkit": "1.1.13",
-    "docusaurus-plugin-llms": "^0.5.1",
-    "docusaurus-plugin-typedoc": "^1.2.0",
-    "prettier": "^3.6.2",
-    "typedoc": "^0.28.0",
-    "typedoc-plugin-markdown": "^4.6.0",
-    "typescript": "~6.0.2"
+    "@docusaurus/module-type-aliases": "3.10.2",
+    "@docusaurus/tsconfig": "3.10.2",
+    "@docusaurus/types": "3.10.2",
+    "@types/react": "^19.3.0",
+    "db-schema-toolkit": "3.0.1",
+    "docusaurus-plugin-llms": "^0.6.1",
+    "docusaurus-plugin-typedoc": "^1.4.3",
+    "prettier": "^3.10.1",
+    "typedoc": "^0.28.20",
+    "typedoc-plugin-markdown": "^4.14.1",
+    "typescript": "~6.0.3"
   },
   "browserslist": {
     "production": [

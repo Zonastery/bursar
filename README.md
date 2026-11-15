@@ -42,7 +42,7 @@ identical accounting and identical bills.
 
 ## Quick start
 
-Requirements: Python 3.12 or 3.13, Node.js 22+, or Go 1.25+; PostgreSQL 16+,
+Requirements: Python 3.12 or 3.13, Node.js 22+, or Go 1.26+; PostgreSQL 16+,
 pg_partman 5.x, and pg_jsonschema 0.3+ available to the database migration role.
 
 ```bash
@@ -73,8 +73,8 @@ Google ADK applications install the optional adapter separately:
 go get github.com/Zonastery/bursar/golang/integrations/googleadk/v2
 ```
 
-The adapter follows ADK's Go 1.26.5 requirement while the core SDK remains
-compatible with Go 1.25. Releases publish its matching
+The core SDK and web service require Go 1.26 or newer. The optional ADK adapter
+requires Go 1.26.10 or newer. Releases publish its matching
 `golang/integrations/googleadk/v2.0.4` tag from the same commit.
 
 Create a tenant, then build the facade:

@@ -4,7 +4,7 @@
 SDK lives in [`../golang`](../golang)). This module ships the platform
 foundation — configuration, structured logging, OpenTelemetry, health and
 readiness probes, and graceful shutdown — so feature routes can be added
-without re-solving operational concerns. It requires Go 1.25+.
+without re-solving operational concerns. It requires Go 1.26+.
 
 ## Quick start
 
@@ -65,7 +65,7 @@ web/
 
 | Target | Purpose |
 | --- | --- |
-| `make lint` | gofmt check, `go vet`, pinned Staticcheck (`staticcheck@v0.7.0`) |
+| `make lint` | gofmt check, `go vet`, pinned Staticcheck (`staticcheck@v0.8.2`) |
 | `make test` | Race-enabled unit tests |
 | `make cover` | Atomic coverage profile plus the coverage gate |
 | `make tidy-check` | Fails if `go.mod`/`go.sum` are not tidy |

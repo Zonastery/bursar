@@ -547,9 +547,10 @@ func (p *Provider) ChargeSavedPaymentMethod(ctx context.Context, params bursar.S
 	return result, nil
 }
 
-// GetInvoiceURL retrieves the invoice URL attached to a Dodo payment. The
-// pinned official SDK exposes invoice URLs through Payments.Get and exposes no
-// standalone invoice retrieval endpoint, so callers must pass a payment ID.
+// GetInvoiceURL retrieves the browser-accessible invoice URL attached to a
+// Dodo payment. Dodo's invoice retrieval endpoint returns PDF bytes and
+// requires API authentication, so this URL-valued contract uses the hosted
+// invoice URL from the payment response.
 func (p *Provider) GetInvoiceURL(ctx context.Context, paymentID string) (string, error) {
 	if p == nil || p.client == nil || p.client.Payments == nil {
 		return "", dodoUninitializedError()
@@ -565,6 +566,7 @@ func (p *Provider) GetInvoiceURL(ctx context.Context, paymentID string) (string,
 	if payment == nil {
 		return "", dodoResponseError("retrieve invoice URL", "payment")
 	}
+	//lint:ignore SA1019 Dodo's replacement endpoint returns an authenticated PDF, but this contract requires a browser-accessible URL.
 	return strings.TrimSpace(payment.InvoiceURL), nil
 }
 
@@ -603,7 +605,7 @@ func (p *Provider) ChangePlan(ctx context.Context, request bursar.ProviderPlanCh
 	if err != nil {
 		return bursar.ProviderPlanChangeResult{}, err
 	}
-	if err := p.client.Subscriptions.ChangePlan(ctx, subscriptionID, dodopayments.SubscriptionChangePlanParams{
+	if _, err := p.client.Subscriptions.ChangePlan(ctx, subscriptionID, dodopayments.SubscriptionChangePlanParams{
 		UpdateSubscriptionPlanReq: body,
 	}, dodoIdempotencyOption(request.IdempotencyKey)); err != nil {
 		return bursar.ProviderPlanChangeResult{}, dodoRequestError("change plan", err, true)

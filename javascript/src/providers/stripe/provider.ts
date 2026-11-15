@@ -331,7 +331,7 @@ export class StripeProvider implements PaymentProvider {
       mode: "setup",
       success_url: params.returnUrl,
       cancel_url: params.cancelUrl ?? params.returnUrl,
-      payment_method_types: ["card"],
+      allowed_payment_method_types: ["card"],
     });
     return { url: requireStripeText(session.url, "createPaymentMethodSetupSession", "url") };
   }

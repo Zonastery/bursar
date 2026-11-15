@@ -13,6 +13,7 @@ type DodoPayment = Awaited<ReturnType<DodoPayments["payments"]["retrieve"]>>;
 type DodoPlanChangePreview = Awaited<
   ReturnType<DodoPayments["subscriptions"]["previewChangePlan"]>
 >;
+type DodoPlanChangeResult = Awaited<ReturnType<DodoPayments["subscriptions"]["changePlan"]>>;
 type DodoPaymentMethodUpdate = Awaited<
   ReturnType<DodoPayments["subscriptions"]["updatePaymentMethod"]>
 >;
@@ -90,7 +91,7 @@ export interface DodoClient {
       subscriptionId: Parameters<DodoPayments["subscriptions"]["changePlan"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["changePlan"]>[1],
       options?: DodoMutationRequestOptions,
-    ): Promise<void>;
+    ): Promise<DodoPlanChangeResult>;
     previewChangePlan(
       subscriptionId: Parameters<DodoPayments["subscriptions"]["previewChangePlan"]>[0],
       body: Parameters<DodoPayments["subscriptions"]["previewChangePlan"]>[1],

@@ -73,6 +73,8 @@ func (f *dodoFixture) handler(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/change-plan/preview"):
 		writeDodoJSON(w, dodoPlanPreviewJSON)
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/change-plan"):
+		writeDodoJSON(w, `{}`)
 	case r.Method == http.MethodPatch:
 		writeDodoJSON(w, `{}`)
 	case r.Method == http.MethodPost || r.Method == http.MethodDelete:
