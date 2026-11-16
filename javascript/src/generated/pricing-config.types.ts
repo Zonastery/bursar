@@ -17,18 +17,12 @@ export type Op1 = "in";
 /**
  * @minItems 1
  */
-export type Values = [
-  string | number | string | boolean,
-  ...(string | number | string | boolean)[],
-];
+export type Values = [string | number | boolean, ...(string | number | boolean)[]];
 export type Op2 = "not_in";
 /**
  * @minItems 1
  */
-export type Values1 = [
-  string | number | string | boolean,
-  ...(string | number | string | boolean)[],
-];
+export type Values1 = [string | number | boolean, ...(string | number | boolean)[]];
 export type Op3 = "prefix";
 export type Value1 = string;
 export type Op4 = "range";

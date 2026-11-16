@@ -36,6 +36,8 @@ pre-commit:
     js-lint:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"
+      # Generated config declarations are verified by regeneration and typecheck; Oxlint ignores them.
+      exclude: "javascript/src/generated/**"
       run: |
         bunx --no-install oxlint --config .oxlintrc.json --deny-warnings {staged_files} \
           || { echo "↳ run: bunx --no-install oxlint --config .oxlintrc.json --fix <files>  (then review & re-stage)" >&2; exit 1; }
