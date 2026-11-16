@@ -308,7 +308,7 @@ class StripeProvider:
                 "mode": "setup",
                 "success_url": params.return_url,
                 "cancel_url": params.cancel_url or params.return_url,
-                "payment_method_types": ["card"],
+                "allowed_payment_method_types": ["card"],
             }
         )
         return ProviderUrlResult(

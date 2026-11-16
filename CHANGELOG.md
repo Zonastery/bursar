@@ -17,7 +17,12 @@ See the [comparison with 2.0.5](https://github.com/Zonastery/bursar/compare/v2.0
 
 ### Changed
 
-- Upgraded the Python, JavaScript, and Go SDK dependency sets and pinned the Bun
+- Upgraded the Python SDK dependency and development-dependency sets to their
+  latest stable releases, including Stripe 17 and Google ADK 2.14. The optional
+  Stripe extra now requires `stripe>=16,<18` for Checkout
+  `allowed_payment_method_types`, and the Google ADK extra supports
+  `google-adk>=2.7,<2.15`.
+- Upgraded the JavaScript and Go SDK dependency sets and pinned the Bun
   toolchain to 1.4.0.
 
 ### Fixed

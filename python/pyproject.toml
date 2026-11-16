@@ -60,7 +60,7 @@ where = ["src"]
 
 [project.optional-dependencies]
 stripe = [
-    "stripe>=15.5.0,<16",
+    "stripe>=16.0.0,<18",
 ]
 dodo = [
     "dodopayments[webhooks]>=1.112.0,<2",
@@ -72,7 +72,7 @@ s3 = [
     "boto3>=1.43.72,<2",
 ]
 google-adk = [
-    "google-adk>=2.7.0,<2.8.0",
+    "google-adk>=2.7.0,<2.15.0",
 ]
 opentelemetry = [
     "opentelemetry-api>=1.43.0,<2",
@@ -90,10 +90,10 @@ test = [
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
-    "stripe>=15.5.0,<16",
+    "stripe>=16.0.0,<18",
     "dodopayments[webhooks]>=1.112.0,<2",
     "boto3>=1.43.72,<2",
-    "google-adk>=2.7.0,<2.8.0",
+    "google-adk>=2.7.0,<2.15.0",
     "opentelemetry-api>=1.43.0,<2",
 ]
 
@@ -238,9 +238,9 @@ test-deps = [
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
-    "stripe>=15.5.0,<16",
+    "stripe>=16.0.0,<18",
     "dodopayments[webhooks]>=1.112.0,<2",
     "boto3>=1.43.72,<2",
-    "google-adk>=2.7.0,<2.8.0",
+    "google-adk>=2.7.0,<2.15.0",
     "opentelemetry-api>=1.43.0,<2",
 ]
