@@ -3,7 +3,7 @@ module github.com/Zonastery/bursar/golang/integrations/googleadk/v2
 go 1.26.10
 
 require (
-	github.com/Zonastery/bursar/golang/v2 v2.0.4
+	github.com/Zonastery/bursar/golang/v2 v2.0.5
 	google.golang.org/adk/v2 v2.7.1
 	google.golang.org/genai v1.77.0
 )

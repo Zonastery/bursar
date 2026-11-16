@@ -6,7 +6,26 @@ page after the Python and TypeScript packages are published successfully.
 
 ## [Unreleased]
 
-See the [comparison with 2.0.4](https://github.com/Zonastery/bursar/compare/v2.0.4...HEAD).
+See the [comparison with 2.0.5](https://github.com/Zonastery/bursar/compare/v2.0.5...HEAD).
+
+## [2.0.5] - 2026-11-16
+
+### Added
+
+- Added the Bursar web service foundation, a Go HTTP service for hosted
+  deployments.
+
+### Changed
+
+- Upgraded the Python, JavaScript, and Go SDK dependency sets and pinned the Bun
+  toolchain to 1.4.0.
+
+### Fixed
+
+- Restored the repository CI gates so generated pricing schemas, generated
+  TypeScript declarations, and lint tooling are verified on every change.
+- Regenerated the JavaScript pricing configuration types so they match the
+  shared JSON Schema exactly.
 
 ## [2.0.4] - 2026-08-21
 
@@ -129,6 +148,7 @@ See the [comparison with 2.0.4](https://github.com/Zonastery/bursar/compare/v2.0
 - [0.0.2](https://github.com/Zonastery/bursar/compare/v0.0.1...v0.0.2)
 - [0.0.1](https://github.com/Zonastery/bursar/releases/tag/v0.0.1)
 
+[2.0.5]: https://github.com/Zonastery/bursar/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/Zonastery/bursar/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/Zonastery/bursar/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/Zonastery/bursar/compare/v2.0.1...v2.0.2
