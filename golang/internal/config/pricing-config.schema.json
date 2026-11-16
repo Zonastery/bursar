@@ -985,10 +985,6 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-              "type": "string"
-            },
-            {
               "type": "boolean"
             }
           ],
@@ -1300,10 +1296,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              },
-              {
                 "type": "boolean"
               }
             ]
@@ -1445,10 +1437,6 @@
               },
               {
                 "type": "number"
-              },
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
               },
               {
                 "type": "boolean"

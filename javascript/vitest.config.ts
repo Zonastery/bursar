@@ -36,7 +36,8 @@ export default defineConfig({
         "src/index.ts",
         "src/node.ts",
         "src/metrics.ts",
-        "src/providers",
+        // Vitest 5 uses picomatch matching, so directory exclusions need a glob.
+        "src/providers/**",
         // Abstract capability surface; concrete stores are covered instead.
         "src/credits/store.ts",
       ],

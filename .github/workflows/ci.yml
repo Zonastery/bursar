@@ -44,9 +44,11 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: python/pyproject.toml
-      - run: pip install -e "python/[test,postgres]"
+      - run: pip install uv==0.11.16
       - working-directory: python
-        run: pyright src/ --warnings
+        run: |
+          uv sync --locked --extra test --extra postgres
+          uv run --locked --extra test --extra postgres pyright src/ --warnings
 
   test:
     name: Python ${{ matrix.python-version }} / PostgreSQL ${{ matrix.postgres.major }}
@@ -85,20 +87,25 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: python/pyproject.toml
-      - run: pip install -e "python/[test,postgres]"
+      # Pydantic's JSON Schema output is a cross-SDK artifact; use the committed lock.
+      - run: pip install uv==0.11.16
+      - working-directory: python
+        run: uv sync --locked --extra test --extra postgres
       # Loads the shared expression vectors and runs the real-Postgres
       # concurrency and double-spend suite through testcontainers.
       # --cov-fail-under is the floor in pyproject.toml (ratchet up, never down).
       - working-directory: python
-        run: pytest --cov=bursar --cov-branch --cov-report=term-missing --cov-report=xml
+        run: |
+          uv run --locked --extra test --extra postgres pytest \
+            --cov=bursar --cov-branch --cov-report=term-missing --cov-report=xml
       - name: Verify pricing JSON schema is up to date
         run: |
-          python python/scripts/generate_pricing_json_schema.py
+          uv run --project python --locked --extra test --extra postgres \
+            python python/scripts/generate_pricing_json_schema.py
           git diff --exit-code -- \
             docs/pricing-config.schema.json \
             javascript/src/generated/pricing-config.schema.json \
-            golang/internal/config/pricing-config.schema.json \
-            python/src/bursar/sql/001_schema_and_types.sql
+            golang/internal/config/pricing-config.schema.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: matrix.python-version == '3.13' && matrix.postgres.major == '17'
         with:
@@ -290,12 +297,15 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-
-      - run: pip install -e "python/[test]"
+      - run: pip install uv==0.11.16
+      - working-directory: python
+        run: uv sync --locked --extra test
       - working-directory: javascript
         run: bun ci --ignore-scripts && bun run build
       - name: Export and compare shared contract vectors
         run: |
-          python python/scripts/export_contract_results.py /tmp/bursar-python-contract.json
+          uv run --project python --locked --extra test \
+            python python/scripts/export_contract_results.py /tmp/bursar-python-contract.json
           node javascript/scripts/export-contract-results.mjs /tmp/bursar-javascript-contract.json
           cd golang
           go run ../.github/package-smoke/go-export-contract-results.go \
@@ -380,7 +390,7 @@ jobs:
           /tmp/bursar-python-consumer/bin/python -c 'import bursar; assert bursar.Bursar and bursar.PricingEngine'
           wheel=$(find /tmp/bursar-wheel -name '*.whl' -print -quit)
           /tmp/bursar-python-consumer/bin/pip install "${wheel}[postgres,s3,opentelemetry]"
-          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "030_operator_runtime_role.sql").is_file()'
+          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "031_catalog_document_shape_schema.sql").is_file()'
           /tmp/bursar-python-consumer/bin/bursar migrate
           /tmp/bursar-python-consumer/bin/bursar tenant bootstrap package-smoke \
             .github/package-smoke/pricing.json \

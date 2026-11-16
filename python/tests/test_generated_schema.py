@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from bursar.config import BursarConfig
@@ -59,6 +60,25 @@ def test_generated_json_schema_is_current() -> None:
     for output in outputs:
         assert json.loads(output.read_text(encoding="utf-8")) == expected
 
-    sql = (repository / "python" / "src" / "bursar" / "sql" / "001_schema_and_types.sql").read_text(encoding="utf-8")
-    generated = sql.split("$catalog_json$", 2)[1]
-    assert json.loads(generated) == _compact_shape_schema(expected)
+    # Migrations are checksummed and immutable, so validate the latest function definition.
+    sql_dir = repository / "python" / "src" / "bursar" / "sql"
+    latest_sql_schema: str | None = None
+    for migration in sorted(sql_dir.glob("[0-9][0-9][0-9]_*.sql")):
+        sql = migration.read_text(encoding="utf-8")
+        function = re.search(
+            r"CREATE(?: OR REPLACE)? FUNCTION\s+bursar\.catalog_document_shape_schema\(\)(.*?)\$function\$;",
+            sql,
+            re.DOTALL,
+        )
+        if function is None:
+            continue
+        generated = re.search(
+            r"SELECT\s+\$catalog_json\$(.*?)\$catalog_json\$::jsonb",
+            function.group(1),
+            re.DOTALL,
+        )
+        assert generated is not None, f"{migration}: catalog schema function has no generated JSON payload"
+        latest_sql_schema = generated.group(1)
+
+    assert latest_sql_schema is not None, "No catalog shape schema function found in SQL migrations"
+    assert json.loads(latest_sql_schema) == _compact_shape_schema(expected)
