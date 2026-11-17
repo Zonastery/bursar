@@ -26,7 +26,7 @@ declare module "vitest" {
 }
 
 let container: StartedPostgreSqlContainer | undefined;
-const DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.10-pg-jsonschema-0.3.4";
+const DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.12-pg-jsonschema-0.3.4";
 const POSTGRES_BUILD_CONTEXT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../tests/postgres",

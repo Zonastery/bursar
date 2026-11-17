@@ -42,7 +42,7 @@ jobs:
       - name: Setup Python (for API docs generation)
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
       - name: Install Python package + Sphinx + notebook deps
         run: |
           pip install -e "../python[postgres,stripe]"
@@ -52,7 +52,7 @@ jobs:
           node-version: "22"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.4"
       - run: npm ci
       - name: Install JS package deps (for TypeDoc)
         run: bun ci --ignore-scripts

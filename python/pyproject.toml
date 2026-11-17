@@ -4,8 +4,8 @@ version = "2.0.5"
 description = "Open-source PostgreSQL credit ledger, usage metering, and billing SDK for AI SaaS"
 readme = "README.md"
 license = "AGPL-3.0-only"
-# Bursar supports the two Python versions exercised by its release matrix.
-requires-python = ">=3.12,<3.14"
+# Bursar supports Python 3.12 through 3.15, covered by its release matrix.
+requires-python = ">=3.12,<3.16"
 dependencies = [
     "pydantic>=2.13.4,<3",
     "pyyaml>=6.0.3,<7",
@@ -37,6 +37,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 

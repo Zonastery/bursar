@@ -18,7 +18,7 @@ SHELL := /bin/bash
 GO_TEST_COVERAGE := github.com/vladopajic/go-test-coverage/v2@v2.19.0
 
 TEST_PG_NAME ?= bursar-test-pg
-TEST_PG_IMAGE ?= bursar/postgres-test:17.10-pg-jsonschema-0.3.4
+TEST_PG_IMAGE ?= bursar/postgres-test:17.12-pg-jsonschema-0.3.4
 TEST_PG_BUILD_CONTEXT ?= tests/postgres
 TEST_PG_PORT ?= 55432
 TEST_PG_DATABASE ?= bursar

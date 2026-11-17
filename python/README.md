@@ -15,7 +15,7 @@
 The Python SDK for [Bursar](https://github.com/Zonastery/bursar). It meters
 usage, prices operations, and manages balances against the shared canonical
 PostgreSQL schema and the same versioned configuration document as the
-JavaScript SDK. Python 3.12 and 3.13 are supported.
+JavaScript SDK. Python 3.12 through 3.15 are supported.
 
 ## Installation
 

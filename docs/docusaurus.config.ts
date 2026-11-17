@@ -32,7 +32,7 @@ const structuredData = {
       license: `${repositoryUrl}/blob/main/LICENSE`,
       programmingLanguage: ["Python", "TypeScript", "Go", "SQL"],
       runtimePlatform: [
-        "Python 3.12–3.13",
+        "Python 3.12–3.15",
         "Node.js 22+",
         "Go 1.25+",
         "PostgreSQL 16+",

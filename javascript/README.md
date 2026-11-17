@@ -233,7 +233,7 @@ for the full S3 and ClickHouse setup.
 
 ```bash
 cd javascript
-bun ci                        # Bun 1.4.0; installs the committed bun.lock
+bun ci                        # Bun 1.4.4; installs the committed bun.lock
 bun run typecheck
 bun run test                  # integration tests use a disposable testcontainer by default
 bun run lint

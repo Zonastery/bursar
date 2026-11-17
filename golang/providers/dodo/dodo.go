@@ -407,7 +407,9 @@ func (p *Provider) ListPaymentMethods(ctx context.Context, customerID string) ([
 	if err != nil {
 		return nil, err
 	}
-	response, err := p.client.Customers.GetPaymentMethods(ctx, customerID)
+	response, err := p.client.Customers.GetPaymentMethods(
+		ctx, customerID, dodopayments.CustomerGetPaymentMethodsParams{},
+	)
 	if err != nil {
 		return nil, dodoRequestError("list payment methods", err, false)
 	}

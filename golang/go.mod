@@ -1,16 +1,16 @@
 module github.com/Zonastery/bursar/golang/v2
 
-go 1.26.0
+go 1.26.11
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.51.0
 	github.com/aws/aws-sdk-go-v2 v1.48.0
-	github.com/aws/aws-sdk-go-v2/config v1.33.18
-	github.com/aws/aws-sdk-go-v2/credentials v1.21.0
+	github.com/aws/aws-sdk-go-v2/config v1.33.19
+	github.com/aws/aws-sdk-go-v2/credentials v1.21.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/dlclark/regexp2 v1.12.0
-	github.com/dodopayments/dodopayments-go v1.126.0
+	github.com/dodopayments/dodopayments-go v1.127.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/pashagolub/pgxmock/v6 v6.0.0-beta2
@@ -49,14 +49,14 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.3 // indirect
+	github.com/jackc/puddle/v2 v2.2.4 // indirect
 	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/paulmach/orb v0.14.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
-	github.com/tidwall/gjson v1.20.3 // indirect
+	github.com/tidwall/gjson v1.20.4 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.3.0 // indirect
 	github.com/tidwall/sjson v1.2.9 // indirect

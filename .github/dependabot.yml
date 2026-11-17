@@ -13,3 +13,27 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/golang"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/golang/integrations/googleadk"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/python"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/tests/postgres"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/web"
+    schedule:
+      interval: "weekly"

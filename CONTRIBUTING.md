@@ -33,7 +33,7 @@ uv sync --group dev
 
 ```bash
 cd bursar/javascript
-bun ci                        # Bun 1.4.0; installs the committed bun.lock
+bun ci                        # Bun 1.4.4; installs the committed bun.lock
 ```
 
 The published SDK remains ESM for Node.js 22 or newer. Bun manages development
@@ -78,7 +78,7 @@ gmake test-integration
 ```
 
 The fixtures apply `python/src/bursar/sql/*.sql` themselves; no preloaded Bursar
-schema is needed. CI runs this matrix on Python 3.12 and 3.13.
+schema is needed. CI runs this matrix on Python 3.12 through 3.15.
 Supplying `DATABASE_URL` requires `BURSAR_ALLOW_DATABASE_RESET=1` because the
 harness truncates every Bursar-owned table between tests. Set it only for a
 disposable test database; `gmake test-integration` handles this automatically
@@ -187,7 +187,7 @@ authoritative gate.** Install them with `lefthook install`.
    in every SDK. Do not introduce a divergence.
 4. Ensure all tests pass and there are no new type errors.
 5. Open a PR against `main`.
-6. CI runs lint → typecheck → test (Python 3.12–3.13 and Node 22/24 against
+6. CI runs lint → typecheck → test (Python 3.12–3.15 and Node 22/24 against
    PostgreSQL 16/17 + pg_partman 5 + pg_jsonschema 0.3; Go 1.25–1.26 unit and
    race tests, plus the required Go PostgreSQL package-smoke suite) and the
    cross-SDK parity gate.

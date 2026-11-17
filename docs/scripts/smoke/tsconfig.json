@@ -8,9 +8,8 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
-    "baseUrl": "../../../javascript",
     "paths": {
-      "stripe": ["node_modules/stripe"]
+      "stripe": ["../../../javascript/node_modules/stripe"]
     },
     "typeRoots": ["../../../javascript/node_modules/@types"],
     "ignoreDeprecations": "6.0"

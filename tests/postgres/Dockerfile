@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG POSTGRES_IMAGE=postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+ARG POSTGRES_IMAGE=postgres:17.12-bookworm@sha256:40865bc877a289da75963d97d72b59633f639fc5af7a4e856bfa3714cae5b536
 FROM ${POSTGRES_IMAGE} AS pg-jsonschema
 
 ARG PG_JSONSCHEMA_VERSION=0.3.4

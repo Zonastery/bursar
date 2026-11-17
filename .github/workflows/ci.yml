@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
           cache: pip
           cache-dependency-path: python/pyproject.toml
       - run: pip install ruff==0.16.3 sqlfluff==4.2.2
@@ -41,10 +41,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
           cache: pip
           cache-dependency-path: python/pyproject.toml
-      - run: pip install uv==0.11.16
+      - run: pip install uv==0.13.8
       - working-directory: python
         run: |
           uv sync --locked --extra test --extra postgres
@@ -62,7 +62,7 @@ jobs:
         # Supported Python runtimes and PostgreSQL majors. Base images are
         # immutable, multi-architecture OCI indexes; the Dockerfile separately
         # verifies the matching pg_jsonschema package checksum.
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
         postgres:
           - major: "16"
             base_image: postgres:16.10-bookworm@sha256:38471f330eb885e04de130b768d6db4e10469e2311879c7e5c699f6d2d8a1c74
@@ -88,7 +88,7 @@ jobs:
           cache: pip
           cache-dependency-path: python/pyproject.toml
       # Pydantic's JSON Schema output is a cross-SDK artifact; use the committed lock.
-      - run: pip install uv==0.11.16
+      - run: pip install uv==0.13.8
       - working-directory: python
         run: uv sync --locked --extra test --extra postgres
       # Loads the shared expression vectors and runs the real-Postgres
@@ -107,7 +107,7 @@ jobs:
             javascript/src/generated/pricing-config.schema.json \
             golang/internal/config/pricing-config.schema.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: matrix.python-version == '3.13' && matrix.postgres.major == '17'
+        if: matrix.python-version == '3.15' && matrix.postgres.major == '17'
         with:
           name: python-coverage-report
           path: python/coverage.xml
@@ -147,14 +147,14 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.4"
       - name: Cache Bun install artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-${{ hashFiles('javascript/bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-
+            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-
       # Also loads the shared expression vectors used by the Python suite.
       # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
       - working-directory: javascript
@@ -178,14 +178,14 @@ jobs:
           node-version: "22"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.4"
       - name: Cache Bun install artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-${{ hashFiles('javascript/bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-
+            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
@@ -203,7 +203,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.11"
           cache-dependency-path: golang/go.sum
       - name: Verify module metadata and formatting
         working-directory: golang
@@ -217,7 +217,7 @@ jobs:
       - run: go vet ./...
         working-directory: golang
       - name: Run pinned Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
         working-directory: golang
 
   go-test:
@@ -226,7 +226,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go-version: ["1.26.x"]
+        go-version: ["1.26.11"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -240,10 +240,10 @@ jobs:
     name: Go Google ADK integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.11"
           cache-dependency-path: golang/integrations/googleadk/go.sum
       - name: Verify optional module metadata and formatting
         working-directory: golang/integrations/googleadk
@@ -257,7 +257,7 @@ jobs:
       - run: go vet ./...
         working-directory: golang/integrations/googleadk
       - name: Run pinned Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
         working-directory: golang/integrations/googleadk
       - name: Run race tests and enforce Google ADK coverage
         run: |
@@ -277,7 +277,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
           cache: pip
           cache-dependency-path: python/pyproject.toml
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -285,19 +285,19 @@ jobs:
           node-version: "22"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.11"
           cache-dependency-path: golang/go.sum
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.4"
       - name: Cache Bun install artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-${{ hashFiles('javascript/bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-
-      - run: pip install uv==0.11.16
+            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-
+      - run: pip install uv==0.13.8
       - working-directory: python
         run: uv sync --locked --extra test
       - working-directory: javascript
@@ -341,24 +341,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.11"
           cache-dependency-path: golang/go.sum
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.4"
       - name: Cache Bun install artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-${{ hashFiles('javascript/bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-
+            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-
       - name: Start package-smoke PostgreSQL
         run: |
           docker build --tag bursar/postgres-test:package-smoke tests/postgres
@@ -487,7 +487,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
       - name: Verify tag and SDK module versions agree
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -607,7 +607,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.15"
       - run: pip install uv
       - working-directory: python
         run: |
@@ -630,14 +630,14 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.4"
       - name: Cache Bun install artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-${{ hashFiles('javascript/bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.0-
+            ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-
       # npm >= 11.5.1 supports OIDC trusted publishing; the npm CLI mints a
       # short-lived token from the id-token, so no NODE_AUTH_TOKEN is required.
       - run: npm install -g npm@latest

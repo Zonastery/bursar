@@ -44,7 +44,7 @@ from bursar.credits.postgres.store import PostgresStore, run_migrations
 
 TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 TEST_TENANT_SLUG = "bursar-tests"
-DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.10-pg-jsonschema-0.3.4"
+DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.12-pg-jsonschema-0.3.4"
 POSTGRES_BUILD_CONTEXT = Path(__file__).resolve().parents[2] / "tests" / "postgres"
 RESET_SQL = (POSTGRES_BUILD_CONTEXT / "reset_bursar.sql").read_text(encoding="utf-8")
 

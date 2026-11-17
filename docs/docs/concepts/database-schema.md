@@ -14,12 +14,12 @@ This diagram is generated from the canonical SQL migrations in
 ```mermaid
 erDiagram
     tenants {
-        uuid id "PK"
-        text slug "UK"
-        text display_name
-        text status
-        timestamptz created_at
-        timestamptz updated_at
+        UUID id "PK"
+        TEXT slug
+        TEXT display_name
+        TEXT status
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
     storage_settings {
         BOOLEAN singleton "PK"
@@ -688,6 +688,9 @@ erDiagram
         timestamptz grace_ends_at
         timestamptz grace_expired_at
         timestamptz provider_updated_at
+        timestamptz entitlement_provider_updated_at
+        uuid entitlement_billing_event_id "FK"
+        text entitlement_reconciliation_outcome
         timestamptz status_changed_at
         jsonb metadata
         timestamptz created_at
@@ -1007,6 +1010,7 @@ erDiagram
     billing_subscriptions ||--|| billing_entitlement_sources : "subject_id to subject_id"
     billing_subscriptions ||--|| billing_entitlement_sources : "provider_environment to provider_environment"
     billing_subscriptions ||--|| billing_entitlement_sources : "subscription_id to id"
+    billing_events ||--o{ billing_subscriptions : "entitlement_billing_event_id to id"
     tenants ||--o{ billing_event_payloads : "tenant_id to id"
     billing_events ||--o{ billing_event_payloads : "event_id to id"
     billing_events ||--o{ billing_event_payloads : "received_at to payload_received_at"

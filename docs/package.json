@@ -43,13 +43,14 @@
     "@docusaurus/tsconfig": "3.10.2",
     "@docusaurus/types": "3.10.2",
     "@types/react": "^19.3.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "db-schema-toolkit": "3.0.1",
     "docusaurus-plugin-llms": "^0.6.1",
     "docusaurus-plugin-typedoc": "^1.4.3",
     "prettier": "^3.10.1",
     "typedoc": "^0.28.20",
     "typedoc-plugin-markdown": "^4.14.1",
-    "typescript": "~6.0.3"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "browserslist": {
     "production": [

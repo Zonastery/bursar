@@ -2,7 +2,7 @@
 # Multi-stage build for the bursar-web service: static binary, distroless,
 # non-root runtime image. CI pins the base images by digest (house style);
 # keep the tags here readable but expect the workflow to override them.
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
