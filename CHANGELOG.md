@@ -6,7 +6,14 @@ page after the Python and TypeScript packages are published successfully.
 
 ## [Unreleased]
 
-See the [comparison with 2.0.5](https://github.com/Zonastery/bursar/compare/v2.0.5...HEAD).
+See the [comparison with 2.0.6](https://github.com/Zonastery/bursar/compare/v2.0.6...HEAD).
+
+## [2.0.6] - 2026-11-17
+
+### Changed
+
+- Synchronized Python, JavaScript, telemetry, and Google ADK Go dependency
+  versions for this patch release. No public API changes.
 
 ## [2.0.5] - 2026-11-16
 
@@ -153,6 +160,7 @@ See the [comparison with 2.0.5](https://github.com/Zonastery/bursar/compare/v2.0
 - [0.0.2](https://github.com/Zonastery/bursar/compare/v0.0.1...v0.0.2)
 - [0.0.1](https://github.com/Zonastery/bursar/releases/tag/v0.0.1)
 
+[2.0.6]: https://github.com/Zonastery/bursar/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/Zonastery/bursar/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/Zonastery/bursar/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/Zonastery/bursar/compare/v2.0.2...v2.0.3
