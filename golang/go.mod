@@ -13,7 +13,7 @@ require (
 	github.com/dodopayments/dodopayments-go v1.127.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0
-	github.com/pashagolub/pgxmock/v6 v6.0.0-beta2
+	github.com/pashagolub/pgxmock/v6 v6.0.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/shopspring/decimal v1.6.0
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1
