@@ -16,7 +16,7 @@ require (
 	github.com/pashagolub/pgxmock/v6 v6.0.0-beta2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/shopspring/decimal v1.6.0
-	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1
+	github.com/standard-webhooks/standard-webhooks/libraries v1.3.0
 	github.com/stripe/stripe-go/v84 v84.4.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
