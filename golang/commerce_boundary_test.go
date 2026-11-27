@@ -153,6 +153,9 @@ func TestCheckoutQuantityEnforcesOfferBounds(t *testing.T) {
 	if _, err := checkoutQuantity(offer, int64Pointer(1)); err == nil {
 		t.Fatal("checkout quantity below the offer minimum was accepted")
 	}
+	if _, err := checkoutQuantity(CommerceOffer{Type: "credit_pack"}, int64Pointer(0)); err == nil {
+		t.Fatal("non-positive checkout quantity was accepted")
+	}
 	if got, err := checkoutQuantity(offer, int64Pointer(2)); err != nil || got != 2 {
 		t.Fatalf("checkoutQuantity() at the minimum = %d, %v; want 2, nil", got, err)
 	}

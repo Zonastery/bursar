@@ -74,8 +74,12 @@ describe("configuration shortcuts", () => {
   it("binds commerce provider identifiers to the selected environment", () => {
     const input: JsonObject = {
       commerce: {
+        providers: { stripe: { type: "stripe" } },
         offers: {
           monthly: { providers: { stripe: { price_id: "price_test" } } },
+          noProviderReferences: "invalid offer",
+          invalidProviderReferences: { providers: "invalid providers" },
+          invalidReference: { providers: { stripe: "invalid reference" } },
         },
       },
     };
@@ -87,6 +91,21 @@ describe("configuration shortcuts", () => {
         },
       },
     });
+  });
+
+  it("guards malformed optional config objects during normalization", () => {
+    const invalidPlan: JsonObject = { plans: { ignored: "invalid plan" } };
+    expect(normalizeConfig(invalidPlan).plans).toEqual(invalidPlan.plans);
+
+    const invalidRateCard: JsonObject = {
+      pricing: {
+        operations: { chat: { charge: { type: "flat", amount: "1" } } },
+        rate_cards: { invalid: "invalid card" },
+      },
+    };
+    expect(() => normalizeConfig(invalidRateCard)).toThrow(
+      "pricing.rate_cards.invalid must be an object",
+    );
   });
 
   it("rejects ambiguous signup and rate-card shorthand", () => {

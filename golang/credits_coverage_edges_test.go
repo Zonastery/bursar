@@ -71,4 +71,7 @@ func TestDeductUsageRejectsMissingIdempotencyKey(t *testing.T) {
 	if _, err := service.DeductUsage(context.Background(), "user-1", UsageMetrics{Operation: "chat"}, PricedUsageOptions{}); err == nil {
 		t.Fatal("DeductUsage() accepted a missing idempotency key")
 	}
+	if _, err := service.RecordUsageMetrics(context.Background(), "user-1", UsageMetrics{Operation: "chat"}, PricedUsageRecordOptions{}); err == nil {
+		t.Fatal("RecordUsageMetrics() accepted a missing idempotency key")
+	}
 }

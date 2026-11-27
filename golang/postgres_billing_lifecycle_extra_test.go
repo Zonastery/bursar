@@ -355,4 +355,12 @@ func TestPostgresBillingLifecycleReturnsAccountResolutionError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "PostgreSQL store is not initialized") {
 		t.Fatalf("process() account-resolution error = %v", err)
 	}
+	for name, event := range map[string]BillingEvent{
+		"subscription": {Provider: "stripe", Subscription: &BillingSubscription{ProviderSubscriptionID: "sub-1"}},
+		"payment":      {Provider: "stripe", Payment: &BillingPayment{ProviderPaymentID: "pay-1"}},
+	} {
+		if _, err := processor.resolveAccount(context.Background(), event, ""); err == nil || !strings.Contains(err.Error(), "PostgreSQL store is not initialized") {
+			t.Errorf("resolveAccount() for %s = %v", name, err)
+		}
+	}
 }
