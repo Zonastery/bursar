@@ -347,6 +347,11 @@ func TestPostgresBillingEventRejectsCallerClaimAndFallsBackToAccount(t *testing.
 func TestPostgresBillingLifecycleReturnsAccountResolutionError(t *testing.T) {
 	t.Parallel()
 	processor := postgresBillingLifecycle{store: &PostgresStore{}}
+	if err := processor.updateCheckoutFromEvent(context.Background(), BillingEvent{
+		Metadata: map[string]any{"checkout_intent_id": "not-a-uuid"},
+	}, "completed"); err == nil {
+		t.Fatal("updateCheckoutFromEvent() accepted an invalid checkout intent ID")
+	}
 	_, err := processor.process(context.Background(), BillingEvent{
 		Provider: "stripe",
 		Type:     BillingEventCustomerUpdated,
