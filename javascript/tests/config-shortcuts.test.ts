@@ -71,6 +71,24 @@ describe("configuration shortcuts", () => {
     expect(() => canonicalBursarConfigDict({ ...starter, commerce: invalid })).toThrow();
   });
 
+  it("binds commerce provider identifiers to the selected environment", () => {
+    const input: JsonObject = {
+      commerce: {
+        offers: {
+          monthly: { providers: { stripe: { price_id: "price_test" } } },
+        },
+      },
+    };
+    const normalized = normalizeConfig(input, "live");
+    expect(normalized.commerce).toMatchObject({
+      offers: {
+        monthly: {
+          providers: { stripe: { price_id: { live: "price_test" } } },
+        },
+      },
+    });
+  });
+
   it("rejects ambiguous signup and rate-card shorthand", () => {
     // @ts-expect-error Invalid environments must also be rejected for untyped callers.
     expect(() => normalizeConfig({}, "staging")).toThrow("invalid provider environment");

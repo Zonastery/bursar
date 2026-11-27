@@ -64,3 +64,11 @@ func TestCreditsServicePreservesStoreAndLazyExpiryErrors(t *testing.T) {
 		t.Fatalf("RefundCredits() store error = %v", err)
 	}
 }
+
+func TestDeductUsageRejectsMissingIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	service := &CreditsService{catalog: &CatalogService{}}
+	if _, err := service.DeductUsage(context.Background(), "user-1", UsageMetrics{Operation: "chat"}, PricedUsageOptions{}); err == nil {
+		t.Fatal("DeductUsage() accepted a missing idempotency key")
+	}
+}

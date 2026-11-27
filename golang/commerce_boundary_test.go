@@ -143,6 +143,24 @@ func TestClassifyPlanChangeRejectsUnknownCadenceAndMissingPlans(t *testing.T) {
 	}
 }
 
+func TestCheckoutQuantityEnforcesOfferBounds(t *testing.T) {
+	t.Parallel()
+	offer := CommerceOffer{
+		Type:     "credit_pack",
+		Quantity: &OfferQuantity{Minimum: 2, Maximum: 5},
+	}
+
+	if _, err := checkoutQuantity(offer, int64Pointer(1)); err == nil {
+		t.Fatal("checkout quantity below the offer minimum was accepted")
+	}
+	if got, err := checkoutQuantity(offer, int64Pointer(2)); err != nil || got != 2 {
+		t.Fatalf("checkoutQuantity() at the minimum = %d, %v; want 2, nil", got, err)
+	}
+	if _, err := checkoutQuantity(offer, int64Pointer(6)); err == nil {
+		t.Fatal("checkout quantity above the offer maximum was accepted")
+	}
+}
+
 func TestCommerceNilAndLifecycleBoundaries(t *testing.T) {
 	var service *CommerceService
 	if _, err := service.ProviderForAccount(context.Background(), "account"); err == nil {

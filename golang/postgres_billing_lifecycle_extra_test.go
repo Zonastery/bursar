@@ -343,3 +343,16 @@ func TestPostgresBillingEventRejectsCallerClaimAndFallsBackToAccount(t *testing.
 		t.Fatal("ProcessBillingEvent() unexpectedly succeeded without a PostgreSQL client")
 	}
 }
+
+func TestPostgresBillingLifecycleReturnsAccountResolutionError(t *testing.T) {
+	t.Parallel()
+	processor := postgresBillingLifecycle{store: &PostgresStore{}}
+	_, err := processor.process(context.Background(), BillingEvent{
+		Provider: "stripe",
+		Type:     BillingEventCustomerUpdated,
+		Customer: &BillingCustomer{ProviderCustomerID: "cus-1"},
+	}, "")
+	if err == nil || !strings.Contains(err.Error(), "PostgreSQL store is not initialized") {
+		t.Fatalf("process() account-resolution error = %v", err)
+	}
+}
