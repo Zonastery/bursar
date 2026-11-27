@@ -8,8 +8,12 @@ import (
 	bursar "github.com/Zonastery/bursar/golang/v2"
 )
 
+type usageBackendGuard interface {
+	WithUsageBackend(context.Context, string, func() error) error
+}
+
 type guardedUsage struct {
-	store     *bursar.PostgresStore
+	store     usageBackendGuard
 	analytics bursar.UsageAnalyticsStore
 	charges   bursar.UsageChargeStore
 }

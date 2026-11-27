@@ -309,6 +309,18 @@ func TestCheckoutIntentIdentifierAcceptsDriverScalarNames(t *testing.T) {
 	}
 }
 
+func TestCheckoutRequestDigestNormalizesLegacyTopupKind(t *testing.T) {
+	t.Parallel()
+	legacy, err := checkoutRequestDigest(CheckoutIntentCreate{AccountID: "account-1", CheckoutKind: "credit_topup", ProductKey: "credits", Provider: "stripe", Quantity: 1})
+	if err != nil {
+		t.Fatalf("legacy checkout digest error = %v", err)
+	}
+	canonical, err := checkoutRequestDigest(CheckoutIntentCreate{AccountID: "account-1", CheckoutKind: "topup", ProductKey: "credits", Provider: "stripe", Quantity: 1})
+	if err != nil || legacy != canonical {
+		t.Fatalf("legacy and canonical top-up digests differ: %x / %x, %v", legacy, canonical, err)
+	}
+}
+
 func TestPostgresCommerceAndBillingProjectionRowsFailClosed(t *testing.T) {
 	if _, err := firstScalar(map[string]any{"result": true, "other": false}, "scalar"); err == nil {
 		t.Fatal("multi-column scalar result accepted")

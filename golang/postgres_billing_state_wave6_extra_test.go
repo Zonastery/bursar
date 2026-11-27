@@ -217,3 +217,16 @@ func TestBillingStateInputAndTransitionValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestExpiredGraceQueriesRejectInvalidLimitsBeforeDatabaseAccess(t *testing.T) {
+	t.Parallel()
+	store := &PostgresStore{}
+	for _, limit := range []int{0, 1001} {
+		if _, err := store.ListExpiredGraceSubscriptions(context.Background(), time.Time{}, limit); err == nil {
+			t.Errorf("ListExpiredGraceSubscriptions(limit=%d) accepted an invalid limit", limit)
+		}
+		if _, err := store.ExpirePastDueGracePeriods(context.Background(), time.Time{}, limit); err == nil {
+			t.Errorf("ExpirePastDueGracePeriods(limit=%d) accepted an invalid limit", limit)
+		}
+	}
+}

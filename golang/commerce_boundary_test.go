@@ -59,6 +59,33 @@ func TestCommerceConstructionRejectsMissingOrUnsafeCapabilities(t *testing.T) {
 	}
 }
 
+func TestCommerceConstructorRegistersExistingAutoRechargeService(t *testing.T) {
+	t.Parallel()
+	base := newCheckoutService(t, &checkoutStoreStub{config: checkoutTestConfig(t)}, map[string]*checkoutProviderStub{
+		"stripe": {name: "stripe"},
+	}, 0)
+	billing := &BillingService{AutoRecharge: &AutoRechargeService{}}
+	service, err := NewCommerceService(billing, base.catalog, base.credits, CommerceOptions{
+		Store: base.store, Providers: base.providers,
+	})
+	if err != nil {
+		t.Fatalf("NewCommerceService() error = %v", err)
+	}
+	if service.AutoRecharge == nil || service.autoRechargeCore != billing.AutoRecharge {
+		t.Fatal("existing auto-recharge service was not composed into commerce")
+	}
+	service.Close()
+}
+
+func TestClassifyPlanChangeRecognizesLateralOfferSwitch(t *testing.T) {
+	t.Parallel()
+	config := &BursarConfig{Plans: map[string]PlanDefinition{"basic": {Tier: 1}}}
+	got, err := classifyPlanChangeWithOffer(config, "basic", "month", 0, "basic", "month", 1, false)
+	if err != nil || got != PlanChangeLateral {
+		t.Fatalf("classifyPlanChangeWithOffer() = %q, %v; want lateral", got, err)
+	}
+}
+
 func TestCommerceNilAndLifecycleBoundaries(t *testing.T) {
 	var service *CommerceService
 	if _, err := service.ProviderForAccount(context.Background(), "account"); err == nil {

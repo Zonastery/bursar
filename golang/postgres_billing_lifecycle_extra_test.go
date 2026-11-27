@@ -299,3 +299,32 @@ func TestBillingLifecycleHelpers(t *testing.T) {
 		t.Fatalf("subscriptionEventID(empty) = %q", got)
 	}
 }
+
+func TestSubscriptionEntitlementOutcomeMatchesDurableStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status           string
+		outcome          subscriptionEntitlementOutcome
+		applyEntitlement bool
+		valid            bool
+	}{
+		{"active", subscriptionEntitlementApplied, true, true},
+		{"trialing", subscriptionEntitlementPreserved, false, true},
+		{"past_due", subscriptionEntitlementPreserved, true, true},
+		{"canceled", subscriptionEntitlementRevoked, false, true},
+		{"canceled", subscriptionEntitlementPreserved, false, true},
+		{"active", subscriptionEntitlementPreserved, true, false},
+		{"unknown", subscriptionEntitlementApplied, true, false},
+	}
+	for _, test := range tests {
+		t.Run(test.status+"/"+string(test.outcome), func(t *testing.T) {
+			err := validateSubscriptionEntitlementOutcome(test.status, test.outcome, test.applyEntitlement)
+			if test.valid && err != nil {
+				t.Fatalf("valid entitlement outcome rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid entitlement outcome accepted")
+			}
+		})
+	}
+}
