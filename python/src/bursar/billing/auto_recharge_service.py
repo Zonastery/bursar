@@ -28,7 +28,9 @@ from bursar.config import (
     StripePriceReference,
     TopupOffer,
     load_config_from_dict,
+    resolve_provider_id,
 )
+from bursar.config.availability import offer_is_available
 from bursar.errors import (
     AutoRechargeDisabledError,
     AutoRechargeNotConfiguredError,
@@ -139,18 +141,33 @@ class AutoRechargeService:
     def __init__(self, billing: AutoRechargeBillingPort) -> None:
         self._billing = billing
 
-    def _policy(self, provider: PaymentProvider) -> _ResolvedAutoRechargePolicy | None:
+    def _policy(
+        self, provider: PaymentProvider, profile: BillingAutoRechargeProfile | None = None
+    ) -> _ResolvedAutoRechargePolicy | None:
         raw = self._billing.get_active_catalog_document()
         if raw is None:
             return None
-        config = load_config_from_dict(raw)
+        config = load_config_from_dict(raw, getattr(self._billing, "provider_environment", None))
         policy = config.commerce.auto_recharge
         if policy is None:
             return None
 
-        topup_key = policy.eligible_topups[0]
+        topup_key = profile.topup_key if profile is not None and profile.enabled else policy.eligible_topups[0]
+        if not topup_key or topup_key not in policy.eligible_topups:
+            return None
+        quantity = profile.quantity if profile is not None and profile.enabled else policy.quantity.default
+        if not policy.quantity.minimum <= quantity <= policy.quantity.maximum:
+            return None
         topup = config.commerce.offers.get(topup_key)
-        if not isinstance(topup, TopupOffer):
+        if not isinstance(topup, TopupOffer) or not offer_is_available(topup.availability):
+            return None
+        if (
+            profile is not None
+            and profile.enabled
+            and not policy.balance_below.minimum <= profile.threshold <= policy.balance_below.maximum
+        ):
+            return None
+        if topup.price.amount_minor * quantity > policy.limits.max_charge_minor:
             return None
         reference = topup.providers.get(provider.provider)
         if reference is None:
@@ -158,13 +175,15 @@ class AutoRechargeService:
 
         resolved_topup: BillingTopupResult | None
         if isinstance(reference, StripePriceReference):
-            product_id = reference.price_id
+            product_id = resolve_provider_id(reference.price_id, getattr(self._billing, "provider_environment", None))
             resolved_topup = self._billing.resolve_topup(provider.provider, None, product_id)
         elif isinstance(reference, DodoProductReference):
-            product_id = reference.product_id
+            product_id = resolve_provider_id(reference.product_id, getattr(self._billing, "provider_environment", None))
             resolved_topup = self._billing.resolve_topup(provider.provider, product_id, None)
         elif isinstance(reference, CustomObjectReference):
-            product_id = reference.external_id
+            product_id = resolve_provider_id(
+                reference.external_id, getattr(self._billing, "provider_environment", None)
+            )
             resolved_topup = self._billing.resolve_topup_by_lookup(provider.provider, product_id)
         else:
             return None
@@ -173,10 +192,12 @@ class AutoRechargeService:
 
         period = resolve_auto_recharge_window(policy.limits.window)
         return _ResolvedAutoRechargePolicy(
-            threshold=Decimal(policy.balance_below.default),
+            threshold=profile.threshold
+            if profile is not None and profile.enabled
+            else Decimal(policy.balance_below.default),
             topup_key=topup_key,
             topup_id=resolved_topup.topup_id,
-            quantity=policy.quantity.default,
+            quantity=quantity,
             max_charges_per_window=policy.limits.max_purchases,
             window_unit=period.unit,
             window_count=period.count,
@@ -241,10 +262,10 @@ class AutoRechargeService:
         user_id: str,
         provider: PaymentProvider,
     ) -> BillingAutoRechargeStatus | None:
-        policy = self._policy(provider)
+        profile = self._billing.get_auto_recharge_profile(user_id)
+        policy = self._policy(provider, profile)
         if policy is None:
             return None
-        profile = self._billing.get_auto_recharge_profile(user_id)
         payment = await self._payment_method(user_id, provider) if profile is not None and profile.enabled else None
         quote = await self._preview(policy, payment, provider) if payment is not None else None
         method = payment[1] if payment is not None else None
@@ -293,6 +314,7 @@ class AutoRechargeService:
                 armed=True,
                 provider=provider.provider,
                 topup_id=policy.topup_id,
+                topup_key=policy.topup_key,
                 quantity=policy.quantity,
                 threshold=policy.threshold,
                 max_charges_per_window=policy.max_charges_per_window,
@@ -354,12 +376,14 @@ class AutoRechargeService:
         balance: Decimal | int,
         return_url: str | None,
     ) -> AutoRechargeProcessResult:
-        policy = self._policy(provider)
-        if policy is None:
-            return AutoRechargeProcessResult(outcome="not_configured")
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled or profile.state != "active":
             return AutoRechargeProcessResult(outcome="disabled")
+        policy = self._policy(provider, profile)
+        if policy is None:
+            return AutoRechargeProcessResult(outcome="not_configured")
+        if profile.provider != provider.provider:
+            return AutoRechargeProcessResult(outcome="not_configured")
         if Decimal(balance) >= policy.threshold:
             return AutoRechargeProcessResult(outcome="above_threshold")
         if not isinstance(provider, SavedPaymentChargeProvider):
@@ -374,6 +398,9 @@ class AutoRechargeService:
             AutoRechargeAttemptClaim(
                 user_id=user_id,
                 idempotency_key=idempotency_key,
+                expected_product_id=policy.product_id,
+                expected_quantity=policy.quantity,
+                expected_topup_key=policy.topup_key,
             )
         )
         if attempt is None:

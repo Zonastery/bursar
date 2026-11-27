@@ -84,6 +84,31 @@ describe("shared commerce parity fixture", () => {
     }
   });
 
+  it("compares full cadence and uses tier independently of display rank", () => {
+    const config = loadConfigFromDict(fixture.catalog);
+    const entry = Object.values(config.commerce.offers).find(
+      (offer) => offer.type === "subscription",
+    );
+    if (!entry || entry.type !== "subscription") throw new Error("missing fixture offer");
+    const target = {
+      ...entry,
+      billingInterval: { unit: "month" as const, count: 3 },
+    };
+    expect(classifySubscriptionChange(config, target.plan, "month", target, 1).classification).toBe(
+      "cadence_change",
+    );
+    expect(classifySubscriptionChange(config, target.plan, "month", target, 3).classification).toBe(
+      "unchanged",
+    );
+    const weekly = {
+      ...target,
+      billingInterval: { unit: "week" as const, count: 1 },
+    };
+    expect(classifySubscriptionChange(config, target.plan, "week", weekly, 1).classification).toBe(
+      "unchanged",
+    );
+  });
+
   it("keeps stable error codes and a provider-agnostic public contract", () => {
     expect(new UnknownOfferError("Unknown offer").code).toBe(fixture.error_codes.unknown_offer);
     expect(new InvalidOfferQuantityError("Invalid offer quantity").code).toBe(
@@ -116,7 +141,10 @@ describe("shared commerce parity fixture", () => {
 
   it("validates provider factories and preserves newer loads when a cleared load fails", async () => {
     const invalid = new CommerceProviderRegistry(
-      { providerEnvironment: "test", providers: { alpha: () => invalidProvider() } },
+      {
+        providerEnvironment: "test",
+        providers: { alpha: () => invalidProvider() },
+      },
       { providerEnvironment: "test", eventSink },
     );
     await expect(invalid.get("alpha")).rejects.toThrow("did not return a valid payment provider");
@@ -164,7 +192,10 @@ describe("shared commerce parity fixture", () => {
     expect(
       () =>
         new CommerceProviderRegistry(
-          { providerEnvironment: "test", providers: { " ": () => minimalProvider() } },
+          {
+            providerEnvironment: "test",
+            providers: { " ": () => minimalProvider() },
+          },
           { providerEnvironment: "test", eventSink },
         ),
     ).toThrow("Payment provider names must not be empty");

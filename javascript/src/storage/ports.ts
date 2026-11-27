@@ -1,4 +1,5 @@
 import type { JsonObject } from "../shared/json.js";
+import type { RawUsageJson } from "./raw-json.js";
 
 export interface OutboxEvent {
   eventId: string;
@@ -8,6 +9,8 @@ export interface OutboxEvent {
   aggregateId: string;
   payloadVersion: number;
   payload: JsonObject;
+  /** Exact SQL-projected fragments used internally by projection adapters. */
+  rawUsage?: RawUsageJson;
   claimToken: string;
   attemptCount: number;
   createdAt: string;
@@ -96,6 +99,8 @@ export interface UsageChargeExport {
   planId: string | null;
   rateCardKey: string | null;
   pricingSnapshot: JsonObject;
+  /** Exact persisted fragments for numeric-safe projection. */
+  rawJson?: RawUsageJson;
   ledgerEntryId: string | null;
   correctionOfChargeId: string | null;
   idempotencyKey: string;

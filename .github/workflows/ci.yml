@@ -390,7 +390,7 @@ jobs:
           /tmp/bursar-python-consumer/bin/python -c 'import bursar; assert bursar.Bursar and bursar.PricingEngine'
           wheel=$(find /tmp/bursar-wheel -name '*.whl' -print -quit)
           /tmp/bursar-python-consumer/bin/pip install "${wheel}[postgres,s3,opentelemetry]"
-          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "031_catalog_document_shape_schema.sql").is_file()'
+          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; from pathlib import Path; import bursar.storage; import bursar.telemetry.opentelemetry; source = Path("python/src/bursar/sql"); installed = files("bursar").joinpath("sql"); expected = {p.name: p.read_bytes() for p in source.glob("*.sql")}; actual = {p.name: p.read_bytes() for p in installed.iterdir() if p.name.endswith(".sql")}; assert actual == expected, f"Wheel SQL differs: missing={expected.keys() - actual.keys()}, extra={actual.keys() - expected.keys()}"; assert files("bursar").joinpath("starter.yaml").read_bytes() == Path("python/src/bursar/starter.yaml").read_bytes()'
           /tmp/bursar-python-consumer/bin/bursar migrate
           /tmp/bursar-python-consumer/bin/bursar tenant bootstrap package-smoke \
             .github/package-smoke/pricing.json \

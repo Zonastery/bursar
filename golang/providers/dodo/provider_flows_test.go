@@ -25,6 +25,7 @@ type dodoFixture struct {
 	previewResponse       string
 	chargeSessionResponse string
 	paymentResponse       string
+	checkoutBody          string
 }
 
 func (f *dodoFixture) handler(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +33,11 @@ func (f *dodoFixture) handler(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	f.mu.Unlock()
 	body, _ := io.ReadAll(r.Body)
+	if r.URL.Path == "/checkouts" && r.Method == http.MethodPost {
+		f.mu.Lock()
+		f.checkoutBody = string(body)
+		f.mu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if f.status != 0 {
 		w.WriteHeader(f.status)
@@ -275,9 +281,12 @@ func TestDodoProviderRealWorldHTTPFlows(t *testing.T) {
 	fixture := &dodoFixture{}
 	provider := newDodoFixtureProvider(t, fixture)
 	ctx := t.Context()
-	checkout, err := provider.CreateCheckoutSession(ctx, bursar.CheckoutSessionRequest{AccountID: "acct_1", ProductID: "prod_1", Quantity: 2, CustomerID: "cus_1", SuccessURL: "https://app.test/success", CancelURL: "https://app.test/cancel", IdempotencyKey: "checkout-1", Metadata: map[string]string{"plan": "pro"}})
+	checkout, err := provider.CreateCheckoutSession(ctx, bursar.CheckoutSessionRequest{AccountID: "acct_1", ProductID: "prod_1", Quantity: 2, CustomerID: "cus_1", SuccessURL: "https://app.test/success", CancelURL: "https://app.test/cancel", IdempotencyKey: "checkout-1", Mode: "subscription", Trial: &bursar.BillingInterval{Unit: "week", Count: 2}, Metadata: map[string]string{"plan": "pro"}})
 	if err != nil || checkout.ID != "sess_1" || checkout.URL == "" {
 		t.Fatalf("checkout = %#v, err = %v", checkout, err)
+	}
+	if !strings.Contains(fixture.checkoutBody, `"trial_period_days":14`) {
+		t.Fatalf("Dodo checkout trial body = %q", fixture.checkoutBody)
 	}
 	if status, err := provider.GetCheckoutSessionStatus(ctx, checkout.ID); err != nil || status != "succeeded" {
 		t.Fatalf("checkout status = %q, err = %v", status, err)

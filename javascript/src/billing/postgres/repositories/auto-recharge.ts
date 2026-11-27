@@ -41,6 +41,7 @@ const ProfileRowSchema = z
     state: z.enum(["disabled", "active", "paused"]),
     provider: z.string().min(1).nullable(),
     topup_id: postgresUuid.nullable(),
+    topup_key: z.string().min(1).nullable(),
     quantity: positiveInteger,
     threshold: decimal,
     max_charges_per_window: positiveInteger.nullable(),
@@ -184,6 +185,7 @@ function projectProfile(row: PostgresRow) {
     state: row.state,
     provider: row.provider,
     topup_id: row.topup_id,
+    topup_key: row.topup_key ?? null,
     quantity: row.quantity,
     threshold: row.threshold,
     max_charges_per_window: row.max_charges_per_window,
@@ -230,6 +232,7 @@ function profileFromRow(row: PostgresRow): BillingAutoRechargeProfile {
     state: parsed.state,
     provider: parsed.provider,
     topupId: parsed.topup_id,
+    topupKey: parsed.topup_key,
     quantity: parsed.quantity,
     threshold: parsed.threshold,
     maxChargesPerWindow: parsed.max_charges_per_window,
@@ -314,10 +317,19 @@ export class BillingAutoRechargeRepository {
   async claimAttempt(input: {
     userId: string;
     idempotencyKey: string;
+    expectedProductId: string;
+    expectedQuantity: number;
+    expectedTopupKey: string;
   }): Promise<BillingAutoRechargeAttempt | null> {
     const rows = await this.query(
-      "SELECT * FROM bursar.claim_auto_recharge_attempt($1::uuid, $2)",
-      [input.userId, input.idempotencyKey],
+      "SELECT * FROM bursar.claim_auto_recharge_attempt($1::uuid, $2, $3, $4, $5)",
+      [
+        input.userId,
+        input.idempotencyKey,
+        input.expectedProductId,
+        input.expectedQuantity,
+        input.expectedTopupKey,
+      ],
     );
     const row = optionalRecordRow(rows, "BillingAutoRechargeRepository.claimAttempt");
     return row === null ? null : attemptFromRow(row);

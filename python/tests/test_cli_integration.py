@@ -32,7 +32,10 @@ CLI_MAINTENANCE_SUBJECT_ID = "00000000-0000-4000-8000-000000000102"
 OPERATOR_OWNER_ROLE = "bursar_operator_runtime"
 PARTITION_OWNER_ROLE = "bursar_partition_runtime"
 OPERATOR_FUNCTIONS = (
+    "bursar.abort_usage_backend_cutover(uuid)",
     "bursar.archive_billing_event_payload(uuid,text,text)",
+    "bursar.begin_usage_backend_cutover(uuid,text,timestamp with time zone)",
+    "bursar.bind_tenant_context(uuid,text)",
     "bursar.claim_outbox_events(integer,integer,text[])",
     "bursar.claim_outbox_events(uuid,integer,integer,text[])",
     "bursar.complete_outbox_event(bigint,uuid)",
@@ -41,14 +44,19 @@ OPERATOR_FUNCTIONS = (
         "bursar.configure_storage(integer,integer,integer,integer,integer,"
         "integer,integer,integer,integer,integer,integer,integer,integer,integer)"
     ),
-    "bursar.create_tenant(uuid,text,text)",
+    "bursar.create_tenant(uuid,text,text,text)",
     "bursar.export_billing_event_payload(uuid)",
     "bursar.export_usage_charge(uuid)",
     "bursar.fail_outbox_event(bigint,uuid,text,integer,integer)",
     "bursar.fail_tenant_outbox_event(uuid,bigint,uuid,text,integer,integer)",
     "bursar.get_outbox_stats(uuid)",
+    "bursar.finish_usage_backend_cutover(uuid,text,bigint)",
     "bursar.get_storage_settings()",
+    "bursar.get_usage_backend_status(uuid)",
+    "bursar.get_tenant_context_by_slug(text)",
+    "bursar.import_usage_cutover_item(uuid,jsonb)",
     "bursar.list_outbox_dead_letters(uuid,timestamp with time zone,bigint,integer)",
+    "bursar.list_usage_cutover_postgres(uuid,timestamp with time zone,uuid,integer)",
     "bursar.maybe_run_storage_maintenance(timestamp with time zone)",
     "bursar.renew_tenant_outbox_claim(uuid,bigint,uuid,integer)",
     "bursar.requeue_outbox_dead_letter(uuid,bigint)",
@@ -56,6 +64,8 @@ OPERATOR_FUNCTIONS = (
     "bursar.run_storage_maintenance(timestamp with time zone)",
     "bursar.run_storage_partition_maintenance(text,timestamp with time zone)",
     "bursar.set_tenant_status(uuid,text)",
+    "bursar.usage_cutover_projection(uuid,uuid)",
+    "bursar.verify_usage_cutover_item(uuid,uuid,timestamp with time zone,text)",
 )
 OPERATOR_TABLE_PRIVILEGES = {
     ("billing_event_payloads", "DELETE"),
@@ -68,6 +78,7 @@ OPERATOR_TABLE_PRIVILEGES = {
     ("credit_leases", "SELECT"),
     ("credit_leases", "UPDATE"),
     ("credit_usage_charges", "DELETE"),
+    ("credit_usage_charges", "INSERT"),
     ("credit_usage_charges", "SELECT"),
     ("credit_usage_charges", "UPDATE"),
     ("event_outbox", "DELETE"),
@@ -84,12 +95,21 @@ OPERATOR_TABLE_PRIVILEGES = {
     ("tenants", "INSERT"),
     ("tenants", "SELECT"),
     ("tenants", "UPDATE"),
+    ("usage_backend_cutover_items", "DELETE"),
+    ("usage_backend_cutover_items", "INSERT"),
+    ("usage_backend_cutover_items", "SELECT"),
     ("usage_charge_payloads", "DELETE"),
+    ("usage_charge_payloads", "INSERT"),
     ("usage_charge_payloads", "SELECT"),
     ("usage_charge_payloads", "UPDATE"),
     ("usage_daily_rollups", "DELETE"),
+    ("usage_daily_rollups", "INSERT"),
     ("usage_daily_rollups", "SELECT"),
     ("usage_daily_rollups", "UPDATE"),
+    ("usage_rollup_contributions", "DELETE"),
+    ("usage_rollup_contributions", "INSERT"),
+    ("usage_rollup_contributions", "SELECT"),
+    ("usage_rollup_contributions", "UPDATE"),
 }
 OPERATOR_RLS_COMMANDS = {
     (table_name, {"SELECT": "r", "INSERT": "a", "UPDATE": "w", "DELETE": "d"}[privilege])
@@ -380,7 +400,11 @@ def test_cli_catalog_maintenance_and_validation_guardrails(
     assert capsys.readouterr().err == "Version 99 not found.\n"
 
     cli.main(["config", "schema"])
-    assert json.loads(capsys.readouterr().out)["title"] == "BursarConfig"
+    schema = json.loads(capsys.readouterr().out)
+    artifact = Path(__file__).resolve().parents[2] / "docs" / "pricing-config.schema.json"
+    assert schema == json.loads(artifact.read_text(encoding="utf-8"))
+    assert schema["title"] == "BursarConfig"
+    assert schema["properties"]["version"]["const"] == 1
     with pytest.raises(SystemExit) as invalid_validation:
         cli.main(["config", "validate", str(invalid_config)])
     assert invalid_validation.value.code == 1
@@ -712,7 +736,10 @@ def test_cli_manages_tenants_migrations_and_config_versions(
             ORDER BY 1
             """
         )
-        assert cursor.fetchall() == [(signature, OPERATOR_OWNER_ROLE) for signature in OPERATOR_FUNCTIONS]
+        assert cursor.fetchall() == [
+            (signature, "bursar_runtime" if signature.startswith("bursar.bind_tenant_context") else OPERATOR_OWNER_ROLE)
+            for signature in sorted(OPERATOR_FUNCTIONS)
+        ]
 
         cursor.execute(
             """
@@ -1098,7 +1125,7 @@ def test_cli_manages_tenants_migrations_and_config_versions(
             """,
             (PARTITION_OWNER_ROLE,),
         )
-        assert cursor.fetchall() == [("storage_settings", "r")]
+        assert cursor.fetchall() == [("storage_settings", "r"), ("tenants", "r")]
 
         cursor.execute(
             """

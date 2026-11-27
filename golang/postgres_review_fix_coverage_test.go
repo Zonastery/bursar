@@ -51,7 +51,7 @@ func TestBillingStateReviewFixUninitializedStoreBoundaries(t *testing.T) {
 	validID := "00000000-0000-4000-8000-000000000405"
 	var store *PostgresStore
 
-	if _, err := store.reconcileSubscriptionEntitlement(ctx, validID, validID, validID, "active", time.Unix(1, 0).UTC(), nil, true, "", "subscription_updated"); err == nil {
+	if _, err := store.reconcileSubscriptionEntitlement(ctx, validID, validID, validID, "active", time.Unix(1, 0).UTC(), nil, true, "subscription_updated"); err == nil {
 		t.Fatal("uninitialized store reconciled a subscription entitlement")
 	}
 	if _, err := store.PseudonymizeFinancialSubject(ctx, validID); err == nil {
@@ -67,7 +67,7 @@ func TestBillingStateReviewFixEntitlementInputContract(t *testing.T) {
 		accountID, subscriptionID, eventID string
 		status                             string
 		updatedAt                          time.Time
-		terminalPlanKey, reason            string
+		reason                             string
 	}
 	valid := func() entitlementInput {
 		return entitlementInput{
@@ -85,7 +85,6 @@ func TestBillingStateReviewFixEntitlementInputContract(t *testing.T) {
 		{"billing event UUID", func(input *entitlementInput) { input.eventID = "not-a-uuid" }},
 		{"subscription status", func(input *entitlementInput) { input.status = "unknown" }},
 		{"provider timestamp", func(input *entitlementInput) { input.updatedAt = time.Time{} }},
-		{"terminal plan key length", func(input *entitlementInput) { input.terminalPlanKey = strings.Repeat("x", 256) }},
 		{"blank reason", func(input *entitlementInput) { input.reason = " " }},
 		{"reason length", func(input *entitlementInput) { input.reason = strings.Repeat("x", 256) }},
 	}
@@ -94,7 +93,7 @@ func TestBillingStateReviewFixEntitlementInputContract(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := valid()
 			test.mutate(&input)
-			if _, err := (*PostgresStore)(nil).reconcileSubscriptionEntitlement(ctx, input.accountID, input.subscriptionID, input.eventID, input.status, input.updatedAt, nil, true, input.terminalPlanKey, input.reason); err == nil {
+			if _, err := (*PostgresStore)(nil).reconcileSubscriptionEntitlement(ctx, input.accountID, input.subscriptionID, input.eventID, input.status, input.updatedAt, nil, true, input.reason); err == nil {
 				t.Fatal("invalid entitlement reconciliation input was accepted")
 			}
 		})

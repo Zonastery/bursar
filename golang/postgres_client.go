@@ -205,6 +205,16 @@ func NewPostgresClientFromPool(pool *pgxpool.Pool, options PostgresClientOptions
 	return &PostgresClient{pool: pool, options: normalized, owned: false}, nil
 }
 
+// ForTenant creates a tenant-bound client borrowing the same PostgreSQL pool.
+func (c *PostgresClient) ForTenant(tenantID string) (*PostgresClient, error) {
+	if c == nil || c.pool == nil {
+		return nil, NewStoreError("PostgreSQL client is not initialized", ErrorOptions{})
+	}
+	options := c.options
+	options.TenantID = tenantID
+	return NewPostgresClientFromPool(c.pool, options)
+}
+
 // TenantID is the validated tenant bound to transactions made by this client.
 func (c *PostgresClient) TenantID() string {
 	if c == nil {
@@ -472,11 +482,11 @@ func (c *PostgresClient) configure(ctx context.Context, tx pgx.Tx) error {
 	if c.options.TenantID != "" {
 		if _, err := tx.Exec(
 			ctx,
-			"SELECT set_config('bursar.tenant_id', $1, true), set_config('bursar.usage_backend', $2, true), set_config('bursar.billing_payload_backend', $3, true), set_config('bursar.provider_environment', $4, true)",
+			"SELECT bursar.bind_tenant_context($1::uuid, $2::text), set_config('bursar.usage_backend', $3, true), set_config('bursar.billing_payload_backend', $4, true)",
 			c.options.TenantID,
+			string(c.options.ProviderEnvironment),
 			c.options.UsageBackend,
 			c.options.BillingPayloadBackend,
-			string(c.options.ProviderEnvironment),
 		); err != nil {
 			return err
 		}
@@ -542,6 +552,12 @@ func normalizePostgresError(err error, operation string, indeterminate bool) err
 	var postgresErr *pgconn.PgError
 	if errors.As(err, &postgresErr) {
 		code := postgresErr.Code
+		if code == "PZ002" {
+			return NewStoreError("Usage backend is unavailable or does not match the tenant", ErrorOptions{Cause: err})
+		}
+		if code == "PZ001" {
+			return NewStoreError("Bursar tenant is inactive or provider environment does not match", ErrorOptions{Cause: err})
+		}
 		if code == "57014" {
 			return NewStoreTimeoutError(operation+" timed out", err)
 		}

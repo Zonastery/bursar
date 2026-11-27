@@ -137,7 +137,6 @@ DECLARE
     v_account uuid;
     v_recipient uuid;
     v_plan_key text;
-    v_idempotency_key text;
     v_award_count integer;
     v_expiry_policy jsonb;
     v_expires_at timestamptz;
@@ -171,7 +170,7 @@ BEGIN
            p_region IS NOT NULL
            AND (
                octet_length(p_region) > 16
-               OR v_region !~ '^[A-Z]{2,3}$'
+               OR v_region !~ '^[A-Z]{2}(-[A-Z0-9]{1,3})?$'
            )
        )
        OR (
@@ -209,41 +208,80 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT id
-    INTO v_revision
-    FROM bursar.catalog_revisions
-    WHERE status = 'active';
+    -- Replay against the original event contract before consulting current policy.
+    -- Lock both possible recipients in stable order, including first requests.
+    FOR v_lock_subject IN
+        SELECT DISTINCT input.subject_id
+        FROM unnest(ARRAY[p_subject_id, p_referrer_subject_id]) AS input(subject_id)
+        WHERE input.subject_id IS NOT NULL
+        ORDER BY input.subject_id
+    LOOP
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'bursar.tenant:' || bursar.require_tenant_id()::text
+            || ':grant-subject:' || v_lock_subject::text, 0));
+    END LOOP;
 
-    IF v_revision IS NULL THEN
+    -- Exact event identity survives removal, eligibility changes and scope changes.
+    SELECT event.* INTO v_event
+    FROM bursar.grant_program_events AS event
+    WHERE event.program_key = p_program_key
+      AND event.subject_id = p_subject_id
+      AND event.event_key = p_event_key;
+
+    SELECT id INTO v_revision
+    FROM bursar.catalog_revisions WHERE status = 'active';
+    IF v_revision IS NOT NULL THEN
+        SELECT program.* INTO v_program
+        FROM bursar.catalog_grant_programs AS program
+        WHERE program.catalog_revision_id = v_revision
+          AND program.program_key = p_program_key
+          AND program.trigger_type = p_trigger_type;
+    END IF;
+
+    -- For a genuinely new event, the *current* subject scope means one award
+    -- per subject, including awards originally posted under event scope.
+    IF v_event.id IS NULL AND v_program.id IS NOT NULL
+       AND v_program.idempotency_scope = 'subject'
+    THEN
+        SELECT event.* INTO v_event
+        FROM bursar.grant_program_events AS event
+        WHERE event.program_key = p_program_key
+          AND event.subject_id = p_subject_id
+        ORDER BY event.created_at, event.id
+        LIMIT 1;
+    END IF;
+
+    IF v_event.id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM bursar.catalog_grant_programs AS original
+            WHERE original.id = v_event.grant_program_id
+              AND original.trigger_type = p_trigger_type
+        ) OR v_event.referrer_subject_id IS DISTINCT FROM p_referrer_subject_id
+          OR v_event.metadata IS DISTINCT FROM v_event_metadata
+        THEN
+            RETURN QUERY SELECT NULL::uuid, NULL::uuid, NULL::uuid,
+                NULL::uuid, NULL::numeric, false, 'idempotency_conflict';
+            RETURN;
+        END IF;
         RETURN QUERY
-        SELECT
-            NULL::uuid,
-            NULL::uuid,
-            NULL::uuid,
-            NULL::uuid,
-            NULL::numeric,
-            false,
-            'missing_active_catalog';
+        SELECT v_event.id, execution.catalog_grant_award_id,
+            execution.recipient_subject_id, execution.ledger_entry_id,
+            entry.amount::numeric, true, NULL::text
+        FROM bursar.grant_award_executions AS execution
+        JOIN bursar.credit_ledger_entries AS entry ON entry.id = execution.ledger_entry_id
+        WHERE execution.grant_event_id = v_event.id
+        ORDER BY execution.id;
         RETURN;
     END IF;
 
-    SELECT program.*
-    INTO v_program
-    FROM bursar.catalog_grant_programs AS program
-    WHERE program.catalog_revision_id = v_revision
-      AND program.program_key = p_program_key
-      AND program.trigger_type = p_trigger_type;
-
-    IF NOT FOUND THEN
-        RETURN QUERY
-        SELECT
-            NULL::uuid,
-            NULL::uuid,
-            NULL::uuid,
-            NULL::uuid,
-            NULL::numeric,
-            false,
-            'unknown_grant_program';
+    IF v_revision IS NULL THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::uuid, NULL::uuid,
+            NULL::uuid, NULL::numeric, false, 'missing_active_catalog';
+        RETURN;
+    END IF;
+    IF v_program.id IS NULL THEN
+        RETURN QUERY SELECT NULL::uuid, NULL::uuid, NULL::uuid,
+            NULL::uuid, NULL::numeric, false, 'unknown_grant_program';
         RETURN;
     END IF;
 
@@ -276,27 +314,6 @@ BEGIN
             'grant_unavailable';
         RETURN;
     END IF;
-
-    -- A referral can post to two personal accounts. Acquire the same advisory
-    -- keys in UUID order before either account row is locked so opposite
-    -- referrals (A -> B and B -> A) cannot deadlock.
-    FOR v_lock_subject IN
-        SELECT DISTINCT input.subject_id
-        FROM unnest(ARRAY[p_subject_id, p_referrer_subject_id])
-            AS input(subject_id)
-        WHERE input.subject_id IS NOT NULL
-        ORDER BY input.subject_id
-    LOOP
-        PERFORM pg_advisory_xact_lock(
-            hashtextextended(
-                'bursar.tenant:'
-                || bursar.require_tenant_id()::text
-                || ':grant-subject:'
-                || v_lock_subject::text,
-                0
-            )
-        );
-    END LOOP;
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
@@ -347,56 +364,6 @@ BEGIN
         RETURN;
     END IF;
 
-    v_idempotency_key := CASE v_program.idempotency_scope
-        WHEN 'subject' THEN p_subject_id::text
-        ELSE p_event_key
-    END;
-
-    SELECT event.*
-    INTO v_event
-    FROM bursar.grant_program_events AS event
-    WHERE event.program_key = v_program.program_key
-      AND event.subject_id = p_subject_id
-      AND event.idempotency_key = v_idempotency_key;
-
-    IF FOUND THEN
-        IF v_program.idempotency_scope = 'event'
-           AND (
-               v_event.event_key IS DISTINCT FROM p_event_key
-               OR v_event.referrer_subject_id
-                    IS DISTINCT FROM p_referrer_subject_id
-               OR v_event.metadata IS DISTINCT FROM v_event_metadata
-           )
-        THEN
-            RETURN QUERY
-            SELECT
-                NULL::uuid,
-                NULL::uuid,
-                NULL::uuid,
-                NULL::uuid,
-                NULL::numeric,
-                false,
-                'idempotency_conflict';
-            RETURN;
-        END IF;
-
-        RETURN QUERY
-        SELECT
-            v_event.id,
-            execution.catalog_grant_award_id,
-            execution.recipient_subject_id,
-            execution.ledger_entry_id,
-            entry.amount::numeric,
-            true,
-            NULL::text
-        FROM bursar.grant_award_executions AS execution
-        JOIN bursar.credit_ledger_entries AS entry
-          ON entry.id = execution.ledger_entry_id
-        WHERE execution.grant_event_id = v_event.id
-        ORDER BY execution.id;
-        RETURN;
-    END IF;
-
     SELECT count(*)::integer
     INTO v_award_count
     FROM bursar.grant_program_events AS event
@@ -431,7 +398,6 @@ BEGIN
         subject_id,
         event_key,
         idempotency_scope,
-        idempotency_key,
         referrer_subject_id,
         metadata
     )
@@ -442,7 +408,6 @@ BEGIN
         p_subject_id,
         p_event_key,
         v_program.idempotency_scope,
-        v_idempotency_key,
         p_referrer_subject_id,
         v_event_metadata
     )
@@ -623,6 +588,10 @@ BEGIN
         v_tenant_id::text,
         true
     );
+
+    PERFORM set_config('bursar.provider_environment',
+        (SELECT provider_environment FROM bursar.tenants WHERE id = v_tenant_id), true);
+    PERFORM bursar.require_tenant_id();
 
     -- Serialize signup with catalog activation so a new assignment is either
     -- included in the activation rollout or sees the newly active revision.

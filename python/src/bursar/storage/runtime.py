@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from inspect import Parameter, signature
-from typing import Literal, Protocol, TypeGuard
+from typing import Any, Literal, Protocol, TypeGuard
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validator, model_validator
@@ -87,6 +87,37 @@ def _is_billing_payload_archive(value: object) -> TypeGuard[BillingPayloadArchiv
 
 def _is_usage_charge_store(value: object) -> bool:
     return hasattr(value, "list_usage_charges")
+
+
+class _GuardedUsageReads:
+    """Hold the tenant's shared cutover lock throughout an external read."""
+
+    def __init__(self, client: PostgresClient, target: object) -> None:
+        self._client = client
+        self._target = target
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        if name not in {
+            "spend_by_user",
+            "spend_by_model",
+            "top_users",
+            "daily_spend",
+            "aggregate_stats",
+            "list_usage_charges",
+        }:
+            raise AttributeError(name)
+
+        def read(*args: Any, **kwargs: Any) -> Any:
+            def guarded(cursor: Any) -> Any:
+                cursor.execute("SELECT bursar.check_usage_backend('clickhouse')")
+                method = getattr(self._target, name, None)
+                if method is None:
+                    raise RuntimeError("ClickHouse usage receipt history is not configured")
+                return method(*args, **kwargs)
+
+            return self._client._run(guarded, operation_name="guarded usage read")
+
+        return read
 
 
 class _RuntimeModel(BaseModel):
@@ -344,12 +375,13 @@ class BursarRuntime:
             billing_payload_backend="s3" if self.s3 is not None else "postgres",
             postgres_options=options.postgres_options,
         )
+        guarded_usage = (
+            _GuardedUsageReads(self.credit_store._client, self.clickhouse) if self.clickhouse is not None else None
+        )
         credits_options = (options.bursar.credits_options or CreditsServiceOptions()).model_copy(
             update={
-                "analytics": self.clickhouse,
-                "usage_store": (
-                    self.clickhouse if self.clickhouse is not None and _is_usage_charge_store(self.clickhouse) else None
-                ),
+                "analytics": guarded_usage,
+                "usage_store": guarded_usage,
             }
         )
         runtime_commerce_options = options.bursar.commerce_options
@@ -452,6 +484,10 @@ class BursarRuntime:
                 return
             start_options = options or BursarRuntimeStartOptions()
             self._verify_tenant_identity()
+            self.credit_store._client.query(
+                "SELECT bursar.check_usage_backend(%s)",
+                ("clickhouse" if self.clickhouse is not None else "postgres",),
+            )
             if start_options.load_catalog:
                 retry_bursar_operation(
                     self.bursar.load_catalog,

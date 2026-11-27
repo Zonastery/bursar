@@ -1,0 +1,8 @@
+{
+  "commerce": {
+    "offers": {
+      "monthly": { "providers": { "stripe": { "price_id": { "test": "price_test_monthly", "live": "price_live_monthly" } } } },
+      "credits": { "providers": { "dodo": { "product_id": { "test": "product_test_credits", "live": "product_live_credits" } } } }
+    }
+  }
+}

@@ -646,7 +646,6 @@ type BillingService struct {
 	provisioning                BillingProvisioningPort
 	autoSelectEntitlementSource bool
 	pastDueGracePeriod          time.Duration
-	terminalPlanKey             string
 }
 
 func NewBillingService(store BillingStore, options ...BillingServiceOptions) (*BillingService, error) {
@@ -777,7 +776,7 @@ func (s *BillingService) Ingest(ctx context.Context, event BillingEvent) (result
 			return s.fail(ctx, event, claim.ClaimToken, err)
 		}
 	} else if processor, ok := s.store.(configuredBillingLifecycleProcessor); ok && IsBillingLifecycleEventType(event.Type) {
-		processed, processErr := processor.processBillingEvent(ctx, event, accountID, s.provisioning, s.autoSelectEntitlementSource, s.pastDueGracePeriod, s.terminalPlanKey)
+		processed, processErr := processor.processBillingEvent(ctx, event, accountID, s.provisioning, s.autoSelectEntitlementSource, s.pastDueGracePeriod)
 		if processErr != nil {
 			return s.fail(ctx, event, claim.ClaimToken, processErr)
 		}

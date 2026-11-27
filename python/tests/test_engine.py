@@ -14,8 +14,8 @@ def base_config() -> dict:
             "operations": {
                 "completion": {
                     "measures": {
-                        "input_tokens": {"unit": "token"},
-                        "output_tokens": {"unit": "token"},
+                        "input_tokens": {"unit": "token", "required": False},
+                        "output_tokens": {"unit": "token", "required": False},
                     },
                     "dimensions": {"model": {"type": "string"}},
                 }

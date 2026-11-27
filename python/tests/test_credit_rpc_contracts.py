@@ -503,6 +503,7 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
                 "catalog_revision_pinned": False,
                 "rate_card": "standard",
                 "allowed_operations": ["completion"],
+                "operation_access": "listed",
                 "credit_allowance_amount": "100",
                 "credit_allowance_priority": 15,
                 "credit_allowance_reset_unit": "month",
@@ -524,6 +525,7 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
     assert calls == [("get_subject_plan", [USER_ID])]
     assert plan is not None
     assert plan.plan_key == "pro"
+    assert plan.operation_access == "listed"
     assert plan.catalog_revision_no == 4
     assert plan.credit_policy_type == "credit_line"
     assert plan.credit_limit == "20"
@@ -534,6 +536,7 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
     public_plan = store.get_user_plan(USER_ID)
 
     assert public_plan.catalog_version == 4
+    assert public_plan.operation_access == "listed"
     assert public_plan.allowance is not None
     assert public_plan.allowance.priority == 15
     assert public_plan.credit_policy is not None

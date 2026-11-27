@@ -3,11 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "generate": "npm run generate:schema-artifact && npm run generate:api && npm run generate:notebooks && npm run generate:erd",
+    "generate": "npm run generate:schema-artifact && npm run generate:api && npm run generate:notebooks",
     "generate:schema-artifact": "cp pricing-config.schema.json static/pricing-config.schema.json",
     "generate:api": "bash scripts/gen-api-docs.sh",
     "generate:notebooks": "bash scripts/run-python.sh scripts/gen-notebook-docs.py",
     "generate:erd": "bash scripts/generate_erd_docs.sh",
+    "check:erd": "node scripts/verify-erd.mjs",
     "prebuild": "npm run generate",
     "prestart": "npm run generate",
     "docusaurus": "docusaurus",
@@ -25,7 +26,7 @@
     "smoke:typescript": "tsc -p scripts/smoke/tsconfig.json",
     "format": "prettier --write \"**/*.{css,json,md,mdx,ts,tsx,yaml,yml}\"",
     "format:check": "prettier --check \"**/*.{css,json,md,mdx,ts,tsx,yaml,yml}\"",
-    "check": "npm run format:check && npm run typecheck && npm run smoke && npm run build"
+    "check": "npm run format:check && npm run typecheck && npm run smoke && npm run check:erd && npm run build"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",

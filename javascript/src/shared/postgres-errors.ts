@@ -125,6 +125,15 @@ export function normalizePostgresError(
     indeterminate: (context.indeterminate ?? false) && hasIndeterminateOutcome(cause, code),
   };
 
+  if (code === "PZ002") {
+    return new StoreError("Usage backend is unavailable or does not match the tenant", options);
+  }
+  if (code === "PZ001") {
+    return new StoreError(
+      "Bursar tenant is inactive or provider environment does not match",
+      options,
+    );
+  }
   if (isTimeout(cause, code)) {
     return new StoreTimeoutError(`PostgreSQL ${operation} timed out`, options);
   }

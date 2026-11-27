@@ -27,6 +27,7 @@ beforeAll(() => {
   );
   // Valid JSON that is not a valid Bursar config.
   writeFileSync(join(tmpDir, "notconfig.json"), JSON.stringify({ hello: "world" }));
+  writeFileSync(join(tmpDir, "valid.yaml"), "version: 1\ncredits: {}\n");
   writeFileSync(join(tmpDir, "empty.json"), "");
   writeFileSync(join(tmpDir, "empty.yaml"), "");
   writeFileSync(join(tmpDir, "empty-object.json"), "{}");
@@ -37,6 +38,7 @@ beforeAll(() => {
 
 afterAll(() => {
   for (const name of [
+    "valid.yaml",
     "test.json",
     "test.yaml",
     "unicode.yaml",
@@ -61,59 +63,74 @@ afterAll(() => {
 });
 
 describe("loadConfigFile", () => {
-  it("loads JSON file", async () => {
+  it("returns a validated publishable config", async () => {
     const { loadConfigFile } = await import("../src/load-config-file.js");
-    const result = await loadConfigFile(join(tmpDir, "test.json"));
-    expect(objectField(objectField(result, "config"), "values")).toEqual({ a: "1" });
+    expect(await loadConfigFile(join(tmpDir, "valid.yaml"))).toMatchObject({
+      version: 1,
+      credits: {},
+    });
+    await expect(loadConfigFile(join(tmpDir, "notconfig.json"))).rejects.toThrow(ConfigError);
+  });
+});
+
+describe("loadRawConfigFile", () => {
+  it("loads JSON file", async () => {
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    const result = await loadRawConfigFile(join(tmpDir, "test.json"));
+    expect(objectField(objectField(result, "config"), "values")).toEqual({
+      a: "1",
+    });
   });
 
   it("loads YAML file", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    const result = await loadConfigFile(join(tmpDir, "test.yaml"));
-    expect(objectField(objectField(result, "config"), "values")).toEqual({ a: "1" });
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    const result = await loadRawConfigFile(join(tmpDir, "test.yaml"));
+    expect(objectField(objectField(result, "config"), "values")).toEqual({
+      a: "1",
+    });
   });
 
   it("throws a clean ConfigError on missing file", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "nope.json"))).rejects.toThrow(ConfigError);
-    await expect(loadConfigFile(join(tmpDir, "nope.json"))).rejects.toThrow(
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "nope.json"))).rejects.toThrow(ConfigError);
+    await expect(loadRawConfigFile(join(tmpDir, "nope.json"))).rejects.toThrow(
       /Config file not found/,
     );
   });
 
   it("throws a clean ConfigError when the path is a directory", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "a-directory.json"))).rejects.toThrow(
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "a-directory.json"))).rejects.toThrow(
       /is a directory/,
     );
   });
 
   it("throws a clean ConfigError on an empty JSON file", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "empty.json"))).rejects.toThrow(ConfigError);
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "empty.json"))).rejects.toThrow(ConfigError);
   });
 
   it("throws a clean ConfigError on an empty YAML file", async () => {
     // An empty YAML document parses to `undefined` via js-yaml, not an object.
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "empty.yaml"))).rejects.toThrow(ConfigError);
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "empty.yaml"))).rejects.toThrow(ConfigError);
   });
 
   it("throws a clean ConfigError on an empty JSON object", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "empty-object.json"))).rejects.toThrow(ConfigError);
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "empty-object.json"))).rejects.toThrow(ConfigError);
   });
 
   it("rejects nested duplicate JSON keys after escape decoding", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "duplicate.json"))).rejects.toThrow(
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "duplicate.json"))).rejects.toThrow(
       "Invalid JSON in " + join(tmpDir, "duplicate.json") + ": duplicated mapping key",
     );
   });
 
   it("loads YAML with Unicode string values", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    const result = await loadConfigFile(join(tmpDir, "unicode.yaml"));
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    const result = await loadRawConfigFile(join(tmpDir, "unicode.yaml"));
     const names = objectField(objectField(result, "config"), "names");
     // unicode keys are preserved
     expect(Object.keys(names)).toContain("gpt-4-türkçe");
@@ -121,15 +138,15 @@ describe("loadConfigFile", () => {
   });
 
   it("leaves schema validation to the config parser", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    const raw = await loadConfigFile(join(tmpDir, "notconfig.json"));
-    // loadConfigFile itself only parses; validation happens at the engine level
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    const raw = await loadRawConfigFile(join(tmpDir, "notconfig.json"));
+    // loadRawConfigFile itself only parses; validation happens at the engine level
     expect(() => PricingEngine.fromDict(raw)).toThrow(ConfigError);
   });
 
   it("rejects unsupported file extensions", async () => {
-    const { loadConfigFile } = await import("../src/load-config-file.js");
-    await expect(loadConfigFile(join(tmpDir, "unsupported.txt"))).rejects.toThrow(
+    const { loadRawConfigFile } = await import("../src/load-config-file.js");
+    await expect(loadRawConfigFile(join(tmpDir, "unsupported.txt"))).rejects.toThrow(
       /Unsupported config file format/,
     );
   });

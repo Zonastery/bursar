@@ -250,7 +250,7 @@ describe("billing diagnostic and repository boundaries", () => {
     },
   );
 
-  it("calls and validates the canonical nine-argument entitlement RPC", async () => {
+  it("calls and validates the canonical eight-argument entitlement RPC", async () => {
     const query = vi.fn().mockResolvedValue([{ outcome: "applied" }]);
     const repository = new BillingSubscriptionRepository(query);
 
@@ -263,13 +263,12 @@ describe("billing diagnostic and repository boundaries", () => {
         "2026-08-05T00:00:00Z",
         null,
         true,
-        null,
         "subscription_active",
       ),
     ).resolves.toBe("applied");
     expect(query).toHaveBeenCalledOnce();
     expect(query.mock.calls[0]?.[0]).toContain("reconcile_subscription_entitlement");
-    expect(query.mock.calls[0]?.[1]).toHaveLength(9);
+    expect(query.mock.calls[0]?.[1]).toHaveLength(8);
 
     query.mockResolvedValueOnce([{ outcome: "unexpected" }]);
     await expect(
@@ -281,7 +280,6 @@ describe("billing diagnostic and repository boundaries", () => {
         "2026-08-05T00:00:00Z",
         null,
         true,
-        null,
         "subscription_active",
       ),
     ).rejects.toMatchObject({ name: StoreError.name, indeterminate: true });
@@ -312,7 +310,6 @@ describe("subscription plan-change provisioning", () => {
         reconcileSubscriptionEntitlement,
       }),
       {
-        terminalPlanKey: "free",
         provisioning: {
           getUserPlan: vi.fn(),
           setUserPlan: vi.fn(),
@@ -345,7 +342,6 @@ describe("subscription plan-change provisioning", () => {
       "2026-08-05T00:00:00Z",
       null,
       true,
-      "free",
       "subscription_canceled",
     );
   });
@@ -547,7 +543,6 @@ describe("subscription plan-change provisioning", () => {
       "2026-08-05T00:00:00Z",
       anchor,
       false,
-      null,
       "subscription_active",
     );
   });
@@ -605,5 +600,40 @@ describe("subscription plan-change provisioning", () => {
     expect(reconcileSubscriptionEntitlement).toHaveBeenCalledOnce();
     expect(reconcileSubscriptionEntitlement.mock.calls[0]?.[6]).toBe(false);
     expect(reconcileSubscriptionEntitlement.mock.calls[0]?.[5]).toBeNull();
+  });
+});
+
+describe("customer deletion catalog policy", () => {
+  it.each([true, false])("uses the configured terminal plan: %s", async (configured) => {
+    const setUserPlan = vi.fn();
+    const unsetUserPlan = vi.fn();
+    const handlers = new BillingEventHandlers(
+      testStore({
+        getActiveCatalogDocument: vi.fn().mockResolvedValue({
+          version: 1,
+          catalog: configured
+            ? { default_plan: "free", subscription_end_plan: "free" }
+            : { default_plan: "free" },
+          plans: { free: { display_name: "Free" } },
+        }),
+      }),
+      { provisioning: { getUserPlan: vi.fn(), setUserPlan, unsetUserPlan } },
+    );
+    const handler = handlers.getHandler(BillingEventType.CUSTOMER_DELETED);
+    await handler?.({
+      provider: "stripe",
+      eventId: "evt",
+      eventType: BillingEventType.CUSTOMER_DELETED,
+      occurredAt: "2026-08-05T00:00:00Z",
+      accountId: "user-1",
+      customer: { providerCustomerId: "cus" },
+    });
+    if (configured) {
+      expect(setUserPlan).toHaveBeenCalledWith("user-1", "free");
+      expect(unsetUserPlan).not.toHaveBeenCalled();
+    } else {
+      expect(unsetUserPlan).toHaveBeenCalledWith("user-1");
+      expect(setUserPlan).not.toHaveBeenCalled();
+    }
   });
 });

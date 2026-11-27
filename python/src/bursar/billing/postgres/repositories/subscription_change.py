@@ -156,7 +156,7 @@ class BillingSubscriptionChangeRepository:
     ) -> BillingSubscriptionChange:
         rows = self._execute(
             """SELECT * FROM bursar.open_subscription_change(
-                   %s::uuid,%s::uuid,%s::timestamptz,%s,%s,%s
+                   %s::uuid,%s::uuid,%s::timestamptz,%s,%s,%s,%s
                )""",
             [
                 subscription_id,
@@ -165,6 +165,7 @@ class BillingSubscriptionChangeRepository:
                 input.effective,
                 input.idempotency_key,
                 input.proration_behavior,
+                input.region,
             ],
         )
         raw = require_mapping_row(rows, "BillingSubscriptionChangeRepository.create")

@@ -33,8 +33,8 @@ func (s *PostgresStore) ProcessBillingEvent(ctx context.Context, event BillingEv
 	return service.Ingest(ctx, event)
 }
 
-func (s *PostgresStore) processBillingEvent(ctx context.Context, event BillingEvent, accountID string, provisioning BillingProvisioningPort, autoSelect bool, gracePeriod time.Duration, terminalPlanKey string) (BillingEventResult, error) {
-	processor := postgresBillingLifecycle{store: s, provisioning: provisioning, autoSelectEntitlementSource: autoSelect, pastDueGracePeriod: gracePeriod, terminalPlanKey: terminalPlanKey}
+func (s *PostgresStore) processBillingEvent(ctx context.Context, event BillingEvent, accountID string, provisioning BillingProvisioningPort, autoSelect bool, gracePeriod time.Duration) (BillingEventResult, error) {
+	processor := postgresBillingLifecycle{store: s, provisioning: provisioning, autoSelectEntitlementSource: autoSelect, pastDueGracePeriod: gracePeriod}
 	return processor.process(ctx, event, accountID)
 }
 
@@ -43,7 +43,6 @@ type postgresBillingLifecycle struct {
 	provisioning                BillingProvisioningPort
 	autoSelectEntitlementSource bool
 	pastDueGracePeriod          time.Duration
-	terminalPlanKey             string
 }
 
 func (p postgresBillingLifecycle) process(ctx context.Context, event BillingEvent, accountID string) (BillingEventResult, error) {
@@ -329,7 +328,6 @@ func (p postgresBillingLifecycle) applySubscription(ctx context.Context, event B
 		state.ProviderUpdatedAt,
 		assignedAt,
 		automaticEntitlement,
-		p.terminalPlanKey,
 		action,
 	)
 	if reconcileErr != nil {
@@ -348,7 +346,7 @@ func (p postgresBillingLifecycle) applySubscription(ctx context.Context, event B
 	}
 	if automaticEntitlement && graceExpired && state.GraceEndsAt != nil {
 		state.ID = subscriptionID
-		if _, err := p.store.expirePastDueGracePeriod(ctx, state, processedAt, p.terminalPlanKey); err != nil {
+		if _, err := p.store.expirePastDueGracePeriod(ctx, state, processedAt); err != nil {
 			return BillingEventResult{}, err
 		}
 	}
@@ -402,7 +400,23 @@ func (p postgresBillingLifecycle) paymentSucceeded(ctx context.Context, event Bi
 	var topup *BillingTopupResult
 	var err error
 	if payment.Purpose == "credit_topup" && payment.Refs != nil {
-		topup, err = p.store.ResolveBillingTopup(ctx, event.Provider, payment.Refs.ProductID, payment.Refs.PriceID, payment.Refs.LookupKey)
+		intentID := ""
+		if rawIntent, present := event.Metadata["checkout_intent_id"]; present {
+			var ok bool
+			intentID, ok = rawIntent.(string)
+			if !ok || strings.TrimSpace(intentID) == "" || accountID == "" {
+				return BillingEventResult{}, NewStoreError("invalid checkout intent", ErrorOptions{})
+			}
+		}
+		attemptID := ""
+		if rawAttempt, present := event.Metadata["auto_recharge_attempt_id"]; present {
+			var ok bool
+			attemptID, ok = rawAttempt.(string)
+			if !ok || strings.TrimSpace(attemptID) == "" || accountID == "" {
+				return BillingEventResult{}, NewStoreError("invalid recharge attempt", ErrorOptions{})
+			}
+		}
+		topup, err = p.store.ResolveCheckoutBillingTopup(ctx, intentID, attemptID, accountID, event.Provider, payment.canonicalProviderPaymentID(), payment.Refs.ProductID, payment.Refs.PriceID, payment.Refs.LookupKey)
 		if err != nil {
 			return BillingEventResult{}, err
 		}
@@ -413,7 +427,11 @@ func (p postgresBillingLifecycle) paymentSucceeded(ctx context.Context, event Bi
 			metadata["credits_per_unit"] = topup.CreditsPerUnit.String()
 		}
 	}
-	paymentID, err := p.store.UpsertBillingPaymentState(ctx, BillingPaymentUpsert{Provider: event.Provider, ProviderPaymentID: payment.canonicalProviderPaymentID(), ProviderInvoiceID: payment.InvoiceID, AccountID: accountID, AmountMinor: payment.AmountMinor, TaxMinor: payment.TaxMinor, Currency: payment.Currency, Purpose: payment.Purpose, Status: payment.Status, ProviderUpdatedAt: event.OccurredAt, Metadata: metadata})
+	topupID := ""
+	if topup != nil {
+		topupID = topup.TopupID
+	}
+	paymentID, err := p.store.UpsertBillingPaymentState(ctx, BillingPaymentUpsert{TopupID: topupID, Provider: event.Provider, ProviderPaymentID: payment.canonicalProviderPaymentID(), ProviderInvoiceID: payment.InvoiceID, AccountID: accountID, AmountMinor: payment.AmountMinor, TaxMinor: payment.TaxMinor, Currency: payment.Currency, Purpose: payment.Purpose, Status: payment.Status, ProviderUpdatedAt: event.OccurredAt, Metadata: metadata})
 	if err != nil {
 		return BillingEventResult{}, err
 	}
@@ -434,7 +452,7 @@ func (p postgresBillingLifecycle) paymentSucceeded(ctx context.Context, event Bi
 		if grantErr != nil {
 			return BillingEventResult{}, grantErr
 		}
-		posting, grantErr := p.store.GrantBillingCredit(ctx, grantID, "billing:"+event.canonicalEventID()+":topup")
+		posting, grantErr := p.store.GrantBillingCredit(ctx, grantID, "billing:payment:"+paymentID+":topup")
 		if grantErr != nil {
 			return BillingEventResult{}, grantErr
 		}

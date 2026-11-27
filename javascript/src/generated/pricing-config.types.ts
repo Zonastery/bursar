@@ -7,40 +7,32 @@
 
 export type Version = 1;
 export type DefaultPlan = string | null;
+/**
+ * Plan assigned when a subscription ends; omission clears the entitlement if it still comes from that subscription.
+ */
+export type SubscriptionEndPlan = string | null;
 export type Unit = string;
-export type Type = "string" | "number" | "boolean";
+/**
+ * Require this usage measure; set false to treat omission as zero.
+ */
 export type Required = boolean;
-export type Extends = string | null;
-export type Op = "eq";
-export type Value = string | number | boolean;
-export type Op1 = "in";
 /**
- * @minItems 1
+ * Inline standard rate-card charge; null means omitted.
  */
-export type Values = [string | number | boolean, ...(string | number | boolean)[]];
-export type Op2 = "not_in";
-/**
- * @minItems 1
- */
-export type Values1 = [string | number | boolean, ...(string | number | boolean)[]];
-export type Op3 = "prefix";
-export type Value1 = string;
-export type Op4 = "range";
-export type Gt = string | null;
-export type Gte = string | null;
-export type Lt = string | null;
-export type Lte = string | null;
 export type Charge =
-  | FlatCharge
-  | PerUnitCharge
-  | PackageCharge
-  | GraduatedCharge
-  | VolumeCharge
-  | ExpressionCharge
-  | SumCharge;
-export type Type1 = "flat";
+  | (
+      | FlatCharge
+      | PerUnitCharge
+      | PackageCharge
+      | GraduatedCharge
+      | VolumeCharge
+      | ExpressionCharge
+      | SumCharge
+    )
+  | null;
+export type Type = "flat";
 export type Amount = string;
-export type Type2 = "per_unit";
+export type Type1 = "per_unit";
 export type Measure = string;
 /**
  * Credits charged for each unit_size units of the selected measure.
@@ -50,12 +42,12 @@ export type Rate = string;
  * Number of measure units represented by one rate unit; use 1000000 for per-million-token rates.
  */
 export type UnitSize = string;
-export type Type3 = "package";
+export type Type2 = "package";
 export type Measure1 = string;
 export type Units = string;
 export type Amount1 = string;
 export type Rounding = "ceil" | "floor" | "nearest";
-export type Type4 = "graduated";
+export type Type3 = "graduated";
 export type Measure2 = string;
 /**
  * @minItems 1
@@ -63,15 +55,15 @@ export type Measure2 = string;
 export type Tiers = [GraduatedTier, ...GraduatedTier[]];
 export type UpTo = string | null;
 export type Rate1 = string;
-export type Type5 = "volume";
+export type Type4 = "volume";
 export type Measure3 = string;
 /**
  * @minItems 1
  */
 export type Tiers1 = [GraduatedTier, ...GraduatedTier[]];
-export type Type6 = "expression";
+export type Type5 = "expression";
 export type Formula = string;
-export type Type7 = "sum";
+export type Type6 = "sum";
 /**
  * @minItems 1
  */
@@ -95,10 +87,28 @@ export type Components = [
     | SumCharge
   )[],
 ];
-export type Rules = PriceRule[];
-export type Unmatched = RejectUnmatched | ChargeUnmatched;
-export type Action = "reject";
-export type Action1 = "charge";
+export type Type7 = "string" | "number" | "boolean";
+export type Required1 = boolean;
+export type Extends = string | null;
+export type Op = "eq";
+export type Value = string | number | boolean;
+export type Op1 = "in";
+/**
+ * @minItems 1
+ */
+export type Values = [string | number | boolean, ...(string | number | boolean)[]];
+export type Op2 = "not_in";
+/**
+ * @minItems 1
+ */
+export type Values1 = [string | number | boolean, ...(string | number | boolean)[]];
+export type Op3 = "prefix";
+export type Value1 = string;
+export type Op4 = "range";
+export type Gt = string | null;
+export type Gte = string | null;
+export type Lt = string | null;
+export type Lte = string | null;
 export type Charge1 =
   | FlatCharge
   | PerUnitCharge
@@ -107,6 +117,22 @@ export type Charge1 =
   | VolumeCharge
   | ExpressionCharge
   | SumCharge;
+export type Rules = PriceRule[];
+export type Unmatched = RejectUnmatched | ChargeUnmatched;
+export type Action = "reject";
+export type Action1 = "charge";
+export type Charge2 =
+  | FlatCharge
+  | PerUnitCharge
+  | PackageCharge
+  | GraduatedCharge
+  | VolumeCharge
+  | ExpressionCharge
+  | SumCharge;
+/**
+ * Grant this amount once per subject on account creation; null means omitted.
+ */
+export type OnSignup = string | null;
 export type Priority = number;
 export type Expiry =
   | NeverExpiry
@@ -171,6 +197,10 @@ export type Default3 = string;
 export type Pattern = string | null;
 export type MaxInFlight = number | null;
 export type MaxInFlight1 = number;
+/**
+ * Plan level for subscription changes, distinct from display rank.
+ */
+export type Tier = number;
 export type DisplayName = string;
 /**
  * Public catalog ordering. Lower ranks appear first; ties are ordered by plan key.
@@ -178,7 +208,10 @@ export type DisplayName = string;
 export type Rank = number;
 export type Description = string | null;
 export type RateCard1 = string | null;
-export type AllowedOperations = string[];
+/**
+ * Allow all, none, or a nonempty list of operations; omission denies all.
+ */
+export type AllowedOperations = ("all" | "none") | [string, ...string[]];
 export type Amount3 = string;
 /**
  * Spend priority shared with credit buckets. Lower values are used first.
@@ -211,12 +244,33 @@ export type AmountMinor = number;
 export type Currency1 = string;
 export type TaxBehavior = "inclusive" | "exclusive" | "unspecified";
 export type Type25 = "stripe_price";
-export type PriceId = string;
+/**
+ * Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment.
+ */
+export type PriceId =
+  | string
+  | {
+      [k: string]: string;
+    };
 export type Type26 = "dodo_product";
-export type ProductId = string;
+/**
+ * Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment.
+ */
+export type ProductId =
+  | string
+  | {
+      [k: string]: string;
+    };
 export type Type27 = "custom_object";
 export type ObjectKind = "subscription" | "one_time";
-export type ExternalId = string;
+/**
+ * Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment.
+ */
+export type ExternalId =
+  | string
+  | {
+      [k: string]: string;
+    };
 export type Type28 = "subscription";
 export type Plan = string;
 export type Amount4 = string;
@@ -271,7 +325,7 @@ export interface BursarConfig {
    * Usage operations, their measures and dimensions, and reusable rate cards.
    */
   pricing?: PricingConfig | null;
-  credits: CreditsConfig;
+  credits?: CreditsConfig;
   entitlements?: EntitlementsConfig;
   admission?: AdmissionConfig;
   plans?: Plans1;
@@ -282,16 +336,18 @@ export interface BursarConfig {
  */
 export interface CatalogConfig {
   default_plan?: DefaultPlan;
+  subscription_end_plan?: SubscriptionEndPlan;
 }
 export interface PricingConfig {
   operations: Operations;
-  rate_cards: RateCards;
+  rate_cards?: RateCards;
 }
 export interface Operations {
   [k: string]: OperationDefinition;
 }
 export interface OperationDefinition {
-  measures: Measures;
+  measures?: Measures;
+  charge?: Charge;
   dimensions?: Dimensions;
 }
 export interface Measures {
@@ -299,13 +355,53 @@ export interface Measures {
 }
 export interface MeasureDefinition {
   unit: Unit;
+  required?: Required;
+}
+export interface FlatCharge {
+  type: Type;
+  amount: Amount;
+}
+export interface PerUnitCharge {
+  type: Type1;
+  measure: Measure;
+  rate: Rate;
+  unit_size?: UnitSize;
+}
+export interface PackageCharge {
+  type: Type2;
+  measure: Measure1;
+  units: Units;
+  amount: Amount1;
+  rounding?: Rounding;
+}
+export interface GraduatedCharge {
+  type: Type3;
+  measure: Measure2;
+  tiers: Tiers;
+}
+export interface GraduatedTier {
+  up_to?: UpTo;
+  rate: Rate1;
+}
+export interface VolumeCharge {
+  type: Type4;
+  measure: Measure3;
+  tiers: Tiers1;
+}
+export interface ExpressionCharge {
+  type: Type5;
+  formula: Formula;
+}
+export interface SumCharge {
+  type: Type6;
+  components: Components;
 }
 export interface Dimensions {
   [k: string]: DimensionDefinition;
 }
 export interface DimensionDefinition {
-  type: Type;
-  required?: Required;
+  type: Type7;
+  required?: Required1;
 }
 export interface RateCards {
   [k: string]: RateCard;
@@ -323,7 +419,7 @@ export interface OperationPricing {
 }
 export interface PriceRule {
   when: When;
-  charge: Charge;
+  charge: Charge1;
 }
 export interface When {
   [k: string]: EqualMatcher | InMatcher | NotInMatcher | PrefixMatcher | RangeMatcher;
@@ -351,56 +447,18 @@ export interface RangeMatcher {
   lt?: Lt;
   lte?: Lte;
 }
-export interface FlatCharge {
-  type: Type1;
-  amount: Amount;
-}
-export interface PerUnitCharge {
-  type: Type2;
-  measure: Measure;
-  rate: Rate;
-  unit_size?: UnitSize;
-}
-export interface PackageCharge {
-  type: Type3;
-  measure: Measure1;
-  units: Units;
-  amount: Amount1;
-  rounding?: Rounding;
-}
-export interface GraduatedCharge {
-  type: Type4;
-  measure: Measure2;
-  tiers: Tiers;
-}
-export interface GraduatedTier {
-  up_to?: UpTo;
-  rate: Rate1;
-}
-export interface VolumeCharge {
-  type: Type5;
-  measure: Measure3;
-  tiers: Tiers1;
-}
-export interface ExpressionCharge {
-  type: Type6;
-  formula: Formula;
-}
-export interface SumCharge {
-  type: Type7;
-  components: Components;
-}
 export interface RejectUnmatched {
   action: Action;
 }
 export interface ChargeUnmatched {
   action: Action1;
-  charge: Charge1;
+  charge: Charge2;
 }
 /**
  * Credit buckets, spending policies, grants, and optional display conversion.
  */
 export interface CreditsConfig {
+  on_signup?: OnSignup;
   buckets?: Buckets;
   default_bucket?: DefaultBucket;
   policies?: Policies;
@@ -543,6 +601,7 @@ export interface Plans1 {
   [k: string]: PlanDefinition;
 }
 export interface PlanDefinition {
+  tier?: Tier;
   display_name: DisplayName;
   rank?: Rank;
   description?: Description;
@@ -635,11 +694,11 @@ export interface Providers1 {
   [k: string]: StripePriceReference | DodoProductReference | CustomObjectReference;
 }
 export interface StripePriceReference {
-  type: Type25;
+  type?: Type25;
   price_id: PriceId;
 }
 export interface DodoProductReference {
-  type: Type26;
+  type?: Type26;
   product_id: ProductId;
 }
 export interface CustomObjectReference {

@@ -102,6 +102,8 @@ export interface BillingSubscriptionChangeInput {
   provider: string;
   providerSubscriptionId: string;
   toOfferId: string;
+  /** Trusted ISO region used to evaluate availability. */
+  region?: string;
   effectiveAt: string;
   effective: "immediate" | "renewal";
   idempotencyKey: string;

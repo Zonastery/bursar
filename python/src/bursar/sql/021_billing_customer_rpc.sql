@@ -406,7 +406,8 @@ CREATE FUNCTION bursar.upsert_billing_payment(
     p_status bursar.billing_payment_status,
     p_provider_updated_at timestamptz,
     p_provider_invoice_id text,
-    p_metadata jsonb
+    p_metadata jsonb,
+    p_topup_id uuid DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
@@ -433,6 +434,10 @@ BEGIN
                255
            ))
        OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
+       OR (p_topup_id IS NOT NULL AND (p_purpose <> 'credit_topup' OR NOT EXISTS (
+           SELECT 1 FROM bursar.catalog_topups AS topup
+           WHERE topup.id = p_topup_id
+       )))
     THEN
         RAISE EXCEPTION 'invalid billing payment' USING ERRCODE='22023';
     END IF;
@@ -454,12 +459,12 @@ BEGIN
     INSERT INTO bursar.billing_payments(
         subject_id,provider,provider_environment,provider_payment_id,provider_invoice_id,
         amount_minor,tax_minor,currency,purpose,status,provider_updated_at,status_changed_at,
-        metadata
+        metadata,topup_id
     )
     VALUES (
         p_subject_id,p_provider,v_environment,p_provider_payment_id,p_provider_invoice_id,
         p_amount_minor,p_tax_minor,p_currency,p_purpose,p_status,p_provider_updated_at,
-        p_provider_updated_at,v_metadata
+        p_provider_updated_at,v_metadata,p_topup_id
     )
     ON CONFLICT (
         tenant_id,
@@ -467,7 +472,8 @@ BEGIN
         provider_environment,
         provider_payment_id
     ) DO UPDATE
-    SET status=EXCLUDED.status,
+    SET topup_id=COALESCE(billing_payments.topup_id, EXCLUDED.topup_id),
+        status=EXCLUDED.status,
         tax_minor=EXCLUDED.tax_minor,
         provider_invoice_id=COALESCE(
             EXCLUDED.provider_invoice_id,
@@ -489,7 +495,14 @@ BEGIN
           OR EXCLUDED.provider_invoice_id IS NULL
           OR billing_payments.provider_invoice_id=EXCLUDED.provider_invoice_id
       )
-      AND EXCLUDED.provider_updated_at > billing_payments.provider_updated_at
+      AND (billing_payments.topup_id IS NULL OR EXCLUDED.topup_id IS NULL
+           OR billing_payments.topup_id = EXCLUDED.topup_id)
+      AND (EXCLUDED.provider_updated_at > billing_payments.provider_updated_at
+           OR (EXCLUDED.provider_updated_at = billing_payments.provider_updated_at
+               AND billing_payments.topup_id IS NULL AND EXCLUDED.topup_id IS NOT NULL
+               AND billing_payments.status = EXCLUDED.status
+               AND billing_payments.tax_minor = EXCLUDED.tax_minor
+               AND billing_payments.metadata = EXCLUDED.metadata))
     RETURNING id INTO v_id;
 
     IF v_id IS NULL THEN
@@ -506,6 +519,7 @@ BEGIN
                v_existing.amount_minor,
                v_existing.currency,
                v_existing.purpose,
+               CASE WHEN v_existing.topup_id IS NOT NULL AND p_topup_id IS NOT NULL THEN v_existing.topup_id END,
                CASE
                    WHEN v_existing.provider_invoice_id IS NOT NULL
                         AND p_provider_invoice_id IS NOT NULL
@@ -516,6 +530,7 @@ BEGIN
                p_amount_minor,
                p_currency,
                p_purpose,
+               CASE WHEN v_existing.topup_id IS NOT NULL AND p_topup_id IS NOT NULL THEN p_topup_id END,
                CASE
                    WHEN v_existing.provider_invoice_id IS NOT NULL
                         AND p_provider_invoice_id IS NOT NULL

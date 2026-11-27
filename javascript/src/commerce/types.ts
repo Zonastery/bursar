@@ -64,6 +64,8 @@ export interface CreateCheckoutInput {
   accountId: string;
   email?: string;
   offerKey: string;
+  /** Trusted ISO region for availability checks. */
+  region?: string;
   provider?: string;
   type?: CommerceCheckoutKind;
   quantity?: number;
@@ -104,7 +106,8 @@ export type SubscriptionAccessState = "entitled" | "grace" | "blocked" | "none";
 
 export interface NormalizedPendingPlanChange {
   planKey: string;
-  interval: "month" | "year";
+  interval: "day" | "week" | "month" | "year";
+  intervalCount: number;
   effectiveAt: string;
   scheduled: boolean;
   providerOperationId: string | null;
@@ -147,7 +150,8 @@ export type PlanChangeClassification =
 
 interface PlanChangePreviewResultBase {
   planId: string;
-  interval: "month" | "year";
+  interval: "day" | "week" | "month" | "year";
+  intervalCount: number;
 }
 
 /**
@@ -171,6 +175,8 @@ export type PlanChangePreviewResult =
 export interface PreviewPlanChangeInput {
   accountId: string;
   offerKey: string;
+  /** Trusted ISO region for availability checks. */
+  region?: string;
 }
 
 export interface ConfirmPlanChangeInput extends PreviewPlanChangeInput {
@@ -185,7 +191,8 @@ export interface ConfirmPlanChangeResult {
   scheduled?: boolean;
   effectiveAt?: string;
   planId: string;
-  interval: "month" | "year";
+  interval: "day" | "week" | "month" | "year";
+  intervalCount: number;
 }
 
 export interface PortalSessionInput {

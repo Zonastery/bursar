@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import { normalizeTenantId } from "../shared/postgres-client.js";
+import { utcTimestamp } from "../shared/timestamp.js";
+import { rawUsageJson } from "./raw-json.js";
 import { safeParse } from "../shared/postgres-validation.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import {
@@ -26,9 +28,16 @@ const textSchema = z.string().min(1);
 const timestampSchema = z
   .union([
     z.date().refine((value) => !Number.isNaN(value.getTime())),
-    z.string().datetime({ offset: true }),
+    z.string().refine((value) => {
+      try {
+        utcTimestamp(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }),
   ])
-  .transform((value) => (value instanceof Date ? value : new Date(value)).toISOString());
+  .transform((value) => (value instanceof Date ? value.toISOString() : utcTimestamp(value)));
 const nonnegativeIntegerSchema = z
   .union([z.number(), z.string().regex(/^\d+$/u)])
   .transform(Number)
@@ -124,12 +133,12 @@ export class PostgresStorageRepository implements OutboxRecoveryStore {
     leaseSeconds: number,
   ): Promise<OutboxEvent[]> {
     const rows = await this.query(
-      "SELECT * FROM bursar.claim_outbox_events($1::uuid, $2::integer, $3::integer, $4::text[])",
+      "SELECT claimed.*, jsonb_build_object('measures', (claimed.payload->'measures')::text, 'dimensions', (claimed.payload->'dimensions')::text, 'metadata', (claimed.payload->'metadata')::text, 'pricing_snapshot', (claimed.payload->'pricing_snapshot')::text) AS payload_raw, claimed.created_at::text AS created_at FROM bursar.claim_outbox_events($1::uuid, $2::integer, $3::integer, $4::text[]) AS claimed",
       [this.tenantId, limit, leaseSeconds, [...topics]],
     );
     return rows.map((raw) => {
       const row = asRow(raw, "claim_outbox_events");
-      return {
+      const event: OutboxEvent = {
         eventId: requiredString(row, "event_id", "outbox event"),
         tenantId: requiredString(row, "tenant_id", "outbox event"),
         topic: requiredString(row, "topic", "outbox event"),
@@ -141,6 +150,9 @@ export class PostgresStorageRepository implements OutboxRecoveryStore {
         attemptCount: nonnegativeInteger(row, "attempt_count", "outbox event"),
         createdAt: requiredTimestamp(row, "created_at", "outbox event"),
       };
+      const exact = rawUsageJson(row.payload_raw);
+      if (exact) event.rawUsage = exact;
+      return event;
     });
   }
 
@@ -206,7 +218,7 @@ export class PostgresStorageRepository implements OutboxRecoveryStore {
   async listDeadLetters(options: OutboxDeadLetterListOptions = {}): Promise<OutboxDeadLetterPage> {
     const parsed = outboxDeadLetterListOptionsSchema.parse(options);
     const rows = await this.query(
-      "SELECT * FROM bursar.list_outbox_dead_letters($1::uuid, $2::timestamptz, $3::bigint, $4::integer)",
+      "SELECT dead.*, dead.created_at::text AS created_at, dead.updated_at::text AS updated_at FROM bursar.list_outbox_dead_letters($1::uuid, $2::timestamptz, $3::bigint, $4::integer) AS dead",
       [
         this.tenantId,
         parsed.cursor?.createdAt ?? null,
@@ -253,16 +265,17 @@ export class PostgresStorageRepository implements OutboxRecoveryStore {
   }
 
   async getUsageCharge(chargeId: string): Promise<UsageChargeExport | null> {
-    const rows = await this.query("SELECT bursar.export_usage_charge($1::uuid) AS payload", [
-      chargeId,
-    ]);
+    const rows = await this.query(
+      "SELECT payload, jsonb_build_object('measures', (payload->'measures')::text, 'dimensions', (payload->'dimensions')::text, 'metadata', (payload->'metadata')::text, 'pricing_snapshot', (payload->'pricing_snapshot')::text) AS payload_raw FROM (SELECT bursar.export_usage_charge($1::uuid) AS payload) AS result",
+      [chargeId],
+    );
     const value = rows.length > 0 ? asRow(rows[0], "export_usage_charge").payload : null;
     if (value === null || value === undefined) return null;
     const row = asRow(value, "export_usage_charge payload");
     if (row.payload_available !== true) {
       throw new Error(`Usage charge ${chargeId} payload expired before export`);
     }
-    return {
+    const usage: UsageChargeExport = {
       tenantId: requiredString(row, "tenant_id", "usage charge export"),
       chargeId: requiredString(row, "charge_id", "usage charge export"),
       accountId: requiredString(row, "account_id", "usage charge export"),
@@ -294,6 +307,9 @@ export class PostgresStorageRepository implements OutboxRecoveryStore {
       eventAt: requiredTimestamp(row, "event_at", "usage charge export"),
       createdAt: requiredTimestamp(row, "created_at", "usage charge export"),
     };
+    const exact = rawUsageJson(rows[0]?.payload_raw);
+    if (exact) usage.rawJson = exact;
+    return usage;
   }
 
   async getBillingEventPayload(eventId: string): Promise<BillingEventPayloadExport | null> {

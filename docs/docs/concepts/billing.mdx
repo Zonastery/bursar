@@ -11,6 +11,30 @@ offer catalog and the normalized event state machine; the provider only
 executes payments. The `commerce` section of the canonical config declares
 providers, offers, and auto-recharge guardrails.
 
+The optional `catalog.subscription_end_plan` selects the plan after a subscription ends; `catalog.default_plan` selects the signup plan. A signup grant is a one-time ledger credit, a plan allowance is a windowed entitlement, and a cycle grant is issued on subscription renewal. Subscription intervals include both unit and count, so a quarterly offer differs from a monthly offer.
+
+Stripe and Dodo checkout trials accept day or week durations in the catalog; the adapters send a day count. Stripe permits up to 730 days and Dodo up to 10,000. Region-restricted offers require a trusted region at checkout. Provider IDs can vary by deployment, while secrets remain in runtime adapters.
+
+For example, a paid offer can retain provider IDs for multiple financial environments in one catalog:
+
+```yaml
+commerce:
+  providers:
+    stripe: { type: stripe }
+  offers:
+    pro_monthly:
+      type: subscription
+      display_name: Pro monthly
+      plan: pro
+      billing_interval: { unit: month, count: 1 }
+      price: { amount_minor: 1200, currency: USD }
+      providers:
+        stripe:
+          price_id: { test: price_test_pro, live: price_live_pro }
+```
+
+Define the referenced `pro` plan separately and configure the Stripe adapter credentials for the store environment at runtime. The catalog retains both IDs; checkout and webhook lookup use only the matching environment. A missing mapping never falls back to another environment. Plan `rank` orders the pricing page; `tier` classifies upgrades and downgrades, while `rate_card` selects usage pricing.
+
 ## Providers
 
 `commerce.providers` names the payment providers an environment supports.
@@ -37,7 +61,7 @@ trusted custom adapters.
 
 `commerce.offers` defines what customers can buy. Prices are integer minor
 units with a currency and a `tax_behavior`; provider references map the offer
-to provider objects (`stripe_price.price_id`, `dodo_product.product_id`).
+to provider objects (`price_id` for Stripe, `product_id` for Dodo). Bursar infers the built-in reference type from the provider definition.
 
 **Subscription offers** bind a plan to a billing interval, an optional trial,
 and an optional cycle grant — the Pro monthly plan with a 50,000-credit grant:
@@ -49,7 +73,7 @@ offers:
     display_name: Pro Monthly
     price: { amount_minor: 2000, currency: USD }
     providers:
-      stripe: { type: stripe_price, price_id: price_pro_monthly }
+      stripe: { price_id: price_pro_monthly }
     plan: pro
     billing_interval: { unit: month, count: 1 }
     cycle_grant:
@@ -68,7 +92,7 @@ credits_10k:
   display_name: "10,000 Credits"
   price: { amount_minor: 500, currency: USD }
   providers:
-    stripe: { type: stripe_price, price_id: price_credits_10k }
+    stripe: { price_id: price_credits_10k }
   credits_per_unit: "10000"
   quantity: { minimum: 1, maximum: 10, default: 1 }
   bucket: purchased
@@ -90,6 +114,13 @@ topup, the offer's credits are granted to the configured bucket; on
 is assigned. The walkthrough in
 [Subscription integration](../guides/subscription-integration.mdx) shows the
 full flow end to end.
+
+A checkout operation key is unique for a subject within a tenant and provider
+environment, including across providers. Reuse it only for the same request; a
+different offer, quantity, account, region, or explicitly selected provider
+conflicts. Retries use the intent's original catalog terms and provider. Bursar
+derives the provider's idempotency key from the intent, so different subjects
+can safely use the same local operation key.
 
 ## Subscriptions
 
@@ -119,6 +150,17 @@ direction — `upgrade`, `downgrade`, `lateral`, and `cadence_change`. Each
 policy sets `effective` (`immediate` or `renewal`), `proration` (`prorated` or
 `none`), and `payment_failure` (`prevent_change` or `apply_change`): a
 downgrade may wait for renewal, while an upgrade applies immediately.
+
+Keep offer keys stable when republishing a catalog: selecting the current key
+with the same plan and interval is unchanged even if its provider ID or price
+changes. Give an alternative offer a distinct key. A change to a different key
+with the same plan and interval is lateral and follows the lateral policy.
+
+Pass a trusted `region` to both `preview_plan_change` / `previewPlanChange`
+and `confirm_plan_change` / `confirmPlanChange` for region-restricted offers.
+Both calls check the target offer's availability dates and region; confirmation
+also refreshes the quote before changing the subscription. An expired or
+ineligible offer cannot be confirmed from an earlier preview.
 
 ## Auto-recharge
 
@@ -154,6 +196,18 @@ deduction. Processing outcomes are `not_configured`, `disabled`,
 `action_required`, and `failed`. Per-user profiles persist threshold, topup,
 quantity, window counts, and payment method, so recharges are idempotent and
 bounded even across process restarts.
+
+A new enrollment uses the first top-up in `eligible_topups` and the configured default quantity.
+An enabled profile keeps its saved top-up and quantity when the catalog is
+republished or those defaults change. Before each automatic charge, the active
+catalog must still authorize that selection, its provider product, quantity, and
+unchanged commercial terms. Removing eligibility or changing those terms prevents
+the charge rather than silently switching the customer to a different purchase.
+
+Automatic purchases have no trusted region, so region-restricted or time-unavailable
+top-ups cannot be charged. An unknown provider outcome keeps its original
+idempotency key and remains available for webhook or read-side reconciliation when
+it is no longer safe to retry.
 
 ## Billing persistence boundary
 

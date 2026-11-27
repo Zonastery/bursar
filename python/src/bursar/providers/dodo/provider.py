@@ -32,6 +32,7 @@ from bursar.providers.types import (
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
+    checkout_trial_days,
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
@@ -141,6 +142,7 @@ class DodoProvider:
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         if not params.account_id:
             raise ValueError("Authentication required for checkout")
+        trial_days = checkout_trial_days(params, 10000)
         client = self._get_client()
         quantity = params.quantity if params.quantity is not None else 1
         metadata = {**(params.metadata or {}), "bursar_account_id": params.account_id}
@@ -149,6 +151,8 @@ class DodoProvider:
             "return_url": params.return_url,
             "metadata": metadata,
         }
+        if trial_days is not None:
+            session_kwargs["subscription_data"] = {"trial_period_days": trial_days}
         if params.cancel_url:
             session_kwargs["cancel_url"] = params.cancel_url
         if params.customer_id:

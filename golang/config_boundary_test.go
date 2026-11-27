@@ -277,7 +277,7 @@ func TestCommerceParserRejectsUnsafeProviderAndAutoRechargePolicies(t *testing.T
 			return err
 		}},
 		{"duplicate provider object", func() error {
-			_, err := parseCommerceOffer("pack", topupOffer(nil), provider, credits, map[string]struct{}{"stripe/price_pack": {}})
+			_, err := parseCommerceOffer("pack", topupOffer(nil), provider, credits, map[string]struct{}{"stripe/test/price_pack": {}})
 			return err
 		}},
 		{"topup credits", func() error {

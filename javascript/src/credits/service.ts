@@ -137,6 +137,10 @@ import { type NormalizedLogger, normalizeLogger } from "../shared/logger.js";
  */
 export class CreditsService {
   private readonly store: CreditStore;
+
+  get providerEnvironment() {
+    return this.store.providerEnvironment;
+  }
   private readonly queries: CreditQueries;
   private readonly catalogRuntime: CatalogRuntime;
   private readonly leases: CreditLeaseWorkflow;
@@ -726,6 +730,7 @@ export class CreditsService {
     userId: string,
     metrics: UsageMetrics,
     options: DeductOptions,
+    flatJob = false,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] deduct", {
@@ -733,6 +738,8 @@ export class CreditsService {
       feature: options.feature,
     });
     const engine = await this.catalogRuntime.engineForUser(userId);
+    if (flatJob && engine.hasMeasure(metrics.operation, "jobs"))
+      metrics = { ...metrics, measures: { jobs: 1 } };
     const plan = await this.store.getUserPlan(userId);
     const effectiveIdempotencyKey = requireStableKey(options?.idempotencyKey);
     const model = z.string().safeParse(metrics.dimensions?.model).data ?? null;
@@ -870,7 +877,9 @@ export class CreditsService {
     jobName: string,
     options: DeductFlatJobOptions,
   ): Promise<DeductionResult> {
-    return this.deduct(userId, { operation: jobName, measures: { jobs: 1 } }, options);
+    return this.instrumentation.run("credits.deduct", undefined, () =>
+      this.deductUninstrumented(userId, { operation: jobName }, options, true),
+    );
   }
 
   async refundCredits(entryId: string, options: RefundCreditsOptions): Promise<RefundSuccess> {

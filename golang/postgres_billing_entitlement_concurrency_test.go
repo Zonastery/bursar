@@ -75,7 +75,7 @@ func TestPostgresSubscriptionUpsertAndGraceExpiryDoNotDeadlock(t *testing.T) {
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			_, err := store.expirePastDueGracePeriod(raceCtx, *candidate, now.Add(10*time.Minute), "")
+			_, err := store.expirePastDueGracePeriod(raceCtx, *candidate, now.Add(10*time.Minute))
 			results <- err
 		}()
 	}

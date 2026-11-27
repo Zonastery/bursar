@@ -378,7 +378,7 @@ func TestPostgresBillingStateRemainingValidationPaths(t *testing.T) {
 			return store.RecordSubscriptionConflict(ctx, BillingSubscriptionConflictCreate{Provider: "alpha", DuplicateProviderSubscriptionID: "duplicate", Metadata: map[string]any{"bad": make(chan int)}})
 		}},
 		{"entitlement account UUID", func() error {
-			_, err := store.reconcileSubscriptionEntitlement(ctx, "bad", validID, validID, "active", now, nil, true, "", "subscription_updated")
+			_, err := store.reconcileSubscriptionEntitlement(ctx, "bad", validID, validID, "active", now, nil, true, "subscription_updated")
 			return err
 		}},
 		{"pseudonym UUID", func() error { _, err := store.PseudonymizeFinancialSubject(ctx, "bad"); return err }},

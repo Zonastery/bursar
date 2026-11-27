@@ -47,8 +47,8 @@ class PricingEngine:
         self._config = config
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> PricingEngine:
-        return cls(load_config_from_dict(data))
+    def from_dict(cls, data: dict[str, Any], environment: str | None = None) -> PricingEngine:
+        return cls(load_config_from_dict(data, environment))
 
     @property
     def pricing_schema(self) -> dict[str, Any]:
@@ -81,6 +81,10 @@ class PricingEngine:
                 raise ConfigError(f"dimension '{name}' must be numeric")
             if dimension.type == "boolean" and type(value) is not bool:
                 raise ConfigError(f"dimension '{name}' must be boolean")
+
+        for name, measure in definition.measures.items():
+            if measure.required and name not in metrics.measures:
+                raise ConfigError(f"operation '{operation_name}' requires usage measure '{name}'")
 
         measures = {name: metrics.measures.get(name, Decimal(0)) for name in definition.measures}
         card_key = self._resolve_rate_card(rate_card)

@@ -10,7 +10,7 @@
  * ```
  */
 
-export { loadConfigFile } from "./load-config-file.js";
+export { loadConfigFile, loadRawConfigFile } from "./load-config-file.js";
 
 // Optional high-volume storage infrastructure. These adapters are Node-only;
 // the main package remains the PostgreSQL-first application API.

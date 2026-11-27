@@ -743,6 +743,321 @@
           }
         }
       }
+    },
+    {
+      "name": "null_signup_and_sole_named_card",
+      "expect": "accept",
+      "config": {
+        "version": 1,
+        "credits": {
+          "on_signup": null
+        },
+        "catalog": {
+          "default_plan": "free"
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "allowed_operations": [
+              "report"
+            ]
+          }
+        },
+        "pricing": {
+          "operations": {
+            "report": {
+              "charge": {
+                "type": "flat",
+                "amount": "2"
+              }
+            }
+          },
+          "rate_cards": {
+            "custom": {
+              "operations": {}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "null_inline_charge_uses_explicit_price",
+      "expect": "accept",
+      "config": {
+        "version": 1,
+        "credits": {
+          "on_signup": null
+        },
+        "catalog": {
+          "default_plan": "free"
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "allowed_operations": [
+              "report"
+            ]
+          }
+        },
+        "pricing": {
+          "operations": {
+            "report": {
+              "charge": null
+            }
+          },
+          "rate_cards": {
+            "custom": {
+              "operations": {
+                "report": {
+                  "unmatched": {
+                    "action": "charge",
+                    "charge": {
+                      "type": "flat",
+                      "amount": "3"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "multiple_cards_need_plan_choice",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "on_signup": null
+        },
+        "catalog": {
+          "default_plan": "free"
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "allowed_operations": [
+              "report"
+            ]
+          }
+        },
+        "pricing": {
+          "operations": {
+            "report": {
+              "charge": {
+                "type": "flat",
+                "amount": "2"
+              }
+            }
+          },
+          "rate_cards": {
+            "custom": {
+              "operations": {}
+            },
+            "second": {
+              "operations": {}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "multiple_cards_explicit_choice",
+      "expect": "accept",
+      "config": {
+        "version": 1,
+        "credits": {
+          "on_signup": null
+        },
+        "catalog": {
+          "default_plan": "free"
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "allowed_operations": [
+              "report"
+            ],
+            "rate_card": "custom"
+          }
+        },
+        "pricing": {
+          "operations": {
+            "report": {
+              "charge": {
+                "type": "flat",
+                "amount": "2"
+              }
+            }
+          },
+          "rate_cards": {
+            "custom": {
+              "operations": {}
+            },
+            "second": {
+              "operations": {}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "provider_kinds_inferred",
+      "expect": "accept",
+      "config": {
+        "version": 1,
+        "credits": {
+          "on_signup": null
+        },
+        "catalog": {
+          "default_plan": "free"
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "allowed_operations": [
+              "report"
+            ]
+          }
+        },
+        "pricing": {
+          "operations": {
+            "report": {
+              "charge": {
+                "type": "flat",
+                "amount": "2"
+              }
+            }
+          },
+          "rate_cards": {
+            "custom": {
+              "operations": {}
+            }
+          }
+        },
+        "commerce": {
+          "providers": {
+            "stripe": {
+              "type": "stripe"
+            },
+            "dodo": {
+              "type": "dodo"
+            }
+          },
+          "offers": {
+            "a": {
+              "type": "topup",
+              "display_name": "A",
+              "price": {
+                "amount_minor": 100,
+                "currency": "USD"
+              },
+              "credits_per_unit": "10",
+              "bucket": "default",
+              "providers": {
+                "stripe": {
+                  "price_id": "price_a"
+                }
+              }
+            },
+            "b": {
+              "type": "topup",
+              "display_name": "B",
+              "price": {
+                "amount_minor": 100,
+                "currency": "USD"
+              },
+              "credits_per_unit": "10",
+              "bucket": "default",
+              "providers": {
+                "dodo": {
+                  "product_id": "product_b"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "provider_reference_kind_mismatch",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "on_signup": null
+        },
+        "catalog": {
+          "default_plan": "free"
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "allowed_operations": [
+              "report"
+            ]
+          }
+        },
+        "pricing": {
+          "operations": {
+            "report": {
+              "charge": {
+                "type": "flat",
+                "amount": "2"
+              }
+            }
+          },
+          "rate_cards": {
+            "custom": {
+              "operations": {}
+            }
+          }
+        },
+        "commerce": {
+          "providers": {
+            "stripe": {
+              "type": "stripe"
+            },
+            "dodo": {
+              "type": "dodo"
+            }
+          },
+          "offers": {
+            "a": {
+              "type": "topup",
+              "display_name": "A",
+              "price": {
+                "amount_minor": 100,
+                "currency": "USD"
+              },
+              "credits_per_unit": "10",
+              "bucket": "default",
+              "providers": {
+                "stripe": {
+                  "price_id": "price_a",
+                  "type": "dodo_product"
+                }
+              }
+            },
+            "b": {
+              "type": "topup",
+              "display_name": "B",
+              "price": {
+                "amount_minor": 100,
+                "currency": "USD"
+              },
+              "credits_per_unit": "10",
+              "bucket": "default",
+              "providers": {
+                "dodo": {
+                  "product_id": "product_b"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   ]
 }

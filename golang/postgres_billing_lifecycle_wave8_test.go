@@ -38,6 +38,7 @@ func TestPostgresLifecyclePlanChangeAndTerminalEntitlement(t *testing.T) {
 	sdk, store := newFinancialSDK(t, ctx, config, &financialProvider{name: "alpha"})
 
 	catalog := financialCatalogConfig(t)
+	catalog["catalog"].(map[string]any)["subscription_end_plan"] = "starter"
 	offers := catalog["commerce"].(map[string]any)["offers"].(map[string]any)
 	yearly := maps.Clone(offers["pro_month"].(map[string]any))
 	yearly["display_name"] = "Pro yearly"
@@ -143,7 +144,7 @@ func TestPostgresLifecyclePlanChangeAndTerminalEntitlement(t *testing.T) {
 	if err != nil || pastDue == nil || pastDue.Status != "past_due" || pastDue.GraceEndsAt == nil || pastDue.GraceEndsAt.After(time.Now().UTC()) {
 		t.Fatalf("past-due subscription = %+v, error = %v", pastDue, err)
 	}
-	if plan, err := sdk.Credits.GetUserPlan(ctx, accountID); err != nil || plan.PlanKey != "" {
+	if plan, err := sdk.Credits.GetUserPlan(ctx, accountID); err != nil || plan.PlanKey != "starter" {
 		t.Fatalf("plan after expired grace = %+v, error = %v", plan, err)
 	}
 
@@ -155,7 +156,7 @@ func TestPostgresLifecyclePlanChangeAndTerminalEntitlement(t *testing.T) {
 	}); err != nil || resumed.Action != "subscription_resumed" {
 		t.Fatalf("resume subscription = %+v, error = %v", resumed, err)
 	}
-	terminalService, err := NewBillingService(store, BillingServiceOptions{Provisioning: store, TerminalPlanKey: "starter"})
+	terminalService, err := NewBillingService(store, BillingServiceOptions{Provisioning: store})
 	if err != nil {
 		t.Fatalf("construct terminal-plan billing service: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestPostgresLifecycleFailsClosedAtPersistenceBoundaries(t *testing.T) {
 		{"auto-recharge reconciliation", billingError(processor.paymentFailed(canceledCtx, BillingEvent{Provider: "alpha", Payment: payment}, ""))},
 		{"refund upsert", billingError(processor.refund(canceledCtx, BillingEvent{Provider: "alpha", Refund: refund}, accountID))},
 		{"entitlement reconciliation", func() error {
-			_, err := store.reconcileSubscriptionEntitlement(canceledCtx, accountID, uuid.NewString(), uuid.NewString(), "canceled", now, nil, true, "", "subscription_canceled")
+			_, err := store.reconcileSubscriptionEntitlement(canceledCtx, accountID, uuid.NewString(), uuid.NewString(), "canceled", now, nil, true, "subscription_canceled")
 			return err
 		}()},
 	}

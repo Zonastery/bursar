@@ -94,6 +94,7 @@ type AutoRechargeProfile struct {
 	Armed               bool
 	Provider            string
 	TopupID             string
+	TopupKey            string
 	Quantity            int64
 	Threshold           Amount
 	MaxChargesPerWindow int
@@ -131,8 +132,11 @@ type AutoRechargeAttempt struct {
 // store atomically checks the persisted profile, current balance, cooldown,
 // in-flight work, and current policy-window limit before it returns an attempt.
 type AutoRechargeAttemptClaim struct {
-	UserID         string
-	IdempotencyKey string
+	UserID            string
+	IdempotencyKey    string
+	ExpectedProductID string
+	ExpectedQuantity  int64
+	ExpectedTopupKey  string
 }
 
 // AutoRechargeAttemptUpdate records the observable provider result. Stores
@@ -437,16 +441,16 @@ func (s *AutoRechargeService) GetStatus(ctx context.Context, userID string, prov
 	if err != nil {
 		return nil, err
 	}
-	policy, err := s.ResolvePolicy(ctx, provider)
-	if err != nil || policy == nil {
-		return nil, err
-	}
 	profile, err := s.GetProfile(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 	providerName, err := autoRechargeProviderName(provider)
 	if err != nil {
+		return nil, err
+	}
+	policy, err := s.resolvePolicy(ctx, providerName, profile)
+	if err != nil || policy == nil {
 		return nil, err
 	}
 	if err := autoRechargeProfileProviderMatches(profile, providerName); err != nil {
@@ -541,6 +545,7 @@ func (s *AutoRechargeService) Enable(ctx context.Context, provider PaymentProvid
 		Armed:               true,
 		Provider:            providerName,
 		TopupID:             policy.TopupID,
+		TopupKey:            policy.TopupKey,
 		Quantity:            policy.Quantity,
 		Threshold:           policy.Threshold,
 		MaxChargesPerWindow: policy.MaxChargesPerWindow,
@@ -616,23 +621,30 @@ func (s *AutoRechargeService) ProcessIfNeeded(ctx context.Context, provider Paym
 	if err != nil {
 		return AutoRechargeProcessResult{}, err
 	}
-	policy, err := s.ResolvePolicy(ctx, provider)
-	if err != nil {
-		return AutoRechargeProcessResult{}, err
-	}
-	if policy == nil {
-		return AutoRechargeProcessResult{Outcome: AutoRechargeOutcomeNotConfigured}, nil
-	}
 	profile, err := s.GetProfile(ctx, userID)
 	if err != nil {
 		return AutoRechargeProcessResult{}, err
 	}
 	if profile == nil || !profile.Enabled || profile.State != AutoRechargeStateActive {
+		policy, err := s.ResolvePolicy(ctx, provider)
+		if err != nil {
+			return AutoRechargeProcessResult{}, err
+		}
+		if policy == nil {
+			return AutoRechargeProcessResult{Outcome: AutoRechargeOutcomeNotConfigured}, nil
+		}
 		return AutoRechargeProcessResult{Outcome: AutoRechargeOutcomeDisabled}, nil
 	}
 	providerName, err := autoRechargeProviderName(provider)
 	if err != nil {
 		return AutoRechargeProcessResult{}, err
+	}
+	policy, err := s.resolvePolicy(ctx, providerName, profile)
+	if err != nil {
+		return AutoRechargeProcessResult{}, err
+	}
+	if policy == nil {
+		return AutoRechargeProcessResult{Outcome: AutoRechargeOutcomeNotConfigured}, nil
 	}
 	if err := autoRechargeProfileProviderMatches(profile, providerName); err != nil {
 		return AutoRechargeProcessResult{}, err
@@ -659,7 +671,7 @@ func (s *AutoRechargeService) ProcessIfNeeded(ctx context.Context, provider Paym
 	if err != nil {
 		return AutoRechargeProcessResult{}, err
 	}
-	attempt, err := s.store.ClaimAutoRechargeAttempt(ctx, AutoRechargeAttemptClaim{UserID: userID, IdempotencyKey: idempotencyKey})
+	attempt, err := s.store.ClaimAutoRechargeAttempt(ctx, AutoRechargeAttemptClaim{UserID: userID, IdempotencyKey: idempotencyKey, ExpectedProductID: policy.ProductID, ExpectedQuantity: policy.Quantity, ExpectedTopupKey: policy.TopupKey})
 	if err != nil {
 		return AutoRechargeProcessResult{}, err
 	}
@@ -759,7 +771,7 @@ func (s *AutoRechargeService) PostDeductionHook(providers AutoRechargeProviderRe
 	}
 }
 
-func (s *AutoRechargeService) resolvePolicy(ctx context.Context, providerName string) (*AutoRechargePolicy, error) {
+func (s *AutoRechargeService) resolvePolicy(ctx context.Context, providerName string, profiles ...*AutoRechargeProfile) (*AutoRechargePolicy, error) {
 	config, err := s.catalog.GetConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -775,13 +787,41 @@ func (s *AutoRechargeService) resolvePolicy(ctx context.Context, providerName st
 		return nil, autoRechargeConfigError("eligible top-ups must not be empty")
 	}
 	topupKey := strings.TrimSpace(guardrails.EligibleTopups[0])
+	quantity := int64(guardrails.Quantity.Default)
+	threshold := guardrails.BalanceBelow.Default
+	if len(profiles) > 0 && profiles[0] != nil && profiles[0].Enabled {
+		topupKey, quantity = profiles[0].TopupKey, profiles[0].Quantity
+		threshold = profiles[0].Threshold
+		if topupKey == "" || !containsText(guardrails.EligibleTopups, topupKey) || quantity < int64(guardrails.Quantity.Minimum) || quantity > int64(guardrails.Quantity.Maximum) {
+			return nil, nil
+		}
+	}
 	offer, found := config.Commerce.Offers[topupKey]
 	if !found || offer.Type != "topup" {
 		return nil, autoRechargeConfigError("eligible auto-recharge top-up is missing or is not a top-up offer")
 	}
+	if !offerIsAvailable(offer.Availability, "") {
+		return nil, nil
+	}
+	if quantity < 1 {
+		return nil, autoRechargeConfigError("auto-recharge quantity must be positive")
+	}
+	if threshold.LessThan(guardrails.BalanceBelow.Minimum) || threshold.GreaterThan(guardrails.BalanceBelow.Maximum) || offer.Price.AmountMinor > guardrails.Limits.MaxChargeMinor/quantity {
+		return nil, nil
+	}
 	reference, found := offer.Providers[providerName]
 	if !found {
 		return nil, nil
+	}
+	bound, ok := s.store.(interface{ ProviderEnvironment() ProviderEnvironment })
+	if (reference.PriceID.isBound() || reference.ProductID.isBound() || reference.ExternalID.isBound()) && !ok {
+		return nil, autoRechargeConfigError("provider environment is required")
+	}
+	if ok {
+		reference, err = ResolveProviderReference(reference, bound.ProviderEnvironment())
+		if err != nil {
+			return nil, err
+		}
 	}
 	productID := providerProductID(reference)
 	if productID == "" {
@@ -806,12 +846,12 @@ func (s *AutoRechargeService) resolvePolicy(ctx context.Context, providerName st
 		return nil, err
 	}
 	return &AutoRechargePolicy{
-		Threshold:           guardrails.BalanceBelow.Default,
+		Threshold:           threshold,
 		RearmAbove:          guardrails.RearmAbove,
 		TopupKey:            topupKey,
 		TopupID:             topupID,
 		ProductID:           productID,
-		Quantity:            int64(guardrails.Quantity.Default),
+		Quantity:            quantity,
 		MaxChargesPerWindow: guardrails.Limits.MaxPurchases,
 		MaxChargeMinor:      guardrails.Limits.MaxChargeMinor,
 		Window:              window,

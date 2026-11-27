@@ -2,6 +2,9 @@ import { readFileSync, statSync } from "fs";
 import { extname } from "path";
 import { load as parseYaml } from "js-yaml";
 import { z } from "zod";
+import { canonicalBursarConfigDict } from "./config.js";
+import type { BursarConfigData } from "./config/types.js";
+import type { ProviderEnvironment } from "./providers/environment.js";
 import { ConfigError } from "./errors.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "./shared/json.js";
 
@@ -29,7 +32,9 @@ function readFileClean(filepath: string): string {
     if (code === "ENOENT") throw new ConfigError(`Config file not found: ${filepath}`);
     if (code === "EACCES") throw new ConfigError(`Permission denied: ${filepath}`);
     const message = cause instanceof Error ? cause.message : String(cause);
-    throw new ConfigError(`Could not read ${filepath}: ${message}`, [], { cause });
+    throw new ConfigError(`Could not read ${filepath}: ${message}`, [], {
+      cause,
+    });
   }
   if (stat.isDirectory()) {
     throw new ConfigError(`Not a file (is a directory): ${filepath}`);
@@ -38,7 +43,9 @@ function readFileClean(filepath: string): string {
     return readFileSync(filepath, "utf-8");
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
-    throw new ConfigError(`Could not read ${filepath}: ${message}`, [], { cause });
+    throw new ConfigError(`Could not read ${filepath}: ${message}`, [], {
+      cause,
+    });
   }
 }
 
@@ -65,7 +72,7 @@ function assertNonEmptyObject(data: JsonValue | undefined, filepath: string): Js
  * JSON syntax is validated by the platform parser and mapping keys are also
  * checked by js-yaml so duplicate config fields cannot silently overwrite.
  */
-export async function loadConfigFile(filepath: string): Promise<JsonObject> {
+export async function loadRawConfigFile(filepath: string): Promise<JsonObject> {
   const extension = extname(filepath).toLowerCase();
   if (!new Set([".json", ".yaml", ".yml"]).has(extension)) {
     throw new ConfigError(
@@ -83,7 +90,9 @@ export async function loadConfigFile(filepath: string): Promise<JsonObject> {
       parsed = jsonValue.data;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      throw new ConfigError(`Invalid YAML in ${filepath}: ${message}`, [], { cause });
+      throw new ConfigError(`Invalid YAML in ${filepath}: ${message}`, [], {
+        cause,
+      });
     }
     return assertNonEmptyObject(parsed, filepath);
   }
@@ -94,7 +103,17 @@ export async function loadConfigFile(filepath: string): Promise<JsonObject> {
     parsed = parseJsonWithUniqueKeys(content);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
-    throw new ConfigError(`Invalid JSON in ${filepath}: ${message}`, [], { cause });
+    throw new ConfigError(`Invalid JSON in ${filepath}: ${message}`, [], {
+      cause,
+    });
   }
   return assertNonEmptyObject(parsed, filepath);
+}
+
+/** Load, validate, and normalize a configuration for catalog publication. */
+export async function loadConfigFile(
+  filepath: string,
+  environment?: ProviderEnvironment,
+): Promise<BursarConfigData> {
+  return canonicalBursarConfigDict(await loadRawConfigFile(filepath), environment);
 }

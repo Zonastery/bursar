@@ -20,6 +20,7 @@ export interface BillingAutoRechargeProfile {
   armed?: boolean;
   provider: string | null;
   topupId: string | null;
+  topupKey?: string | null;
   quantity: number;
   threshold: Decimal;
   maxChargesPerWindow: number | null;

@@ -154,7 +154,6 @@ def test_expire_past_due_grace_periods_matches_javascript_cas_flow() -> None:
         subscription_id,
         "2026-07-29T00:00:00+00:00",
         "2026-07-30T00:00:00+00:00",
-        None,
     )
 
 
@@ -181,7 +180,7 @@ def test_terminal_subscription_replacement_is_source_aware() -> None:
         cancel_at_period_end=False,
     )
     provisioning = MagicMock()
-    service = BillingService(store, provisioning=provisioning, terminal_plan_key="free")
+    service = BillingService(store, provisioning=provisioning)
     event = BillingEvent(
         provider="stripe",
         event_id="evt_paused_source",
@@ -207,7 +206,6 @@ def test_terminal_subscription_replacement_is_source_aware() -> None:
         "2026-07-30T00:00:00+00:00",
         None,
         True,
-        "free",
         "subscription_paused",
     )
     provisioning.unset_user_plan.assert_not_called()
@@ -364,7 +362,6 @@ def test_subscription_entitlement_uses_atomic_store_boundary() -> None:
         "2026-07-29T00:00:00+00:00",
         None,
         True,
-        None,
         "subscription_active",
     )
     provisioning.set_user_plan.assert_not_called()
@@ -562,7 +559,6 @@ def test_reconcile_entitlement_validates_the_scalar_outcome() -> None:
         "2026-07-29T12:00:00.900000+00:00",
         None,
         True,
-        None,
         "subscription_active",
     )
 
@@ -863,7 +859,6 @@ def test_plan_change_captures_allowance_anchor_before_advancing() -> None:
         "2026-07-29T00:00:00+00:00",
         anchor,
         True,
-        None,
         "subscription_active",
     )
     provisioning.set_user_plan.assert_not_called()

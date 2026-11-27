@@ -7,6 +7,8 @@ description: Integrate and review Bursar usage metering, prepaid credits, ledger
 
 Treat Bursar as the application's financial boundary. Route pricing, credit mutations, admission checks, and provider events through one tenant-bound `Bursar` facade.
 
+Start new integrations with the packaged starter: `bursar config init bursar.yaml` or `npx bursar-config init bursar.yaml`. Follow the [quickstart](https://zonastery.github.io/bursar/docs/quickstart) for signup replay and a metered charge.
+
 ## Establish the integration context
 
 1. Read repository instructions before changing code.

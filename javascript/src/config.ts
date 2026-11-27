@@ -5,6 +5,8 @@ import { z } from "zod";
 
 import schema from "./generated/pricing-config.schema.json" with { type: "json" };
 import { ConfigError } from "./errors.js";
+import { normalizeConfig } from "./config/normalize.js";
+import type { ProviderEnvironment } from "./providers/environment.js";
 import { parseAdmission, parseEntitlements } from "./config/parse-access.js";
 import { parseCommerce } from "./config/parse-commerce.js";
 import { parseCredits } from "./config/parse-credits.js";
@@ -34,20 +36,56 @@ const validateStructure = ajv.compile<BursarConfigData>(schema);
 
 function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
   if (!errors?.length) return "configuration does not match the Bursar schema";
-  return errors
-    .map((error) => `${error.instancePath || "$"} ${error.message ?? error.keyword}`)
+  const useful = errors.filter((error) => !["oneOf", "anyOf"].includes(error.keyword));
+  // A discriminated union reports failures from every alternative. Discard branches
+  // whose discriminator mismatched, leaving diagnostics for the chosen variant.
+  const rejectedBranches = new Set(
+    useful
+      .filter(
+        (error) => error.keyword === "const" && /\/(type|action|op)$/.test(error.instancePath),
+      )
+      .map((error) => error.schemaPath.replace(/\/properties\/(type|action|op)\/const$/, "")),
+  );
+  const selected = useful.filter(
+    (error) => ![...rejectedBranches].some((branch) => error.schemaPath.startsWith(`${branch}/`)),
+  );
+  const candidates = selected.length ? selected : errors;
+  return [
+    ...new Set(
+      candidates.map((error) => {
+        const path = error.instancePath || "$";
+        if (error.keyword === "additionalProperties")
+          return `${path} contains unknown field '${String(error.params.additionalProperty)}'`;
+        if (error.keyword === "required")
+          return `${path}.${String(error.params.missingProperty)} is required`;
+        if (error.keyword === "enum")
+          return `${path} must be one of ${JSON.stringify(error.params.allowedValues)}`;
+        if (error.keyword === "const")
+          return `${path} must equal ${JSON.stringify(error.params.allowedValue)}`;
+        return `${path} ${error.message ?? error.keyword}`;
+      }),
+    ),
+  ]
+    .slice(0, 8)
     .join("; ");
 }
 
-export function loadConfigFromDict<T extends object>(data: T): ParsedBursarConfig {
+export function loadConfigFromDict<T extends object>(
+  data: T,
+  environment?: ProviderEnvironment,
+): ParsedBursarConfig {
   if (!validateStructure(data)) {
     throw new ConfigError(
       formatAjvErrors(validateStructure.errors),
       validateStructure.errors ?? [],
     );
   }
+  const input = normalizeConfig(
+    asObject(z.record(z.string(), z.json()).parse(data), "config"),
+    environment,
+  );
 
-  const raw = asObject(z.record(z.string(), z.json()).parse(data), "config");
+  const raw = asObject(z.record(z.string(), z.json()).parse(input), "config");
   const pricing = raw.pricing == null ? undefined : parsePricing(raw.pricing);
   const credits = parseCredits(asObject(raw.credits, "credits"));
   const entitlements = parseEntitlements(raw.entitlements);
@@ -94,6 +132,11 @@ export function loadConfigFromDict<T extends object>(data: T): ParsedBursarConfi
   if (Object.keys(plans).length > 0 && defaultPlan == null) {
     semanticError("catalog.default_plan is required when plans are configured");
   }
+  const subscriptionEndPlan =
+    catalogRaw.subscription_end_plan == null ? undefined : String(catalogRaw.subscription_end_plan);
+  if (subscriptionEndPlan != null && !plans[subscriptionEndPlan]) {
+    semanticError(`catalog.subscription_end_plan references unknown plan '${subscriptionEndPlan}'`);
+  }
   const result: ParsedBursarConfig = {
     version: 1,
     catalog: {},
@@ -104,6 +147,7 @@ export function loadConfigFromDict<T extends object>(data: T): ParsedBursarConfi
     commerce,
   };
   if (defaultPlan != null) result.catalog.defaultPlan = defaultPlan;
+  if (subscriptionEndPlan != null) result.catalog.subscriptionEndPlan = subscriptionEndPlan;
   if (pricing != null) result.pricing = pricing;
   return result;
 }
@@ -116,7 +160,7 @@ function isSnakeCaseObject(value: SnakeCaseValue): value is SnakeCaseObject {
 }
 
 function toSnakeCase(value: SnakeCaseValue): JsonValue {
-  if (value instanceof Decimal) return value.toFixed(6);
+  if (value instanceof Decimal) return value.toFixed();
   const primitive = z.union([z.string(), z.number(), z.boolean(), z.null()]).safeParse(value);
   if (primitive.success) return primitive.data;
   if (Array.isArray(value)) return value.map((child) => toSnakeCase(child));
@@ -141,8 +185,11 @@ function canonicalConfig(data: ParsedBursarConfig): BursarConfigData {
   return canonical;
 }
 
-export function canonicalBursarConfigDict<T extends object>(data: T): BursarConfigData {
-  return canonicalConfig(loadConfigFromDict(data));
+export function canonicalBursarConfigDict<T extends object>(
+  data: T,
+  environment?: ProviderEnvironment,
+): BursarConfigData {
+  return canonicalConfig(loadConfigFromDict(data, environment));
 }
 
 /** Serialize an already parsed configuration without re-validating camelCase fields as raw input. */
@@ -218,7 +265,10 @@ export function loadCatalogRollout<T>(data?: T): CatalogRollout {
     if (!parsedIncludePinned.success) {
       throw new ConfigError(`rollout.plans.${planKey}.include_pinned must be boolean`);
     }
-    plans[planKey] = { effective: effective.data, includePinned: parsedIncludePinned.data };
+    plans[planKey] = {
+      effective: effective.data,
+      includePinned: parsedIncludePinned.data,
+    };
   }
 
   return { plans };

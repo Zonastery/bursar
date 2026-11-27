@@ -269,7 +269,7 @@ export class PostgresBillingStore extends BillingStore {
     }
     const rows = await this.queryFn(
       `SELECT bursar.create_checkout_intent(
-         $1::uuid, $2, $3, $4, $5, decode($6, 'hex'), $7::timestamptz
+         $1::uuid, $2, $3, $4, $5, decode($6, 'hex'), $7::timestamptz, NULL, NULL, $8, $9::uuid
        ) AS id`,
       [
         input.subjectId,
@@ -279,6 +279,8 @@ export class PostgresBillingStore extends BillingStore {
         input.productKey,
         input.requestDigest,
         input.expiresAt,
+        input.region ?? null,
+        input.expectedRevisionId ?? null,
       ],
     );
     const id = requireResultField(
@@ -309,6 +311,31 @@ export class PostgresBillingStore extends BillingStore {
         details: { checkoutIntentId: id },
       });
     }
+  }
+
+  override async findCheckoutIntent(
+    subjectId: string,
+    operationKey: string,
+    provider?: string,
+  ): Promise<{ intent: CheckoutIntent; catalog: JsonObject } | null> {
+    const rows = await this.queryFn("SELECT * FROM bursar.find_checkout_intent($1::uuid, $2, $3)", [
+      subjectId,
+      operationKey,
+      provider ?? null,
+    ]);
+    if (rows.length === 0) return null;
+    if (rows.length !== 1)
+      throw new StoreError("checkout operation key matches multiple providers");
+    const row = rows[0]!;
+    const id = safeParse(postgresUuid, row.intent_id, "findCheckoutIntent.id");
+    const catalog = safeParse(
+      z.record(z.string(), z.json()),
+      row.source_document,
+      "findCheckoutIntent.catalog",
+    );
+    const intent = await this.getCheckoutIntent(id, subjectId);
+    if (!intent) throw new StoreError("checkout intent disappeared");
+    return { intent, catalog };
   }
 
   async getCheckoutIntent(id: string, subjectId: string): Promise<CheckoutIntent | null> {
@@ -527,7 +554,6 @@ export class PostgresBillingStore extends BillingStore {
     expectedProviderUpdatedAt: string,
     planAssignedAt: Date | string | null,
     applyEntitlement: boolean,
-    terminalPlanKey: string | null,
     reason: string,
   ): Promise<SubscriptionEntitlementOutcome> {
     return this.billingSubscription.reconcileEntitlement(
@@ -538,7 +564,6 @@ export class PostgresBillingStore extends BillingStore {
       expectedProviderUpdatedAt,
       planAssignedAt,
       applyEntitlement,
-      terminalPlanKey,
       reason,
     );
   }
@@ -548,14 +573,12 @@ export class PostgresBillingStore extends BillingStore {
     subscriptionId: string,
     expectedGraceEndsAt: string,
     expiredAt: string,
-    terminalPlanKey: string | null,
   ): Promise<boolean> {
     return this.billingSubscription.expireGracePeriod(
       subjectId,
       subscriptionId,
       expectedGraceEndsAt,
       expiredAt,
-      terminalPlanKey,
     );
   }
 
@@ -615,8 +638,20 @@ export class PostgresBillingStore extends BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
+    checkoutIntentId?: string | null,
+    subjectId?: string | null,
+    providerPaymentId?: string | null,
+    rechargeAttemptId?: string | null,
   ): Promise<BillingTopupResult | null> {
-    const r = await this.billingTopup.resolveByPrice(provider, priceId ?? null, productId ?? null);
+    const r = await this.billingTopup.resolveByPrice(
+      provider,
+      priceId ?? null,
+      productId ?? null,
+      checkoutIntentId,
+      subjectId,
+      providerPaymentId,
+      rechargeAttemptId,
+    );
     return this.rowToTopup(r);
   }
 
@@ -657,6 +692,7 @@ export class PostgresBillingStore extends BillingStore {
       options.metadata ? JSON.stringify(options.metadata) : null,
       options.status,
       options.providerUpdatedAt,
+      options.topupId ?? null,
     );
   }
 
@@ -850,19 +886,22 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
-  async getActiveCatalogDocument(): Promise<JsonObject | null> {
+  async getActiveCatalogRevision(): Promise<{ id: string; config: JsonObject } | null> {
     const rows = await this.queryFn("SELECT * FROM bursar.active_catalog_revision()", []);
-    const row = optionalRecordRow(rows, "PostgresBillingStore.getActiveCatalogDocument");
+    const row = optionalRecordRow(rows, "PostgresBillingStore.getActiveCatalogRevision");
     if (row === null) return null;
-    const sourceDocument = row.source_document;
-    if (sourceDocument === undefined) {
-      throw new StoreError("active catalog revision returned no source document");
-    }
-    return safeParse(
-      z.record(z.string(), z.json()),
-      sourceDocument,
-      "PostgresBillingStore.getActiveCatalogDocument",
-    );
+    return {
+      id: safeParse(postgresUuid, row.id, "PostgresBillingStore.getActiveCatalogRevision.id"),
+      config: safeParse(
+        z.record(z.string(), z.json()),
+        row.source_document,
+        "PostgresBillingStore.getActiveCatalogRevision.config",
+      ),
+    };
+  }
+
+  async getActiveCatalogDocument(): Promise<JsonObject | null> {
+    return (await this.getActiveCatalogRevision())?.config ?? null;
   }
 
   async pseudonymizeFinancialSubject(userId: string): Promise<boolean> {

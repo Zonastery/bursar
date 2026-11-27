@@ -6,23 +6,32 @@ import type {
 import { CommerceResourceNotFoundError, MissingPlanChangePolicyError } from "./errors.js";
 import type { PlanChangeClassification } from "./types.js";
 
-function normalizeInterval(value: string | null | undefined): "month" | "year" | null {
+function normalizeInterval(
+  value: string | null | undefined,
+): "day" | "week" | "month" | "year" | null {
   const normalized = value?.toLowerCase();
-  return normalized === "month" || normalized === "year" ? normalized : null;
+  return normalized === "day" ||
+    normalized === "week" ||
+    normalized === "month" ||
+    normalized === "year"
+    ? normalized
+    : null;
 }
 
 export interface ClassifiedSubscriptionChange {
   classification: PlanChangeClassification;
-  targetInterval: "month" | "year";
+  targetInterval: "day" | "week" | "month" | "year";
   policy?: SubscriptionChangePolicy;
 }
 
-/** Classify a subscription transition from explicit rank and cadence. */
+/** Classify a subscription transition from explicit tier and cadence. */
 export function classifySubscriptionChange(
   config: ParsedBursarConfig,
   currentPlan: string,
   currentIntervalValue: string | null | undefined,
   targetOffer: SubscriptionOffer,
+  currentIntervalCount: number | null | undefined = 1,
+  sameOffer = true,
 ): ClassifiedSubscriptionChange {
   const currentDefinition = config.plans[currentPlan];
   const targetDefinition = config.plans[targetOffer.plan];
@@ -36,11 +45,15 @@ export function classifySubscriptionChange(
   }
 
   let classification: PlanChangeClassification;
-  if (targetOffer.plan === currentPlan && targetInterval === currentInterval) {
-    classification = "unchanged";
-  } else if (targetDefinition.rank > currentDefinition.rank) {
+  if (
+    targetOffer.plan === currentPlan &&
+    targetInterval === currentInterval &&
+    targetOffer.billingInterval.count === (currentIntervalCount ?? 1)
+  ) {
+    classification = sameOffer ? "unchanged" : "lateral";
+  } else if (targetDefinition.tier > currentDefinition.tier) {
     classification = "upgrade";
-  } else if (targetDefinition.rank < currentDefinition.rank) {
+  } else if (targetDefinition.tier < currentDefinition.tier) {
     classification = "downgrade";
   } else if (targetOffer.plan !== currentPlan) {
     classification = "lateral";

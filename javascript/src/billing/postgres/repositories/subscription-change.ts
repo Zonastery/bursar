@@ -141,7 +141,7 @@ export class BillingSubscriptionChangeRepository {
   ): Promise<BillingSubscriptionChange> {
     const rows = await this.query(
       `SELECT * FROM bursar.open_subscription_change(
-         $1::uuid, $2::uuid, $3::timestamptz, $4, $5, $6
+         $1::uuid, $2::uuid, $3::timestamptz, $4, $5, $6, $7
        )`,
       [
         subscriptionId,
@@ -150,6 +150,7 @@ export class BillingSubscriptionChangeRepository {
         input.effective,
         input.idempotencyKey,
         input.prorationBehavior ?? "provider_default",
+        input.region ?? null,
       ],
     );
     const raw = requireRecordRow(rows, "BillingSubscriptionChangeRepository.create");

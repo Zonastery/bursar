@@ -80,13 +80,13 @@ func ProjectPublicCatalog(config *BursarConfig) PublicCatalog {
 		}
 		if plan.CreditAllowance != nil {
 			projected.Allowance = &PublicCatalogAllowance{
-				Amount: amountConfigString(plan.CreditAllowance.Amount), Priority: plan.CreditAllowance.Priority,
+				Amount: catalogDisplayAmountString(plan.CreditAllowance.Amount), Priority: plan.CreditAllowance.Priority,
 				Window: projectPublicWindow(plan.CreditAllowance.Window),
 			}
 		}
 		for quotaKey, quota := range plan.Quotas {
 			projected.Quotas[quotaKey] = PublicCatalogQuota{
-				Operation: quota.Operation, Measure: quota.Measure, Limit: amountConfigString(quota.Limit),
+				Operation: quota.Operation, Measure: quota.Measure, Limit: catalogDisplayAmountString(quota.Limit),
 				Window: projectPublicWindow(quota.Window), Enforcement: quota.Enforcement,
 			}
 		}
@@ -149,7 +149,7 @@ func projectPublicOffer(key string, offer CommerceOffer) PublicCatalogOffer {
 	}
 	if offer.Type == "topup" {
 		if offer.CreditsPerUnit != nil {
-			credits := amountConfigString(*offer.CreditsPerUnit)
+			credits := catalogDisplayAmountString(*offer.CreditsPerUnit)
 			projected.CreditsPerUnit = &credits
 		}
 		if offer.Quantity != nil {
@@ -175,4 +175,9 @@ func cloneStringPointer(value *string) *string {
 	}
 	cloned := *value
 	return &cloned
+}
+
+// catalogDisplayAmountString preserves the public catalog display precision.
+func catalogDisplayAmountString(value Amount) string {
+	return QuantizeMoney(value).StringFixed(MoneyDecimalPlaces)
 }

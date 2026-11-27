@@ -52,6 +52,7 @@ export interface GetUserPlanResult {
   creditPolicy: PlanCreditPolicy | null;
   admission: PlanAdmissionPolicy | null;
   allowedOperations: string[];
+  operationAccess: "all" | "none" | "listed" | null;
   planAssignedAt: Date | null;
   planAssignmentEndsAt: Date | null;
   assignmentSourceType: "manual" | "subscription" | "migration" | "system" | null;

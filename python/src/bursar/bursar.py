@@ -365,6 +365,10 @@ class BillingCapability(BillingEventSink, Protocol):
 
     def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None: ...
 
+    def find_checkout_intent(
+        self, subject_id: str, operation_key: str, provider: str | None = None
+    ) -> tuple[CheckoutIntent, dict[str, Any]] | None: ...
+
     def get_user_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
 
     def get_active_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
@@ -378,6 +382,8 @@ class BillingCapability(BillingEventSink, Protocol):
     def get_user_preferences(self, user_id: str) -> BillingPreferences | None: ...
 
     def get_active_catalog_document(self) -> dict[str, Any] | None: ...
+
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None: ...
 
     def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceRecord]: ...
 
@@ -504,7 +510,7 @@ class CatalogService:
         active = self.get_active()
         if active is None:
             raise CatalogNotLoadedError("No active Bursar catalog is available")
-        return load_config_from_dict(active.config)
+        return load_config_from_dict(active.config, getattr(self._credits._store, "provider_environment", None))
 
     def public_view(self) -> PublicCatalog:
         return project_public_catalog(self.get_config())

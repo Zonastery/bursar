@@ -40,6 +40,9 @@ from bursar.billing.types import (
 class BillingStore(ABC):
     @abstractmethod
     def get_active_catalog_document(self) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None: ...
     @abstractmethod
     def create_or_get_checkout_intent(
         self,
@@ -159,6 +162,10 @@ class BillingStore(ABC):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
+        checkout_intent_id: str | None = None,
+        subject_id: str | None = None,
+        provider_payment_id: str | None = None,
+        recharge_attempt_id: str | None = None,
     ) -> BillingTopupResult | None: ...
 
     @abstractmethod
@@ -252,6 +259,11 @@ class BillingStore(ABC):
     def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None: ...
 
     @abstractmethod
+    def find_checkout_intent(
+        self, subject_id: str, operation_key: str, provider: str | None = None
+    ) -> tuple[CheckoutIntent, dict] | None: ...
+
+    @abstractmethod
     def list_expired_grace_subscriptions(
         self,
         now: datetime,
@@ -268,7 +280,6 @@ class BillingStore(ABC):
         expected_provider_updated_at: str,
         plan_assigned_at: datetime | str | None,
         apply_entitlement: bool,
-        terminal_plan_key: str | None,
         reason: str,
     ) -> SubscriptionEntitlementOutcome: ...
 
@@ -279,7 +290,6 @@ class BillingStore(ABC):
         subscription_id: str,
         expected_grace_ends_at: str,
         expired_at: str,
-        terminal_plan_key: str | None,
     ) -> bool: ...
 
     @abstractmethod

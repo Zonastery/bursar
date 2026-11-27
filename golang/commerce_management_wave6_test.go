@@ -94,7 +94,7 @@ func (s *commerceWaveState) ResolveBillingOffer(_ context.Context, provider, pro
 		return nil, s.resolveOfferErr
 	}
 	for _, offer := range s.offers {
-		if offer.Provider == provider && (offer.PriceID == priceID || offer.ProductID == productID || offer.LookupKey == lookupKey) {
+		if offer.Provider == provider && ((priceID != "" && offer.PriceID == priceID) || (productID != "" && offer.ProductID == productID) || (lookupKey != "" && offer.LookupKey == lookupKey)) {
 			copy := *offer
 			return &copy, nil
 		}
@@ -262,7 +262,7 @@ func commerceWavePlanFixture(t *testing.T) (*CommerceService, *commerceWaveState
 	}
 	credits := &commerceWaveCreditStore{active: &CatalogRevision{ID: "catalog-wave6", Version: 1, Config: config}, plan: GetUserPlanResult{PlanKey: "starter"}}
 	provider := &commerceWaveProvider{checkoutProviderStub: checkoutProviderStub{name: "stripe"}, preview: PlanChangePreview{TotalAmount: MustAmount("12.340000"), SettlementAmount: MustAmount("12.340000"), Currency: "USD", EffectiveAt: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), NextBillingDate: timePtr(time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)), LineItems: []PlanChangeLineItem{{ProductID: "starter-year", UnitPrice: MustAmount("12.340000"), Quantity: 1, ProrationFactor: MustAmount("1"), Currency: "usd", Tax: MustAmount("0"), Subtotal: MustAmount("12.340000")}}}, portalURL: "https://portal.example", updateURL: "https://update.example", setupURL: "https://setup.example", invoiceURL: "https://invoice.example"}
-	state := &commerceWaveState{subscription: &CommerceSubscription{ID: "subscription-1", AccountID: "account-1", Provider: "stripe", ProviderSubscriptionID: "sub-1", ProviderCustomerID: "cus-1", PlanKey: "starter", Status: "active", Interval: "month"}, offers: map[string]*BillingOffer{"starter_year": {ID: "offer-year", Provider: "stripe", OfferKey: "starter_year", PlanKey: "starter", PriceID: "stripe-starter-year", Interval: "year", IntervalCnt: 1}}}
+	state := &commerceWaveState{subscription: &CommerceSubscription{ID: "subscription-1", AccountID: "account-1", Provider: "stripe", ProviderSubscriptionID: "sub-1", ProviderCustomerID: "cus-1", PlanKey: "starter", OfferKey: "starter_month", Status: "active", Interval: "month"}, offers: map[string]*BillingOffer{"starter_year": {ID: "offer-year", Provider: "stripe", OfferKey: "starter_year", PlanKey: "starter", LookupKey: "stripe-starter-year", Interval: "year", IntervalCnt: 1}}}
 	state.customers = map[string]*BillingCustomerRecord{"stripe": {Provider: "stripe", ProviderCustomerID: "cus-1", AccountID: "account-1"}}
 	service := newCommerceWaveService(t, state, credits, provider, config)
 	return service, state, provider, "account-1"
@@ -420,5 +420,34 @@ func TestCommerceAutoRechargeRetryProviderMismatchIsRejected(t *testing.T) {
 	provider := &autoRechargeProviderStub{autoRechargeProviderBase: autoRechargeProviderBase{name: "dodo"}}
 	if _, err := service.Retry(context.Background(), provider, AutoRechargeProcessInput{UserID: "user-1", Balance: MustAmount("0")}); err == nil || !strings.Contains(err.Error(), "provider") {
 		t.Fatalf("provider mismatch error = %v", err)
+	}
+}
+
+func TestPlanChangeOfferIdentityAndAvailability(t *testing.T) {
+	ctx := context.Background()
+	service, state, provider, accountID := commerceWavePlanFixture(t)
+	config := service.credits.store.(*commerceWaveCreditStore).active.Config
+	offers := config["commerce"].(map[string]any)["offers"].(map[string]any)
+	target := offers["starter_year"].(map[string]any)
+	target["billing_interval"] = map[string]any{"unit": "month", "count": 1}
+	target["availability"] = map[string]any{"regions": []any{"IN"}}
+	if _, err := service.PreviewPlanChange(ctx, PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year"}); err == nil {
+		t.Fatal("missing region accepted")
+	}
+	region := "in"
+	preview, err := service.PreviewPlanChange(ctx, PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year", Region: &region})
+	if err != nil || preview.Classification != PlanChangeLateral {
+		t.Fatalf("preview = %+v, %v", preview, err)
+	}
+	if _, err := service.ConfirmPlanChange(ctx, ConfirmPlanChangeInput{AccountID: accountID, OfferKey: "starter_year", Region: &region, QuoteFingerprint: preview.QuoteFingerprint, OperationKey: "lateral"}); err != nil {
+		t.Fatal(err)
+	}
+	if state.createdChange == nil || state.createdChange.Region == nil || *state.createdChange.Region != region {
+		t.Fatal("region was not persisted")
+	}
+	_ = provider
+	state.subscription.OfferKey = ""
+	if _, err := service.PreviewPlanChange(ctx, PreviewPlanChangeInput{AccountID: accountID, OfferKey: "starter_year", Region: &region}); err == nil {
+		t.Fatal("unknown current offer accepted")
 	}
 }

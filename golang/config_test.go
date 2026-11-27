@@ -101,7 +101,7 @@ func TestConfigAcceptsTypedGoContainersWithoutFloatCoercion(t *testing.T) {
 		"plans": map[string]any{
 			"free": map[string]any{
 				"display_name":       "Free",
-				"allowed_operations": []string{},
+				"allowed_operations": "none",
 			},
 		},
 	})

@@ -194,6 +194,7 @@ CONFIG: dict[str, Any] = {
         "starter": {
             "display_name": "Starter",
             "rank": 0,
+            "tier": 0,
             "rate_card": "standard",
             "allowed_operations": ["completion"],
             "features": {},
@@ -203,6 +204,7 @@ CONFIG: dict[str, Any] = {
         "pro": {
             "display_name": "Pro",
             "rank": 1,
+            "tier": 1,
             "rate_card": "standard",
             "allowed_operations": ["completion"],
             "features": {},
@@ -609,8 +611,8 @@ async def test_checkout_recovers_open_intent_after_transient_persistence_failure
         assert recovered.intent_id == intent_id
         assert len(provider.checkout_params) == 2
         assert [params.idempotency_key for params in provider.checkout_params] == [
-            input.operation_key,
-            input.operation_key,
+            f"bursar:checkout:{recovered.intent_id}",
+            f"bursar:checkout:{recovered.intent_id}",
         ]
         assert {params.return_url for params in provider.checkout_params} == {recovered.url}
 
@@ -626,7 +628,7 @@ async def test_checkout_recovers_open_intent_after_transient_persistence_failure
             )
             assert cursor.fetchone() == (
                 "completed",
-                f"session_{input.operation_key}",
+                f"session_bursar:checkout:{recovered.intent_id}",
                 recovered.url,
             )
             cursor.execute(
@@ -668,7 +670,7 @@ async def test_concurrent_same_key_checkouts_converge_on_one_provider_session(
 
         assert second == first
         assert len(provider.checkout_params) == 2
-        assert {params.idempotency_key for params in provider.checkout_params} == {input.operation_key}
+        assert {params.idempotency_key for params in provider.checkout_params} == {f"bursar:checkout:{first.intent_id}"}
         assert {params.return_url for params in provider.checkout_params} == {first.url}
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -687,7 +689,7 @@ async def test_concurrent_same_key_checkouts_converge_on_one_provider_session(
             assert cursor.fetchone() == (
                 first.intent_id,
                 "open",
-                f"session_{input.operation_key}",
+                f"session_bursar:checkout:{first.intent_id}",
                 first.url,
                 1,
             )

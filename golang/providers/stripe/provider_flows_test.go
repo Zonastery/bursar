@@ -20,13 +20,19 @@ type stripeFixture struct {
 	mu               sync.Mutex
 	requests         []string
 	scheduleResponse string
+	checkoutBody     string
 }
 
 func (f *stripeFixture) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	f.mu.Unlock()
-	_, _ = io.ReadAll(r.Body)
+	body, _ := io.ReadAll(r.Body)
+	if r.URL.Path == "/v1/checkout/sessions" && r.Method == http.MethodPost {
+		f.mu.Lock()
+		f.checkoutBody = string(body)
+		f.mu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Path == "/v1/payment_methods" {
 		writeStripeJSON(w, `{"object":"list","has_more":false,"data":[{"id":"pm_1","object":"payment_method","type":"card","card":{"brand":"visa","last4":"4242","exp_month":12,"exp_year":2099}},{"id":"pm_1","object":"payment_method","type":"card","card":{"brand":"visa","last4":"4242","exp_month":12,"exp_year":2099}}]}`)
@@ -140,10 +146,13 @@ func TestStripeProviderRealWorldHTTPFlows(t *testing.T) {
 	checkout, err := provider.CreateCheckoutSession(ctx, bursar.CheckoutSessionRequest{
 		AccountID: "acct_1", ProductID: "price_1", Quantity: 2, CustomerID: "cus_1", CustomerEmail: "buyer@example.com",
 		SuccessURL: "https://app.test/success", CancelURL: "https://app.test/cancel", IdempotencyKey: "checkout-1", Mode: "subscription",
-		Metadata: map[string]string{"plan": "pro"},
+		Metadata: map[string]string{"plan": "pro"}, Trial: &bursar.BillingInterval{Unit: "week", Count: 2},
 	})
 	if err != nil || checkout.ID != "cs_1" || checkout.URL == "" || checkout.CustomerID != "cus_1" {
 		t.Fatalf("checkout = %#v, err = %v", checkout, err)
+	}
+	if !strings.Contains(fixture.checkoutBody, "subscription_data[trial_period_days]=14") {
+		t.Fatalf("Stripe checkout trial body = %q", fixture.checkoutBody)
 	}
 	if status, err := provider.GetCheckoutSessionStatus(ctx, checkout.ID); err != nil || status != "succeeded" {
 		t.Fatalf("checkout status = %q, err = %v", status, err)

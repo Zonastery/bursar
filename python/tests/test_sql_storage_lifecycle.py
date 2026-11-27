@@ -899,7 +899,7 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT set_config('bursar.tenant_id', %s, true)",
+                "SELECT bursar.bind_tenant_context(%s::uuid, 'test')",
                 (TEST_TENANT_ID,),
             )
             cursor.execute(

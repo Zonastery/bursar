@@ -5,6 +5,8 @@ import {
   asBoolean,
   asDecimal,
   asObject,
+  nonNegativeDecimal,
+  positiveDecimal,
   asString,
   identifier,
   semanticError,
@@ -70,7 +72,9 @@ function parseMatcher(
       if (definition.type !== "number") {
         semanticError(`${path} range matcher requires a number dimension`);
       }
-      const parsed: Extract<DimensionMatcher, { op: "range" }> = { op: "range" };
+      const parsed: Extract<DimensionMatcher, { op: "range" }> = {
+        op: "range",
+      };
       if (raw.gt != null) parsed.gt = asDecimal(raw.gt);
       if (raw.gte != null) parsed.gte = asDecimal(raw.gte);
       if (raw.lt != null) parsed.lt = asDecimal(raw.lt);
@@ -92,15 +96,21 @@ function parseMatcher(
       return parsed;
     }
     default:
-      return { op: "eq", value: parseMatcherScalar(raw.value, definition, path) };
+      return {
+        op: "eq",
+        value: parseMatcherScalar(raw.value, definition, path),
+      };
   }
 }
 
-function parseTiers(value: JsonValue | undefined): GraduatedTier[] {
-  const tiers = asArray(value, "pricing.tiers").map((item) => {
+function parseTiers(value: JsonValue | undefined, path: string): GraduatedTier[] {
+  const tiers = asArray(value, "pricing.tiers").map((item, index) => {
     const tier = asObject(item);
-    const parsedTier: GraduatedTier = { rate: asDecimal(tier.rate) };
-    if (tier.up_to != null) parsedTier.upTo = asDecimal(tier.up_to);
+    const parsedTier: GraduatedTier = {
+      rate: nonNegativeDecimal(tier.rate, `${path}[${index}].rate`),
+    };
+    if (tier.up_to != null)
+      parsedTier.upTo = positiveDecimal(tier.up_to, `${path}[${index}].up_to`);
     return parsedTier;
   });
   if (tiers.at(-1)?.upTo != null || tiers.slice(0, -1).some((tier) => tier.upTo == null)) {
@@ -118,24 +128,27 @@ function parseTiers(value: JsonValue | undefined): GraduatedTier[] {
   return tiers;
 }
 
-function parseCharge(value: JsonValue): Charge {
+function parseCharge(value: JsonValue, path: string): Charge {
   const raw = asObject(value);
   switch (raw.type) {
     case "flat":
-      return { type: "flat", amount: asDecimal(raw.amount) };
+      return {
+        type: "flat",
+        amount: nonNegativeDecimal(raw.amount, `${path}.amount`),
+      };
     case "per_unit":
       return {
         type: "per_unit",
         measure: asString(raw.measure),
-        rate: asDecimal(raw.rate),
-        unitSize: asDecimal(raw.unit_size ?? 1),
+        rate: nonNegativeDecimal(raw.rate, `${path}.rate`),
+        unitSize: positiveDecimal(raw.unit_size ?? 1, `${path}.unit_size`),
       };
     case "package":
       return {
         type: "package",
         measure: asString(raw.measure),
-        units: asDecimal(raw.units),
-        amount: asDecimal(raw.amount),
+        units: positiveDecimal(raw.units, `${path}.units`),
+        amount: nonNegativeDecimal(raw.amount, `${path}.amount`),
         rounding: roundingSchema.parse(raw.rounding ?? "ceil"),
       };
     case "graduated":
@@ -143,14 +156,16 @@ function parseCharge(value: JsonValue): Charge {
       return {
         type: raw.type,
         measure: asString(raw.measure),
-        tiers: parseTiers(raw.tiers),
+        tiers: parseTiers(raw.tiers, `${path}.tiers`),
       };
     case "expression":
       return { type: "expression", formula: asString(raw.formula) };
     case "sum":
       return {
         type: "sum",
-        components: asArray(raw.components, "pricing.sum.components").map(parseCharge),
+        components: asArray(raw.components, "pricing.sum.components").map((component, index) =>
+          parseCharge(component, `${path}.components[${index}]`),
+        ),
       };
     default:
       return semanticError(`unsupported charge type '${asString(raw.type)}'`);
@@ -219,13 +234,10 @@ export function parsePricing(value: JsonValue): PricingConfig {
   const operations: Record<string, OperationDefinition> = {};
   for (const [operationKey, input] of Object.entries(operationsRaw)) {
     const operation = asObject(input);
-    const measuresRaw = asObject(operation.measures);
+    const measuresRaw = asObject(operation.measures ?? {});
     const dimensionsRaw = asObject(operation.dimensions ?? {});
     validateIdentifiers(measuresRaw, `pricing.operations.${operationKey}.measures`);
     validateIdentifiers(dimensionsRaw, `pricing.operations.${operationKey}.dimensions`);
-    if (Object.keys(measuresRaw).length === 0) {
-      semanticError(`pricing.operations.${operationKey}.measures must not be empty`);
-    }
     const overlap = Object.keys(measuresRaw).filter((key) =>
       Object.prototype.hasOwnProperty.call(dimensionsRaw, key),
     );
@@ -236,7 +248,10 @@ export function parsePricing(value: JsonValue): PricingConfig {
       measures: Object.fromEntries(
         Object.entries(measuresRaw).map(([key, definition]) => [
           key,
-          { unit: identifier(asString(asObject(definition).unit), `${operationKey}.${key}.unit`) },
+          {
+            unit: identifier(asString(asObject(definition).unit), `${operationKey}.${key}.unit`),
+            required: asBoolean(asObject(definition).required ?? true),
+          },
         ]),
       ),
       dimensions: Object.fromEntries(
@@ -282,6 +297,7 @@ export function parsePricing(value: JsonValue): PricingConfig {
               ruleRaw.charge,
               `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].charge`,
             ),
+            `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].charge`,
           );
           validateCharge(parsedCharge, definition, operationKey);
           return {
@@ -310,7 +326,13 @@ export function parsePricing(value: JsonValue): PricingConfig {
       const unmatchedRaw = asObject(operationPriceRaw.unmatched);
       const unmatched =
         unmatchedRaw.action === "charge"
-          ? ({ action: "charge", charge: parseCharge(asObject(unmatchedRaw.charge)) } as const)
+          ? ({
+              action: "charge",
+              charge: parseCharge(
+                asObject(unmatchedRaw.charge),
+                `pricing.rate_cards.${cardKey}.operations.${operationKey}.unmatched.charge`,
+              ),
+            } as const)
           : ({ action: "reject" } as const);
       if (unmatched.action === "charge") {
         validateCharge(unmatched.charge, definition, operationKey);

@@ -45,6 +45,24 @@ def test_shared_transition_classification_fixture() -> None:
         assert (result.policy.proration if result.policy is not None else None) == transition["proration"]
 
 
+def test_same_plan_identity_and_cadence_count() -> None:
+    config = load_config_from_dict(FIXTURE["catalog"])
+    offer = next(item for item in config.commerce.offers.values() if isinstance(item, SubscriptionOffer))
+    interval = offer.billing_interval
+    assert (
+        classify_subscription_change(config, offer.plan, interval.unit, offer, interval.count, True).classification
+        == "unchanged"
+    )
+    assert (
+        classify_subscription_change(config, offer.plan, interval.unit, offer, interval.count, False).classification
+        == "lateral"
+    )
+    assert (
+        classify_subscription_change(config, offer.plan, interval.unit, offer, interval.count + 1, True).classification
+        == "cadence_change"
+    )
+
+
 def test_shared_error_codes_and_provider_agnostic_public_contract() -> None:
     assert UnknownOfferError.code == FIXTURE["error_codes"]["unknown_offer"]
     assert InvalidOfferQuantityError.code == FIXTURE["error_codes"]["invalid_quantity"]
@@ -259,3 +277,50 @@ async def test_provider_registry_propagates_factory_failure_to_active_waiter() -
 
     with pytest.raises(RuntimeError, match="provider factory failed"):
         await registry.get("mock")
+
+
+def test_plan_change_classifies_by_tier_not_display_rank() -> None:
+    config = load_config_from_dict(FIXTURE["catalog"])
+    config.plans["starter"].rank = 100
+    config.plans["pro"].rank = 0
+    offer = config.commerce.offers["pro_month"]
+    assert isinstance(offer, SubscriptionOffer)
+    assert classify_subscription_change(config, "starter", "month", offer).classification == "upgrade"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "selected", "unavailable"), [("test", "dodo", "stripe"), ("live", "stripe", "dodo")]
+)
+async def test_provider_selection_uses_available_environment_bindings(environment, selected, unavailable) -> None:
+    import copy
+
+    class StripeMock(MockPaymentProvider):
+        provider = "stripe"
+
+    class DodoMock(MockPaymentProvider):
+        provider = "dodo"
+
+    raw = copy.deepcopy(FIXTURE["catalog"])
+    raw["commerce"]["providers"] = {"stripe": {"type": "stripe"}, "dodo": {"type": "dodo"}}
+    offer = next(value for value in raw["commerce"]["offers"].values() if value["type"] == "subscription")
+    offer["providers"] = {
+        "stripe": {"type": "stripe_price", "price_id": {"live": "live-price"}},
+        "dodo": {"type": "dodo_product", "product_id": {"test": "test-product"}},
+    }
+    # Remove unrelated offers whose references use the original providers.
+    raw["commerce"]["offers"] = {"selected": offer}
+    config = load_config_from_dict(raw)
+    registry = CommerceProviderRegistry(
+        CommerceOptions(
+            provider_environment=environment,
+            providers={
+                "stripe": lambda context: StripeMock(event_sink=context.event_sink),
+                "dodo": lambda context: DodoMock(event_sink=context.event_sink),
+            },
+        ),
+        CommerceProviderFactoryContext(provider_environment=environment, event_sink=object()),  # type: ignore[reportArgumentType]
+    )
+    assert (await registry.select(offer=config.commerce.offers["selected"])).provider == selected
+    with pytest.raises(ProviderSelectionError):
+        await registry.select(requested=unavailable, offer=config.commerce.offers["selected"])

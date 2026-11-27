@@ -87,6 +87,7 @@ it("resubmits an unknown auto-recharge outcome with its original provider key", 
       state: "active",
       provider: "stripe",
       topupId: "00000000-0000-0000-0000-000000000010",
+      topupKey: "small_pack",
       quantity: 1,
       threshold: new Decimal(1000),
       maxChargesPerWindow: 3,
@@ -139,4 +140,72 @@ it("resubmits an unknown auto-recharge outcome with its original provider key", 
   expect(updateAutoRechargeAttempt).toHaveBeenCalledWith(
     expect.objectContaining({ state: "processing", providerAttemptId: "payment-1" }),
   );
+  const reordered = structuredClone(catalog);
+  const other = structuredClone(reordered.commerce.offers.small_pack);
+  other.providers.stripe.price_id = "price_other";
+  Object.assign(reordered.commerce.offers, { other_pack: other });
+  reordered.commerce.auto_recharge.eligible_topups = ["other_pack", "small_pack"];
+  reordered.commerce.auto_recharge.quantity.default = 2;
+  vi.mocked(billing.getActiveCatalogDocument).mockResolvedValue(reordered);
+  chargeSavedPaymentMethod.mockClear();
+  vi.mocked(billing.claimAutoRechargeAttempt).mockClear();
+  await new AutoRechargeService(billing).processIfNeeded({
+    userId: "00000000-0000-0000-0000-000000000001",
+    provider,
+    balance: new Decimal(50),
+  });
+  expect(billing.claimAutoRechargeAttempt).toHaveBeenCalledWith(
+    expect.objectContaining({
+      expectedTopupKey: "small_pack",
+      expectedProductId: "price_pack",
+      expectedQuantity: 1,
+    }),
+  );
+  expect(chargeSavedPaymentMethod).toHaveBeenCalledWith(
+    expect.objectContaining({ productId: "price_pack", quantity: 1 }),
+  );
+
+  for (const guardrail of ["charge", "threshold"] as const) {
+    const changed = structuredClone(catalog);
+    if (guardrail === "charge") changed.commerce.auto_recharge.limits.max_charge_minor = 100;
+    else {
+      changed.commerce.auto_recharge.balance_below.maximum = "500";
+      changed.commerce.auto_recharge.balance_below.default = "500";
+    }
+    vi.mocked(billing.getActiveCatalogDocument).mockResolvedValue(changed);
+    vi.mocked(billing.claimAutoRechargeAttempt).mockClear();
+    chargeSavedPaymentMethod.mockClear();
+    await expect(
+      new AutoRechargeService(billing).processIfNeeded({
+        userId: "00000000-0000-0000-0000-000000000001",
+        provider,
+        balance: new Decimal(50),
+      }),
+    ).resolves.toMatchObject({ outcome: "not_configured" });
+    expect(billing.claimAutoRechargeAttempt).not.toHaveBeenCalled();
+    expect(chargeSavedPaymentMethod).not.toHaveBeenCalled();
+  }
+
+  // A previously enabled profile cannot trigger a charge after its offer
+  // becomes unavailable; no trusted region exists for unattended charges.
+  for (const availability of [
+    { regions: ["IN"] },
+    { starts_at: "2099-01-01T00:00:00Z" },
+    { ends_at: "2000-01-01T00:00:00Z" },
+  ]) {
+    const restricted = structuredClone(catalog);
+    Object.assign(restricted.commerce.offers.small_pack, { availability });
+    vi.mocked(billing.getActiveCatalogDocument).mockResolvedValue(restricted);
+    vi.mocked(billing.claimAutoRechargeAttempt).mockClear();
+    chargeSavedPaymentMethod.mockClear();
+    await expect(
+      new AutoRechargeService(billing).processIfNeeded({
+        userId: "00000000-0000-0000-0000-000000000001",
+        provider,
+        balance: new Decimal(50),
+      }),
+    ).resolves.toMatchObject({ outcome: "not_configured" });
+    expect(billing.claimAutoRechargeAttempt).not.toHaveBeenCalled();
+    expect(chargeSavedPaymentMethod).not.toHaveBeenCalled();
+  }
 });

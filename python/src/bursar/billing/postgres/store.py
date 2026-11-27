@@ -322,7 +322,7 @@ class PostgresBillingStore(BillingStore):
 
     # ── Public API ─────────────────────────────────────────────────────
 
-    def get_active_catalog_document(self) -> dict[str, Any] | None:
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None:
         rows = self._execute("SELECT * FROM bursar.active_catalog_revision()")
         if not rows:
             return None
@@ -334,7 +334,15 @@ class PostgresBillingStore(BillingStore):
         row = rows[0]
         if not isinstance(row, dict) or not isinstance(row.get("source_document"), dict):
             raise StoreError("active catalog revision returned a malformed source document")
-        return row["source_document"]
+        try:
+            revision_id = str(UUID(str(row["id"])))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StoreError("active catalog revision returned an invalid id", cause=exc) from exc
+        return revision_id, row["source_document"]
+
+    def get_active_catalog_document(self) -> dict[str, Any] | None:
+        revision = self.get_active_catalog_revision()
+        return revision[1] if revision else None
 
     def create_or_get_checkout_intent(
         self,
@@ -345,7 +353,7 @@ class PostgresBillingStore(BillingStore):
             raise ValueError("request_digest must be a 32-byte hex string")
         rows = self._execute(
             """SELECT bursar.create_checkout_intent(
-                   %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                   %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz, NULL, NULL, %s, %s::uuid
                ) AS id""",
             [
                 input.subject_id,
@@ -355,6 +363,8 @@ class PostgresBillingStore(BillingStore):
                 input.product_key,
                 input.request_digest,
                 input.expires_at,
+                input.region,
+                input.expected_revision_id,
             ],
         )
         intent_id = require_identifier_result(
@@ -603,6 +613,10 @@ class PostgresBillingStore(BillingStore):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
+        checkout_intent_id: str | None = None,
+        subject_id: str | None = None,
+        provider_payment_id: str | None = None,
+        recharge_attempt_id: str | None = None,
     ) -> BillingTopupResult | None:
         """Resolve a credit topup by provider and product/price IDs.
 
@@ -614,7 +628,9 @@ class PostgresBillingStore(BillingStore):
         Returns:
             BillingTopupResult if found, None otherwise.
         """
-        result = self._topup_repo.resolve_by_price(provider, price_id, product_id)
+        result = self._topup_repo.resolve_by_price(
+            provider, price_id, product_id, checkout_intent_id, subject_id, provider_payment_id, recharge_attempt_id
+        )
         return self._row_to_topup(result)
 
     def resolve_billing_offer_by_lookup(
@@ -682,6 +698,7 @@ class PostgresBillingStore(BillingStore):
             json.dumps(input.metadata) if input.metadata else None,
             input.status,
             input.provider_updated_at,
+            input.topup_id,
         )
 
     def upsert_billing_refund(
@@ -967,6 +984,21 @@ class PostgresBillingStore(BillingStore):
         """
         return self._customer_repo.get_by_user_id(user_id, provider)
 
+    def find_checkout_intent(
+        self, subject_id: str, operation_key: str, provider: str | None = None
+    ) -> tuple[CheckoutIntent, dict] | None:
+        rows = self._execute(
+            "SELECT * FROM bursar.find_checkout_intent(%s::uuid,%s,%s)", [subject_id, operation_key, provider]
+        )
+        if not rows:
+            return None
+        if len(rows) != 1 or not isinstance(rows[0], dict) or not isinstance(rows[0].get("source_document"), dict):
+            raise StoreError("checkout operation key matches multiple providers or has invalid catalog")
+        intent = self.get_checkout_intent(str(rows[0]["intent_id"]), subject_id)
+        if intent is None:
+            raise StoreError("checkout intent disappeared")
+        return intent, rows[0]["source_document"]
+
     def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None:
         rows = self._execute(
             "SELECT * FROM bursar.get_checkout_intent(%s::uuid, %s::uuid)",
@@ -1028,7 +1060,6 @@ class PostgresBillingStore(BillingStore):
         expected_provider_updated_at: str,
         plan_assigned_at: datetime | str | None,
         apply_entitlement: bool,
-        terminal_plan_key: str | None,
         reason: str,
     ) -> SubscriptionEntitlementOutcome:
         return self._subscription_repo.reconcile_entitlement(
@@ -1039,7 +1070,6 @@ class PostgresBillingStore(BillingStore):
             expected_provider_updated_at,
             plan_assigned_at,
             apply_entitlement,
-            terminal_plan_key,
             reason,
         )
 
@@ -1049,14 +1079,12 @@ class PostgresBillingStore(BillingStore):
         subscription_id: str,
         expected_grace_ends_at: str,
         expired_at: str,
-        terminal_plan_key: str | None,
     ) -> bool:
         return self._subscription_repo.expire_grace_period(
             subject_id,
             subscription_id,
             expected_grace_ends_at,
             expired_at,
-            terminal_plan_key,
         )
 
     def record_subscription_conflict(

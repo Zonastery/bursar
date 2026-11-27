@@ -726,3 +726,255 @@ ON bursar.quota_usage_events (catalog_quota_id);
 
 CREATE INDEX quota_usage_events_plan_revision_fk_idx
 ON bursar.quota_usage_events (plan_id, catalog_revision_id);
+
+-- A provider payment purchases at most one top-up grant, regardless of
+-- webhook delivery or the catalog revision used to resolve the product.
+CREATE UNIQUE INDEX billing_credit_grants_payment_key_uidx
+ON bursar.billing_credit_grants (tenant_id, payment_id, grant_key)
+WHERE topup_id IS NOT null;
+
+-- Tenant-leading indexes for the baseline foreign keys.
+CREATE INDEX account_plan_assignment_history_tenant_id_account_id_idx
+ON bursar.account_plan_assignment_history (tenant_id, account_id);
+CREATE INDEX account_plan_assignment_history_tenant_id_plan_id_cata_4e913942
+ON bursar.account_plan_assignment_history (tenant_id, plan_id, catalog_revision_id, plan_key);
+CREATE INDEX account_plan_assignments_tenant_id_account_id_idx
+ON bursar.account_plan_assignments (tenant_id, account_id);
+CREATE INDEX account_plan_assignments_tenant_id_plan_id_catalog_rev_58b60adb
+ON bursar.account_plan_assignments (tenant_id, plan_id, catalog_revision_id, plan_key);
+CREATE INDEX allowance_windows_tenant_id_account_id_idx
+ON bursar.allowance_windows (tenant_id, account_id);
+CREATE INDEX allowance_windows_tenant_id_plan_id_catalog_revision_id_idx
+ON bursar.allowance_windows (tenant_id, plan_id, catalog_revision_id);
+CREATE INDEX billing_auto_recharge_attempts_tenant_id_topup_id_cata_56fa2640
+ON bursar.billing_auto_recharge_attempts (tenant_id, topup_id, catalog_revision_id);
+CREATE INDEX billing_auto_recharge_profiles_tenant_id_catalog_revis_8745a14e
+ON bursar.billing_auto_recharge_profiles (tenant_id, catalog_revision_id);
+CREATE INDEX billing_auto_recharge_profiles_tenant_id_topup_id_cata_adc4894c
+ON bursar.billing_auto_recharge_profiles (tenant_id, topup_id, catalog_revision_id);
+CREATE INDEX billing_checkout_intents_tenant_id_catalog_revision_id_idx
+ON bursar.billing_checkout_intents (tenant_id, catalog_revision_id);
+CREATE INDEX billing_credit_grants_tenant_id_billing_event_id_idx
+ON bursar.billing_credit_grants (tenant_id, billing_event_id);
+CREATE INDEX billing_credit_grants_tenant_id_ledger_entry_id_idx
+ON bursar.billing_credit_grants (tenant_id, ledger_entry_id);
+CREATE INDEX billing_credit_grants_tenant_id_payment_id_subject_id_idx
+ON bursar.billing_credit_grants (tenant_id, payment_id, subject_id);
+CREATE INDEX billing_credit_grants_tenant_id_subject_id_idx
+ON bursar.billing_credit_grants (tenant_id, subject_id);
+CREATE INDEX billing_credit_grants_tenant_id_subscription_id_subject_id_idx
+ON bursar.billing_credit_grants (tenant_id, subscription_id, subject_id);
+CREATE INDEX billing_credit_grants_tenant_id_topup_id_catalog_revis_204f8417
+ON bursar.billing_credit_grants (tenant_id, topup_id, catalog_revision_id);
+CREATE INDEX billing_disputes_tenant_id_payment_id_subject_id_provi_10eb8866
+ON bursar.billing_disputes (tenant_id, payment_id, subject_id, provider, provider_environment);
+CREATE INDEX billing_disputes_tenant_id_subject_id_idx
+ON bursar.billing_disputes (tenant_id, subject_id);
+CREATE INDEX billing_entitlement_sources_tenant_id_subscription_id__19349f07
+ON bursar.billing_entitlement_sources (tenant_id, subscription_id, subject_id, provider_environment);
+CREATE INDEX billing_event_payloads_tenant_id_event_id_received_at_idx
+ON ONLY bursar.billing_event_payloads (tenant_id, event_id, received_at);
+CREATE INDEX billing_events_tenant_id_subject_id_idx
+ON bursar.billing_events (tenant_id, subject_id);
+CREATE INDEX billing_invoices_tenant_id_subject_id_idx
+ON bursar.billing_invoices (tenant_id, subject_id);
+CREATE INDEX billing_invoices_tenant_id_subscription_id_subject_id__b9d1bc23
+ON bursar.billing_invoices (tenant_id, subscription_id, subject_id, provider, provider_environment);
+CREATE INDEX billing_payments_tenant_id_subject_id_idx
+ON bursar.billing_payments (tenant_id, subject_id);
+CREATE INDEX billing_refund_grants_tenant_id_grant_id_idx
+ON bursar.billing_refund_grants (tenant_id, grant_id);
+CREATE INDEX billing_refund_grants_tenant_id_ledger_entry_id_idx
+ON bursar.billing_refund_grants (tenant_id, ledger_entry_id);
+CREATE INDEX billing_refund_grants_tenant_id_refund_id_idx
+ON bursar.billing_refund_grants (tenant_id, refund_id);
+CREATE INDEX billing_refunds_tenant_id_payment_id_idx
+ON bursar.billing_refunds (tenant_id, payment_id);
+CREATE INDEX billing_subscription_changes_tenant_id_from_offer_id_f_850fc322
+ON bursar.billing_subscription_changes (tenant_id, from_offer_id, from_catalog_revision_id);
+CREATE INDEX billing_subscription_changes_tenant_id_subscription_id_idx
+ON bursar.billing_subscription_changes (tenant_id, subscription_id);
+CREATE INDEX billing_subscription_changes_tenant_id_to_offer_id_to__b098e860
+ON bursar.billing_subscription_changes (tenant_id, to_offer_id, to_catalog_revision_id);
+CREATE INDEX billing_subscription_conflicts_tenant_id_billing_event_id_idx
+ON bursar.billing_subscription_conflicts (tenant_id, billing_event_id);
+CREATE INDEX billing_subscription_conflicts_tenant_id_existing_subs_c5a5b17c
+ON bursar.billing_subscription_conflicts (tenant_id, existing_subscription_id);
+CREATE INDEX billing_subscription_conflicts_tenant_id_subject_id_idx
+ON bursar.billing_subscription_conflicts (tenant_id, subject_id);
+CREATE INDEX billing_subscriptions_tenant_id_entitlement_billing_ev_adea69a0
+ON bursar.billing_subscriptions (tenant_id, entitlement_billing_event_id);
+CREATE INDEX billing_subscriptions_tenant_id_offer_id_catalog_revis_959fff52
+ON bursar.billing_subscriptions (tenant_id, offer_id, catalog_revision_id);
+CREATE INDEX billing_subscriptions_tenant_id_subject_id_idx
+ON bursar.billing_subscriptions (tenant_id, subject_id);
+CREATE INDEX catalog_activation_history_tenant_id_catalog_revision_id_idx
+ON bursar.catalog_activation_history (tenant_id, catalog_revision_id);
+CREATE INDEX catalog_admission_operation_policies_tenant_id_catalog_124f491e
+ON bursar.catalog_admission_operation_policies (tenant_id, catalog_revision_id, operation_key);
+CREATE INDEX catalog_admission_operation_policies_tenant_id_catalog_960d1068
+ON bursar.catalog_admission_operation_policies (tenant_id, catalog_revision_id, admission_policy_key);
+CREATE INDEX catalog_auto_recharge_policies_tenant_id_catalog_revis_dbb60f1a
+ON bursar.catalog_auto_recharge_policies (tenant_id, catalog_revision_id, default_topup_key);
+CREATE INDEX catalog_grant_awards_tenant_id_catalog_revision_id_buc_bb1b08a0
+ON bursar.catalog_grant_awards (tenant_id, catalog_revision_id, bucket_key);
+CREATE INDEX catalog_grant_awards_tenant_id_grant_program_id_catalo_3b6a0af9
+ON bursar.catalog_grant_awards (tenant_id, grant_program_id, catalog_revision_id);
+CREATE INDEX catalog_grant_programs_tenant_id_catalog_revision_id_idx
+ON bursar.catalog_grant_programs (tenant_id, catalog_revision_id);
+CREATE INDEX catalog_offers_tenant_id_catalog_revision_id_cycle_gra_ff83dc76
+ON bursar.catalog_offers (tenant_id, catalog_revision_id, cycle_grant_bucket_key);
+CREATE INDEX catalog_offers_tenant_id_catalog_revision_id_plan_key_idx
+ON bursar.catalog_offers (tenant_id, catalog_revision_id, plan_key);
+CREATE INDEX catalog_plan_features_tenant_id_catalog_revision_id_fe_daf7f77e
+ON bursar.catalog_plan_features (tenant_id, catalog_revision_id, feature_key);
+CREATE INDEX catalog_plan_features_tenant_id_catalog_revision_id_pl_b826b0a9
+ON bursar.catalog_plan_features (tenant_id, catalog_revision_id, plan_key);
+CREATE INDEX catalog_plan_quotas_tenant_id_catalog_revision_id_oper_dcabefd3
+ON bursar.catalog_plan_quotas (tenant_id, catalog_revision_id, operation_key);
+CREATE INDEX catalog_plan_quotas_tenant_id_catalog_revision_id_plan_key_idx
+ON bursar.catalog_plan_quotas (tenant_id, catalog_revision_id, plan_key);
+CREATE INDEX catalog_plans_tenant_id_catalog_revision_id_admission__3b1f4f23
+ON bursar.catalog_plans (tenant_id, catalog_revision_id, admission_policy_key);
+CREATE INDEX catalog_plans_tenant_id_catalog_revision_id_credit_all_a23f843c
+ON bursar.catalog_plans (tenant_id, catalog_revision_id, credit_allowance_bucket);
+CREATE INDEX catalog_plans_tenant_id_catalog_revision_id_credit_pol_ebff521d
+ON bursar.catalog_plans (tenant_id, catalog_revision_id, credit_policy_key);
+CREATE INDEX catalog_plans_tenant_id_catalog_revision_id_rate_card_idx
+ON bursar.catalog_plans (tenant_id, catalog_revision_id, rate_card);
+CREATE INDEX catalog_provider_refs_tenant_id_catalog_revision_id_idx
+ON bursar.catalog_provider_refs (tenant_id, catalog_revision_id);
+CREATE INDEX catalog_rate_cards_tenant_id_catalog_revision_id_exten_8fa42db9
+ON bursar.catalog_rate_cards (tenant_id, catalog_revision_id, extends_key);
+CREATE INDEX catalog_topups_tenant_id_catalog_revision_id_bucket_key_idx
+ON bursar.catalog_topups (tenant_id, catalog_revision_id, bucket_key);
+CREATE INDEX credit_debt_repayments_tenant_id_account_id_idx
+ON bursar.credit_debt_repayments (tenant_id, account_id);
+CREATE INDEX credit_debt_repayments_tenant_id_ledger_entry_id_idx
+ON bursar.credit_debt_repayments (tenant_id, ledger_entry_id);
+CREATE INDEX credit_lease_quota_reservations_tenant_id_catalog_quota_id_idx
+ON bursar.credit_lease_quota_reservations (tenant_id, catalog_quota_id);
+CREATE INDEX credit_lease_quota_reservations_tenant_id_lease_id_idx
+ON bursar.credit_lease_quota_reservations (tenant_id, lease_id);
+CREATE INDEX credit_lease_quota_reservations_tenant_id_quota_window_id_idx
+ON bursar.credit_lease_quota_reservations (tenant_id, quota_window_id);
+CREATE INDEX credit_leases_tenant_id_account_id_idx
+ON bursar.credit_leases (tenant_id, account_id);
+CREATE INDEX credit_leases_tenant_id_allowance_window_id_idx
+ON bursar.credit_leases (tenant_id, allowance_window_id);
+CREATE INDEX credit_leases_tenant_id_catalog_revision_id_idx
+ON bursar.credit_leases (tenant_id, catalog_revision_id);
+CREATE INDEX credit_leases_tenant_id_ledger_entry_id_idx
+ON bursar.credit_leases (tenant_id, ledger_entry_id);
+CREATE INDEX credit_leases_tenant_id_plan_id_catalog_revision_id_idx
+ON bursar.credit_leases (tenant_id, plan_id, catalog_revision_id);
+CREATE INDEX credit_leases_tenant_id_usage_charge_id_idx
+ON bursar.credit_leases (tenant_id, usage_charge_id);
+CREATE INDEX credit_ledger_entries_tenant_id_account_id_idx
+ON bursar.credit_ledger_entries (tenant_id, account_id);
+CREATE INDEX credit_ledger_entries_tenant_id_catalog_revision_id_idx
+ON bursar.credit_ledger_entries (tenant_id, catalog_revision_id);
+CREATE INDEX credit_ledger_entries_tenant_id_reference_entry_id_idx
+ON bursar.credit_ledger_entries (tenant_id, reference_entry_id);
+CREATE INDEX credit_lot_allocations_tenant_id_debit_entry_id_idx
+ON bursar.credit_lot_allocations (tenant_id, debit_entry_id);
+CREATE INDEX credit_lot_allocations_tenant_id_lot_id_idx
+ON bursar.credit_lot_allocations (tenant_id, lot_id);
+CREATE INDEX credit_lot_restorations_tenant_id_lot_id_idx
+ON bursar.credit_lot_restorations (tenant_id, lot_id);
+CREATE INDEX credit_lot_restorations_tenant_id_original_allocation_id_idx
+ON bursar.credit_lot_restorations (tenant_id, original_allocation_id);
+CREATE INDEX credit_lot_restorations_tenant_id_refund_entry_id_idx
+ON bursar.credit_lot_restorations (tenant_id, refund_entry_id);
+CREATE INDEX credit_lot_source_allocations_tenant_id_lot_allocation_id_idx
+ON bursar.credit_lot_source_allocations (tenant_id, lot_allocation_id);
+CREATE INDEX credit_lot_source_allocations_tenant_id_lot_source_id_idx
+ON bursar.credit_lot_source_allocations (tenant_id, lot_source_id);
+CREATE INDEX credit_lot_source_restorations_tenant_id_lot_restoration_id_idx
+ON bursar.credit_lot_source_restorations (tenant_id, lot_restoration_id);
+CREATE INDEX credit_lot_source_restorations_tenant_id_source_alloca_2c0f3ed3
+ON bursar.credit_lot_source_restorations (tenant_id, source_allocation_id);
+CREATE INDEX credit_lot_sources_tenant_id_ledger_entry_id_idx
+ON bursar.credit_lot_sources (tenant_id, ledger_entry_id);
+CREATE INDEX credit_lot_sources_tenant_id_lot_id_idx
+ON bursar.credit_lot_sources (tenant_id, lot_id);
+CREATE INDEX credit_lots_tenant_id_account_id_idx
+ON bursar.credit_lots (tenant_id, account_id);
+CREATE INDEX credit_lots_tenant_id_catalog_revision_id_bucket_key_idx
+ON bursar.credit_lots (tenant_id, catalog_revision_id, bucket_key);
+CREATE INDEX credit_lots_tenant_id_source_entry_id_idx
+ON bursar.credit_lots (tenant_id, source_entry_id);
+CREATE INDEX credit_plan_migrations_tenant_id_from_plan_id_idx
+ON bursar.credit_plan_migrations (tenant_id, from_plan_id);
+CREATE INDEX credit_plan_migrations_tenant_id_to_plan_id_idx
+ON bursar.credit_plan_migrations (tenant_id, to_plan_id);
+CREATE INDEX credit_team_members_tenant_id_subject_id_idx
+ON bursar.credit_team_members (tenant_id, subject_id);
+CREATE INDEX credit_team_usage_charges_tenant_id_ledger_entry_id_idx
+ON bursar.credit_team_usage_charges (tenant_id, ledger_entry_id);
+CREATE INDEX credit_team_usage_charges_tenant_id_subject_id_idx
+ON bursar.credit_team_usage_charges (tenant_id, subject_id);
+CREATE INDEX credit_team_usage_charges_tenant_id_team_id_subject_id_idx
+ON bursar.credit_team_usage_charges (tenant_id, team_id, subject_id);
+CREATE INDEX credit_unallocated_debits_tenant_id_account_id_idx
+ON bursar.credit_unallocated_debits (tenant_id, account_id);
+CREATE INDEX credit_unallocated_debits_tenant_id_ledger_entry_id_idx
+ON bursar.credit_unallocated_debits (tenant_id, ledger_entry_id);
+CREATE INDEX credit_usage_charges_tenant_id_account_id_idx
+ON bursar.credit_usage_charges (tenant_id, account_id);
+CREATE INDEX credit_usage_charges_tenant_id_catalog_revision_id_idx
+ON bursar.credit_usage_charges (tenant_id, catalog_revision_id);
+CREATE INDEX credit_usage_charges_tenant_id_ledger_entry_id_idx
+ON bursar.credit_usage_charges (tenant_id, ledger_entry_id);
+CREATE INDEX credit_usage_charges_tenant_id_plan_id_catalog_revision_id_idx
+ON bursar.credit_usage_charges (tenant_id, plan_id, catalog_revision_id);
+CREATE INDEX external_identities_tenant_id_subject_id_idx
+ON bursar.external_identities (tenant_id, subject_id);
+CREATE INDEX grant_award_executions_tenant_id_catalog_grant_award_i_edc46eb9
+ON bursar.grant_award_executions (tenant_id, catalog_grant_award_id, catalog_revision_id);
+CREATE INDEX grant_award_executions_tenant_id_grant_event_id_idx
+ON bursar.grant_award_executions (tenant_id, grant_event_id);
+CREATE INDEX grant_award_executions_tenant_id_ledger_entry_id_idx
+ON bursar.grant_award_executions (tenant_id, ledger_entry_id);
+CREATE INDEX grant_award_executions_tenant_id_recipient_subject_id_idx
+ON bursar.grant_award_executions (tenant_id, recipient_subject_id);
+CREATE INDEX grant_program_events_tenant_id_grant_program_id_catalo_fe492701
+ON bursar.grant_program_events (tenant_id, grant_program_id, catalog_revision_id);
+CREATE INDEX grant_program_events_tenant_id_referrer_subject_id_idx
+ON bursar.grant_program_events (tenant_id, referrer_subject_id);
+CREATE INDEX grant_program_events_tenant_id_subject_id_idx
+ON bursar.grant_program_events (tenant_id, subject_id);
+CREATE INDEX plan_assignment_changes_tenant_id_account_id_idx
+ON bursar.plan_assignment_changes (tenant_id, account_id);
+CREATE INDEX plan_assignment_changes_tenant_id_from_plan_id_idx
+ON bursar.plan_assignment_changes (tenant_id, from_plan_id);
+CREATE INDEX plan_assignment_changes_tenant_id_to_plan_id_idx
+ON bursar.plan_assignment_changes (tenant_id, to_plan_id);
+CREATE INDEX quota_events_tenant_id_quota_window_id_idx
+ON bursar.quota_events (tenant_id, quota_window_id);
+CREATE INDEX quota_events_tenant_id_usage_charge_id_idx
+ON bursar.quota_events (tenant_id, usage_charge_id);
+CREATE INDEX quota_usage_events_tenant_id_account_id_idx
+ON bursar.quota_usage_events (tenant_id, account_id);
+CREATE INDEX quota_usage_events_tenant_id_catalog_quota_id_idx
+ON bursar.quota_usage_events (tenant_id, catalog_quota_id);
+CREATE INDEX quota_usage_events_tenant_id_correction_of_event_id_idx
+ON bursar.quota_usage_events (tenant_id, correction_of_event_id);
+CREATE INDEX quota_usage_events_tenant_id_plan_id_catalog_revision_id_idx
+ON bursar.quota_usage_events (tenant_id, plan_id, catalog_revision_id);
+CREATE INDEX quota_usage_events_tenant_id_usage_charge_id_idx
+ON bursar.quota_usage_events (tenant_id, usage_charge_id);
+CREATE INDEX quota_windows_tenant_id_account_id_idx
+ON bursar.quota_windows (tenant_id, account_id);
+CREATE INDEX quota_windows_tenant_id_plan_id_catalog_revision_id_idx
+ON bursar.quota_windows (tenant_id, plan_id, catalog_revision_id);
+CREATE INDEX usage_charge_payloads_tenant_id_charge_id_event_at_idx
+ON ONLY bursar.usage_charge_payloads (tenant_id, charge_id, event_at);
+CREATE INDEX usage_daily_rollups_tenant_id_account_id_idx
+ON bursar.usage_daily_rollups (tenant_id, account_id);
+
+CREATE INDEX billing_payments_tenant_topup_idx
+ON bursar.billing_payments (tenant_id, topup_id);
+
+CREATE INDEX usage_rollup_contributions_event_at_idx
+ON bursar.usage_rollup_contributions (event_at, tenant_id, charge_id);

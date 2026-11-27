@@ -139,6 +139,22 @@ class WebhookResult(_ProviderModel):
     event_type: NonEmptyString | None
 
 
+class CheckoutTrial(_ProviderModel):
+    unit: Literal["day", "week"]
+    count: PositiveInt
+
+
+def checkout_trial_days(params: CheckoutParams, maximum: int) -> int | None:
+    if params.trial is None:
+        return None
+    if params.type != "subscription":
+        raise ValueError("checkout trials require a subscription")
+    days = params.trial.count * (7 if params.trial.unit == "week" else 1)
+    if days > maximum:
+        raise ValueError(f"checkout trial must be between 1 and {maximum} days")
+    return days
+
+
 class CheckoutParams(_ProviderModel):
     account_id: NonEmptyString
     customer_id: NonEmptyString | None = None
@@ -146,6 +162,7 @@ class CheckoutParams(_ProviderModel):
     product_id: NonEmptyString
     type: Literal["subscription", "credit_pack"]
     quantity: PositiveInt | None = None
+    trial: CheckoutTrial | None = None
     return_url: NonEmptyString
     cancel_url: str
     metadata: dict[str, str]

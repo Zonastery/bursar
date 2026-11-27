@@ -193,10 +193,10 @@ def test_fixed_accounting_is_not_user_configurable() -> None:
         load_config_from_dict(data)
 
 
-def test_canonicalizes_credit_decimals_to_six_places() -> None:
+def test_canonicalizes_credit_decimals_without_losing_precision() -> None:
     canonical = canonical_bursar_config_dict(base_config())
-    assert canonical["credits"]["policies"]["invoice"]["limit"] == "500.000000"
-    assert canonical["plans"]["pro"]["credit_allowance"]["amount"] == "10.000000"
+    assert canonical["credits"]["policies"]["invoice"]["limit"] == "500"
+    assert canonical["plans"]["pro"]["credit_allowance"]["amount"] == "10"
 
 
 def test_canonicalizer_accepts_an_already_validated_config() -> None:

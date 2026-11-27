@@ -144,13 +144,13 @@ def test_greenfield_billing_fixes_are_defined_at_their_origins() -> None:
     )
 
     assert "'bursar.unassign_plan_if_source(uuid,text,uuid,text)'" not in security_sql
-    assert "'bursar.replace_subscription_entitlement_if_source(uuid,uuid,text,text)'" not in security_sql
+    assert "'bursar.replace_subscription_entitlement_if_source(uuid,uuid,text)'" not in security_sql
     assert "'bursar.mark_subscription_grace_expired(uuid,timestamptz,timestamptz)'" not in security_sql
     assert (
         "'bursar.reconcile_subscription_entitlement(uuid,uuid,uuid,"
-        "bursar.billing_subscription_status,timestamptz,timestamptz,boolean,text,text)'" in security_sql
+        "bursar.billing_subscription_status,timestamptz,timestamptz,boolean,text)'" in security_sql
     )
-    assert "'bursar.expire_subscription_grace_period(uuid,uuid,timestamptz,timestamptz,text)'" in security_sql
+    assert "'bursar.expire_subscription_grace_period(uuid,uuid,timestamptz,timestamptz)'" in security_sql
     assert not (SQL_DIR / "031_subscription_entitlement_source_rpc.sql").exists()
     assert not (SQL_DIR / "032_grant_billing_credit_replay_cast.sql").exists()
 
@@ -200,7 +200,8 @@ def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
         "bursar.run_storage_partition_maintenance(text,timestamptz)",
         "bursar.run_storage_maintenance(timestamptz)",
         "bursar.maybe_run_storage_maintenance(timestamptz)",
-        "bursar.create_tenant(uuid,text,text)",
+        "bursar.create_tenant(uuid,text,text,text)",
+        "bursar.get_tenant_context_by_slug(text)",
         "bursar.set_tenant_status(uuid,text)",
     )
 
@@ -752,3 +753,33 @@ def test_internal_history_ids_use_bigint_identity(pg_database_url: str) -> None:
             (table_names,),
         )
         assert cursor.fetchall() == [(table_name, "bigint", "YES", "ALWAYS") for table_name in table_names]
+
+
+def test_raw_catalog_publication_defaults_omitted_flat_measures(pg_database_url: str) -> None:
+    from psycopg2.extras import Json
+
+    from tests.conftest import TEST_TENANT_ID
+
+    document = {
+        "version": 1,
+        "credits": {},
+        "pricing": {
+            "operations": {"export": {}},
+            "rate_cards": {
+                "standard": {
+                    "operations": {
+                        "export": {"unmatched": {"action": "charge", "charge": {"type": "flat", "amount": "2"}}}
+                    }
+                }
+            },
+        },
+    }
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
+        cursor.execute("SELECT revision_id FROM bursar.publish_and_activate_catalog(1, %s)", (Json(document),))
+        row = cursor.fetchone()
+        assert row is not None
+        revision_id = row[0]
+        cursor.execute("SELECT measures FROM bursar.catalog_operations WHERE catalog_revision_id = %s", (revision_id,))
+        assert cursor.fetchone() == ({},)

@@ -343,6 +343,19 @@
           ],
           "default": null,
           "title": "Default Plan"
+        },
+        "subscription_end_plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Plan assigned when a subscription ends; omission clears the entitlement if it still comes from that subscription.",
+          "title": "Subscription End Plan"
         }
       },
       "title": "CatalogConfig",
@@ -577,6 +590,23 @@
     "CreditsConfig": {
       "additionalProperties": false,
       "properties": {
+        "on_signup": {
+          "anyOf": [
+            {
+              "examples": [
+                "10.500000"
+              ],
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Grant this amount once per subject on account creation; null means omitted.",
+          "title": "On Signup"
+        },
         "buckets": {
           "additionalProperties": {
             "$ref": "#/$defs/BucketDefinition"
@@ -656,9 +686,29 @@
           "type": "string"
         },
         "external_id": {
-          "minLength": 1,
-          "title": "External Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "additionalProperties": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minProperties": 1,
+              "propertyNames": {
+                "enum": [
+                  "test",
+                  "live",
+                  "sandbox"
+                ]
+              },
+              "type": "object"
+            }
+          ],
+          "description": "Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment.",
+          "title": "External Id"
         }
       },
       "required": [
@@ -817,17 +867,37 @@
       "properties": {
         "type": {
           "const": "dodo_product",
+          "default": "dodo_product",
           "title": "Type",
           "type": "string"
         },
         "product_id": {
-          "minLength": 1,
-          "title": "Product Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "additionalProperties": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minProperties": 1,
+              "propertyNames": {
+                "enum": [
+                  "test",
+                  "live",
+                  "sandbox"
+                ]
+              },
+              "type": "object"
+            }
+          ],
+          "description": "Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment.",
+          "title": "Product Id"
         }
       },
       "required": [
-        "type",
         "product_id"
       ],
       "title": "DodoProductReference",
@@ -1398,6 +1468,12 @@
         "unit": {
           "title": "Unit",
           "type": "string"
+        },
+        "required": {
+          "default": true,
+          "description": "Require this usage measure; set false to treat omission as zero.",
+          "title": "Required",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1512,6 +1588,53 @@
           "title": "Measures",
           "type": "object"
         },
+        "charge": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "expression": "#/$defs/ExpressionCharge",
+                  "flat": "#/$defs/FlatCharge",
+                  "graduated": "#/$defs/GraduatedCharge",
+                  "package": "#/$defs/PackageCharge",
+                  "per_unit": "#/$defs/PerUnitCharge",
+                  "sum": "#/$defs/SumCharge",
+                  "volume": "#/$defs/VolumeCharge"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/FlatCharge"
+                },
+                {
+                  "$ref": "#/$defs/PerUnitCharge"
+                },
+                {
+                  "$ref": "#/$defs/PackageCharge"
+                },
+                {
+                  "$ref": "#/$defs/GraduatedCharge"
+                },
+                {
+                  "$ref": "#/$defs/VolumeCharge"
+                },
+                {
+                  "$ref": "#/$defs/ExpressionCharge"
+                },
+                {
+                  "$ref": "#/$defs/SumCharge"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inline standard rate-card charge; null means omitted.",
+          "title": "Charge"
+        },
         "dimensions": {
           "additionalProperties": {
             "$ref": "#/$defs/DimensionDefinition"
@@ -1520,9 +1643,6 @@
           "type": "object"
         }
       },
-      "required": [
-        "measures"
-      ],
       "title": "OperationDefinition",
       "type": "object"
     },
@@ -1676,6 +1796,14 @@
     "PlanDefinition": {
       "additionalProperties": false,
       "properties": {
+        "tier": {
+          "default": 0,
+          "description": "Plan level for subscription changes, distinct from display rank.",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Tier",
+          "type": "integer"
+        },
         "display_name": {
           "minLength": 1,
           "title": "Display Name",
@@ -1714,11 +1842,25 @@
           "title": "Rate Card"
         },
         "allowed_operations": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Allowed Operations",
-          "type": "array"
+          "anyOf": [
+            {
+              "enum": [
+                "all",
+                "none"
+              ],
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "default": "none",
+          "description": "Allow all, none, or a nonempty list of operations; omission denies all.",
+          "title": "Allowed Operations"
         },
         "features": {
           "additionalProperties": {
@@ -1958,8 +2100,7 @@
         }
       },
       "required": [
-        "operations",
-        "rate_cards"
+        "operations"
       ],
       "title": "PricingConfig",
       "type": "object"
@@ -2235,17 +2376,37 @@
       "properties": {
         "type": {
           "const": "stripe_price",
+          "default": "stripe_price",
           "title": "Type",
           "type": "string"
         },
         "price_id": {
-          "minLength": 1,
-          "title": "Price Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "additionalProperties": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minProperties": 1,
+              "propertyNames": {
+                "enum": [
+                  "test",
+                  "live",
+                  "sandbox"
+                ]
+              },
+              "type": "object"
+            }
+          ],
+          "description": "Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment.",
+          "title": "Price Id"
         }
       },
       "required": [
-        "type",
         "price_id"
       ],
       "title": "StripePriceReference",
@@ -2411,15 +2572,7 @@
         },
         "providers": {
           "additionalProperties": {
-            "discriminator": {
-              "mapping": {
-                "custom_object": "#/$defs/CustomObjectReference",
-                "dodo_product": "#/$defs/DodoProductReference",
-                "stripe_price": "#/$defs/StripePriceReference"
-              },
-              "propertyName": "type"
-            },
-            "oneOf": [
+            "anyOf": [
               {
                 "$ref": "#/$defs/StripePriceReference"
               },
@@ -2582,15 +2735,7 @@
         },
         "providers": {
           "additionalProperties": {
-            "discriminator": {
-              "mapping": {
-                "custom_object": "#/$defs/CustomObjectReference",
-                "dodo_product": "#/$defs/DodoProductReference",
-                "stripe_price": "#/$defs/StripePriceReference"
-              },
-              "propertyName": "type"
-            },
-            "oneOf": [
+            "anyOf": [
               {
                 "$ref": "#/$defs/StripePriceReference"
               },
@@ -2764,8 +2909,7 @@
     }
   },
   "required": [
-    "version",
-    "credits"
+    "version"
   ],
   "title": "BursarConfig",
   "type": "object",

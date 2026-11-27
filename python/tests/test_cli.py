@@ -327,3 +327,77 @@ def test_tenant_bootstrap_resolves_runtime_target_before_provisioning(
 
     assert exc.value.code == 1
     assert "BURSAR_PROVIDER_ENVIRONMENT" in capsys.readouterr().err
+
+
+def test_validate_json_reports_normalization_conflict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "conflict.yaml"
+    path.write_text("""\
+version: 1
+credits:
+  on_signup: '20'
+  grant_programs:
+    signup:
+      trigger: account_created
+      awards: [{amount: '10', bucket: default}]
+""")
+    with pytest.raises(SystemExit):
+        cli.main(["config", "validate", str(path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert "conflicts" in payload["errors"][0]["msg"]
+
+
+def test_validate_json_rejects_non_string_environment_keys_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "invalid.yaml"
+    path.write_text("""\
+version: 1
+commerce:
+  offers:
+    buy:
+      type: topup
+      display_name: Buy
+      price: {amount_minor: 100, currency: USD}
+      credits_per_unit: '10'
+      bucket: default
+      providers:
+        stripe:
+          type: stripe_price
+          price_id: {test: price_test, 1: price_invalid}
+""")
+    with pytest.raises(SystemExit):
+        cli.main(["config", "validate", str(path), "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["valid"] is False
+    assert payload["errors"]
+    assert captured.err == ""
+
+
+def test_validate_json_accepts_partial_provider_environment(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "missing-binding.yaml"
+    path.write_text("""\
+version: 1
+commerce:
+  providers:
+    stripe: {type: stripe}
+    dodo: {type: dodo}
+  offers:
+    buy:
+      type: topup
+      display_name: Buy
+      price: {amount_minor: 100, currency: USD}
+      credits_per_unit: '10'
+      bucket: default
+      providers:
+        stripe:
+          type: stripe_price
+          price_id: {test: price_test}
+        dodo:
+          type: dodo_product
+          product_id: {live: product_live}
+""")
+    cli.main(["config", "validate", str(path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"valid": True, "errors": []}

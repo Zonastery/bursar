@@ -28,8 +28,10 @@ export interface CheckoutIntentCreate {
   operationKey: string;
   checkoutKind: "subscription" | "credit_topup";
   productKey: string;
+  region?: string;
   requestDigest: string;
   expiresAt: string;
+  expectedRevisionId?: string;
 }
 
 export interface CheckoutIntentUpdate {
@@ -57,6 +59,7 @@ export interface BillingPaymentUpsert {
   provider: string;
   providerPaymentId: string;
   providerInvoiceId?: string | null;
+  topupId?: string | null;
   userId: string;
   amountMinor: number;
   taxMinor: number;
@@ -117,6 +120,9 @@ export interface BillingDisputeUpsert {
 export interface AutoRechargeAttemptClaim {
   userId: string;
   idempotencyKey: string;
+  expectedProductId: string;
+  expectedQuantity: number;
+  expectedTopupKey: string;
 }
 
 export interface AutoRechargeAttemptUpdate {
@@ -148,11 +154,17 @@ export interface BillingCapability extends BillingEventSink {
   createOrGetCheckoutIntent(input: CheckoutIntentCreate): Promise<CheckoutIntent>;
   updateCheckoutIntent(id: string, update: CheckoutIntentUpdate): Promise<void>;
   getCheckoutIntent(id: string, subjectId: string): Promise<CheckoutIntent | null>;
+  findCheckoutIntent(
+    subjectId: string,
+    operationKey: string,
+    provider?: string,
+  ): Promise<{ intent: CheckoutIntent; catalog: JsonObject } | null>;
   getUserSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getUserPreferences(userId: string): Promise<BillingPreferences | null>;
   getActiveCatalogDocument(): Promise<JsonObject | null>;
+  getActiveCatalogRevision(): Promise<{ id: string; config: JsonObject } | null>;
   listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
   listCancellableSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
   listBillingInvoices(userId: string): Promise<BillingInvoiceRecord[]>;

@@ -673,6 +673,321 @@ BEGIN
 END
 $$;
 
+-- Tenant-specific usage routing is changed only through a paused cutover.
+CREATE FUNCTION bursar.get_usage_backend_status(p_tenant uuid)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+    SELECT jsonb_build_object(
+        'backend', usage_backend,
+        'target', usage_cutover_target,
+        'cutoff', usage_cutover_cutoff
+    ) FROM bursar.tenants WHERE id = p_tenant AND status = 'active'
+$$;
+
+CREATE FUNCTION bursar.begin_usage_backend_cutover(
+    p_tenant uuid, p_target text, p_cutoff timestamptz
+)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_tenant bursar.tenants;
+BEGIN
+    IF p_tenant IS NULL OR p_target IS NULL OR p_target NOT IN ('postgres', 'clickhouse')
+       OR p_cutoff IS NULL OR NOT bursar.is_finite_timestamptz(p_cutoff) OR p_cutoff > now() THEN
+        RAISE EXCEPTION 'invalid usage cutover request' USING ERRCODE = '22023';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('bursar.usage.cutover.retention', 0));
+    PERFORM pg_advisory_xact_lock(hashtextextended('bursar.usage.backend:' || p_tenant::text, 0));
+    SELECT * INTO v_tenant FROM bursar.tenants WHERE id = p_tenant AND status = 'active' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'active tenant not found' USING ERRCODE = '22023';
+    END IF;
+    IF v_tenant.usage_cutover_target IS NOT NULL THEN
+        IF v_tenant.usage_cutover_target <> p_target THEN
+            RAISE EXCEPTION 'different usage cutover already in progress' USING ERRCODE = '55000';
+        END IF;
+    ELSIF v_tenant.usage_backend = p_target THEN
+        RAISE EXCEPTION 'usage backend is already selected' USING ERRCODE = '55000';
+    ELSE
+        IF EXISTS (
+            SELECT 1 FROM bursar.credit_usage_charges AS charge
+            WHERE charge.tenant_id = p_tenant
+              AND charge.event_at < p_cutoff
+              AND (
+                  charge.billing_disposition = 'record_only'
+                  OR charge.event_at >= now() - make_interval(days => (
+                      SELECT usage_payload_retention_days FROM bursar.storage_settings WHERE singleton
+                  ))
+              )
+              AND (
+                  v_tenant.usage_backend = 'postgres'
+                  OR NOT EXISTS (
+                      SELECT 1 FROM bursar.usage_charge_payloads AS payload
+                      WHERE payload.tenant_id = p_tenant AND payload.charge_id = charge.id
+                        AND payload.event_at = charge.event_at
+                  )
+              )
+        ) THEN
+            RAISE EXCEPTION 'cutover cutoff would truncate retained usage history'
+                USING ERRCODE = '55000';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM bursar.credit_usage_charges AS charge
+            WHERE charge.tenant_id = p_tenant
+              AND charge.billing_disposition = 'billable'
+              AND charge.event_at < p_cutoff
+              AND charge.event_at >= (((now() - make_interval(days => (
+                  SELECT usage_rollup_retention_days FROM bursar.storage_settings WHERE singleton
+              )))::date)::timestamp AT TIME ZONE 'UTC')
+              AND (
+                  v_tenant.usage_backend = 'postgres'
+                  OR NOT EXISTS (
+                      SELECT 1 FROM bursar.usage_rollup_contributions AS contribution
+                      WHERE contribution.tenant_id = p_tenant AND contribution.charge_id = charge.id
+                  )
+              )
+        ) THEN
+            RAISE EXCEPTION 'cutover cutoff would truncate retained usage analytics'
+                USING ERRCODE = '55000';
+        END IF;
+        DELETE FROM bursar.usage_backend_cutover_items WHERE tenant_id = p_tenant;
+        UPDATE bursar.tenants SET usage_cutover_target = p_target, usage_cutover_cutoff = p_cutoff
+        WHERE id = p_tenant;
+    END IF;
+    RETURN bursar.get_usage_backend_status(p_tenant);
+END
+$$;
+
+CREATE FUNCTION bursar.abort_usage_backend_cutover(p_tenant uuid)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('bursar.usage.backend:' || p_tenant::text, 0));
+    DELETE FROM bursar.usage_backend_cutover_items WHERE tenant_id = p_tenant;
+    UPDATE bursar.tenants SET usage_cutover_target = NULL, usage_cutover_cutoff = NULL
+    WHERE id = p_tenant AND status = 'active';
+    IF NOT FOUND THEN RAISE EXCEPTION 'active tenant not found' USING ERRCODE = '22023'; END IF;
+END
+$$;
+
+-- Canonical full-detail record used only by the operator cutover boundary.
+CREATE FUNCTION bursar.usage_cutover_projection(p_tenant uuid, p_charge uuid)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+    SELECT jsonb_build_object(
+        'tenant_id', charge.tenant_id, 'charge_id', charge.id,
+        'account_id', charge.account_id, 'subject_id', account.subject_id,
+        'operation', charge.operation, 'feature', payload.feature,
+        'model', payload.model, 'region', payload.region,
+        'measures', payload.measures, 'dimensions', payload.dimensions,
+        'metadata', payload.metadata,
+        'requested', bursar.digest_numeric_text(charge.requested),
+        'charged', bursar.digest_numeric_text(charge.charged),
+        'allowance_requested', bursar.digest_numeric_text(charge.allowance_requested),
+        'allowance_covered', bursar.digest_numeric_text(charge.allowance_covered),
+        'billing_disposition', charge.billing_disposition,
+        'catalog_revision_id', charge.catalog_revision_id, 'plan_id', charge.plan_id,
+        'rate_card_key', charge.rate_card_key, 'pricing_snapshot', payload.pricing_snapshot,
+        'ledger_entry_id', charge.ledger_entry_id, 'correction_of_charge_id', charge.correction_of_charge_id,
+        'idempotency_key', charge.idempotency_key,
+        'request_digest', encode(charge.request_digest, 'hex'),
+        'event_at', charge.event_at, 'created_at', charge.created_at,
+        'payload_available', payload.charge_id IS NOT NULL
+    )
+    FROM bursar.credit_usage_charges AS charge
+    JOIN bursar.credit_accounts AS account
+      ON account.tenant_id = charge.tenant_id AND account.id = charge.account_id
+    LEFT JOIN bursar.usage_charge_payloads AS payload
+      ON payload.tenant_id = charge.tenant_id AND payload.charge_id = charge.id
+     AND payload.event_at = charge.event_at
+    WHERE charge.tenant_id = p_tenant AND charge.id = p_charge
+$$;
+
+CREATE FUNCTION bursar.list_usage_cutover_postgres(
+    p_tenant uuid, p_after_event timestamptz, p_after_charge uuid, p_limit integer
+)
+RETURNS SETOF jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_cutoff timestamptz;
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000
+       OR ((p_after_event IS NULL) <> (p_after_charge IS NULL)) THEN
+        RAISE EXCEPTION 'invalid usage cutover page' USING ERRCODE = '22023';
+    END IF;
+    SELECT usage_cutover_cutoff INTO v_cutoff FROM bursar.tenants
+    WHERE id = p_tenant AND status = 'active' AND usage_backend = 'postgres'
+      AND usage_cutover_target = 'clickhouse';
+    IF v_cutoff IS NULL THEN
+        RAISE EXCEPTION 'postgres to clickhouse cutover is not active' USING ERRCODE = '55000';
+    END IF;
+    RETURN QUERY
+    SELECT bursar.usage_cutover_projection(p_tenant, charge.id)
+    FROM bursar.credit_usage_charges AS charge
+    WHERE charge.tenant_id = p_tenant AND charge.event_at >= v_cutoff
+      AND (p_after_event IS NULL OR (charge.event_at, charge.id) > (p_after_event, p_after_charge))
+    ORDER BY charge.event_at, charge.id LIMIT p_limit;
+END
+$$;
+-- Restore one ClickHouse projection without repeating ledger or outbox effects.
+-- Existing facts must match exactly; only expired record-only receipts may be
+-- reconstructed. ON CONFLICT avoids repeating rollup triggers on retries.
+CREATE FUNCTION bursar.import_usage_cutover_item(p_tenant uuid, p_item jsonb)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_cutoff timestamptz;
+    v_id uuid := (p_item->>'charge_id')::uuid;
+    v_account uuid := (p_item->>'account_id')::uuid;
+    v_event timestamptz := (p_item->>'event_at')::timestamptz;
+    v_result jsonb;
+    v_expected jsonb;
+BEGIN
+    SELECT usage_cutover_cutoff INTO v_cutoff FROM bursar.tenants
+    WHERE id = p_tenant AND status = 'active' AND usage_backend = 'clickhouse'
+      AND usage_cutover_target = 'postgres';
+    IF v_cutoff IS NULL THEN
+        RAISE EXCEPTION 'clickhouse to postgres cutover is not active' USING ERRCODE = '55000';
+    END IF;
+    IF p_item IS NULL OR (p_item->>'tenant_id')::uuid IS DISTINCT FROM p_tenant
+       OR v_event IS NULL OR v_event < v_cutoff
+       OR NOT EXISTS (SELECT 1 FROM bursar.credit_accounts
+           WHERE tenant_id = p_tenant AND id = v_account
+             AND subject_id = (p_item->>'subject_id')::uuid) THEN
+        RAISE EXCEPTION 'invalid cutover item identity' USING ERRCODE = '22023';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM bursar.credit_usage_charges
+                   WHERE tenant_id = p_tenant AND id = v_id) THEN
+        IF p_item->>'billing_disposition' <> 'record_only' THEN
+            RAISE EXCEPTION 'billable usage receipt missing' USING ERRCODE = '55000';
+        END IF;
+        INSERT INTO bursar.credit_usage_charges (
+            tenant_id, id, account_id, operation, event_at, requested, charged,
+            allowance_requested, allowance_covered, billing_disposition,
+            catalog_revision_id, plan_id, rate_card_key, ledger_entry_id,
+            correction_of_charge_id, idempotency_key, request_digest, created_at
+        ) VALUES (
+            p_tenant, v_id, v_account, p_item->>'operation', v_event,
+            (p_item->>'requested')::numeric, (p_item->>'charged')::numeric,
+            (p_item->>'allowance_requested')::numeric, (p_item->>'allowance_covered')::numeric,
+            p_item->>'billing_disposition', (p_item->>'catalog_revision_id')::uuid,
+            (p_item->>'plan_id')::uuid, p_item->>'rate_card_key', (p_item->>'ledger_entry_id')::uuid,
+            (p_item->>'correction_of_charge_id')::uuid, p_item->>'idempotency_key',
+            decode(p_item->>'request_digest', 'hex'), (p_item->>'created_at')::timestamptz
+        );
+    END IF;
+    PERFORM set_config('bursar.usage_backend', 'postgres', true);
+    INSERT INTO bursar.usage_charge_payloads (
+        tenant_id, charge_id, event_at, measures, feature, model, region,
+        dimensions, metadata, pricing_snapshot
+    ) VALUES (
+        p_tenant, v_id, v_event, p_item->'measures', p_item->>'feature',
+        p_item->>'model', p_item->>'region', p_item->'dimensions', p_item->'metadata',
+        p_item->'pricing_snapshot'
+    ) ON CONFLICT (event_at, charge_id) DO NOTHING;
+    v_result := bursar.usage_cutover_projection(p_tenant, v_id);
+    v_expected := jsonb_build_object(
+        'tenant_id', p_tenant, 'charge_id', v_id, 'account_id', v_account,
+        'subject_id', (p_item->>'subject_id')::uuid, 'operation', p_item->>'operation',
+        'feature', p_item->>'feature', 'model', p_item->>'model', 'region', p_item->>'region',
+        'measures', p_item->'measures', 'dimensions', p_item->'dimensions', 'metadata', p_item->'metadata',
+        'requested', bursar.digest_numeric_text((p_item->>'requested')::numeric),
+        'charged', bursar.digest_numeric_text((p_item->>'charged')::numeric),
+        'allowance_requested', bursar.digest_numeric_text((p_item->>'allowance_requested')::numeric),
+        'allowance_covered', bursar.digest_numeric_text((p_item->>'allowance_covered')::numeric),
+        'billing_disposition', p_item->>'billing_disposition',
+        'catalog_revision_id', (p_item->>'catalog_revision_id')::uuid,
+        'plan_id', (p_item->>'plan_id')::uuid, 'rate_card_key', p_item->>'rate_card_key',
+        'pricing_snapshot', p_item->'pricing_snapshot',
+        'ledger_entry_id', (p_item->>'ledger_entry_id')::uuid,
+        'correction_of_charge_id', (p_item->>'correction_of_charge_id')::uuid,
+        'idempotency_key', p_item->>'idempotency_key', 'request_digest', p_item->>'request_digest',
+        'event_at', v_event, 'created_at', (p_item->>'created_at')::timestamptz,
+        'payload_available', true
+    );
+    IF v_result IS DISTINCT FROM v_expected THEN
+        RAISE EXCEPTION 'usage cutover item differs from retained receipt' USING ERRCODE = '55000';
+    END IF;
+    RETURN v_result;
+END
+$$;
+REVOKE ALL ON FUNCTION bursar.import_usage_cutover_item(uuid, jsonb) FROM PUBLIC;
+
+-- Record only a digest and identity after the driver independently compares the
+-- source and destination. Replays must agree; no payload is retained here.
+CREATE FUNCTION bursar.verify_usage_cutover_item(
+    p_tenant uuid, p_charge uuid, p_event_at timestamptz, p_digest text
+)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_cutoff timestamptz;
+    v_existing text;
+BEGIN
+    SELECT usage_cutover_cutoff INTO v_cutoff FROM bursar.tenants
+    WHERE id = p_tenant AND status = 'active' AND usage_cutover_target IS NOT NULL;
+    IF v_cutoff IS NULL OR p_charge IS NULL OR p_event_at IS NULL OR p_event_at < v_cutoff
+       OR p_digest IS NULL OR p_digest !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'invalid usage cutover verification' USING ERRCODE = '22023';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM bursar.credit_usage_charges AS charge
+        JOIN bursar.usage_charge_payloads AS payload
+          ON payload.tenant_id = charge.tenant_id AND payload.charge_id = charge.id
+         AND payload.event_at = charge.event_at
+        WHERE charge.tenant_id = p_tenant AND charge.id = p_charge AND charge.event_at = p_event_at
+    ) THEN
+        RAISE EXCEPTION 'verified usage record is not present in PostgreSQL' USING ERRCODE = '55000';
+    END IF;
+    INSERT INTO bursar.usage_backend_cutover_items(tenant_id, charge_id, event_at, digest)
+    VALUES (p_tenant, p_charge, p_event_at, p_digest)
+    ON CONFLICT (tenant_id, charge_id, event_at) DO NOTHING;
+    SELECT digest INTO v_existing FROM bursar.usage_backend_cutover_items
+    WHERE tenant_id = p_tenant AND charge_id = p_charge AND event_at = p_event_at;
+    IF v_existing IS DISTINCT FROM p_digest THEN
+        RAISE EXCEPTION 'cutover verification digest changed' USING ERRCODE = '55000';
+    END IF;
+END
+$$;
+
+CREATE FUNCTION bursar.finish_usage_backend_cutover(p_tenant uuid, p_target text, p_count bigint)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_cutoff timestamptz;
+    v_count bigint;
+BEGIN
+    IF p_tenant IS NULL OR p_target IS NULL OR p_count IS NULL OR p_count < 0 THEN
+        RAISE EXCEPTION 'invalid usage cutover finish' USING ERRCODE = '22023';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('bursar.usage.backend:' || p_tenant::text, 0));
+    SELECT usage_cutover_cutoff INTO v_cutoff FROM bursar.tenants
+    WHERE id = p_tenant AND status = 'active' AND usage_cutover_target = p_target FOR UPDATE;
+    IF v_cutoff IS NULL THEN
+        RAISE EXCEPTION 'requested usage cutover is not active' USING ERRCODE = '55000';
+    END IF;
+    SELECT count(*) INTO v_count FROM bursar.usage_backend_cutover_items WHERE tenant_id = p_tenant;
+    IF v_count <> p_count OR EXISTS (
+        SELECT 1 FROM bursar.credit_usage_charges AS charge
+        WHERE charge.tenant_id = p_tenant AND charge.event_at >= v_cutoff
+          AND NOT EXISTS (SELECT 1 FROM bursar.usage_backend_cutover_items AS verified
+              WHERE verified.tenant_id = p_tenant AND verified.charge_id = charge.id
+                AND verified.event_at = charge.event_at)
+    ) OR EXISTS (
+        SELECT 1 FROM bursar.event_outbox AS event
+        WHERE event.tenant_id = p_tenant AND event.topic = 'usage.charge_recorded'
+          AND event.payload->>'delivery_required' = 'true' AND event.status <> 'delivered'
+    ) THEN
+        RAISE EXCEPTION 'usage cutover has unverified records or pending required exports'
+            USING ERRCODE = '55000';
+    END IF;
+    UPDATE bursar.tenants SET usage_backend = p_target,
+        usage_cutover_target = NULL, usage_cutover_cutoff = NULL WHERE id = p_tenant;
+    DELETE FROM bursar.usage_backend_cutover_items WHERE tenant_id = p_tenant;
+END
+$$;
+REVOKE ALL ON FUNCTION bursar.verify_usage_cutover_item(uuid, uuid, timestamptz, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.finish_usage_backend_cutover(uuid, text, bigint) FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION bursar.usage_cutover_projection(uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.list_usage_cutover_postgres(uuid, timestamptz, uuid, integer) FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION bursar.get_usage_backend_status(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.begin_usage_backend_cutover(uuid, text, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.abort_usage_backend_cutover(uuid) FROM PUBLIC;
+
 -- ---------------------------------------------------------------------------
 -- 3. Optional export projections and archive pointers
 -- ---------------------------------------------------------------------------
@@ -697,6 +1012,7 @@ AS $$
             'tenant_id', charge.tenant_id,
             'charge_id', charge.id,
             'subject_id', account.subject_id,
+            'request_digest', encode(charge.request_digest, 'hex'),
             'requested', charge.requested::text,
             'charged', charge.charged::text,
             'allowance_requested', charge.allowance_requested::text,
@@ -1062,6 +1378,7 @@ BEGIN
         RETURN jsonb_build_object('status', 'busy');
     END IF;
 
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended('bursar.usage.cutover.retention', 0));
     v_parent_name := format('bursar.%I', p_parent_table);
     v_parent := v_parent_name::regclass;
 
@@ -1112,6 +1429,12 @@ BEGIN
       ON child.oid = inheritance.inhrelid
     WHERE inheritance.inhparent = v_parent
       AND pg_get_expr(child.relpartbound, child.oid) <> 'DEFAULT';
+
+    IF p_parent_table = 'usage_charge_payloads' THEN
+        SELECT greatest(v_retention, p_now - min(usage_cutover_cutoff))
+        INTO v_retention FROM bursar.tenants
+        WHERE usage_cutover_target IS NOT NULL;
+    END IF;
 
     v_previous_lock_timeout := current_setting('lock_timeout');
     PERFORM set_config(
@@ -1267,6 +1590,7 @@ DECLARE
     v_quota_notifications integer := 0;
     v_terminal_leases integer := 0;
     v_rollups integer := 0;
+    v_rollup_contributions integer := 0;
     v_outbox integer := 0;
     v_outbox_hard_limit integer := 0;
     v_outbox_remaining integer := 0;
@@ -1283,6 +1607,7 @@ BEGIN
         RETURN jsonb_build_object('status', 'busy');
     END IF;
 
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended('bursar.usage.cutover.retention', 0));
     SELECT *
     INTO v_settings
     FROM bursar.storage_settings
@@ -1306,6 +1631,8 @@ BEGIN
         SELECT payload.event_at, payload.charge_id
         FROM bursar.usage_charge_payloads AS payload
         WHERE payload.event_at < v_usage_cutoff
+          AND NOT EXISTS (SELECT 1 FROM bursar.tenants AS tenant
+              WHERE tenant.id = payload.tenant_id AND tenant.usage_cutover_target IS NOT NULL)
         ORDER BY payload.event_at, payload.charge_id
         LIMIT v_settings.maintenance_batch_size
         FOR UPDATE SKIP LOCKED
@@ -1327,6 +1654,8 @@ BEGIN
         FROM bursar.credit_usage_charges AS charge
         WHERE charge.billing_disposition = 'record_only'
           AND charge.event_at < v_usage_cutoff
+          AND NOT EXISTS (SELECT 1 FROM bursar.tenants AS tenant
+              WHERE tenant.id = charge.tenant_id AND tenant.usage_cutover_target IS NOT NULL)
         ORDER BY charge.event_at, charge.id
         LIMIT v_settings.maintenance_batch_size
         FOR UPDATE SKIP LOCKED
@@ -1450,6 +1779,8 @@ BEGIN
                       days => v_settings.usage_rollup_retention_days
                   )
               )::date
+          AND NOT EXISTS (SELECT 1 FROM bursar.tenants AS tenant
+              WHERE tenant.id = rollup.tenant_id AND tenant.usage_cutover_target IS NOT NULL)
         ORDER BY
             rollup.usage_day,
             rollup.account_id,
@@ -1472,6 +1803,25 @@ BEGIN
         RETURNING rollup.usage_day
     )
     SELECT count(*)::integer INTO v_rollups FROM deleted;
+
+    WITH candidates AS MATERIALIZED (
+        SELECT tenant_id, charge_id
+        FROM bursar.usage_rollup_contributions AS marker
+        WHERE event_at < (((p_now - make_interval(
+            days => v_settings.usage_rollup_retention_days
+        ))::date)::timestamp AT TIME ZONE 'UTC')
+          AND NOT EXISTS (SELECT 1 FROM bursar.tenants AS tenant
+              WHERE tenant.id = marker.tenant_id AND tenant.usage_cutover_target IS NOT NULL)
+        ORDER BY event_at, tenant_id, charge_id
+        LIMIT v_settings.maintenance_batch_size
+        FOR UPDATE SKIP LOCKED
+    ), deleted AS (
+        DELETE FROM bursar.usage_rollup_contributions AS marker
+        USING candidates
+        WHERE marker.tenant_id = candidates.tenant_id AND marker.charge_id = candidates.charge_id
+        RETURNING marker.charge_id
+    )
+    SELECT count(*)::integer INTO v_rollup_contributions FROM deleted;
 
     -- Undelivered payloads are retained for replay. Operators explicitly
     -- abandon dead letters after confirming the external archive is complete;
@@ -1534,6 +1884,7 @@ BEGIN
         OR v_quota_notifications = v_settings.maintenance_batch_size
         OR v_terminal_leases = v_settings.maintenance_batch_size
         OR v_rollups = v_settings.maintenance_batch_size
+        OR v_rollup_contributions = v_settings.maintenance_batch_size
         OR v_outbox = v_settings.maintenance_batch_size;
 
     UPDATE bursar.storage_settings
@@ -1860,3 +2211,24 @@ REVOKE ALL ON FUNCTION bursar.run_storage_partition_maintenance_base(
 REVOKE ALL ON FUNCTION bursar.run_storage_maintenance(timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
 FROM PUBLIC;
+
+COMMENT ON FUNCTION bursar.get_usage_backend_status(uuid) IS
+'Returns the selected usage backend and any in-progress tenant cutover.';
+COMMENT ON FUNCTION bursar.begin_usage_backend_cutover(uuid, text, timestamptz) IS
+'Pauses tenant usage routing and starts or resumes the requested cutover.';
+COMMENT ON FUNCTION bursar.abort_usage_backend_cutover(uuid) IS
+'Aborts a tenant usage cutover and retains its original backend.';
+
+COMMENT ON FUNCTION bursar.list_usage_cutover_postgres(uuid, timestamptz, uuid, integer) IS
+'Pages the retained PostgreSQL source for an active tenant usage cutover.';
+
+COMMENT ON FUNCTION bursar.import_usage_cutover_item(uuid, jsonb) IS
+'Restores and verifies one retained ClickHouse usage record during a cutover.';
+
+COMMENT ON FUNCTION bursar.verify_usage_cutover_item(uuid, uuid, timestamptz, text) IS
+'Records a verified usage identity and digest during a tenant cutover.';
+COMMENT ON FUNCTION bursar.finish_usage_backend_cutover(uuid, text, bigint) IS
+'Completes a verified, fully drained tenant usage backend cutover.';
+
+COMMENT ON FUNCTION bursar.usage_cutover_projection(uuid, uuid) IS
+'Returns one canonical usage record for an operator cutover.';

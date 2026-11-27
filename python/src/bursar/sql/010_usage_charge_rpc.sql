@@ -55,6 +55,7 @@ DECLARE v_account uuid;
  v_dimensions jsonb;
 
 BEGIN
+    PERFORM bursar.current_usage_backend();
     p_allowance_requested:=COALESCE(p_allowance_requested,p_allowance);
     p_requested := round(p_requested, 6);
     p_allowance := round(p_allowance, 6);
@@ -393,6 +394,7 @@ DECLARE
     v_event_at timestamptz := now();
     v_dimensions jsonb;
 BEGIN
+    PERFORM bursar.current_usage_backend();
     p_requested := round(p_requested, 6);
     v_dimensions := COALESCE(p_dimensions, '{}'::jsonb)
         || jsonb_strip_nulls(

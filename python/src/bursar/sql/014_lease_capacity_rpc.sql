@@ -1035,6 +1035,7 @@ DECLARE
     v_plan_id uuid;
     v_lease_id uuid;
     v_max_concurrent integer;
+    v_global_max_concurrent integer;
     v_requested_minimum numeric;
     v_requested_max_concurrent integer := p_max_concurrent;
     v_quota_error text;
@@ -1266,6 +1267,7 @@ BEGIN
             RETURN;
         END IF;
         v_max_concurrent := v_policy.max_concurrent;
+        v_global_max_concurrent := v_policy.global_max_concurrent;
         v_revision := v_policy.catalog_revision_id;
         v_plan_id := v_policy.plan_id;
     ELSE
@@ -1303,6 +1305,7 @@ BEGIN
     IF v_plan_id IS NOT NULL THEN
         SELECT
             plan.allowed_operations,
+            plan.definition->'allowed_operations' AS operation_access,
             plan.credit_allowance_amount,
             plan.credit_allowance_priority,
             plan.credit_allowance_reset_unit,
@@ -1335,7 +1338,7 @@ BEGIN
             RETURN;
         END IF;
 
-        IF cardinality(v_plan.allowed_operations) > 0
+        IF COALESCE(v_plan.operation_access <> '"all"'::jsonb, true)
            AND NOT p_operation = ANY(v_plan.allowed_operations)
         THEN
             RETURN QUERY
@@ -1537,6 +1540,16 @@ BEGIN
             'active'::bursar.lease_status,
             0::numeric,
             'insufficient_headroom';
+        RETURN;
+    END IF;
+
+    IF v_global_max_concurrent IS NOT NULL
+       AND (SELECT count(*) FROM bursar.credit_leases AS lease
+            WHERE lease.account_id = v_account AND lease.status = 'active'
+              AND lease.expires_at > now()) >= v_global_max_concurrent
+    THEN
+        RETURN QUERY SELECT NULL::uuid, 'active'::bursar.lease_status,
+            0::numeric, 'max_concurrent_reached';
         RETURN;
     END IF;
 

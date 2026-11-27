@@ -21,7 +21,6 @@ type BillingServiceOptions struct {
 	Provisioning                BillingProvisioningPort
 	AutoSelectEntitlementSource *bool
 	PastDueGracePeriod          *time.Duration
-	TerminalPlanKey             string
 }
 
 // Options constructs Bursar's single application-facing facade. CreditStore
@@ -269,7 +268,6 @@ func applyBillingOptions(service *BillingService, options *BillingServiceOptions
 	if options.PastDueGracePeriod != nil {
 		service.pastDueGracePeriod = *options.PastDueGracePeriod
 	}
-	service.terminalPlanKey = options.TerminalPlanKey
 	return nil
 }
 

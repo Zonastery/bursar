@@ -134,6 +134,9 @@ export class BillingManagement {
   async claimAutoRechargeAttempt(input: {
     userId: string;
     idempotencyKey: string;
+    expectedProductId: string;
+    expectedQuantity: number;
+    expectedTopupKey: string;
   }): Promise<BillingAutoRechargeAttempt | null> {
     return this.store.claimAutoRechargeAttempt(input);
   }

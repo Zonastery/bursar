@@ -14,6 +14,7 @@ import {
   type PriceRule,
 } from "./config.js";
 import { ConfigError } from "./errors.js";
+import type { ProviderEnvironment } from "./providers/environment.js";
 import { evaluateExpression } from "./expr.js";
 import type { UsageMetrics } from "./metrics.js";
 
@@ -32,12 +33,17 @@ function requiredMeasure(measures: Record<string, Decimal>, name: string): Decim
 export class PricingEngine {
   constructor(private readonly config: ParsedBursarConfig) {}
 
-  static fromDict<T extends object>(data: T): PricingEngine {
-    return new PricingEngine(loadConfigFromDict(data));
+  static fromDict<T extends object>(data: T, environment?: ProviderEnvironment): PricingEngine {
+    return new PricingEngine(loadConfigFromDict(data, environment));
   }
 
   get pricingSchema(): BursarConfigData {
     return canonicalParsedBursarConfigDict(this.config);
+  }
+
+  /** Whether the operation declares a named usage measure. */
+  hasMeasure(operation: string, measure: string): boolean {
+    return Object.hasOwn(this.config.pricing?.operations[operation]?.measures ?? {}, measure);
   }
 
   calculate(
@@ -94,7 +100,9 @@ export class PricingEngine {
     }
 
     const measures: Record<string, Decimal> = {};
-    for (const name of Object.keys(operation.measures)) {
+    for (const [name, definition] of Object.entries(operation.measures)) {
+      if (definition.required && measuresInput[name] == null)
+        throw new ConfigError(`operation '${metrics.operation}' requires usage measure '${name}'`);
       const value = new Decimal(measuresInput[name] ?? 0);
       if (!value.isFinite() || value.isNegative())
         throw new ConfigError(`usage measure '${name}' must be finite and non-negative`);

@@ -36,19 +36,19 @@ func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 	}
 	priceID := "alpha-credit-pack"
 	resolved, err := store.ResolveAutoRechargeTopup(ctx, AutoRechargeTopupLookup{
-		Provider: "alpha", OfferKey: "credit_pack", Reference: ProviderReference{PriceID: &priceID},
+		Provider: "alpha", OfferKey: "credit_pack", Reference: ProviderReference{PriceID: ScalarProviderID(priceID)},
 	})
 	if err != nil || resolved == nil || resolved.ID != topup.TopupID || resolved.ProductID != priceID {
 		t.Fatalf("resolved auto-recharge top-up = %+v, error = %v", resolved, err)
 	}
 	wrongOffer, err := store.ResolveAutoRechargeTopup(ctx, AutoRechargeTopupLookup{
-		Provider: "alpha", OfferKey: "not-credit-pack", Reference: ProviderReference{PriceID: &priceID},
+		Provider: "alpha", OfferKey: "not-credit-pack", Reference: ProviderReference{PriceID: ScalarProviderID(priceID)},
 	})
 	if err != nil || wrongOffer != nil {
 		t.Fatalf("mismatched auto-recharge top-up = %+v, error = %v", wrongOffer, err)
 	}
 	if absent, err := store.ResolveAutoRechargeTopup(ctx, AutoRechargeTopupLookup{
-		Provider: "alpha", OfferKey: "credit_pack", Reference: ProviderReference{PriceID: stringPointer("missing-price")},
+		Provider: "alpha", OfferKey: "credit_pack", Reference: ProviderReference{PriceID: ScalarProviderID("missing-price")},
 	}); err != nil || absent != nil {
 		t.Fatalf("missing auto-recharge top-up = %+v, error = %v", absent, err)
 	}
@@ -66,7 +66,7 @@ func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 		t.Fatalf("enabled auto-recharge profile = %+v, error = %v", gotProfile, err)
 	}
 
-	attempt, err := store.ClaimAutoRechargeAttempt(ctx, AutoRechargeAttemptClaim{UserID: accountID, IdempotencyKey: "state-attempt-" + uuid.NewString()})
+	attempt, err := store.ClaimAutoRechargeAttempt(ctx, AutoRechargeAttemptClaim{UserID: accountID, IdempotencyKey: "state-attempt-" + uuid.NewString(), ExpectedProductID: priceID, ExpectedQuantity: 1, ExpectedTopupKey: "credit_pack"})
 	if err != nil || attempt == nil || attempt.State != AutoRechargeAttemptClaimed {
 		t.Fatalf("claimed auto-recharge attempt = %+v, error = %v", attempt, err)
 	}

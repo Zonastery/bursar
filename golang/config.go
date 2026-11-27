@@ -41,7 +41,8 @@ type BursarConfig struct {
 type ParsedBursarConfig = BursarConfig
 
 type CatalogConfig struct {
-	DefaultPlan *string
+	DefaultPlan         *string
+	SubscriptionEndPlan *string
 }
 
 type Duration struct {
@@ -81,7 +82,8 @@ type ExpiryPolicy struct {
 }
 
 type MeasureDefinition struct {
-	Unit string
+	Unit     string
+	Required bool
 }
 
 type DimensionDefinition struct {
@@ -241,9 +243,11 @@ type PlanEvolution struct {
 type PlanDefinition struct {
 	DisplayName       string
 	Rank              int
+	Tier              int
 	Description       *string
 	RateCard          *string
 	AllowedOperations []string
+	OperationAccess   string
 	Features          map[string]any
 	CreditAllowance   *CreditAllowance
 	Quotas            map[string]QuotaDefinition
@@ -257,12 +261,59 @@ type ProviderDefinition struct {
 	Adapter *string
 }
 
+// ProviderID is either a scalar provider identifier or environment bindings.
+// Its representation is private so a value cannot contain both forms.
+type ProviderID struct{ value any }
+
+// ScalarProviderID constructs a provider ID shared by the current publication environment.
+func ScalarProviderID(id string) ProviderID { return ProviderID{value: id} }
+
+// BoundProviderID constructs environment-specific provider IDs, copying the input.
+func BoundProviderID(bindings map[ProviderEnvironment]string) ProviderID {
+	copy := make(map[string]string, len(bindings))
+	for env, id := range bindings {
+		copy[string(env)] = id
+	}
+	return ProviderID{value: copy}
+}
+
+// Resolve selects the provider identifier for the given environment.
+func (id ProviderID) Resolve(environment ProviderEnvironment) (string, error) {
+	switch value := id.value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case map[string]string:
+		result, ok := value[string(environment)]
+		if !ok {
+			return "", newConfigError("provider reference has no ID for environment "+string(environment), nil)
+		}
+		return result, nil
+	default:
+		return "", newConfigError("invalid provider ID", nil)
+	}
+}
+func (id ProviderID) canonical() any {
+	if bindings, ok := id.value.(map[string]string); ok {
+		result := make(map[string]string, len(bindings))
+		for key, value := range bindings {
+			result[key] = value
+		}
+		return result
+	}
+	return id.value
+}
+func (id ProviderID) isBound() bool  { _, ok := id.value.(map[string]string); return ok }
+func (id ProviderID) scalar() string { value, _ := id.value.(string); return value }
+
+// ProviderReference retains each provider identifier as one scalar-or-bindings value.
 type ProviderReference struct {
 	Type       string
-	PriceID    *string
-	ProductID  *string
+	PriceID    ProviderID
+	ProductID  ProviderID
 	ObjectKind *string
-	ExternalID *string
+	ExternalID ProviderID
 }
 
 type OfferPrice struct {
@@ -387,6 +438,11 @@ var (
 
 // LoadConfigFromMap validates and parses a raw snake_case configuration map.
 func LoadConfigFromMap(data map[string]any) (*BursarConfig, error) {
+	return LoadConfigFromMapWithEnvironment(data, "")
+}
+
+// LoadConfigFromMapWithEnvironment parses a catalog while retaining all provider bindings.
+func LoadConfigFromMapWithEnvironment(data map[string]any, environment string) (*BursarConfig, error) {
 	if data == nil {
 		return nil, newConfigError("configuration must be an object", nil)
 	}
@@ -395,6 +451,9 @@ func LoadConfigFromMap(data map[string]any) (*BursarConfig, error) {
 	// converting any number through float64 before schema validation.
 	normalized := canonicalJSONMap(data)
 	if err := validateConfigStructure(normalized); err != nil {
+		return nil, err
+	}
+	if err := normalizeCatalog(normalized, environment); err != nil {
 		return nil, err
 	}
 	return parseBursarConfig(normalized)
@@ -1022,6 +1081,11 @@ func parseBursarConfig(raw map[string]any) (*BursarConfig, error) {
 		return nil, err
 	}
 
+	subscriptionEndPlan, err := configOptionalString(catalogRaw, "subscription_end_plan", "catalog.subscription_end_plan")
+	if err != nil {
+		return nil, err
+	}
+
 	credits, err := parseCredits(raw["credits"])
 	if err != nil {
 		return nil, err
@@ -1075,12 +1139,17 @@ func parseBursarConfig(raw map[string]any) (*BursarConfig, error) {
 			return nil, newConfigError("catalog.default_plan references unknown plan '"+*defaultPlan+"'", nil)
 		}
 	}
+	if subscriptionEndPlan != nil {
+		if _, exists := plans[*subscriptionEndPlan]; !exists {
+			return nil, newConfigError("catalog.subscription_end_plan references unknown plan", nil)
+		}
+	}
 	if len(plans) > 0 && defaultPlan == nil {
 		return nil, newConfigError("catalog.default_plan is required when plans are configured", nil)
 	}
 	return &BursarConfig{
 		Version:      1,
-		Catalog:      CatalogConfig{DefaultPlan: defaultPlan},
+		Catalog:      CatalogConfig{DefaultPlan: defaultPlan, SubscriptionEndPlan: subscriptionEndPlan},
 		Pricing:      pricing,
 		Credits:      credits,
 		Entitlements: entitlements,
@@ -1818,9 +1887,6 @@ func parsePricing(value any) (*PricingConfig, error) {
 		if err := validateConfigIdentifiers(dimensionsRaw, path+".dimensions"); err != nil {
 			return nil, err
 		}
-		if len(measuresRaw) == 0 {
-			return nil, newConfigError(path+".measures must not be empty", nil)
-		}
 		measures := make(map[string]MeasureDefinition, len(measuresRaw))
 		for name, value := range measuresRaw {
 			definition, err := configObject(value, path+".measures."+name)
@@ -1834,7 +1900,14 @@ func parsePricing(value any) (*PricingConfig, error) {
 			if err := validateConfigIdentifier(unit, path+".measures."+name+".unit"); err != nil {
 				return nil, err
 			}
-			measures[name] = MeasureDefinition{Unit: unit}
+			required := true
+			if input, exists := definition["required"]; exists {
+				required, err = configBool(input, path+".measures."+name+".required")
+				if err != nil {
+					return nil, err
+				}
+			}
+			measures[name] = MeasureDefinition{Unit: unit, Required: required}
 		}
 		dimensions := make(map[string]DimensionDefinition, len(dimensionsRaw))
 		for name, value := range dimensionsRaw {
@@ -2058,6 +2131,14 @@ func parsePlans(
 				return nil, err
 			}
 		}
+		tier := 0
+		if input, exists := planRaw["tier"]; exists && input != nil {
+			value, err := configInteger(input, path+".tier")
+			if err != nil {
+				return nil, err
+			}
+			tier = value
+		}
 		description, err := configOptionalString(planRaw, "description", path+".description")
 		if err != nil {
 			return nil, err
@@ -2074,11 +2155,33 @@ func parsePlans(
 				return nil, newConfigError(fmt.Sprintf("plans.%s.rate_card references unknown rate card '%s'", key, *rateCard), nil)
 			}
 		}
+		access := "none"
 		allowedOperations := []string{}
-		if input, exists := planRaw["allowed_operations"]; exists && input != nil {
-			allowedOperations, err = configSliceStrings(input, path+".allowed_operations")
-			if err != nil {
-				return nil, err
+		if input, exists := planRaw["allowed_operations"]; exists {
+			if scalar, ok := input.(string); ok {
+				if scalar != "all" && scalar != "none" {
+					return nil, newConfigError(path+".allowed_operations is invalid", nil)
+				}
+				access = scalar
+			} else {
+				allowedOperations, err = configSliceStrings(input, path+".allowed_operations")
+				if err != nil {
+					return nil, err
+				}
+				if len(allowedOperations) == 0 {
+					return nil, newConfigError(path+".allowed_operations must not be empty", nil)
+				}
+				access = "listed"
+			}
+		}
+		if access == "all" {
+			if pricing == nil || rateCard == nil {
+				return nil, newConfigError(path+".allowed_operations=all requires pricing", nil)
+			}
+			for operation := range pricing.Operations {
+				if !ResolvesOperation(pricing, *rateCard, operation) {
+					return nil, newConfigError(path+" enables operation without pricing", nil)
+				}
 			}
 		}
 		seenOperations := map[string]struct{}{}
@@ -2191,9 +2294,11 @@ func parsePlans(
 		plans[key] = PlanDefinition{
 			DisplayName:       displayName,
 			Rank:              rank,
+			Tier:              tier,
 			Description:       description,
 			RateCard:          rateCard,
 			AllowedOperations: allowedOperations,
+			OperationAccess:   access,
 			Features:          features,
 			CreditAllowance:   allowance,
 			Quotas:            quotas,
@@ -2412,51 +2517,74 @@ func parseProviderReference(value any, path string) (ProviderReference, error) {
 	if err != nil {
 		return ProviderReference{}, err
 	}
-	typeValue, err := configString(raw["type"], path+".type")
+	kind, err := configString(raw["type"], path+".type")
 	if err != nil {
 		return ProviderReference{}, err
 	}
-	reference := ProviderReference{Type: typeValue}
-	switch typeValue {
+	ref := ProviderReference{Type: kind}
+	var field string
+	switch kind {
 	case "stripe_price":
-		priceID, err := configString(raw["price_id"], path+".price_id")
-		if err != nil {
-			return ProviderReference{}, err
-		}
-		reference.PriceID = &priceID
+		field = "price_id"
 	case "dodo_product":
-		productID, err := configString(raw["product_id"], path+".product_id")
-		if err != nil {
-			return ProviderReference{}, err
-		}
-		reference.ProductID = &productID
+		field = "product_id"
 	case "custom_object":
+		field = "external_id"
 		objectKind, err := configString(raw["object_kind"], path+".object_kind")
 		if err != nil {
 			return ProviderReference{}, err
 		}
-		externalID, err := configString(raw["external_id"], path+".external_id")
-		if err != nil {
-			return ProviderReference{}, err
-		}
-		reference.ObjectKind, reference.ExternalID = &objectKind, &externalID
+		ref.ObjectKind = &objectKind
 	default:
 		return ProviderReference{}, newConfigError(path+".type is invalid", nil)
 	}
-	return reference, nil
+	var id ProviderID
+	if obj, ok := raw[field].(map[string]any); ok {
+		bindings := make(map[ProviderEnvironment]string, len(obj))
+		for env, v := range obj {
+			text, err := configString(v, path+"."+field+"."+env)
+			if err != nil {
+				return ProviderReference{}, err
+			}
+			bindings[ProviderEnvironment(env)] = text
+		}
+		id = BoundProviderID(bindings)
+	} else {
+		text, err := configString(raw[field], path+"."+field)
+		if err != nil {
+			return ProviderReference{}, err
+		}
+		id = ScalarProviderID(text)
+	}
+	switch kind {
+	case "stripe_price":
+		ref.PriceID = id
+	case "dodo_product":
+		ref.ProductID = id
+	case "custom_object":
+		ref.ExternalID = id
+	}
+
+	return ref, nil
 }
 
-func providerReferenceExternalID(reference ProviderReference) string {
-	if reference.PriceID != nil {
-		return *reference.PriceID
+// ResolveProviderReference selects only the configured environment for an operation.
+func ResolveProviderReference(ref ProviderReference, environment ProviderEnvironment) (ProviderReference, error) {
+	for _, id := range []*ProviderID{&ref.PriceID, &ref.ProductID, &ref.ExternalID} {
+		if id.value == nil {
+			continue
+		}
+		value, err := id.Resolve(environment)
+		if err != nil {
+			return ref, err
+		}
+		*id = ScalarProviderID(value)
 	}
-	if reference.ProductID != nil {
-		return *reference.ProductID
-	}
-	if reference.ExternalID != nil {
-		return *reference.ExternalID
-	}
-	return ""
+	return ref, nil
+}
+
+func providerReferenceExternalID(ref ProviderReference) string {
+	return firstNonEmpty(ref.PriceID.scalar(), ref.ProductID.scalar(), ref.ExternalID.scalar())
 }
 
 func providerReferenceCompatible(provider ProviderDefinition, reference ProviderReference) bool {
@@ -2543,11 +2671,18 @@ func parseCommerceOffer(
 		if !providerReferenceCompatible(provider, reference) {
 			return CommerceOffer{}, newConfigError(path+" has incompatible provider reference", nil)
 		}
-		uniqueKey := providerKey + "/" + providerReferenceExternalID(reference)
-		if _, exists := seenProviderObjects[uniqueKey]; exists {
-			return CommerceOffer{}, newConfigError("duplicate provider object reference "+uniqueKey, nil)
+		// A scalar occupies every environment; maps occupy only their named environments.
+		for _, env := range []ProviderEnvironment{"test", "live", "sandbox"} {
+			selected, err := ResolveProviderReference(reference, env)
+			if err != nil {
+				continue
+			}
+			uniqueKey := providerKey + "/" + string(env) + "/" + providerReferenceExternalID(selected)
+			if _, exists := seenProviderObjects[uniqueKey]; exists {
+				return CommerceOffer{}, newConfigError("duplicate provider object reference "+uniqueKey, nil)
+			}
+			seenProviderObjects[uniqueKey] = struct{}{}
 		}
-		seenProviderObjects[uniqueKey] = struct{}{}
 		references[providerKey] = reference
 	}
 	offer := CommerceOffer{
@@ -2937,6 +3072,9 @@ func CanonicalParsedBursarConfigDict(config *BursarConfig) map[string]any {
 	} else {
 		result["catalog"] = map[string]any{}
 	}
+	if config.Catalog.SubscriptionEndPlan != nil {
+		result["catalog"].(map[string]any)["subscription_end_plan"] = *config.Catalog.SubscriptionEndPlan
+	}
 	if config.Pricing != nil {
 		result["pricing"] = canonicalPricing(*config.Pricing)
 	}
@@ -2997,7 +3135,7 @@ func canonicalJSONValue(value any) any {
 }
 
 func amountConfigString(value Amount) string {
-	return QuantizeMoney(value).StringFixed(MoneyDecimalPlaces)
+	return value.String()
 }
 
 func canonicalDuration(value Duration) map[string]any {
@@ -3215,7 +3353,7 @@ func canonicalPricing(value PricingConfig) map[string]any {
 	for key, operation := range value.Operations {
 		measures := make(map[string]any, len(operation.Measures))
 		for name, definition := range operation.Measures {
-			measures[name] = map[string]any{"unit": definition.Unit}
+			measures[name] = map[string]any{"unit": definition.Unit, "required": definition.Required}
 		}
 		dimensions := make(map[string]any, len(operation.Dimensions))
 		for name, definition := range operation.Dimensions {
@@ -3262,9 +3400,19 @@ func canonicalPlans(value map[string]PlanDefinition) map[string]any {
 				"emit_at_percent": append([]int(nil), quota.EmitAtPercent...),
 			}
 		}
+		var access any = plan.OperationAccess
+		if plan.OperationAccess == "" {
+			access = "none"
+			if len(plan.AllowedOperations) > 0 {
+				access = plan.AllowedOperations
+			}
+		}
+		if plan.OperationAccess == "listed" {
+			access = plan.AllowedOperations
+		}
 		entry := map[string]any{
-			"display_name": plan.DisplayName, "rank": plan.Rank,
-			"allowed_operations": append([]string(nil), plan.AllowedOperations...),
+			"display_name": plan.DisplayName, "rank": plan.Rank, "tier": plan.Tier,
+			"allowed_operations": access,
 			"features":           features, "quotas": quotas,
 			"evolution": map[string]any{"default_rollout": plan.Evolution.DefaultRollout},
 		}
@@ -3293,17 +3441,13 @@ func canonicalPlans(value map[string]PlanDefinition) map[string]any {
 
 func canonicalProviderReference(value ProviderReference) map[string]any {
 	result := map[string]any{"type": value.Type}
-	if value.PriceID != nil {
-		result["price_id"] = *value.PriceID
-	}
-	if value.ProductID != nil {
-		result["product_id"] = *value.ProductID
+	for field, id := range map[string]ProviderID{"price_id": value.PriceID, "product_id": value.ProductID, "external_id": value.ExternalID} {
+		if id.value != nil {
+			result[field] = id.canonical()
+		}
 	}
 	if value.ObjectKind != nil {
 		result["object_kind"] = *value.ObjectKind
-	}
-	if value.ExternalID != nil {
-		result["external_id"] = *value.ExternalID
 	}
 	return result
 }

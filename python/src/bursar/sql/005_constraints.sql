@@ -11,7 +11,7 @@
 --   4. Quota measurement and plan history
 --   5. Catalog immutability and projection validation
 --   6. Refund bounds
---   7. Tenant-qualified relationship rewrite
+--   7. Tenant-qualified relationship keys
 
 -- 1. Shared projection and outbox support
 
@@ -55,7 +55,13 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF bursar.current_usage_backend() = 'postgres' THEN
+    IF COALESCE(NULLIF(current_setting('bursar.usage_backend', true), ''), 'postgres') = 'postgres' THEN
+        INSERT INTO bursar.usage_rollup_contributions(tenant_id, charge_id, event_at)
+        VALUES (NEW.tenant_id, NEW.charge_id, NEW.event_at)
+        ON CONFLICT (tenant_id, charge_id) DO NOTHING;
+        IF NOT FOUND THEN
+            RETURN NEW;
+        END IF;
         INSERT INTO bursar.usage_daily_rollups(
         tenant_id,
         usage_day,
@@ -1521,285 +1527,819 @@ BEGIN
 END
 $$;
 
--- 7. Tenant-qualified relationship rewrite
+-- 7. Tenant-qualified relationship keys
 
--- Snapshot the original relationship graph, then replace every relationship
--- between tenant-owned tables with a tenant-prefixed composite foreign key.
--- The original single-tenant foreign keys are removed after the composite
--- constraints have been installed.
---
--- Subject identifiers are the only host-supplied IDs and may repeat between
--- tenants. Build their final key up front so the relationship rewrite can use
--- it directly instead of leaving a duplicate unique index behind.
-CREATE UNIQUE INDEX subjects_tenant_id_id_uidx
-ON bursar.subjects (tenant_id, id);
+-- Referenced tenant-qualified keys, followed by the complete relationship graph.
+CREATE UNIQUE INDEX catalog_topups_tenant_id_id_key
+ON bursar.catalog_topups (tenant_id, id);
+CREATE UNIQUE INDEX allowance_windows_tenant_id_id_key
+ON bursar.allowance_windows (tenant_id, id);
+CREATE UNIQUE INDEX billing_credit_grants_tenant_id_id_key
+ON bursar.billing_credit_grants (tenant_id, id);
+CREATE UNIQUE INDEX billing_events_tenant_id_id_key
+ON bursar.billing_events (tenant_id, id);
+CREATE UNIQUE INDEX billing_events_tenant_id_id_payload_received_at_key
+ON bursar.billing_events (tenant_id, id, payload_received_at);
+CREATE UNIQUE INDEX billing_payments_tenant_id_id_key
+ON bursar.billing_payments (tenant_id, id);
+CREATE UNIQUE INDEX billing_payments_tenant_id_id_subject_id_key
+ON bursar.billing_payments (tenant_id, id, subject_id);
+CREATE UNIQUE INDEX billing_payments_tenant_id_id_subject_id_provider_prov_70120919
+ON bursar.billing_payments (tenant_id, id, subject_id, provider, provider_environment);
+CREATE UNIQUE INDEX billing_refunds_tenant_id_id_key
+ON bursar.billing_refunds (tenant_id, id);
+CREATE UNIQUE INDEX billing_subscriptions_tenant_id_id_key
+ON bursar.billing_subscriptions (tenant_id, id);
+CREATE UNIQUE INDEX billing_subscriptions_tenant_id_id_subject_id_key
+ON bursar.billing_subscriptions (tenant_id, id, subject_id);
+CREATE UNIQUE INDEX billing_subscriptions_tenant_id_id_subject_id_provider_86f3f32a
+ON bursar.billing_subscriptions (tenant_id, id, subject_id, provider_environment);
+CREATE UNIQUE INDEX billing_subscriptions_tenant_id_id_subject_id_provider_99a2f7c7
+ON bursar.billing_subscriptions (tenant_id, id, subject_id, provider, provider_environment);
+CREATE UNIQUE INDEX catalog_admission_policies_tenant_id_catalog_revision__dd2766ee
+ON bursar.catalog_admission_policies (tenant_id, catalog_revision_id, policy_key);
+CREATE UNIQUE INDEX catalog_buckets_tenant_id_catalog_revision_id_bucket_key_key
+ON bursar.catalog_buckets (tenant_id, catalog_revision_id, bucket_key);
+CREATE UNIQUE INDEX catalog_credit_policies_tenant_id_catalog_revision_id__a63dfe19
+ON bursar.catalog_credit_policies (tenant_id, catalog_revision_id, policy_key);
+CREATE UNIQUE INDEX catalog_entitlement_features_tenant_id_catalog_revisio_770753d9
+ON bursar.catalog_entitlement_features (tenant_id, catalog_revision_id, feature_key);
+CREATE UNIQUE INDEX catalog_grant_awards_tenant_id_id_catalog_revision_id_key
+ON bursar.catalog_grant_awards (tenant_id, id, catalog_revision_id);
+CREATE UNIQUE INDEX catalog_grant_programs_tenant_id_id_catalog_revision_id_key
+ON bursar.catalog_grant_programs (tenant_id, id, catalog_revision_id);
+CREATE UNIQUE INDEX catalog_offers_tenant_id_id_catalog_revision_id_key
+ON bursar.catalog_offers (tenant_id, id, catalog_revision_id);
+CREATE UNIQUE INDEX catalog_operations_tenant_id_catalog_revision_id_opera_acfae2b5
+ON bursar.catalog_operations (tenant_id, catalog_revision_id, operation_key);
+CREATE UNIQUE INDEX catalog_plan_quotas_tenant_id_id_key
+ON bursar.catalog_plan_quotas (tenant_id, id);
+CREATE UNIQUE INDEX catalog_plans_tenant_id_catalog_revision_id_plan_key_key
+ON bursar.catalog_plans (tenant_id, catalog_revision_id, plan_key);
+CREATE UNIQUE INDEX catalog_plans_tenant_id_id_catalog_revision_id_key
+ON bursar.catalog_plans (tenant_id, id, catalog_revision_id);
+CREATE UNIQUE INDEX catalog_plans_tenant_id_id_catalog_revision_id_plan_key_key
+ON bursar.catalog_plans (tenant_id, id, catalog_revision_id, plan_key);
+CREATE UNIQUE INDEX catalog_plans_tenant_id_id_key
+ON bursar.catalog_plans (tenant_id, id);
+CREATE UNIQUE INDEX catalog_rate_cards_tenant_id_catalog_revision_id_rate__b2603ded
+ON bursar.catalog_rate_cards (tenant_id, catalog_revision_id, rate_card_key);
+CREATE UNIQUE INDEX catalog_revisions_tenant_id_id_key
+ON bursar.catalog_revisions (tenant_id, id);
+CREATE UNIQUE INDEX catalog_topups_tenant_id_catalog_revision_id_topup_key_key
+ON bursar.catalog_topups (tenant_id, catalog_revision_id, topup_key);
+CREATE UNIQUE INDEX catalog_topups_tenant_id_id_catalog_revision_id_key
+ON bursar.catalog_topups (tenant_id, id, catalog_revision_id);
+CREATE UNIQUE INDEX credit_accounts_tenant_id_id_key
+ON bursar.credit_accounts (tenant_id, id);
+CREATE UNIQUE INDEX credit_leases_tenant_id_id_key
+ON bursar.credit_leases (tenant_id, id);
+CREATE UNIQUE INDEX credit_ledger_entries_tenant_id_id_key
+ON bursar.credit_ledger_entries (tenant_id, id);
+CREATE UNIQUE INDEX credit_lot_allocations_tenant_id_id_key
+ON bursar.credit_lot_allocations (tenant_id, id);
+CREATE UNIQUE INDEX credit_lot_restorations_tenant_id_id_key
+ON bursar.credit_lot_restorations (tenant_id, id);
+CREATE UNIQUE INDEX credit_lot_source_allocations_tenant_id_id_key
+ON bursar.credit_lot_source_allocations (tenant_id, id);
+CREATE UNIQUE INDEX credit_lot_sources_tenant_id_id_key
+ON bursar.credit_lot_sources (tenant_id, id);
+CREATE UNIQUE INDEX credit_lots_tenant_id_id_key
+ON bursar.credit_lots (tenant_id, id);
+CREATE UNIQUE INDEX credit_team_members_tenant_id_team_id_subject_id_key
+ON bursar.credit_team_members (tenant_id, team_id, subject_id);
+CREATE UNIQUE INDEX credit_teams_tenant_id_id_key
+ON bursar.credit_teams (tenant_id, id);
+CREATE UNIQUE INDEX credit_usage_charges_tenant_id_id_event_at_key
+ON bursar.credit_usage_charges (tenant_id, id, event_at);
+CREATE UNIQUE INDEX credit_usage_charges_tenant_id_id_key
+ON bursar.credit_usage_charges (tenant_id, id);
+CREATE UNIQUE INDEX grant_program_events_tenant_id_id_key
+ON bursar.grant_program_events (tenant_id, id);
+CREATE UNIQUE INDEX quota_usage_events_tenant_id_id_key
+ON bursar.quota_usage_events (tenant_id, id);
+CREATE UNIQUE INDEX quota_windows_tenant_id_id_key
+ON bursar.quota_windows (tenant_id, id);
 
--- Capture the pre-rewrite FK catalog, including action and deferrability metadata,
--- so the generated tenant-qualified constraints preserve original behavior.
-CREATE TEMPORARY TABLE bursar_multitenant_foreign_keys
-ON COMMIT DROP
-AS
-SELECT
-    constraint_info.oid,
-    constraint_info.conname,
-    constraint_info.conrelid,
-    constraint_info.confrelid,
-    constraint_info.conkey,
-    constraint_info.confkey,
-    constraint_info.confupdtype,
-    constraint_info.confdeltype,
-    constraint_info.condeferrable,
-    constraint_info.condeferred,
-    child_table.relname AS child_table_name,
-    parent_table.relname AS parent_table_name
-FROM pg_constraint AS constraint_info
-INNER JOIN pg_class AS child_table
-    ON constraint_info.conrelid = child_table.oid
-INNER JOIN pg_class AS parent_table
-    ON constraint_info.confrelid = parent_table.oid
-WHERE
-    constraint_info.contype = 'f'
-    AND constraint_info.connamespace = 'bursar'::regnamespace
-    AND constraint_info.conparentid = 0
-    AND NOT child_table.relispartition
-    AND NOT parent_table.relispartition
-    AND EXISTS (
-        SELECT 1
-        FROM pg_attribute AS child_tenant
-        WHERE
-            child_tenant.attrelid = constraint_info.conrelid
-            AND child_tenant.attname = 'tenant_id'
-            AND NOT child_tenant.attisdropped
-    )
-    AND EXISTS (
-        SELECT 1
-        FROM pg_attribute AS parent_tenant
-        WHERE
-            parent_tenant.attrelid = constraint_info.confrelid
-            AND parent_tenant.attname = 'tenant_id'
-            AND NOT parent_tenant.attisdropped
-    );
+ALTER TABLE bursar.account_plan_assignment_history
+ADD CONSTRAINT account_plan_assignment_history_tenant_id_account_id_c_dd6c8b66
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
 
--- For every tenant-owned relationship, create the required tenant-leading parent
--- key and child lookup index, add the composite FK, then remove the unsafe FK.
--- Longer keys are processed first so one covering index can serve shorter FKs;
--- only complete indexes count because an arbitrary partial predicate can omit
--- rows even when every referenced child column is NOT NULL.
-DO $$
-DECLARE
-    v_fk record;
-    v_child_columns text;
-    v_child_column_names text;
-    v_parent_columns text;
-    v_parent_column_names text;
-    v_child_key smallint [];
-    v_parent_key smallint [];
-    v_child_tenant_attnum smallint;
-    v_parent_tenant_attnum smallint;
-    v_parent_index_name text;
-    v_child_index_name text;
-    v_constraint_name text;
-    v_name_seed text;
-    v_update_action text;
-    v_delete_action text;
-    v_deferrability text;
-BEGIN
-    FOR v_fk IN
-        SELECT *
-        FROM bursar_multitenant_foreign_keys
-        ORDER BY cardinality(conkey) DESC, oid
-    LOOP
-        SELECT
-            string_agg(
-                format('%I', attribute_info.attname),
-                ', ' ORDER BY key_info.ordinality
-            ),
-            string_agg(
-                attribute_info.attname,
-                '_' ORDER BY key_info.ordinality
-            )
-        INTO
-            v_child_columns,
-            v_child_column_names
-        FROM unnest(v_fk.conkey) WITH ORDINALITY AS key_info(attnum, ordinality)
-        JOIN pg_attribute AS attribute_info
-          ON attribute_info.attrelid = v_fk.conrelid
-         AND attribute_info.attnum = key_info.attnum;
+ALTER TABLE bursar.account_plan_assignment_history
+ADD CONSTRAINT account_plan_assignment_history_tenant_id_plan_id_cata_4a7c0849
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id, plan_key)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id, plan_key);
 
-        SELECT
-            string_agg(
-                format('%I', attribute_info.attname),
-                ', ' ORDER BY key_info.ordinality
-            ),
-            string_agg(
-                attribute_info.attname,
-                '_' ORDER BY key_info.ordinality
-            )
-        INTO v_parent_columns, v_parent_column_names
-        FROM unnest(v_fk.confkey) WITH ORDINALITY AS key_info(attnum, ordinality)
-        JOIN pg_attribute AS attribute_info
-          ON attribute_info.attrelid = v_fk.confrelid
-         AND attribute_info.attnum = key_info.attnum;
+ALTER TABLE bursar.account_plan_assignments
+ADD CONSTRAINT account_plan_assignments_tenant_id_account_id_credit_a_38166cb1
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
 
-        SELECT attribute_info.attnum
-        INTO v_child_tenant_attnum
-        FROM pg_attribute AS attribute_info
-        WHERE attribute_info.attrelid = v_fk.conrelid
-          AND attribute_info.attname = 'tenant_id'
-          AND NOT attribute_info.attisdropped;
+ALTER TABLE bursar.account_plan_assignments
+ADD CONSTRAINT account_plan_assignments_tenant_id_plan_id_catalog_rev_aef9cdcb
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id, plan_key)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id, plan_key);
 
-        SELECT attribute_info.attnum
-        INTO v_parent_tenant_attnum
-        FROM pg_attribute AS attribute_info
-        WHERE attribute_info.attrelid = v_fk.confrelid
-          AND attribute_info.attname = 'tenant_id'
-          AND NOT attribute_info.attisdropped;
+ALTER TABLE bursar.allowance_windows
+ADD CONSTRAINT allowance_windows_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
 
-        v_child_key := array_prepend(v_child_tenant_attnum, v_fk.conkey);
-        v_parent_key := array_prepend(v_parent_tenant_attnum, v_fk.confkey);
+ALTER TABLE bursar.allowance_windows
+ADD CONSTRAINT allowance_windows_tenant_id_plan_id_catalog_revision_i_cf3649d1
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id);
 
-        v_name_seed := v_fk.parent_table_name
-            || '_tenant_id_'
-            || v_parent_column_names
-            || '_key';
-        v_parent_index_name := CASE
-            WHEN length(v_name_seed) <= 63 THEN v_name_seed
-            ELSE left(v_name_seed, 54)
-                || '_'
-                || substr(md5(v_name_seed), 1, 8)
-        END;
+ALTER TABLE bursar.billing_auto_recharge_attempts
+ADD CONSTRAINT billing_auto_recharge_attempts_tenant_id_subject_id_su_9247aefd
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
 
-        v_name_seed := v_fk.child_table_name
-            || '_tenant_id_'
-            || v_child_column_names
-            || '_idx';
-        v_child_index_name := CASE
-            WHEN length(v_name_seed) <= 63 THEN v_name_seed
-            ELSE left(v_name_seed, 54)
-                || '_'
-                || substr(md5(v_name_seed), 1, 8)
-        END;
+ALTER TABLE bursar.billing_auto_recharge_attempts
+ADD CONSTRAINT billing_auto_recharge_attempts_tenant_id_topup_id_cata_a26e080b
+FOREIGN KEY (tenant_id, topup_id, catalog_revision_id)
+REFERENCES bursar.catalog_topups (tenant_id, id, catalog_revision_id);
 
-        v_name_seed := v_fk.child_table_name
-            || '_tenant_id_'
-            || v_child_column_names
-            || '_'
-            || v_fk.parent_table_name
-            || '_fkey';
-        v_constraint_name := CASE
-            WHEN length(v_name_seed) <= 63 THEN v_name_seed
-            ELSE left(v_name_seed, 54)
-                || '_'
-                || substr(md5(v_name_seed), 1, 8)
-        END;
+ALTER TABLE bursar.billing_auto_recharge_profiles
+ADD CONSTRAINT billing_auto_recharge_profiles_tenant_id_catalog_revis_12516701
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id);
 
-        IF NOT EXISTS (
-            SELECT 1
-            FROM pg_index AS index_info
-            WHERE index_info.indrelid = v_fk.confrelid
-              AND index_info.indisunique
-              AND index_info.indisvalid
-              AND index_info.indpred IS NULL
-              AND index_info.indnkeyatts = cardinality(v_parent_key)
-              AND (
-                  regexp_split_to_array(
-                      trim(index_info.indkey::text),
-                      ' +'
-                  )
-              )[1:cardinality(v_parent_key)]::smallint[] = v_parent_key
-        ) THEN
-            EXECUTE format(
-                'CREATE UNIQUE INDEX %I ON %s (tenant_id, %s)',
-                v_parent_index_name,
-                v_fk.confrelid::regclass,
-                v_parent_columns
-            );
-        END IF;
+ALTER TABLE bursar.billing_auto_recharge_profiles
+ADD CONSTRAINT billing_auto_recharge_profiles_tenant_id_subject_id_su_9bddeda3
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
 
-        IF NOT EXISTS (
-            SELECT 1
-            FROM pg_index AS index_info
-            WHERE index_info.indrelid = v_fk.conrelid
-              AND index_info.indisvalid
-              AND index_info.indnkeyatts >= cardinality(v_child_key)
-              AND (
-                  regexp_split_to_array(
-                      trim(index_info.indkey::text),
-                      ' +'
-                  )
-              )[1:cardinality(v_child_key)]::smallint[] = v_child_key
-              AND index_info.indpred IS NULL
-        ) THEN
-            EXECUTE format(
-                'CREATE INDEX %I ON %s (tenant_id, %s)',
-                v_child_index_name,
-                v_fk.conrelid::regclass,
-                v_child_columns
-            );
-        END IF;
+ALTER TABLE bursar.billing_auto_recharge_profiles
+ADD CONSTRAINT billing_auto_recharge_profiles_tenant_id_topup_id_cata_17fdbd9f
+FOREIGN KEY (tenant_id, topup_id, catalog_revision_id)
+REFERENCES bursar.catalog_topups (tenant_id, id, catalog_revision_id);
 
-        v_update_action := CASE v_fk.confupdtype
-            WHEN 'r' THEN ' ON UPDATE RESTRICT'
-            WHEN 'c' THEN ' ON UPDATE CASCADE'
-            WHEN 'n' THEN ' ON UPDATE SET NULL'
-            WHEN 'd' THEN ' ON UPDATE SET DEFAULT'
-            ELSE ''
-        END;
-        v_delete_action := CASE v_fk.confdeltype
-            WHEN 'r' THEN ' ON DELETE RESTRICT'
-            WHEN 'c' THEN ' ON DELETE CASCADE'
-            WHEN 'n' THEN ' ON DELETE SET NULL'
-            WHEN 'd' THEN ' ON DELETE SET DEFAULT'
-            ELSE ''
-        END;
-        v_deferrability := CASE
-            WHEN v_fk.condeferrable AND v_fk.condeferred
-            THEN ' DEFERRABLE INITIALLY DEFERRED'
-            WHEN v_fk.condeferrable
-            THEN ' DEFERRABLE INITIALLY IMMEDIATE'
-            ELSE ''
-        END;
+ALTER TABLE bursar.billing_checkout_intents
+ADD CONSTRAINT billing_checkout_intents_tenant_id_catalog_revision_id_43811098
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id);
 
-        EXECUTE format(
-            'ALTER TABLE %s ADD CONSTRAINT %I '
-            'FOREIGN KEY (tenant_id, %s) '
-            'REFERENCES %s (tenant_id, %s)%s%s%s',
-            v_fk.conrelid::regclass,
-            v_constraint_name,
-            v_child_columns,
-            v_fk.confrelid::regclass,
-            v_parent_columns,
-            v_update_action,
-            v_delete_action,
-            v_deferrability
-        );
-    END LOOP;
+ALTER TABLE bursar.billing_checkout_intents
+ADD CONSTRAINT billing_checkout_intents_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
 
-    FOR v_fk IN
-        SELECT * FROM bursar_multitenant_foreign_keys ORDER BY oid
-    LOOP
-        EXECUTE format(
-            'ALTER TABLE %s DROP CONSTRAINT %I',
-            v_fk.conrelid::regclass,
-            v_fk.conname
-        );
-    END LOOP;
-END
-$$;
+ALTER TABLE bursar.billing_credit_grants
+ADD CONSTRAINT billing_credit_grants_tenant_id_billing_event_id_billi_379dbd55
+FOREIGN KEY (tenant_id, billing_event_id)
+REFERENCES bursar.billing_events (tenant_id, id);
 
--- Subject IDs are supplied by host applications and may legitimately be the
--- same UUID in two tenants. Their primary key must therefore include tenancy.
-ALTER TABLE bursar.subjects DROP CONSTRAINT subjects_pkey;
-ALTER TABLE bursar.subjects
-ADD CONSTRAINT subjects_pkey
-PRIMARY KEY USING INDEX subjects_tenant_id_id_uidx;
+ALTER TABLE bursar.billing_credit_grants
+ADD CONSTRAINT billing_credit_grants_tenant_id_ledger_entry_id_credit_e0ef73f7
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
 
--- The original timestamp-qualified keys existed only to let PostgreSQL create
--- the initial foreign keys before the tenant rewrite. Their replacements now
--- reference tenant-qualified unique indexes, so remove the narrower duplicate
--- constraints and avoid paying for redundant unique B-trees.
-ALTER TABLE bursar.credit_usage_charges
-DROP CONSTRAINT credit_usage_charges_id_event_at_key;
+ALTER TABLE bursar.billing_credit_grants
+ADD CONSTRAINT billing_credit_grants_tenant_id_payment_id_subject_id__8352f50a
+FOREIGN KEY (tenant_id, payment_id, subject_id)
+REFERENCES bursar.billing_payments (tenant_id, id, subject_id);
+
+ALTER TABLE bursar.billing_credit_grants
+ADD CONSTRAINT billing_credit_grants_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_credit_grants
+ADD CONSTRAINT billing_credit_grants_tenant_id_subscription_id_subjec_07d18b27
+FOREIGN KEY (tenant_id, subscription_id, subject_id)
+REFERENCES bursar.billing_subscriptions (tenant_id, id, subject_id);
+
+ALTER TABLE bursar.billing_credit_grants
+ADD CONSTRAINT billing_credit_grants_tenant_id_topup_id_catalog_revis_77be0776
+FOREIGN KEY (tenant_id, topup_id, catalog_revision_id)
+REFERENCES bursar.catalog_topups (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.billing_customers
+ADD CONSTRAINT billing_customers_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_disputes
+ADD CONSTRAINT billing_disputes_tenant_id_payment_id_subject_id_provi_55fff152
+FOREIGN KEY (
+    tenant_id,
+    payment_id,
+    subject_id,
+    provider,
+    provider_environment
+)
+REFERENCES bursar.billing_payments (tenant_id, id, subject_id, provider, provider_environment);
+
+ALTER TABLE bursar.billing_disputes
+ADD CONSTRAINT billing_disputes_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_entitlement_sources
+ADD CONSTRAINT billing_entitlement_sources_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_entitlement_sources
+ADD CONSTRAINT billing_entitlement_sources_tenant_id_subscription_id__4f43303e
+FOREIGN KEY (
+    tenant_id,
+    subscription_id,
+    subject_id,
+    provider_environment
+)
+REFERENCES bursar.billing_subscriptions (tenant_id, id, subject_id, provider_environment);
+
+ALTER TABLE bursar.billing_event_payloads
+ADD CONSTRAINT billing_event_payloads_tenant_id_event_id_received_at__2c75a2fb
+FOREIGN KEY (tenant_id, event_id, received_at)
+REFERENCES bursar.billing_events (tenant_id, id, payload_received_at) ON DELETE CASCADE;
 
 ALTER TABLE bursar.billing_events
-DROP CONSTRAINT billing_events_id_payload_received_at_key;
+ADD CONSTRAINT billing_events_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE bursar.billing_invoices
+ADD CONSTRAINT billing_invoices_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_invoices
+ADD CONSTRAINT billing_invoices_tenant_id_subscription_id_subject_id__917fb5d8
+FOREIGN KEY (
+    tenant_id,
+    subscription_id,
+    subject_id,
+    provider,
+    provider_environment
+)
+REFERENCES bursar.billing_subscriptions (tenant_id, id, subject_id, provider, provider_environment);
+
+ALTER TABLE bursar.billing_payments
+ADD CONSTRAINT billing_payments_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_preferences
+ADD CONSTRAINT billing_preferences_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_refund_grants
+ADD CONSTRAINT billing_refund_grants_tenant_id_grant_id_billing_credi_000be710
+FOREIGN KEY (tenant_id, grant_id)
+REFERENCES bursar.billing_credit_grants (tenant_id, id);
+
+ALTER TABLE bursar.billing_refund_grants
+ADD CONSTRAINT billing_refund_grants_tenant_id_ledger_entry_id_credit_b41676a2
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.billing_refund_grants
+ADD CONSTRAINT billing_refund_grants_tenant_id_refund_id_billing_refunds_fkey
+FOREIGN KEY (tenant_id, refund_id)
+REFERENCES bursar.billing_refunds (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.billing_refunds
+ADD CONSTRAINT billing_refunds_tenant_id_payment_id_billing_payments_fkey
+FOREIGN KEY (tenant_id, payment_id)
+REFERENCES bursar.billing_payments (tenant_id, id);
+
+ALTER TABLE bursar.billing_subscription_changes
+ADD CONSTRAINT billing_subscription_changes_tenant_id_from_offer_id_f_41b22d7a
+FOREIGN KEY (tenant_id, from_offer_id, from_catalog_revision_id)
+REFERENCES bursar.catalog_offers (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.billing_subscription_changes
+ADD CONSTRAINT billing_subscription_changes_tenant_id_subscription_id_7fe33ea7
+FOREIGN KEY (tenant_id, subscription_id)
+REFERENCES bursar.billing_subscriptions (tenant_id, id);
+
+ALTER TABLE bursar.billing_subscription_changes
+ADD CONSTRAINT billing_subscription_changes_tenant_id_to_offer_id_to__d5d37a8c
+FOREIGN KEY (tenant_id, to_offer_id, to_catalog_revision_id)
+REFERENCES bursar.catalog_offers (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.billing_subscription_conflicts
+ADD CONSTRAINT billing_subscription_conflicts_tenant_id_billing_event_c152a047
+FOREIGN KEY (tenant_id, billing_event_id)
+REFERENCES bursar.billing_events (tenant_id, id);
+
+ALTER TABLE bursar.billing_subscription_conflicts
+ADD CONSTRAINT billing_subscription_conflicts_tenant_id_existing_subs_17b1b40d
+FOREIGN KEY (tenant_id, existing_subscription_id)
+REFERENCES bursar.billing_subscriptions (tenant_id, id);
+
+ALTER TABLE bursar.billing_subscription_conflicts
+ADD CONSTRAINT billing_subscription_conflicts_tenant_id_subject_id_su_235678eb
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.billing_subscriptions
+ADD CONSTRAINT billing_subscriptions_tenant_id_entitlement_billing_ev_a73e765f
+FOREIGN KEY (tenant_id, entitlement_billing_event_id)
+REFERENCES bursar.billing_events (tenant_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE bursar.billing_subscriptions
+ADD CONSTRAINT billing_subscriptions_tenant_id_offer_id_catalog_revis_91bc4ceb
+FOREIGN KEY (tenant_id, offer_id, catalog_revision_id)
+REFERENCES bursar.catalog_offers (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.billing_subscriptions
+ADD CONSTRAINT billing_subscriptions_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.catalog_activation_history
+ADD CONSTRAINT catalog_activation_history_tenant_id_catalog_revision__12abc0b1
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id);
+
+ALTER TABLE bursar.catalog_admission_operation_policies
+ADD CONSTRAINT catalog_admission_operation_policies_tenant_id_catalog_e6169799
+FOREIGN KEY (tenant_id, catalog_revision_id, admission_policy_key)
+REFERENCES bursar.catalog_admission_policies (tenant_id, catalog_revision_id, policy_key) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_admission_operation_policies
+ADD CONSTRAINT catalog_admission_operation_policies_tenant_id_catalog_f7a87de5
+FOREIGN KEY (tenant_id, catalog_revision_id, operation_key)
+REFERENCES bursar.catalog_operations (tenant_id, catalog_revision_id, operation_key) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_admission_policies
+ADD CONSTRAINT catalog_admission_policies_tenant_id_catalog_revision__cbd459af
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_auto_recharge_policies
+ADD CONSTRAINT catalog_auto_recharge_policies_tenant_id_catalog_revis_cf5e7266
+FOREIGN KEY (tenant_id, catalog_revision_id, default_topup_key)
+REFERENCES bursar.catalog_topups (tenant_id, catalog_revision_id, topup_key);
+
+ALTER TABLE bursar.catalog_auto_recharge_policies
+ADD CONSTRAINT catalog_auto_recharge_policies_tenant_id_catalog_revis_fef1f53a
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_buckets
+ADD CONSTRAINT catalog_buckets_tenant_id_catalog_revision_id_catalog__d3db435d
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_credit_policies
+ADD CONSTRAINT catalog_credit_policies_tenant_id_catalog_revision_id__f1f96a9b
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_entitlement_features
+ADD CONSTRAINT catalog_entitlement_features_tenant_id_catalog_revisio_b7fc1cb4
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_grant_awards
+ADD CONSTRAINT catalog_grant_awards_tenant_id_catalog_revision_id_buc_0919d8af
+FOREIGN KEY (tenant_id, catalog_revision_id, bucket_key)
+REFERENCES bursar.catalog_buckets (tenant_id, catalog_revision_id, bucket_key);
+
+ALTER TABLE bursar.catalog_grant_awards
+ADD CONSTRAINT catalog_grant_awards_tenant_id_grant_program_id_catalo_d07bc5fd
+FOREIGN KEY (tenant_id, grant_program_id, catalog_revision_id)
+REFERENCES bursar.catalog_grant_programs (tenant_id, id, catalog_revision_id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_grant_programs
+ADD CONSTRAINT catalog_grant_programs_tenant_id_catalog_revision_id_c_f324a984
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_offers
+ADD CONSTRAINT catalog_offers_tenant_id_catalog_revision_id_catalog_r_8cd7344d
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_offers
+ADD CONSTRAINT catalog_offers_tenant_id_catalog_revision_id_cycle_gra_782764f2
+FOREIGN KEY (tenant_id, catalog_revision_id, cycle_grant_bucket_key)
+REFERENCES bursar.catalog_buckets (tenant_id, catalog_revision_id, bucket_key);
+
+ALTER TABLE bursar.catalog_offers
+ADD CONSTRAINT catalog_offers_tenant_id_catalog_revision_id_plan_key__dc2ffe5e
+FOREIGN KEY (tenant_id, catalog_revision_id, plan_key)
+REFERENCES bursar.catalog_plans (tenant_id, catalog_revision_id, plan_key);
+
+ALTER TABLE bursar.catalog_operations
+ADD CONSTRAINT catalog_operations_tenant_id_catalog_revision_id_catal_d7135891
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_plan_features
+ADD CONSTRAINT catalog_plan_features_tenant_id_catalog_revision_id_fe_fc681a0f
+FOREIGN KEY (tenant_id, catalog_revision_id, feature_key)
+REFERENCES bursar.catalog_entitlement_features (tenant_id, catalog_revision_id, feature_key) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_plan_features
+ADD CONSTRAINT catalog_plan_features_tenant_id_catalog_revision_id_pl_9bae855a
+FOREIGN KEY (tenant_id, catalog_revision_id, plan_key)
+REFERENCES bursar.catalog_plans (tenant_id, catalog_revision_id, plan_key) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_plan_quotas
+ADD CONSTRAINT catalog_plan_quotas_tenant_id_catalog_revision_id_oper_12c02f51
+FOREIGN KEY (tenant_id, catalog_revision_id, operation_key)
+REFERENCES bursar.catalog_operations (tenant_id, catalog_revision_id, operation_key) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_plan_quotas
+ADD CONSTRAINT catalog_plan_quotas_tenant_id_catalog_revision_id_plan_2da83915
+FOREIGN KEY (tenant_id, catalog_revision_id, plan_key)
+REFERENCES bursar.catalog_plans (tenant_id, catalog_revision_id, plan_key) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_plans
+ADD CONSTRAINT catalog_plans_tenant_id_catalog_revision_id_admission__f5550715
+FOREIGN KEY (tenant_id, catalog_revision_id, admission_policy_key)
+REFERENCES bursar.catalog_admission_policies (tenant_id, catalog_revision_id, policy_key);
+
+ALTER TABLE bursar.catalog_plans
+ADD CONSTRAINT catalog_plans_tenant_id_catalog_revision_id_catalog_re_74cba450
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_plans
+ADD CONSTRAINT catalog_plans_tenant_id_catalog_revision_id_credit_all_d20d0223
+FOREIGN KEY (tenant_id, catalog_revision_id, credit_allowance_bucket)
+REFERENCES bursar.catalog_buckets (tenant_id, catalog_revision_id, bucket_key);
+
+ALTER TABLE bursar.catalog_plans
+ADD CONSTRAINT catalog_plans_tenant_id_catalog_revision_id_credit_pol_85b6559c
+FOREIGN KEY (tenant_id, catalog_revision_id, credit_policy_key)
+REFERENCES bursar.catalog_credit_policies (tenant_id, catalog_revision_id, policy_key);
+
+ALTER TABLE bursar.catalog_plans
+ADD CONSTRAINT catalog_plans_tenant_id_catalog_revision_id_rate_card__90e0cc9e
+FOREIGN KEY (tenant_id, catalog_revision_id, rate_card)
+REFERENCES bursar.catalog_rate_cards (tenant_id, catalog_revision_id, rate_card_key);
+
+ALTER TABLE bursar.catalog_provider_refs
+ADD CONSTRAINT catalog_provider_refs_tenant_id_catalog_revision_id_ca_fb36c269
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_rate_cards
+ADD CONSTRAINT catalog_rate_cards_tenant_id_catalog_revision_id_catal_add87416
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.catalog_rate_cards
+ADD CONSTRAINT catalog_rate_cards_tenant_id_catalog_revision_id_exten_296d8ecd
+FOREIGN KEY (tenant_id, catalog_revision_id, extends_key)
+REFERENCES bursar.catalog_rate_cards (tenant_id, catalog_revision_id, rate_card_key) DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE bursar.catalog_topups
+ADD CONSTRAINT catalog_topups_tenant_id_catalog_revision_id_bucket_ke_a6cc25dc
+FOREIGN KEY (tenant_id, catalog_revision_id, bucket_key)
+REFERENCES bursar.catalog_buckets (tenant_id, catalog_revision_id, bucket_key);
+
+ALTER TABLE bursar.catalog_topups
+ADD CONSTRAINT catalog_topups_tenant_id_catalog_revision_id_catalog_r_0b86b222
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.credit_accounts
+ADD CONSTRAINT credit_accounts_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.credit_debt_repayments
+ADD CONSTRAINT credit_debt_repayments_tenant_id_account_id_credit_acc_4477e9de
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.credit_debt_repayments
+ADD CONSTRAINT credit_debt_repayments_tenant_id_ledger_entry_id_credi_8b315081
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_lease_quota_reservations
+ADD CONSTRAINT credit_lease_quota_reservations_tenant_id_catalog_quot_4f4bae4f
+FOREIGN KEY (tenant_id, catalog_quota_id)
+REFERENCES bursar.catalog_plan_quotas (tenant_id, id);
+
+ALTER TABLE bursar.credit_lease_quota_reservations
+ADD CONSTRAINT credit_lease_quota_reservations_tenant_id_lease_id_cre_75df6608
+FOREIGN KEY (tenant_id, lease_id)
+REFERENCES bursar.credit_leases (tenant_id, id);
+
+ALTER TABLE bursar.credit_lease_quota_reservations
+ADD CONSTRAINT credit_lease_quota_reservations_tenant_id_quota_window_fe0631a0
+FOREIGN KEY (tenant_id, quota_window_id)
+REFERENCES bursar.quota_windows (tenant_id, id);
+
+ALTER TABLE bursar.credit_leases
+ADD CONSTRAINT credit_leases_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.credit_leases
+ADD CONSTRAINT credit_leases_tenant_id_allowance_window_id_allowance__36cf7578
+FOREIGN KEY (tenant_id, allowance_window_id)
+REFERENCES bursar.allowance_windows (tenant_id, id);
+
+ALTER TABLE bursar.credit_leases
+ADD CONSTRAINT credit_leases_tenant_id_catalog_revision_id_catalog_re_696c255e
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id);
+
+ALTER TABLE bursar.credit_leases
+ADD CONSTRAINT credit_leases_tenant_id_ledger_entry_id_credit_ledger__6e1bcd67
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_leases
+ADD CONSTRAINT credit_leases_tenant_id_plan_id_catalog_revision_id_ca_86d54803
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.credit_leases
+ADD CONSTRAINT credit_leases_tenant_id_usage_charge_id_credit_usage_c_e203ecd9
+FOREIGN KEY (tenant_id, usage_charge_id)
+REFERENCES bursar.credit_usage_charges (tenant_id, id);
+
+ALTER TABLE bursar.credit_ledger_entries
+ADD CONSTRAINT credit_ledger_entries_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.credit_ledger_entries
+ADD CONSTRAINT credit_ledger_entries_tenant_id_catalog_revision_id_ca_34216124
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id);
+
+ALTER TABLE bursar.credit_ledger_entries
+ADD CONSTRAINT credit_ledger_entries_tenant_id_reference_entry_id_cre_6cc3dd88
+FOREIGN KEY (tenant_id, reference_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_allocations
+ADD CONSTRAINT credit_lot_allocations_tenant_id_debit_entry_id_credit_1281d135
+FOREIGN KEY (tenant_id, debit_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_allocations
+ADD CONSTRAINT credit_lot_allocations_tenant_id_lot_id_credit_lots_fkey
+FOREIGN KEY (tenant_id, lot_id)
+REFERENCES bursar.credit_lots (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_restorations
+ADD CONSTRAINT credit_lot_restorations_tenant_id_lot_id_credit_lots_fkey
+FOREIGN KEY (tenant_id, lot_id)
+REFERENCES bursar.credit_lots (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_restorations
+ADD CONSTRAINT credit_lot_restorations_tenant_id_original_allocation__64e5febb
+FOREIGN KEY (tenant_id, original_allocation_id)
+REFERENCES bursar.credit_lot_allocations (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_restorations
+ADD CONSTRAINT credit_lot_restorations_tenant_id_refund_entry_id_cred_60bae9b2
+FOREIGN KEY (tenant_id, refund_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_source_allocations
+ADD CONSTRAINT credit_lot_source_allocations_tenant_id_lot_allocation_c04c6654
+FOREIGN KEY (tenant_id, lot_allocation_id)
+REFERENCES bursar.credit_lot_allocations (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_source_allocations
+ADD CONSTRAINT credit_lot_source_allocations_tenant_id_lot_source_id__77eeac88
+FOREIGN KEY (tenant_id, lot_source_id)
+REFERENCES bursar.credit_lot_sources (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_source_restorations
+ADD CONSTRAINT credit_lot_source_restorations_tenant_id_lot_restorati_66c3c475
+FOREIGN KEY (tenant_id, lot_restoration_id)
+REFERENCES bursar.credit_lot_restorations (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_source_restorations
+ADD CONSTRAINT credit_lot_source_restorations_tenant_id_source_alloca_5c83397c
+FOREIGN KEY (tenant_id, source_allocation_id)
+REFERENCES bursar.credit_lot_source_allocations (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_sources
+ADD CONSTRAINT credit_lot_sources_tenant_id_ledger_entry_id_credit_le_62578772
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_lot_sources
+ADD CONSTRAINT credit_lot_sources_tenant_id_lot_id_credit_lots_fkey
+FOREIGN KEY (tenant_id, lot_id)
+REFERENCES bursar.credit_lots (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.credit_lots
+ADD CONSTRAINT credit_lots_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.credit_lots
+ADD CONSTRAINT credit_lots_tenant_id_catalog_revision_id_bucket_key_c_d2031918
+FOREIGN KEY (tenant_id, catalog_revision_id, bucket_key)
+REFERENCES bursar.catalog_buckets (tenant_id, catalog_revision_id, bucket_key);
+
+ALTER TABLE bursar.credit_lots
+ADD CONSTRAINT credit_lots_tenant_id_source_entry_id_credit_ledger_en_c1ca40b9
+FOREIGN KEY (tenant_id, source_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_plan_migrations
+ADD CONSTRAINT credit_plan_migrations_tenant_id_from_plan_id_catalog__2fad3bc6
+FOREIGN KEY (tenant_id, from_plan_id)
+REFERENCES bursar.catalog_plans (tenant_id, id);
+
+ALTER TABLE bursar.credit_plan_migrations
+ADD CONSTRAINT credit_plan_migrations_tenant_id_to_plan_id_catalog_plans_fkey
+FOREIGN KEY (tenant_id, to_plan_id)
+REFERENCES bursar.catalog_plans (tenant_id, id);
+
+ALTER TABLE bursar.credit_team_members
+ADD CONSTRAINT credit_team_members_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.credit_team_members
+ADD CONSTRAINT credit_team_members_tenant_id_team_id_credit_teams_fkey
+FOREIGN KEY (tenant_id, team_id)
+REFERENCES bursar.credit_teams (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.credit_team_usage_charges
+ADD CONSTRAINT credit_team_usage_charges_tenant_id_ledger_entry_id_cr_a0ac417b
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_team_usage_charges
+ADD CONSTRAINT credit_team_usage_charges_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.credit_team_usage_charges
+ADD CONSTRAINT credit_team_usage_charges_tenant_id_team_id_credit_teams_fkey
+FOREIGN KEY (tenant_id, team_id)
+REFERENCES bursar.credit_teams (tenant_id, id);
+
+ALTER TABLE bursar.credit_team_usage_charges
+ADD CONSTRAINT credit_team_usage_charges_tenant_id_team_id_subject_id_ac9a10e8
+FOREIGN KEY (tenant_id, team_id, subject_id)
+REFERENCES bursar.credit_team_members (tenant_id, team_id, subject_id);
+
+ALTER TABLE bursar.credit_teams
+ADD CONSTRAINT credit_teams_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.credit_unallocated_debits
+ADD CONSTRAINT credit_unallocated_debits_tenant_id_account_id_credit__b70ecdb7
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.credit_unallocated_debits
+ADD CONSTRAINT credit_unallocated_debits_tenant_id_ledger_entry_id_cr_e4a078ff
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_usage_charges
+ADD CONSTRAINT credit_usage_charges_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.credit_usage_charges
+ADD CONSTRAINT credit_usage_charges_tenant_id_catalog_revision_id_cat_39993034
+FOREIGN KEY (tenant_id, catalog_revision_id)
+REFERENCES bursar.catalog_revisions (tenant_id, id);
+
+ALTER TABLE bursar.credit_usage_charges
+ADD CONSTRAINT credit_usage_charges_tenant_id_ledger_entry_id_credit__25622bbd
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.credit_usage_charges
+ADD CONSTRAINT credit_usage_charges_tenant_id_plan_id_catalog_revisio_c2f93293
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.external_identities
+ADD CONSTRAINT external_identities_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id) ON DELETE CASCADE;
+
+ALTER TABLE bursar.grant_award_executions
+ADD CONSTRAINT grant_award_executions_tenant_id_catalog_grant_award_i_f46dff93
+FOREIGN KEY (tenant_id, catalog_grant_award_id, catalog_revision_id)
+REFERENCES bursar.catalog_grant_awards (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.grant_award_executions
+ADD CONSTRAINT grant_award_executions_tenant_id_grant_event_id_grant__1dca91e3
+FOREIGN KEY (tenant_id, grant_event_id)
+REFERENCES bursar.grant_program_events (tenant_id, id);
+
+ALTER TABLE bursar.grant_award_executions
+ADD CONSTRAINT grant_award_executions_tenant_id_ledger_entry_id_credi_7597f8d2
+FOREIGN KEY (tenant_id, ledger_entry_id)
+REFERENCES bursar.credit_ledger_entries (tenant_id, id);
+
+ALTER TABLE bursar.grant_award_executions
+ADD CONSTRAINT grant_award_executions_tenant_id_recipient_subject_id__1882c552
+FOREIGN KEY (tenant_id, recipient_subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.grant_program_events
+ADD CONSTRAINT grant_program_events_tenant_id_grant_program_id_catalo_65878f23
+FOREIGN KEY (tenant_id, grant_program_id, catalog_revision_id)
+REFERENCES bursar.catalog_grant_programs (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.grant_program_events
+ADD CONSTRAINT grant_program_events_tenant_id_referrer_subject_id_sub_452f3ba1
+FOREIGN KEY (tenant_id, referrer_subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.grant_program_events
+ADD CONSTRAINT grant_program_events_tenant_id_subject_id_subjects_fkey
+FOREIGN KEY (tenant_id, subject_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
+ALTER TABLE bursar.plan_assignment_changes
+ADD CONSTRAINT plan_assignment_changes_tenant_id_account_id_credit_ac_698bb7bc
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.plan_assignment_changes
+ADD CONSTRAINT plan_assignment_changes_tenant_id_from_plan_id_catalog_79d92081
+FOREIGN KEY (tenant_id, from_plan_id)
+REFERENCES bursar.catalog_plans (tenant_id, id);
+
+ALTER TABLE bursar.plan_assignment_changes
+ADD CONSTRAINT plan_assignment_changes_tenant_id_to_plan_id_catalog_plans_fkey
+FOREIGN KEY (tenant_id, to_plan_id)
+REFERENCES bursar.catalog_plans (tenant_id, id);
+
+ALTER TABLE bursar.quota_events
+ADD CONSTRAINT quota_events_tenant_id_quota_window_id_quota_windows_fkey
+FOREIGN KEY (tenant_id, quota_window_id)
+REFERENCES bursar.quota_windows (tenant_id, id);
+
+ALTER TABLE bursar.quota_events
+ADD CONSTRAINT quota_events_tenant_id_usage_charge_id_credit_usage_ch_528173d4
+FOREIGN KEY (tenant_id, usage_charge_id)
+REFERENCES bursar.credit_usage_charges (tenant_id, id);
+
+ALTER TABLE bursar.quota_usage_events
+ADD CONSTRAINT quota_usage_events_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.quota_usage_events
+ADD CONSTRAINT quota_usage_events_tenant_id_catalog_quota_id_catalog__e883adcc
+FOREIGN KEY (tenant_id, catalog_quota_id)
+REFERENCES bursar.catalog_plan_quotas (tenant_id, id);
+
+ALTER TABLE bursar.quota_usage_events
+ADD CONSTRAINT quota_usage_events_tenant_id_correction_of_event_id_qu_f0222493
+FOREIGN KEY (tenant_id, correction_of_event_id)
+REFERENCES bursar.quota_usage_events (tenant_id, id);
+
+ALTER TABLE bursar.quota_usage_events
+ADD CONSTRAINT quota_usage_events_tenant_id_plan_id_catalog_revision__c97d4fed
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.quota_usage_events
+ADD CONSTRAINT quota_usage_events_tenant_id_usage_charge_id_credit_us_f42c7c93
+FOREIGN KEY (tenant_id, usage_charge_id)
+REFERENCES bursar.credit_usage_charges (tenant_id, id);
+
+ALTER TABLE bursar.quota_windows
+ADD CONSTRAINT quota_windows_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+ALTER TABLE bursar.quota_windows
+ADD CONSTRAINT quota_windows_tenant_id_plan_id_catalog_revision_id_ca_d6d86c9b
+FOREIGN KEY (tenant_id, plan_id, catalog_revision_id)
+REFERENCES bursar.catalog_plans (tenant_id, id, catalog_revision_id);
+
+ALTER TABLE bursar.usage_charge_payloads
+ADD CONSTRAINT usage_charge_payloads_tenant_id_charge_id_event_at_cre_1ceef629
+FOREIGN KEY (tenant_id, charge_id, event_at)
+REFERENCES bursar.credit_usage_charges (tenant_id, id, event_at) ON DELETE CASCADE;
+
+ALTER TABLE bursar.usage_daily_rollups
+ADD CONSTRAINT usage_daily_rollups_tenant_id_account_id_credit_accounts_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.credit_accounts (tenant_id, id);
+
+
+ALTER TABLE bursar.billing_payments
+ADD CONSTRAINT billing_payments_tenant_topup_fkey
+FOREIGN KEY (tenant_id, topup_id)
+REFERENCES bursar.catalog_topups (tenant_id, id);
+
+ALTER TABLE bursar.usage_rollup_contributions
+ADD CONSTRAINT usage_rollup_contributions_charge_fkey
+FOREIGN KEY (tenant_id, charge_id)
+REFERENCES bursar.credit_usage_charges (tenant_id, id);

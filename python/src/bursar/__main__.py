@@ -37,6 +37,7 @@ _RETRIES = 5
 # Extra name → top-level import names needed
 _EXTRAS: dict[str, list[str]] = {
     "postgres": ["psycopg2"],
+    "clickhouse": ["clickhouse_connect"],
 }
 
 
@@ -196,8 +197,13 @@ def _provision_tenant(
         ):
             cursor.execute("SET LOCAL ROLE bursar_operator")
             cursor.execute(
-                "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
-                (str(tenant_id) if tenant_id is not None else None, slug, display_name),
+                "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text, %s::text)",
+                (
+                    str(tenant_id) if tenant_id is not None else None,
+                    slug,
+                    display_name,
+                    _provider_environment_from_env(),
+                ),
             )
             row = cursor.fetchone()
             if row is None:
@@ -270,12 +276,77 @@ def _cmd_tenant_status(args: argparse.Namespace) -> None:
     print(str(tenant_id))
 
 
+def _cmd_config_init(args: argparse.Namespace) -> None:
+    """Write the packaged starter once, without overwriting an existing file."""
+    from importlib.resources import files
+    from pathlib import Path
+
+    try:
+        starter = files("bursar").joinpath("starter.yaml").read_text(encoding="utf-8")
+        with Path(args.path).open("x", encoding="utf-8") as destination:
+            destination.write(starter)
+    except OSError as exc:
+        print(f"Could not create config: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    print(json.dumps({"path": args.path, "created": True}))
+
+
+def _cmd_config_quote(args: argparse.Namespace) -> None:
+    """Calculate a quote locally without database or provider access."""
+    from bursar.config import ConfigError, load_config_from_dict
+    from bursar.engine import PricingEngine
+    from bursar.metrics import UsageMetrics
+
+    def pairs(items: list[str], *, json_values: bool) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for item in items:
+            key, separator, value = item.partition("=")
+            if not separator or not key or key in result:
+                raise ValueError(f"expected unique NAME=VALUE, got {item!r}")
+            if json_values:
+                try:
+                    result[key] = json.loads(value)
+                except json.JSONDecodeError:
+                    result[key] = value
+            else:
+                result[key] = value
+        return result
+
+    try:
+        config = load_config_from_dict(_read_config_file(args.file), args.environment)
+        metrics = UsageMetrics(
+            operation=args.operation,
+            measures=pairs(args.measure, json_values=False),
+            dimensions=pairs(args.dimension, json_values=True),
+        )
+        result = PricingEngine(config).calculate(metrics, rate_card=args.rate_card)
+    except (ConfigError, ValueError, OSError) as exc:
+        print(f"Quote failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    print(result.model_dump_json(indent=2))
+
+
 def _cmd_config_validate(args: argparse.Namespace) -> None:
     from bursar.config import ConfigError, load_config_from_dict
 
     try:
         data = _read_config_file(args.file)
-        load_config_from_dict(data)
+        environments: set[str] = set()
+        if data.get("version") == 1:
+            commerce = data.get("commerce", {})
+            if isinstance(commerce, dict) and isinstance(commerce.get("offers", {}), dict):
+                for offer in commerce.get("offers", {}).values():
+                    if isinstance(offer, dict) and isinstance(offer.get("providers"), dict):
+                        for reference in offer["providers"].values():
+                            if isinstance(reference, dict):
+                                for field in ("price_id", "product_id", "external_id"):
+                                    if isinstance(reference.get(field), dict):
+                                        environments.update(reference[field])
+        if environments:
+            for environment in sorted(environments, key=str):
+                load_config_from_dict(data, environment)
+        else:
+            load_config_from_dict(data)
     except ConfigError as exc:
         if args.json:
             print(json.dumps({"valid": False, "errors": exc.errors()}, indent=2, default=str))
@@ -293,7 +364,7 @@ def _validated_config(filepath: str) -> dict[str, Any]:
 
     data = _load_config_file(filepath)
     try:
-        return canonical_bursar_config_dict(data)
+        return canonical_bursar_config_dict(data, _provider_environment_from_env())
     except ConfigError as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -314,7 +385,7 @@ def _validated_rollout(
 
     data = _load_config_file(filepath)
     try:
-        parsed_config = load_config_from_dict(config) if config is not None else None
+        parsed_config = load_config_from_dict(config, _provider_environment_from_env()) if config is not None else None
         return canonical_catalog_rollout_dict(data, parsed_config)
     except ConfigError as exc:
         print(f"Rollout validation failed: {exc}", file=sys.stderr)
@@ -484,9 +555,110 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
 
 def _cmd_config_schema(_args: argparse.Namespace) -> None:
     """Print the Bursar config JSON Schema for editors and validation."""
-    from bursar.config import BursarConfig
+    from bursar.config.types import public_config_json_schema
 
-    print(json.dumps(BursarConfig.model_json_schema(), indent=2))
+    print(json.dumps(public_config_json_schema(), indent=2))
+
+
+def _cmd_usage_cutover(args: argparse.Namespace) -> None:
+    from datetime import datetime
+
+    _require_extra("postgres")
+    _require_extra("clickhouse")
+    import importlib
+
+    import psycopg2
+
+    from bursar.storage.cutover import run_cutover
+
+    tenant = args.tenant_id or os.environ.get("BURSAR_TENANT_ID")
+    if not tenant:
+        raise SystemExit("BURSAR_TENANT_ID or --tenant-id is required")
+    try:
+        cutoff = datetime.fromisoformat(args.cutoff)
+        if cutoff.tzinfo is None:
+            raise ValueError("cutoff must include a timezone")
+        connection = psycopg2.connect(_database_url_from_env("BURSAR_OPERATOR_DATABASE_URL"))
+        try:
+            client = importlib.import_module("clickhouse_connect").get_client(
+                host=os.environ.get("BURSAR_CLICKHOUSE_HOST", "localhost"),
+                port=int(os.environ.get("BURSAR_CLICKHOUSE_PORT", "8123")),
+                username=os.environ.get("BURSAR_CLICKHOUSE_USER", "default"),
+                password=os.environ.get("BURSAR_CLICKHOUSE_PASSWORD", ""),
+                database=os.environ.get("BURSAR_CLICKHOUSE_DATABASE", "default"),
+                secure=os.environ.get("BURSAR_CLICKHOUSE_SECURE", "false").lower() == "true",
+            )
+            try:
+                count = run_cutover(
+                    connection, client, tenant, args.target, cutoff, args.table, _provider_environment_from_env()
+                )
+            finally:
+                client.close()
+        finally:
+            connection.close()
+    except Exception as exc:
+        # Driver exceptions can include connection strings or credentials.
+        safe_messages = (
+            "another cutover driver is running for this tenant",
+            "retained PostgreSQL usage payload is missing; restore it before cutover",
+            "imported PostgreSQL usage payload is missing",
+            "duplicate ClickHouse usage identity",
+            "ClickHouse contains extra retained usage records; reconcile the target before retrying",
+            "usage outbox claim was lost; retry cutover",
+            "unsupported usage outbox payload version",
+            "usage outbox event has no matching tenant charge",
+        )
+        message = str(exc)
+        if message in safe_messages:
+            detail = message
+        elif message.startswith("usage verification failed for charge "):
+            detail = "source and destination usage records differ"
+        elif message.startswith("ClickHouse table "):
+            detail = "ClickHouse projection table is missing or incompatible"
+        elif (diagnostics := getattr(exc, "diag", None)) is not None:
+            server_message = diagnostics.message_primary
+            allowed = (
+                "usage cutover has unverified records or pending required exports",
+                "cutover cutoff is outside PostgreSQL usage retention",
+                "cutover cutoff would truncate retained usage analytics",
+                "usage cutover item differs from retained receipt",
+                "billable usage receipt missing",
+                "different usage cutover already in progress",
+                "usage backend is already selected",
+            )
+            detail = server_message if server_message in allowed else type(exc).__name__
+        else:
+            detail = type(exc).__name__
+        print(f"Usage cutover failed: {detail}. Tenant may remain paused; retry or abort.", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(f"Usage cutover complete: {count} retained records verified.")
+
+
+def _cmd_usage_cutover_abort(args: argparse.Namespace) -> None:
+    _require_extra("postgres")
+    import psycopg2
+
+    tenant = args.tenant_id or os.environ.get("BURSAR_TENANT_ID")
+    if not tenant:
+        raise SystemExit("BURSAR_TENANT_ID or --tenant-id is required")
+    try:
+        tenant = str(UUID(tenant))
+        with closing(psycopg2.connect(_database_url_from_env("BURSAR_OPERATOR_DATABASE_URL"))) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute("SET ROLE bursar_operator")
+                cursor.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended('bursar.usage.cutover.driver:' || %s, 0))",
+                    (tenant,),
+                )
+                lock_result = cursor.fetchone()
+                if lock_result is None or not lock_result[0]:
+                    raise RuntimeError("another cutover driver is running")
+                cursor.execute("SELECT bursar.abort_usage_backend_cutover(%s::uuid)", (tenant,))
+    except Exception as exc:
+        print(f"Usage cutover abort failed ({type(exc).__name__}).", file=sys.stderr)
+        raise SystemExit(1) from None
+    print("Usage cutover aborted; original routing remains selected.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -496,6 +668,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="Bursar SDK: database migrations and catalog management.",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
+
+    p_usage = sub.add_parser("usage-cutover", help="Copy and verify retained tenant usage before switching backend")
+    p_usage.add_argument("target", choices=("postgres", "clickhouse"))
+    p_usage.add_argument("--tenant-id", help="Tenant UUID (or BURSAR_TENANT_ID)")
+    p_usage.add_argument("--cutoff", required=True, help="Oldest retained event timestamp (ISO 8601, with timezone)")
+    p_usage.add_argument("--table", default="bursar_usage_events", help="Existing ClickHouse projection table")
+    p_usage.set_defaults(func=_cmd_usage_cutover)
+
+    p_usage_abort = sub.add_parser("usage-cutover-abort", help="Abort a paused tenant cutover")
+    p_usage_abort.add_argument("--tenant-id", help="Tenant UUID (or BURSAR_TENANT_ID)")
+    p_usage_abort.set_defaults(func=_cmd_usage_cutover_abort)
 
     # migrate
     p_migrate = sub.add_parser(
@@ -574,6 +757,29 @@ def build_parser() -> argparse.ArgumentParser:
         description="Manage immutable Bursar catalog versions.",
     )
     psub = p_config.add_subparsers(dest="subcommand", metavar="<subcommand>")
+
+    p_init = psub.add_parser("init", help="Create a starter config without overwriting a file")
+    p_init.add_argument("path", nargs="?", default="bursar.yaml", help="Output path (default: bursar.yaml)")
+    p_init.set_defaults(func=_cmd_config_init)
+
+    p_quote = psub.add_parser("quote", help="Calculate a local quote without a database")
+    p_quote.add_argument("file", help="JSON/YAML Bursar config file, or '-' for stdin")
+    p_quote.add_argument("--operation", required=True, help="Operation to price")
+    p_quote.add_argument(
+        "--measure", action="append", default=[], metavar="NAME=VALUE", help="Usage measure (repeatable)"
+    )
+    p_quote.add_argument(
+        "--dimension",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Dimension, with JSON values for numbers or booleans (repeatable)",
+    )
+    p_quote.add_argument("--rate-card", help="Rate card to use")
+    p_quote.add_argument(
+        "--environment", choices=["test", "live", "sandbox"], help="Provider environment for provider bindings"
+    )
+    p_quote.set_defaults(func=_cmd_config_quote)
 
     p_set = psub.add_parser("set", help="Apply config when it differs from the active version")
     p_set.add_argument("file", help="JSON/YAML Bursar config file, or '-' for stdin")

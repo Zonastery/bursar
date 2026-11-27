@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://zonastery.github.io/bursar/pricing-config.schema.json
+# Start with a small credit grant and a single priced operation.
+version: 1
+catalog:
+  default_plan: free
+credits:
+  on_signup: "20"
+pricing:
+  operations:
+    export_report:
+      charge:
+        type: flat
+        amount: "2"
+plans:
+  free:
+    display_name: Free
+    allowed_operations: [export_report]

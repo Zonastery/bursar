@@ -233,7 +233,7 @@ def test_repository_rejects_non_object_outbox_payloads() -> None:
                 "aggregate_type": "credit_usage_charge",
                 "aggregate_id": "00000000-0000-0000-0000-000000000001",
                 "payload_version": 1,
-                "payload": "{}",
+                "payload": '"not-an-object"',
                 "claim_token": "10000000-0000-0000-0000-000000000001",
                 "attempt_count": 1,
                 "created_at": "2026-08-10T00:00:00.000Z",

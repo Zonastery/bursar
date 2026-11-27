@@ -36,7 +36,7 @@ func TestAutoRechargeResolvePolicyConfigurationMatrix(t *testing.T) {
 		}, true, ""},
 		{"missing product", func(c *BursarConfig, _ *autoRechargeStoreStub) {
 			ref := c.Commerce.Offers["credits_100"].Providers["stripe"]
-			ref.PriceID = nil
+			ref.PriceID = ProviderID{}
 			c.Commerce.Offers["credits_100"].Providers["stripe"] = ref
 		}, false, "product identifier"},
 		{"invalid quantity", func(c *BursarConfig, _ *autoRechargeStoreStub) { c.Commerce.AutoRecharge.Quantity.Default = 0 }, false, "quantity"},

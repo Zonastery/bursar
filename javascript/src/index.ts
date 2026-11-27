@@ -28,6 +28,7 @@ export { projectPublicCatalog } from "./catalog.js";
 export type {
   PublicCatalog,
   PublicCatalogOffer,
+  PublicCatalogScope,
   PublicCatalogPlan,
   PublicCatalogWindow,
 } from "./catalog.js";
@@ -204,6 +205,7 @@ export { CreditStore } from "./credits/store.js";
 export { PostgresStore } from "./credits/postgres/store.js";
 export type { PostgresStoreOptions } from "./credits/postgres/store.js";
 export type { PostgresConnectionOptions } from "./shared/postgres-client.js";
+export { resolveProviderId } from "./config/parse-commerce.js";
 export { PROVIDER_ENVIRONMENTS } from "./providers/environment.js";
 export type { ProviderEnvironment } from "./providers/environment.js";
 

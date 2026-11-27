@@ -50,6 +50,12 @@ export abstract class BillingStore {
 
   abstract getCheckoutIntent(id: string, subjectId: string): Promise<CheckoutIntent | null>;
 
+  abstract findCheckoutIntent(
+    subjectId: string,
+    operationKey: string,
+    provider?: string,
+  ): Promise<{ intent: CheckoutIntent; catalog: JsonObject } | null>;
+
   abstract resolveBillingOffer(
     provider: string,
     productId?: string | null,
@@ -114,7 +120,6 @@ export abstract class BillingStore {
     expectedProviderUpdatedAt: string,
     planAssignedAt: Date | string | null,
     applyEntitlement: boolean,
-    terminalPlanKey: string | null,
     reason: string,
   ): Promise<SubscriptionEntitlementOutcome>;
 
@@ -123,7 +128,6 @@ export abstract class BillingStore {
     subscriptionId: string,
     expectedGraceEndsAt: string,
     expiredAt: string,
-    terminalPlanKey: string | null,
   ): Promise<boolean>;
 
   abstract updateBillingSubscriptionChange(
@@ -140,6 +144,10 @@ export abstract class BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
+    checkoutIntentId?: string | null,
+    subjectId?: string | null,
+    providerPaymentId?: string | null,
+    rechargeAttemptId?: string | null,
   ): Promise<BillingTopupResult | null>;
   abstract resolveCreditTopupByLookup(
     provider: string,
@@ -184,6 +192,7 @@ export abstract class BillingStore {
   ): Promise<BillingPaymentRecord | null>;
 
   abstract getActiveCatalogDocument(): Promise<JsonObject | null>;
+  abstract getActiveCatalogRevision(): Promise<{ id: string; config: JsonObject } | null>;
 
   abstract pseudonymizeFinancialSubject(userId: string): Promise<boolean>;
 

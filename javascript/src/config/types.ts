@@ -40,6 +40,7 @@ export type ExpiryPolicy =
 
 export interface MeasureDefinition {
   unit: string;
+  required: boolean;
 }
 
 export interface DimensionDefinition {
@@ -180,9 +181,10 @@ export interface PlanDefinition {
   displayName: string;
   /** Explicit commercial ordering; never inferred from declaration order. */
   rank: number;
+  tier: number;
   description?: string;
   rateCard?: string;
-  allowedOperations: string[];
+  allowedOperations: "all" | "none" | string[];
   features: Record<string, FeatureValue>;
   creditAllowance?: CreditAllowance;
   quotas: Record<string, QuotaDefinition>;
@@ -196,10 +198,18 @@ export type ProviderDefinition =
   | { type: "dodo" }
   | { type: "custom"; adapter: string };
 
+export type ProviderId =
+  | string
+  | Partial<Record<import("../providers/environment.js").ProviderEnvironment, string>>;
+
 export type ProviderReference =
-  | { type: "stripe_price"; priceId: string }
-  | { type: "dodo_product"; productId: string }
-  | { type: "custom_object"; objectKind: "subscription" | "one_time"; externalId: string };
+  | { type: "stripe_price"; priceId: ProviderId }
+  | { type: "dodo_product"; productId: ProviderId }
+  | {
+      type: "custom_object";
+      objectKind: "subscription" | "one_time";
+      externalId: ProviderId;
+    };
 
 export interface OfferPrice {
   amountMinor: number;
@@ -276,7 +286,7 @@ export interface SubscriptionChangePolicy {
 
 export interface ParsedBursarConfig {
   version: 1;
-  catalog: { defaultPlan?: string };
+  catalog: { defaultPlan?: string; subscriptionEndPlan?: string };
   pricing?: PricingConfig;
   credits: CreditsConfig;
   entitlements: EntitlementsConfig;

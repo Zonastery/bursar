@@ -1,9 +1,9 @@
 import { resolvesOperation } from "./parse-pricing.js";
 import {
   asArray,
-  asDecimal,
   asInteger,
   asObject,
+  nonNegativeDecimal,
   asString,
   asStringArray,
   identifier,
@@ -115,17 +115,29 @@ export function parsePlans(
       );
     }
     const rateCard = plan.rate_card == null ? undefined : asString(plan.rate_card);
+    const access = plan.allowed_operations ?? "none";
     const allowedOperations =
-      plan.allowed_operations == null
-        ? []
-        : asStringArray(plan.allowed_operations, `plans.${planKey}.allowed_operations`);
-    if (new Set(allowedOperations).size !== allowedOperations.length) {
-      semanticError(`plans.${planKey}.allowed_operations must not contain duplicates`);
+      access === "all" || access === "none"
+        ? access
+        : asStringArray(access, `plans.${planKey}.allowed_operations`);
+    if (allowedOperations === "all" && !pricing)
+      semanticError(`plans.${planKey}.allowed_operations all requires pricing`);
+    if (Array.isArray(allowedOperations)) {
+      if (!allowedOperations.length)
+        semanticError(`plans.${planKey}.allowed_operations must not be empty`);
+      if (new Set(allowedOperations).size !== allowedOperations.length)
+        semanticError(`plans.${planKey}.allowed_operations must not contain duplicates`);
     }
     if (rateCard != null && !pricing?.rateCards[rateCard]) {
       semanticError(`plans.${planKey}.rate_card references unknown rate card '${rateCard}'`);
     }
-    for (const operation of allowedOperations) {
+    const operationsToValidate =
+      allowedOperations === "all"
+        ? Object.keys(pricing?.operations ?? {})
+        : allowedOperations === "none"
+          ? []
+          : allowedOperations;
+    for (const operation of operationsToValidate) {
       identifier(operation, `plans.${planKey}.allowed_operations`);
       if (!pricing?.operations[operation]) {
         semanticError(`plans.${planKey} references unknown operation '${operation}'`);
@@ -182,7 +194,7 @@ export function parsePlans(
       quotas[quotaKey] = {
         operation,
         measure,
-        limit: asDecimal(quota.limit),
+        limit: nonNegativeDecimal(quota.limit, `plans.${planKey}.quotas.${quotaKey}.limit`),
         window: parseWindow(quota.window, `plans.${planKey}.quotas.${quotaKey}.window`),
         enforcement: enforcementSchema.parse(quota.enforcement),
         emitAtPercent,
@@ -204,7 +216,10 @@ export function parsePlans(
       allowanceInput == null
         ? undefined
         : {
-            amount: asDecimal(allowanceInput.amount),
+            amount: nonNegativeDecimal(
+              allowanceInput.amount,
+              `plans.${planKey}.credit_allowance.amount`,
+            ),
             priority: asInteger(allowanceInput.priority),
             window: parseWindow(allowanceInput.window, `plans.${planKey}.credit_allowance.window`),
           };
@@ -223,6 +238,7 @@ export function parsePlans(
     const parsedPlan: PlanDefinition = {
       displayName: asString(plan.display_name),
       rank: asInteger(plan.rank ?? 0),
+      tier: asInteger(plan.tier ?? 0),
       allowedOperations,
       features,
       quotas,

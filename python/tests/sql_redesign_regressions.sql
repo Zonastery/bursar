@@ -5,7 +5,8 @@ SELECT bursar.create_tenant(
     '00000000-0000-0000-0000-000000000888'::uuid,
     'redesign-regression',
     'Redesign regression'
-);
+,
+    'test');
 SELECT set_config(
     'bursar.tenant_id',
     '00000000-0000-0000-0000-000000000888',
@@ -170,6 +171,12 @@ BEGIN
         {
           "version": 1,
           "catalog": {"default_plan": "ordered"},
+          "pricing": {
+            "operations": {"chat": {"measures": {"calls": {"unit": "call"}}}},
+            "rate_cards": {"standard": {"operations": {"chat": {
+              "unmatched": {"action": "charge", "charge": {"type": "per_unit", "measure": "calls", "rate": "1"}}
+            }}}}
+          },
           "credits": {
             "buckets": {
               "gifted": {"priority": 10},
@@ -180,6 +187,8 @@ BEGIN
           "plans": {
             "ordered": {
               "display_name": "Ordered",
+              "rate_card": "standard",
+              "allowed_operations": ["chat"],
               "credit_allowance": {
                 "amount": "50",
                 "priority": 20,
@@ -386,6 +395,12 @@ BEGIN
         {
           "version": 1,
           "catalog": {"default_plan": "priority_first"},
+          "pricing": {
+            "operations": {"chat": {"measures": {"calls": {"unit": "call"}}}},
+            "rate_cards": {"standard": {"operations": {"chat": {
+              "unmatched": {"action": "charge", "charge": {"type": "per_unit", "measure": "calls", "rate": "1"}}
+            }}}}
+          },
           "credits": {
             "buckets": {
               "gifted": {"priority": 10},
@@ -396,6 +411,8 @@ BEGIN
           "plans": {
             "priority_first": {
               "display_name": "Priority first",
+              "rate_card": "standard",
+              "allowed_operations": ["chat"],
               "credit_allowance": {
                 "amount": "50",
                 "priority": 5,
@@ -496,7 +513,7 @@ DECLARE
 BEGIN
     PERFORM bursar.publish_and_activate_catalog(
         1,
-        '{"version":1,"catalog":{"default_plan":"metered"},"pricing":{"operations":{"chat":{"measures":{"calls":{"unit":"call"}},"dimensions":{}}},"rate_cards":{"standard":{"operations":{"chat":{"rules":[],"unmatched":{"action":"charge","charge":{"type":"per_unit","measure":"calls","rate":"1"}}}}}}},"credits":{"buckets":{"default":{"priority":10,"expiry":{"type":"never"}}},"default_bucket":"default"},"plans":{"metered":{"display_name":"Metered","rate_card":"standard","credit_allowance":{"amount":"3","priority":5,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"}},"quotas":{"chat":{"operation":"chat","measure":"calls","limit":"1","window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"enforcement":"block"}}}}}'::jsonb,
+        '{"version":1,"catalog":{"default_plan":"metered"},"pricing":{"operations":{"chat":{"measures":{"calls":{"unit":"call"}},"dimensions":{}}},"rate_cards":{"standard":{"operations":{"chat":{"rules":[],"unmatched":{"action":"charge","charge":{"type":"per_unit","measure":"calls","rate":"1"}}}}}}},"credits":{"buckets":{"default":{"priority":10,"expiry":{"type":"never"}}},"default_bucket":"default"},"plans":{"metered":{"display_name":"Metered","rate_card":"standard","allowed_operations":["chat"],"credit_allowance":{"amount":"3","priority":5,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"}},"quotas":{"chat":{"operation":"chat","measure":"calls","limit":"1","window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"enforcement":"block"}}}}}'::jsonb,
         'atomic-policy'
     );
     SELECT id INTO v_plan FROM bursar.catalog_plans WHERE plan_key='metered' AND catalog_revision_id=(SELECT id FROM bursar.catalog_revisions WHERE status='active');

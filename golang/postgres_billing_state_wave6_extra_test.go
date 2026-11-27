@@ -46,9 +46,9 @@ func TestCommerceStateStatusAndLookupBoundaries(t *testing.T) {
 		kind string
 		want string
 	}{
-		{"price", ProviderReference{PriceID: &price, ProductID: &product, ExternalID: &external}, "price_id", "price"},
-		{"product", ProviderReference{ProductID: &product, ExternalID: &external}, "product_id", "prod"},
-		{"external", ProviderReference{ExternalID: &external}, "external_id", "external"},
+		{"price", ProviderReference{PriceID: ScalarProviderID(price), ProductID: ScalarProviderID(product), ExternalID: ScalarProviderID(external)}, "price_id", "price"},
+		{"product", ProviderReference{ProductID: ScalarProviderID(product), ExternalID: ScalarProviderID(external)}, "product_id", "prod"},
+		{"external", ProviderReference{ExternalID: ScalarProviderID(external)}, "external_id", "external"},
 		{"empty", ProviderReference{}, "", ""},
 	} {
 		t.Run("provider/"+tc.name, func(t *testing.T) {

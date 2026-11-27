@@ -60,6 +60,42 @@ BEGIN
     END IF;
 
     IF p_topup_id IS NOT NULL THEN
+        -- Serialize all deliveries for the same payment before checking its
+        -- durable purchase identity, including across catalog revisions.
+        PERFORM 1 FROM bursar.billing_payments
+        WHERE id = p_payment_id FOR UPDATE;
+
+        SELECT grant_row.* INTO v_existing
+        FROM bursar.billing_credit_grants AS grant_row
+        WHERE grant_row.payment_id = p_payment_id
+          AND grant_row.grant_key = 'default'
+        FOR UPDATE;
+
+        IF FOUND THEN
+            IF p_billing_event_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM bursar.billing_events AS event
+                JOIN bursar.billing_payments AS payment
+                  ON payment.id = p_payment_id
+                 AND payment.provider = event.provider
+                 AND payment.provider_environment = event.provider_environment
+                WHERE event.id = p_billing_event_id AND event.status = 'processing'
+            ) THEN
+                RAISE EXCEPTION 'invalid top-up billing event' USING ERRCODE='22023';
+            END IF;
+            IF v_existing.configured_credits <> v_configured_credits
+               OR v_existing.quantity <> p_quantity
+               OR v_existing.topup_id <> p_topup_id
+            THEN
+                RAISE EXCEPTION 'billing grant identity conflict' USING ERRCODE='23505';
+            END IF;
+            IF p_billing_event_id IS NOT NULL
+               AND NOT bursar.attribute_billing_event_subject(p_billing_event_id, v_existing.subject_id)
+            THEN
+                RAISE EXCEPTION 'billing event missing for grant' USING ERRCODE='23503';
+            END IF;
+            RETURN v_existing.id;
+        END IF;
+
         SELECT
             p.subject_id,
             p.provider,
@@ -90,6 +126,12 @@ BEGIN
            OR p_quantity NOT BETWEEN v_quantity_min AND v_quantity_max
         THEN
             RAISE EXCEPTION 'invalid payment grant' USING ERRCODE='22023';
+        END IF;
+
+        UPDATE bursar.billing_payments SET topup_id = p_topup_id
+        WHERE id = p_payment_id AND (topup_id IS NULL OR topup_id = p_topup_id);
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'payment top-up identity conflict' USING ERRCODE='23505';
         END IF;
 
         IF p_billing_event_id IS NOT NULL

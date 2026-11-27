@@ -45,6 +45,7 @@ class _ProfileRow(_RowModel):
     state: Literal["disabled", "active", "paused"]
     provider: str | None
     topup_id: UUID | None
+    topup_key: str | None = None
     quantity: int = Field(gt=0)
     threshold: Decimal = Field(ge=0)
     max_charges_per_window: int | None = Field(gt=0)
@@ -133,6 +134,7 @@ def _profile_from_row(row: dict[str, Any]) -> BillingAutoRechargeProfile:
             "state": row.get("state"),
             "provider": row.get("provider"),
             "topup_id": row.get("topup_id"),
+            "topup_key": row.get("topup_key"),
             "quantity": row.get("quantity"),
             "threshold": row.get("threshold"),
             "max_charges_per_window": row.get("max_charges_per_window"),
@@ -151,6 +153,7 @@ def _profile_from_row(row: dict[str, Any]) -> BillingAutoRechargeProfile:
         state=parsed.state,
         provider=parsed.provider,
         topup_id=str(parsed.topup_id) if parsed.topup_id is not None else None,
+        topup_key=parsed.topup_key,
         quantity=parsed.quantity,
         threshold=parsed.threshold,
         max_charges_per_window=parsed.max_charges_per_window,
@@ -283,8 +286,14 @@ class BillingAutoRechargeRepository:
 
     def claim_attempt(self, input: AutoRechargeAttemptClaim) -> BillingAutoRechargeAttempt | None:
         rows = self._execute(
-            "SELECT * FROM bursar.claim_auto_recharge_attempt(%s::uuid,%s)",
-            [input.user_id, input.idempotency_key],
+            "SELECT * FROM bursar.claim_auto_recharge_attempt(%s::uuid,%s,%s,%s,%s)",
+            [
+                input.user_id,
+                input.idempotency_key,
+                input.expected_product_id,
+                input.expected_quantity,
+                input.expected_topup_key,
+            ],
         )
         row = optional_mapping_row(rows, "BillingAutoRechargeRepository.claim_attempt")
         return None if row is None else _attempt_from_row(row)

@@ -1,5 +1,6 @@
 import {
-  asDecimal,
+  nonNegativeDecimal,
+  positiveDecimal,
   asInteger,
   asObject,
   asString,
@@ -21,11 +22,45 @@ import type {
   OfferCommon,
   ProviderDefinition,
   ProviderReference,
+  ProviderId,
   SubscriptionChangeClassification,
   SubscriptionChangePolicy,
   TopupOffer,
 } from "./types.js";
 import { z } from "zod";
+import { ConfigError } from "../errors.js";
+import type { ProviderEnvironment } from "../providers/environment.js";
+
+/** Whether a provider reference is bound in the selected environment. */
+export function hasProviderBinding(
+  reference: ProviderReference,
+  environment: ProviderEnvironment,
+): boolean {
+  const id = providerExternalId(reference);
+  return typeof id === "string" || id[environment] !== undefined;
+}
+
+export function resolveProviderId(value: ProviderId, environment?: ProviderEnvironment): string {
+  if (typeof value === "string") return value;
+  if (!environment || !value[environment])
+    throw new ConfigError(
+      `provider ID has no binding for environment ${environment ?? "<unspecified>"}`,
+    );
+  return value[environment];
+}
+
+function parseProviderId(value: JsonValue | undefined): ProviderId {
+  if (typeof value === "string") return value;
+  const mapping = asObject(value);
+  return z
+    .object({
+      test: z.string().optional(),
+      live: z.string().optional(),
+      sandbox: z.string().optional(),
+    })
+    .strict()
+    .parse(mapping);
+}
 
 const customObjectKindSchema = z.enum(["subscription", "one_time"]);
 const taxBehaviorSchema = z.enum(["inclusive", "exclusive", "unspecified"]);
@@ -38,19 +73,19 @@ const changePaymentFailureSchema = z.enum(["prevent_change", "apply_change"]);
 function parseProviderReference(value: JsonValue): ProviderReference {
   const raw = asObject(value);
   if (raw.type === "stripe_price") {
-    return { type: "stripe_price", priceId: asString(raw.price_id) };
+    return { type: "stripe_price", priceId: parseProviderId(raw.price_id) };
   }
   if (raw.type === "dodo_product") {
-    return { type: "dodo_product", productId: asString(raw.product_id) };
+    return { type: "dodo_product", productId: parseProviderId(raw.product_id) };
   }
   return {
     type: "custom_object",
     objectKind: customObjectKindSchema.parse(raw.object_kind),
-    externalId: asString(raw.external_id),
+    externalId: parseProviderId(raw.external_id),
   };
 }
 
-function providerExternalId(reference: ProviderReference): string {
+function providerExternalId(reference: ProviderReference): ProviderId {
   switch (reference.type) {
     case "stripe_price":
       return reference.priceId;
@@ -127,11 +162,14 @@ export function parseCommerce(
         if (!providerReferenceIsCompatible(provider, reference)) {
           semanticError(`commerce.offers.${offerKey} has incompatible provider reference`);
         }
-        const uniqueKey = `${providerKey}/${providerExternalId(reference)}`;
-        if (seenProviderObjects.has(uniqueKey)) {
-          semanticError(`duplicate provider object reference ${uniqueKey}`);
+        const id = providerExternalId(reference);
+        const bindings = typeof id === "string" ? [["*", id]] : Object.entries(id);
+        for (const [environment, value] of bindings) {
+          const uniqueKey = `${providerKey}/${environment}/${value}`;
+          if (seenProviderObjects.has(uniqueKey))
+            semanticError(`duplicate provider object reference ${uniqueKey}`);
+          seenProviderObjects.add(uniqueKey);
         }
-        seenProviderObjects.add(uniqueKey);
         return [providerKey, reference];
       }),
     );
@@ -158,7 +196,10 @@ export function parseCommerce(
         cycleRaw == null
           ? undefined
           : {
-              amount: asDecimal(cycleRaw.amount),
+              amount: positiveDecimal(
+                cycleRaw.amount,
+                `commerce.offers.${offerKey}.cycle_grant.amount`,
+              ),
               bucket: asString(cycleRaw.bucket),
               renewal: renewalSchema.parse(cycleRaw.renewal),
               expiry: parseExpiry(
@@ -175,7 +216,27 @@ export function parseCommerce(
         plan: asString(offer.plan),
         billingInterval: parseBillingInterval(offer.billing_interval),
       };
-      if (offer.trial != null) subscriptionOffer.trial = parseBillingInterval(offer.trial);
+      if (offer.trial != null) {
+        const trial = parseBillingInterval(offer.trial);
+        const providerTypes = Object.keys(references).map((key) => providers[key]?.type);
+        if (providerTypes.some((type) => type === "stripe" || type === "dodo")) {
+          if (trial.unit !== "day" && trial.unit !== "week")
+            semanticError(
+              `commerce.offers.${offerKey}.trial requires day or week units for Stripe and Dodo`,
+            );
+          const days = trial.count * (trial.unit === "week" ? 7 : 1);
+          if (
+            !Number.isSafeInteger(days) ||
+            days < 1 ||
+            (providerTypes.includes("stripe") && days > 730) ||
+            (providerTypes.includes("dodo") && days > 10000)
+          )
+            semanticError(
+              `commerce.offers.${offerKey}.trial is outside the supported provider range`,
+            );
+        }
+        subscriptionOffer.trial = trial;
+      }
       if (cycleGrant != null) subscriptionOffer.cycleGrant = cycleGrant;
       offers[offerKey] = subscriptionOffer;
       continue;
@@ -202,7 +263,10 @@ export function parseCommerce(
     const topupOffer: TopupOffer = {
       ...common,
       type: "topup",
-      creditsPerUnit: asDecimal(offer.credits_per_unit),
+      creditsPerUnit: positiveDecimal(
+        offer.credits_per_unit,
+        `commerce.offers.${offerKey}.credits_per_unit`,
+      ),
       quantity: parsedQuantity,
       bucket,
       lotBehavior: lotBehaviorSchema.parse(offer.lot_behavior ?? "separate_lots"),
@@ -278,9 +342,18 @@ function parseAutoRecharge(
     default: asInteger(quantity.default),
   };
   validateIntegerRange(parsedQuantity, "commerce.auto_recharge.quantity");
-  const parsedMinimum = asDecimal(threshold.minimum);
-  const parsedMaximum = asDecimal(threshold.maximum);
-  const parsedDefault = asDecimal(threshold.default);
+  const parsedMinimum = nonNegativeDecimal(
+    threshold.minimum,
+    "commerce.auto_recharge.balance_below.minimum",
+  );
+  const parsedMaximum = nonNegativeDecimal(
+    threshold.maximum,
+    "commerce.auto_recharge.balance_below.maximum",
+  );
+  const parsedDefault = nonNegativeDecimal(
+    threshold.default,
+    "commerce.auto_recharge.balance_below.default",
+  );
   if (
     parsedMinimum.gt(parsedMaximum) ||
     parsedDefault.lt(parsedMinimum) ||
@@ -300,7 +373,7 @@ function parseAutoRecharge(
       semanticError(`commerce.auto_recharge.quantity must fit commerce.offers.${key}.quantity`);
     }
   }
-  const parsedRearmAbove = asDecimal(auto.rearm_above);
+  const parsedRearmAbove = positiveDecimal(auto.rearm_above, "commerce.auto_recharge.rearm_above");
   if (parsedRearmAbove.lte(parsedMaximum)) {
     semanticError("commerce.auto_recharge.rearm_above must exceed balance_below.maximum");
   }

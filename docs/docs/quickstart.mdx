@@ -67,8 +67,8 @@ export DATABASE_URL="postgresql://bursar_app:password@localhost:5432/bursar"
 export BURSAR_PROVIDER_ENVIRONMENT="test"
 ```
 
-`BURSAR_PROVIDER_ENVIRONMENT` selects an isolated financial namespace. Use
-`test` for this tutorial and provider test credentials; production uses `live`.
+`BURSAR_PROVIDER_ENVIRONMENT` selects the tenant’s immutable financial environment. Use
+`test` for this tutorial and provider test credentials; create a separate `live` tenant for production.
 
 TypeScript applications also install the Node.js package:
 
@@ -98,49 +98,18 @@ export BURSAR_TENANT_ID="018f7f5f-7b4a-7000-8000-000000000001"
 
 ## 3. Define and publish pricing
 
-Save this minimal configuration as `pricing.yaml`. It defines one metered operation, one rate card, one credit bucket, and one plan.
-
-```yaml title="pricing.yaml"
-version: 1
-catalog:
-  default_plan: standard
-pricing:
-  operations:
-    completion:
-      measures:
-        input_tokens: { unit: token }
-      dimensions:
-        model: { type: string }
-  rate_cards:
-    standard:
-      operations:
-        completion:
-          unmatched:
-            action: charge
-            charge:
-              type: per_unit
-              measure: input_tokens
-              rate: "0.25"
-              unit_size: "1000"
-credits:
-  buckets:
-    purchased: { priority: 10 }
-  default_bucket: purchased
-plans:
-  standard:
-    rate_card: standard
-    allowed_operations: [completion]
-```
-
-Validate the file before publishing it:
+Initialize the packaged starter, validate it, and publish the catalog:
 
 ```bash title="Terminal"
-bursar config validate pricing.yaml
-bursar config set pricing.yaml --label "quickstart"
+bursar config init bursar.yaml
+bursar config validate bursar.yaml
+bursar config set bursar.yaml --label "quickstart"
 bursar config list
 ```
 
-The schema rejects unknown fields. Exact decimal values such as `rate` and `unit_size` remain strings so parsing does not introduce floating-point values.
+JavaScript developers can instead author locally with `npx bursar-config init bursar.yaml`, `npx bursar-config validate bursar.yaml`, and `npx bursar-config quote bursar.yaml --operation export_report`. The Python operator CLI above publishes the catalog.
+
+The starter assigns the `free` plan, grants 20 credits once on signup, and prices `export_report` at 2 credits. Amounts are decimal strings. The catalog is stored in PostgreSQL; Go loads this compiled catalog via `LoadCatalog`.
 
 ## 4. Construct the facade
 
@@ -231,26 +200,16 @@ Keep the store tenant-bound for its full lifetime. Never set a session-scoped te
 
 ## 5. Create and fund an account
 
-Create a stable account identifier in your application database. Notify Bursar after signup, then post a purchase with a replay-safe idempotency key.
+Create a stable account identifier and notify Bursar of signup. Repeat the same event to see the replay-safe grant; the balance remains 20.
 
 <Tabs groupId="language">
   <TabItem value="python" label="Python">
 
 ```python
-from decimal import Decimal
-
 account_id = "11111111-1111-4111-8111-111111111111"
-bursar.accounts.on_account_created(
-    account_id,
-    event_key="signup:11111111",
-)
-grant = bursar.credits.add_credits(
-    account_id,
-    Decimal("100.000000"),
-    entry_type="purchase",
-    idempotency_key="purchase:quickstart:11111111",
-)
-print(grant.entry_id, grant.new_balance)
+for _ in range(2):
+    bursar.accounts.on_account_created(account_id, event_key="signup:11111111")
+    print(bursar.credits.get_balance(account_id).balance)  # 20, then 20
 ```
 
   </TabItem>
@@ -258,15 +217,13 @@ print(grant.entry_id, grant.new_balance)
 
 ```typescript
 const accountId = "11111111-1111-4111-8111-111111111111";
-await bursar.accounts.onAccountCreated({
-  accountId,
-  eventKey: "signup:11111111",
-});
-const grant = await bursar.credits.addCredits(accountId, "100.000000", {
-  type: "purchase",
-  idempotencyKey: "purchase:quickstart:11111111",
-});
-console.log(grant.entryId, grant.newBalance);
+for (let i = 0; i < 2; i++) {
+  await bursar.accounts.onAccountCreated({
+    accountId,
+    eventKey: "signup:11111111",
+  });
+  console.log((await bursar.credits.getBalance(accountId)).balance); // 20, then 20
+}
 ```
 
   </TabItem>
@@ -274,31 +231,21 @@ console.log(grant.entryId, grant.newBalance);
 
 ```go
 accountID := "11111111-1111-4111-8111-111111111111"
-if _, err := sdk.Accounts.OnAccountCreated(ctx, bursar.AccountCreatedInput{
-	AccountID: accountID,
-	EventKey:  "signup:11111111",
-}); err != nil {
-	log.Fatal(err)
+for i := 0; i < 2; i++ {
+    _, err := sdk.Accounts.OnAccountCreated(ctx, bursar.AccountCreatedInput{AccountID: accountID, EventKey: "signup:11111111"})
+    if err != nil { log.Fatal(err) }
+    balance, err := sdk.Credits.GetBalance(ctx, accountID)
+    if err != nil { log.Fatal(err) }
+    log.Println(balance.Balance) // 20, then 20
 }
-
-grant, err := sdk.Credits.AddCredits(ctx, accountID, bursar.MustAmount("100.000000"), bursar.AddCreditsOptions{
-	Type:           "purchase",
-	IdempotencyKey: "purchase:quickstart:11111111",
-})
-if err != nil {
-	log.Fatal(err)
-}
-log.Println(grant.EntryID, grant.NewBalance)
 ```
 
   </TabItem>
 </Tabs>
 
-The signup event assigns the `standard` plan from `catalog.default_plan`. The purchase appends one ledger entry and creates spendable credit in the `purchased` bucket.
-
 ## 6. Meter and charge usage
 
-Record 800 input tokens. The rate card prices 1,000 tokens at 0.25 credits, so this call charges 0.20 credits.
+Record one export. The starter charges 2 credits, leaving 18.
 
 <Tabs groupId="language">
   <TabItem value="python" label="Python">
@@ -307,9 +254,9 @@ Record 800 input tokens. The rate card prices 1,000 tokens at 0.25 credits, so t
 from bursar.metrics import UsageMetrics
 
 usage = UsageMetrics(
-    operation="completion",
-    measures={"input_tokens": Decimal("800")},
-    dimensions={"model": "example-model"},
+    operation="export_report",
+    measures={},
+    dimensions={},
 )
 charge = bursar.credits.deduct(
     account_id,
@@ -324,9 +271,9 @@ print(charge.amount, charge.balance_after, charge.entry_id)
 
 ```typescript
 const usage = {
-  operation: "completion",
-  measures: { input_tokens: "800" },
-  dimensions: { model: "example-model" },
+  operation: "export_report",
+  measures: {},
+  dimensions: {},
 };
 const charge = await bursar.credits.deduct(accountId, usage, {
   idempotencyKey: "request:quickstart:0195",
@@ -343,19 +290,19 @@ if err != nil {
 	log.Fatal(err)
 }
 quote, err := engine.Calculate(bursar.UsageMetrics{
-	Operation:  "completion",
-	Measures:   map[string]bursar.Amount{"input_tokens": bursar.MustAmount("800")},
-	Dimensions: map[string]any{"model": "example-model"},
+	Operation:  "export_report",
+	Measures:   map[string]bursar.Amount{},
+	Dimensions: map[string]any{},
 })
 if err != nil {
 	log.Fatal(err)
 }
 charge, err := sdk.Credits.Deduct(ctx, accountID, quote.Total, bursar.DeductWithAllowanceOptions{
-	Operation:      "completion",
+	Operation:      "export_report",
 	IdempotencyKey: "request:quickstart:0195",
 	OperationUsageOptions: bursar.OperationUsageOptions{
-		Measures:   map[string]bursar.Amount{"input_tokens": bursar.MustAmount("800")},
-		Dimensions: map[string]any{"model": "example-model"},
+		Measures:   map[string]bursar.Amount{},
+		Dimensions: map[string]any{},
 	},
 })
 if err != nil {
@@ -371,7 +318,7 @@ Call `deduct` again with the same idempotency key and payload. Bursar returns th
 
 ## 7. Verify the ledger
 
-Read the canonical balance and the latest entries. The account should hold 99.800000 credits after the 0.200000 charge.
+Read the canonical balance and the latest entries. The account should hold 18 credits after the 2-credit charge.
 
 <Tabs groupId="language">
   <TabItem value="python" label="Python">

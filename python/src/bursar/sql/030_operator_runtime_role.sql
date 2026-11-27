@@ -29,6 +29,10 @@
 GRANT USAGE ON SCHEMA bursar, extensions
 TO bursar_operator_runtime;
 
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bursar.usage_rollup_contributions
+TO bursar_operator_runtime;
+GRANT SELECT, INSERT, DELETE ON TABLE bursar.usage_backend_cutover_items
+TO bursar_operator_runtime;
 GRANT SELECT, UPDATE ON TABLE bursar.storage_settings
 TO bursar_operator_runtime;
 GRANT SELECT ON TABLE bursar.catalog_plan_quotas
@@ -37,11 +41,11 @@ GRANT SELECT, INSERT, UPDATE ON TABLE bursar.tenants
 TO bursar_operator_runtime;
 GRANT SELECT, UPDATE, DELETE ON TABLE bursar.event_outbox
 TO bursar_operator_runtime;
-GRANT SELECT, UPDATE, DELETE ON TABLE bursar.credit_usage_charges
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bursar.credit_usage_charges
 TO bursar_operator_runtime;
 GRANT SELECT ON TABLE bursar.credit_accounts
 TO bursar_operator_runtime;
-GRANT SELECT, UPDATE, DELETE ON TABLE bursar.usage_charge_payloads
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bursar.usage_charge_payloads
 TO bursar_operator_runtime;
 GRANT SELECT, UPDATE ON TABLE bursar.billing_events
 TO bursar_operator_runtime;
@@ -53,7 +57,7 @@ GRANT SELECT, UPDATE, DELETE ON TABLE bursar.quota_usage_events
 TO bursar_operator_runtime;
 GRANT SELECT, UPDATE ON TABLE bursar.credit_leases
 TO bursar_operator_runtime;
-GRANT SELECT, UPDATE, DELETE ON TABLE bursar.usage_daily_rollups
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bursar.usage_daily_rollups
 TO bursar_operator_runtime;
 -- Both private owners re-evaluate ordinary CHECK and validation helpers while
 -- mutating rows or partitions. Mirror the runtime-owner dependency closure.
@@ -105,6 +109,8 @@ DECLARE
     v_table name;
 BEGIN
     FOREACH v_table IN ARRAY ARRAY[
+        'usage_rollup_contributions',
+        'usage_backend_cutover_items',
         'storage_settings',
         'catalog_plan_quotas',
         'tenants',
@@ -129,6 +135,7 @@ BEGIN
     END LOOP;
 
     FOREACH v_table IN ARRAY ARRAY[
+        'usage_rollup_contributions',
         'storage_settings',
         'tenants',
         'event_outbox',
@@ -151,11 +158,24 @@ BEGIN
         );
     END LOOP;
 
+    FOREACH v_table IN ARRAY ARRAY[
+        'usage_rollup_contributions', 'usage_backend_cutover_items',
+        'credit_usage_charges', 'usage_charge_payloads', 'usage_daily_rollups'
+    ]::name[]
+    LOOP
+        EXECUTE format(
+            'CREATE POLICY %I ON bursar.%I FOR INSERT TO bursar_operator_runtime WITH CHECK (TRUE)',
+            left('operator_runtime_insert_' || v_table, 63), v_table
+        );
+    END LOOP;
+
     CREATE POLICY operator_runtime_insert_tenants ON bursar.tenants
     FOR INSERT TO bursar_operator_runtime
     WITH CHECK (TRUE);
 
     FOREACH v_table IN ARRAY ARRAY[
+        'usage_rollup_contributions',
+        'usage_backend_cutover_items',
         'event_outbox',
         'credit_usage_charges',
         'usage_charge_payloads',
@@ -189,6 +209,8 @@ GRANT USAGE ON SCHEMA partman
 TO bursar_partition_runtime;
 GRANT SELECT ON TABLE bursar.storage_settings
 TO bursar_partition_runtime;
+GRANT SELECT (usage_cutover_target, usage_cutover_cutoff) ON TABLE bursar.tenants
+TO bursar_partition_runtime;
 GRANT SELECT, UPDATE, DELETE ON TABLE partman.part_config
 TO bursar_partition_runtime;
 GRANT SELECT, UPDATE, DELETE ON TABLE partman.part_config_sub
@@ -215,6 +237,10 @@ CREATE POLICY partition_runtime_read_storage_settings
 ON bursar.storage_settings
 FOR SELECT TO bursar_partition_runtime
 USING (TRUE);
+
+-- Partition retirement must not remove source data during a cutover.
+CREATE POLICY partition_runtime_read_tenant_cutovers
+ON bursar.tenants FOR SELECT TO bursar_partition_runtime USING (TRUE);
 
 -- Transfer both partitioned parents and every existing child to the private DDL
 -- owner so future pg_partman maintenance does not inherit migration-login authority.
@@ -342,6 +368,14 @@ DO $$
 DECLARE
     v_function text;
     v_operator_functions constant text[] := ARRAY[
+        'bursar.verify_usage_cutover_item(uuid,uuid,timestamptz,text)',
+        'bursar.finish_usage_backend_cutover(uuid,text,bigint)',
+        'bursar.import_usage_cutover_item(uuid,jsonb)',
+        'bursar.usage_cutover_projection(uuid,uuid)',
+        'bursar.list_usage_cutover_postgres(uuid,timestamptz,uuid,integer)',
+        'bursar.get_usage_backend_status(uuid)',
+        'bursar.begin_usage_backend_cutover(uuid,text,timestamptz)',
+        'bursar.abort_usage_backend_cutover(uuid)',
         'bursar.get_storage_settings()',
         'bursar.configure_storage(integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer,integer)',
         'bursar.claim_outbox_events(integer,integer,text[])',
@@ -354,7 +388,8 @@ DECLARE
         'bursar.run_storage_partition_maintenance(text,timestamptz)',
         'bursar.run_storage_maintenance(timestamptz)',
         'bursar.maybe_run_storage_maintenance(timestamptz)',
-        'bursar.create_tenant(uuid,text,text)',
+        'bursar.create_tenant(uuid,text,text,text)',
+        'bursar.get_tenant_context_by_slug(text)',
         'bursar.set_tenant_status(uuid,text)',
         'bursar.resolve_active_tenant_for_trigger(text)',
         'bursar.renew_tenant_outbox_claim(uuid,bigint,uuid,integer)',

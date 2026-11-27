@@ -359,7 +359,7 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         )
         cursor.execute("SET LOCAL ROLE bursar_operator")
         cursor.execute(
-            "SELECT bursar.create_tenant(%s, %s, %s)",
+            "SELECT bursar.create_tenant(%s, %s, %s, 'test')",
             (tenant_id, "notebook-demo", "Notebook demo"),
         )
     runtime_dsn = (

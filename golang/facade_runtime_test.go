@@ -120,13 +120,12 @@ func TestBursarAppliesBillingOptionsAcrossHandlerSurfaces(t *testing.T) {
 			Provisioning:                provisioning,
 			AutoSelectEntitlementSource: &autoSelect,
 			PastDueGracePeriod:          &grace,
-			TerminalPlanKey:             "terminal",
 		},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if sdk.Billing == nil || sdk.Billing.defaultHandler == nil || sdk.Billing.provisioning != provisioning || sdk.Billing.autoSelectEntitlementSource || sdk.Billing.pastDueGracePeriod != grace || sdk.Billing.terminalPlanKey != "terminal" {
+	if sdk.Billing == nil || sdk.Billing.defaultHandler == nil || sdk.Billing.provisioning != provisioning || sdk.Billing.autoSelectEntitlementSource || sdk.Billing.pastDueGracePeriod != grace {
 		t.Fatalf("billing options were not applied: %#v", sdk.Billing)
 	}
 	if len(sdk.Billing.handlers) != 1 || len(sdk.Billing.eventHandlers) != 1 {
@@ -162,7 +161,7 @@ func TestBursarComposesCommerceStoreCapabilities(t *testing.T) {
 		CreditStore:  &facadeStoreStub{environment: ProviderEnvironmentTest},
 		BillingStore: store,
 		CommerceOptions: &CommerceOptions{
-			Providers: &ProviderRegistry{},
+			Providers: &ProviderRegistry{context: ProviderFactoryContext{ProviderEnvironment: ProviderEnvironmentTest}},
 		},
 	})
 	if err != nil {

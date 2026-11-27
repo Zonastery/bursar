@@ -1,3 +1,4 @@
+import type { RawUsageJson } from "./raw-json.js";
 import { z } from "zod";
 
 import { Bursar } from "../bursar.js";
@@ -350,6 +351,33 @@ export class BursarRuntime {
           providerEnvironment: this.providerEnvironment,
         }
       : undefined;
+    const usage = this.clickhouse;
+    const guardedAnalytics: UsageAnalyticsStore | undefined = usage
+      ? {
+          spendByUser: (start, end) =>
+            this.creditStore.withUsageBackend("clickhouse", () => usage.spendByUser(start, end)),
+          spendByModel: (start, end) =>
+            this.creditStore.withUsageBackend("clickhouse", () => usage.spendByModel(start, end)),
+          topUsers: (limit, start, end) =>
+            this.creditStore.withUsageBackend("clickhouse", () =>
+              usage.topUsers(limit, start, end),
+            ),
+          dailySpend: (start, end) =>
+            this.creditStore.withUsageBackend("clickhouse", () => usage.dailySpend(start, end)),
+          aggregateStats: (start, end) =>
+            this.creditStore.withUsageBackend("clickhouse", () => usage.aggregateStats(start, end)),
+        }
+      : undefined;
+    const guardedHistory: UsageChargeStore | undefined = usage
+      ? {
+          listUsageCharges: (userId, options) =>
+            this.creditStore.withUsageBackend("clickhouse", () => {
+              if (!supportsUsageHistory(usage))
+                throw new Error("ClickHouse usage receipt history is not configured");
+              return usage.listUsageCharges(userId, options);
+            }),
+        }
+      : undefined;
     this.bursar = new Bursar({
       ...bursarOptions,
       commerceOptions,
@@ -357,9 +385,8 @@ export class BursarRuntime {
       billingStore: this.billingStore,
       creditsOptions: {
         ...(bursarOptions.creditsOptions ?? {}),
-        analytics: this.clickhouse ?? undefined,
-        usageStore:
-          this.clickhouse && supportsUsageHistory(this.clickhouse) ? this.clickhouse : undefined,
+        analytics: guardedAnalytics,
+        usageStore: guardedHistory,
       },
     });
 
@@ -445,6 +472,10 @@ export class BursarRuntime {
   private async startRuntime(options: BursarRuntimeStartOptions): Promise<void> {
     const startOptions = runtimeStartOptionsSchema.parse(options);
     if (this.tenantSlug) await this.verifyTenantIdentity();
+    await this.creditStore.withUsageBackend(
+      this.clickhouse ? "clickhouse" : "postgres",
+      async () => {},
+    );
     if (startOptions.loadCatalog) {
       const shouldRetry =
         startOptions.shouldRetry ??
@@ -572,7 +603,7 @@ export class BursarRuntime {
               `Unsupported usage outbox payload version ${outboxEvent.payloadVersion}`,
             );
           }
-          let usage = usageExportFromOutbox(outboxEvent.payload);
+          let usage = usageExportFromOutbox(outboxEvent.payload, outboxEvent.rawUsage);
           usage ??= await repository.getUsageCharge(outboxEvent.aggregateId);
           if (!usage) {
             throw new Error(`Usage charge ${outboxEvent.aggregateId} is unavailable for export`);
@@ -764,11 +795,14 @@ const billingOutboxPayloadSchema = z
   })
   .passthrough();
 
-function usageExportFromOutbox(payload: JsonObject): UsageChargeExport | null {
+function usageExportFromOutbox(
+  payload: JsonObject,
+  rawUsage?: RawUsageJson,
+): UsageChargeExport | null {
   const parsed = usageOutboxPayloadSchema.safeParse(payload);
   if (!parsed.success) return null;
   const value = parsed.data;
-  return {
+  const usage: UsageChargeExport = {
     tenantId: value.tenant_id,
     chargeId: value.charge_id,
     accountId: value.account_id,
@@ -796,6 +830,8 @@ function usageExportFromOutbox(payload: JsonObject): UsageChargeExport | null {
     eventAt: value.event_at,
     createdAt: value.created_at,
   };
+  if (rawUsage) usage.rawJson = rawUsage;
+  return usage;
 }
 
 function billingExportFromOutbox(payload: JsonObject): BillingEventPayloadExport | null {

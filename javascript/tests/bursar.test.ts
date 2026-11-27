@@ -87,7 +87,10 @@ describe("Bursar facade", () => {
     const active = { version: 3 };
     const getActiveCatalog = vi.fn().mockResolvedValue(active);
     const applyDuePlanChanges = vi.fn().mockResolvedValue(2);
-    const creditStore = testCreditStore({ getActiveCatalog, applyDuePlanChanges });
+    const creditStore = testCreditStore({
+      getActiveCatalog,
+      applyDuePlanChanges,
+    });
     const bursar = new Bursar({ creditStore });
 
     expect(bursar.billing).toBeNull();
@@ -95,6 +98,69 @@ describe("Bursar facade", () => {
     await expect(bursar.catalog.getActive()).resolves.toBe(active);
     await expect(bursar.catalog.applyDueChanges(25)).resolves.toBe(2);
     expect(applyDuePlanChanges).toHaveBeenCalledWith(25);
+  });
+
+  it("scopes facade storefront offers while leaving config available for full inspection", async () => {
+    const config = {
+      version: 1,
+      credits: {},
+      catalog: { default_plan: "free" },
+      plans: { free: { display_name: "Free" } },
+      commerce: {
+        providers: { dodo: { type: "dodo" }, stripe: { type: "stripe" } },
+        offers: {
+          test_offer: {
+            type: "subscription",
+            display_name: "Test",
+            plan: "free",
+            billing_interval: { unit: "month" },
+            price: { amount_minor: 100, currency: "USD" },
+            providers: { dodo: { product_id: { test: "test_id" } } },
+          },
+          live_offer: {
+            type: "subscription",
+            display_name: "Live",
+            plan: "free",
+            billing_interval: { unit: "month" },
+            price: { amount_minor: 200, currency: "USD" },
+            providers: { dodo: { product_id: { live: "live_id" } } },
+          },
+          other_offer: {
+            type: "subscription",
+            display_name: "Other",
+            plan: "free",
+            billing_interval: { unit: "month" },
+            price: { amount_minor: 300, currency: "USD" },
+            providers: { stripe: { price_id: { live: "other_id" } } },
+          },
+        },
+      },
+    };
+    const creditStore = testCreditStore({
+      providerEnvironment: "live",
+      getActiveCatalog: vi.fn().mockResolvedValue({ config }),
+    });
+    const billingStore = testBillingStore({ providerEnvironment: "live" });
+    const bursar = new Bursar({
+      creditStore,
+      billingStore,
+      commerceOptions: {
+        providerEnvironment: "live",
+        providers: {
+          dodo: () => {
+            throw new Error("projection must not construct provider");
+          },
+        },
+      },
+    });
+    expect((await bursar.catalog.publicView()).plans[0]?.offers.map((offer) => offer.key)).toEqual([
+      "live_offer",
+    ]);
+    const marketing = new Bursar({ creditStore });
+    expect(
+      (await marketing.catalog.publicView()).plans[0]?.offers.map((offer) => offer.key),
+    ).toEqual(["live_offer", "other_offer"]);
+    expect(Object.keys((await marketing.catalog.getConfig()).commerce.offers)).toHaveLength(3);
   });
 
   it("rejects billing and commerce options that cannot be applied", () => {
@@ -116,7 +182,10 @@ describe("Bursar facade", () => {
 
   it("configures billing with the facade-owned credit provisioning capability", () => {
     const billingStore = testBillingStore({});
-    const bursar = new Bursar({ creditStore: testCreditStore({}), billingStore });
+    const bursar = new Bursar({
+      creditStore: testCreditStore({}),
+      billingStore,
+    });
 
     expect(bursar.billing).not.toBeNull();
     expect(bursar.billing?.hasProvisioning).toBe(true);
@@ -195,7 +264,10 @@ describe("Bursar facade", () => {
       }),
     );
     await expect(
-      accounts.onAccountCreated({ accountId: "user-1", eventKey: "signup:user-1" }),
+      accounts.onAccountCreated({
+        accountId: "user-1",
+        eventKey: "signup:user-1",
+      }),
     ).rejects.toBeInstanceOf(ConfigError);
   });
 });

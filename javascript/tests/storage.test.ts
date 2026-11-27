@@ -20,6 +20,15 @@ type RuntimeTestOptions = Omit<BursarRuntimeOptions, "providerEnvironment" | "op
 };
 
 function createBursarRuntime(options: RuntimeTestOptions) {
+  if (isPostgresPool(options.postgres)) {
+    const connect = options.postgres.connect;
+    if (vi.isMockFunction(connect) && !connect.getMockImplementation()) {
+      connect.mockResolvedValue({
+        query: vi.fn().mockResolvedValue({ rows: [] }),
+        release: vi.fn(),
+      });
+    }
+  }
   const operatorPostgres =
     options.operatorPostgres ??
     (!isPostgresPool(options.postgres)
@@ -374,10 +383,10 @@ describe("ClickHouseUsageStore", () => {
             feature: "chat",
             model: "gpt",
             region: null,
-            event_at: "2026-07-29 12:00:00.123456",
+            event_at_text: "2026-07-29 12:00:00.123456",
             idempotency_key: "job:42",
             metadata: '{"trace_id":"trace-42"}',
-            created_at: "2026-07-29 12:00:00.654321",
+            created_at_text: "2026-07-29 12:00:00.654321",
           },
           {
             usage_id: "00000000-0000-0000-0000-000000000041",
@@ -390,10 +399,10 @@ describe("ClickHouseUsageStore", () => {
             feature: null,
             model: null,
             region: null,
-            event_at: "2026-07-29 12:00:00.123455",
+            event_at_text: "2026-07-29 12:00:00.123455",
             idempotency_key: "job:41",
             metadata: "{}",
-            created_at: "2026-07-29 12:00:00.654320",
+            created_at_text: "2026-07-29 12:00:00.654320",
           },
         ] as T,
     });
@@ -448,10 +457,10 @@ describe("ClickHouseUsageStore", () => {
             feature: null,
             model: null,
             region: null,
-            event_at: "not-a-clickhouse-timestamp",
+            event_at_text: "not-a-clickhouse-timestamp",
             idempotency_key: "job:42",
             metadata: "[]",
-            created_at: "2026-07-29 12:00:00.000000",
+            created_at_text: "2026-07-29 12:00:00.000000",
           },
         ] as T,
     });
@@ -486,10 +495,10 @@ describe("ClickHouseUsageStore", () => {
             feature: null,
             model: null,
             region: null,
-            event_at: "2026-99-99 12:00:00.000000",
+            event_at_text: "2026-99-99 12:00:00.000000",
             idempotency_key: "job:42",
             metadata: "{}",
-            created_at: "2026-07-29 12:00:00.000000",
+            created_at_text: "2026-07-29 12:00:00.000000",
           },
         ] as T,
     });
@@ -799,7 +808,7 @@ describe("BursarRuntime", () => {
     const firstStart = runtime.start({ loadCatalog: false });
     const secondStart = runtime.start();
     expect(secondStart).toBe(firstStart);
-    expect(clickhouse.initialize).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(clickhouse.initialize).toHaveBeenCalledOnce());
     initializing.resolve();
     await firstStart;
 

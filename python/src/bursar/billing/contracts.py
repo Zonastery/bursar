@@ -29,6 +29,8 @@ class CheckoutIntentCreate(_BillingContract):
     product_key: str
     request_digest: str
     expires_at: str
+    region: str | None = None
+    expected_revision_id: str | None = None
 
 
 class CheckoutIntentUpdate(_BillingContract):
@@ -56,6 +58,7 @@ class BillingPaymentUpsert(_BillingContract):
     provider: str
     provider_payment_id: str
     provider_invoice_id: str | None = None
+    topup_id: str | None = None
     user_id: str
     amount_minor: NonNegativeSafeInteger
     tax_minor: NonNegativeSafeInteger
@@ -116,6 +119,9 @@ class BillingDisputeUpsert(_BillingContract):
 class AutoRechargeAttemptClaim(_BillingContract):
     user_id: str
     idempotency_key: str
+    expected_product_id: str
+    expected_quantity: int
+    expected_topup_key: str
 
 
 class AutoRechargeAttemptUpdate(_BillingContract):

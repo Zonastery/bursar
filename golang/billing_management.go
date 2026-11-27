@@ -67,6 +67,7 @@ type BillingPaymentUpsert struct {
 	Provider          string
 	ProviderPaymentID string
 	ProviderInvoiceID string
+	TopupID           string
 	AccountID         string
 	AmountMinor       int64
 	TaxMinor          int64
@@ -170,7 +171,7 @@ type billingGraceStateStore interface {
 }
 
 type billingGraceExpiryStore interface {
-	expirePastDueGracePeriod(context.Context, CommerceSubscription, time.Time, string) (bool, error)
+	expirePastDueGracePeriod(context.Context, CommerceSubscription, time.Time) (bool, error)
 }
 
 type autoRechargeProviderPaymentUpdater interface {
@@ -538,7 +539,7 @@ func (s *BillingService) ExpirePastDueGracePeriods(ctx context.Context, now time
 		if candidate.ID == "" || candidate.GraceEndsAt == nil || candidate.Status != "past_due" || candidate.GraceExpiredAt != nil {
 			continue
 		}
-		marked, markErr := expirer.expirePastDueGracePeriod(ctx, candidate, now, s.terminalPlanKey)
+		marked, markErr := expirer.expirePastDueGracePeriod(ctx, candidate, now)
 		if markErr != nil {
 			return expired, markErr
 		}
@@ -557,7 +558,7 @@ func (s *BillingService) expireGraceIfNeeded(ctx context.Context, subscription *
 	if !ok {
 		return nil, NewError("atomic billing grace-period expiry is not configured", ErrorOptions{Code: ErrorCodeCapabilityNotConfigured, Category: ErrorCategoryUnavailable})
 	}
-	marked, err := expirer.expirePastDueGracePeriod(ctx, *subscription, now, s.terminalPlanKey)
+	marked, err := expirer.expirePastDueGracePeriod(ctx, *subscription, now)
 	if err != nil {
 		return nil, err
 	}

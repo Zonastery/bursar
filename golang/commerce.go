@@ -55,10 +55,11 @@ type CheckoutIntentCreate struct {
 	IdempotencyKey string
 	// RequestDigest identifies the resolved checkout request bound to a stable
 	// key. Stores must return it on replay before Commerce contacts a provider.
-	RequestDigest string
-	ExpiresAt     time.Time
-	Region        string
-	Metadata      map[string]string
+	RequestDigest      string
+	ExpiresAt          time.Time
+	Region             string
+	Metadata           map[string]string
+	ExpectedRevisionID string
 }
 
 // CheckoutIntentUpdate records the externally-created session. A store should
@@ -78,6 +79,7 @@ type CommerceStore interface {
 	CreateOrGetCheckoutIntent(context.Context, CheckoutIntentCreate) (CheckoutIntent, error)
 	UpdateCheckoutIntent(context.Context, string, string, CheckoutIntentUpdate) error
 	GetCheckoutIntent(context.Context, string, string) (*CheckoutIntent, error)
+	FindCheckoutIntent(context.Context, string, string, string) (*CheckoutIntent, map[string]any, error)
 }
 
 // CommerceOptions configures provider-backed hosted checkout. It is optional
@@ -181,6 +183,11 @@ func NewCommerceService(billing *BillingService, catalog *CatalogService, credit
 	if options.Providers == nil {
 		return nil, NewError("commerce requires a provider registry", ErrorOptions{Code: ErrorCodeCommerceNotConfigured, Category: ErrorCategoryInvalidRequest})
 	}
+	for _, store := range []any{options.Store, options.StateStore, catalog.store} {
+		if bound, ok := store.(interface{ ProviderEnvironment() ProviderEnvironment }); ok && bound.ProviderEnvironment() != options.Providers.context.ProviderEnvironment {
+			return nil, NewError("provider registry and store environments differ", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+		}
+	}
 	if fallback := strings.TrimSpace(options.DefaultProvider); fallback != "" {
 		configured := options.Providers.Configured()
 		if !containsText(configured, fallback) {
@@ -278,9 +285,13 @@ func (s *CommerceService) ProviderForAccount(ctx context.Context, accountID stri
 		if !found {
 			return nil, NewError("checkout offer was not found", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryNotFound, Details: map[string]any{"offer_key": offerKey[0]}})
 		}
-		compatible = sortedProviderKeys(offer.Providers)
+		compatible = s.compatibleProviderKeys(offer.Providers)
 	}
-	return s.providers.Select(ctx, "", firstNonEmpty(current, s.defaultProvider), compatible)
+	fallback := current
+	if fallback == "" && containsText(compatible, s.defaultProvider) {
+		fallback = s.defaultProvider
+	}
+	return s.providers.Select(ctx, "", fallback, compatible)
 }
 
 // Providers returns configured provider names in deterministic order.
@@ -314,6 +325,10 @@ func (s *CommerceService) Close() {
 // CreateCheckout resolves an active offer and creates or replays its hosted
 // provider checkout. Product and quantity rules always come from the catalog.
 func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateCheckoutInput) (CreateCheckoutResult, error) {
+	return s.createCheckoutAttempt(ctx, input, 0)
+}
+
+func (s *CommerceService) createCheckoutAttempt(ctx context.Context, input CreateCheckoutInput, attempt int) (CreateCheckoutResult, error) {
 	if s == nil || s.store == nil || s.providers == nil {
 		return CreateCheckoutResult{}, NewError("commerce is not configured", ErrorOptions{Code: ErrorCodeCommerceNotConfigured, Category: ErrorCategoryInternal})
 	}
@@ -337,12 +352,54 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		return CreateCheckoutResult{}, NewError("checkout success and cancel URLs are required", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
 
-	config, err := s.catalog.GetConfig(ctx)
+	replay, savedCatalog, err := s.store.FindCheckoutIntent(ctx, subjectID, idempotencyKey, input.Provider)
+	if err != nil {
+		return CreateCheckoutResult{}, err
+	}
+	if replay != nil && input.Provider != "" && input.Provider != replay.Provider {
+		return CreateCheckoutResult{}, NewError("checkout operation key is already bound to a different request", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict})
+	}
+	hasWinner := func() (bool, error) {
+		if replay != nil || attempt != 0 {
+			return false, nil
+		}
+		winner, _, lookupErr := s.store.FindCheckoutIntent(ctx, subjectID, idempotencyKey, input.Provider)
+		return winner != nil, lookupErr
+	}
+	var config *BursarConfig
+	var snapshot map[string]any
+	var expectedRevisionID string
+	if replay != nil {
+		config, err = LoadConfigFromMapWithEnvironment(savedCatalog, string(s.providers.context.ProviderEnvironment))
+	} else {
+		var revision *CatalogRevision
+		revision, err = s.catalog.GetActive(ctx)
+		if err == nil && revision == nil {
+			return CreateCheckoutResult{}, NewError("active catalog unavailable", ErrorOptions{Code: ErrorCodeCatalogNotLoaded, Category: ErrorCategoryUnavailable})
+		}
+		if err == nil {
+			snapshot = revision.Config
+			expectedRevisionID = revision.ID
+			config, err = LoadConfigFromMapWithEnvironment(snapshot, string(s.providers.context.ProviderEnvironment))
+		}
+	}
 	if err != nil {
 		return CreateCheckoutResult{}, err
 	}
 	offer, found := config.Commerce.Offers[offerKey]
 	if !found {
+		if replay == nil && attempt == 0 {
+			winner, _, lookupErr := s.store.FindCheckoutIntent(ctx, subjectID, idempotencyKey, input.Provider)
+			if lookupErr != nil {
+				return CreateCheckoutResult{}, lookupErr
+			}
+			if winner != nil {
+				return s.createCheckoutAttempt(ctx, input, 1)
+			}
+		}
+		if replay != nil {
+			return CreateCheckoutResult{}, NewError("checkout operation key is already bound to a different request", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict})
+		}
 		return CreateCheckoutResult{}, NewError("checkout offer was not found", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryNotFound, Details: map[string]any{"offer_key": offerKey}})
 	}
 	if requestedType := strings.ToLower(strings.TrimSpace(input.Type)); requestedType != "" {
@@ -354,11 +411,27 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 			offerType = "credit_pack"
 		}
 		if requestedType != offerType {
+			if winner, lookupErr := hasWinner(); lookupErr != nil {
+				return CreateCheckoutResult{}, lookupErr
+			} else if winner {
+				return s.createCheckoutAttempt(ctx, input, 1)
+			}
+			if replay != nil {
+				return CreateCheckoutResult{}, NewError("checkout operation key is already bound to a different request", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict})
+			}
 			return CreateCheckoutResult{}, NewError("checkout type does not match the selected offer", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryInvalidRequest, Details: map[string]any{"offer_key": offerKey, "type": requestedType}})
 		}
 	}
 	quantity, err := checkoutQuantity(offer, input.Quantity)
 	if err != nil {
+		if winner, lookupErr := hasWinner(); lookupErr != nil {
+			return CreateCheckoutResult{}, lookupErr
+		} else if winner {
+			return s.createCheckoutAttempt(ctx, input, 1)
+		}
+		if replay != nil {
+			return CreateCheckoutResult{}, NewError("checkout operation key is already bound to a different request", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict})
+		}
 		return CreateCheckoutResult{}, err
 	}
 	var currentSubscription *CommerceSubscription
@@ -377,7 +450,7 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 			return CreateCheckoutResult{}, err
 		}
 	}
-	if offer.Type == "subscription" {
+	if offer.Type == "subscription" && replay == nil {
 		state, stateErr := s.requireState()
 		if stateErr != nil {
 			return CreateCheckoutResult{}, stateErr
@@ -387,6 +460,11 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 			return CreateCheckoutResult{}, blockingErr
 		}
 		if blocking != nil {
+			if winner, lookupErr := hasWinner(); lookupErr != nil {
+				return CreateCheckoutResult{}, lookupErr
+			} else if winner {
+				return s.createCheckoutAttempt(ctx, input, 1)
+			}
 			return CreateCheckoutResult{}, NewError("account already has a blocking subscription", ErrorOptions{
 				Code:     ErrorCodeActiveSubscription,
 				Category: ErrorCategoryConflict,
@@ -394,15 +472,26 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 			})
 		}
 	}
-	compatible := sortedProviderKeys(offer.Providers)
-	providerFallback := s.defaultProvider
+	compatible := s.compatibleProviderKeys(offer.Providers)
+	providerFallback := ""
 	if currentProvider != "" {
 		providerFallback = currentProvider
 	} else if accountCustomer != nil {
 		providerFallback = strings.TrimSpace(accountCustomer.Provider)
+	} else if containsText(compatible, s.defaultProvider) {
+		providerFallback = s.defaultProvider
 	}
-	provider, err := s.providers.Select(ctx, input.Provider, providerFallback, compatible)
+	requestedProvider := input.Provider
+	if replay != nil {
+		requestedProvider = replay.Provider
+	}
+	provider, err := s.providers.Select(ctx, requestedProvider, providerFallback, compatible)
 	if err != nil {
+		if winner, lookupErr := hasWinner(); lookupErr != nil {
+			return CreateCheckoutResult{}, lookupErr
+		} else if winner {
+			return s.createCheckoutAttempt(ctx, input, 1)
+		}
 		return CreateCheckoutResult{}, err
 	}
 	if s.state != nil && (accountCustomer == nil || accountCustomer.Provider != provider.Name()) {
@@ -414,6 +503,10 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 	providerRef, exists := offer.Providers[provider.Name()]
 	if !exists {
 		return CreateCheckoutResult{}, NewError("selected provider has no offer reference", ErrorOptions{Code: ErrorCodeProviderSelectionFailed, Category: ErrorCategoryInvalidRequest, Details: map[string]any{"provider": provider.Name(), "offer_key": offerKey}})
+	}
+	providerRef, err = ResolveProviderReference(providerRef, s.providers.context.ProviderEnvironment)
+	if err != nil {
+		return CreateCheckoutResult{}, err
 	}
 	productID := providerProductID(providerRef)
 	if productID == "" {
@@ -447,25 +540,34 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		customerID = strings.TrimSpace(accountCustomer.ProviderCustomerID)
 	}
 	create := CheckoutIntentCreate{
-		SubjectID:      subjectID,
-		AccountID:      accountID,
-		Provider:       provider.Name(),
-		CheckoutKind:   checkoutIntentKind(offer.Type),
-		ProductKey:     offerKey,
-		Quantity:       quantity,
-		IdempotencyKey: idempotencyKey,
-		ExpiresAt:      time.Now().UTC().Add(s.checkoutIntentTTL),
-		Region:         input.Region,
-		Metadata:       metadata,
+		SubjectID:          subjectID,
+		AccountID:          accountID,
+		Provider:           provider.Name(),
+		CheckoutKind:       checkoutIntentKind(offer.Type),
+		ProductKey:         offerKey,
+		Quantity:           quantity,
+		IdempotencyKey:     idempotencyKey,
+		ExpiresAt:          time.Now().UTC().Add(s.checkoutIntentTTL),
+		Region:             input.Region,
+		Metadata:           metadata,
+		ExpectedRevisionID: expectedRevisionID,
 	}
 	digest, err := checkoutRequestDigest(create)
 	if err != nil {
 		return CreateCheckoutResult{}, err
 	}
 	create.RequestDigest = hex.EncodeToString(digest[:])
-	intent, err := s.store.CreateOrGetCheckoutIntent(ctx, create)
-	if err != nil {
-		return CreateCheckoutResult{}, err
+	var intent CheckoutIntent
+	if replay != nil {
+		intent = *replay
+	} else {
+		intent, err = s.store.CreateOrGetCheckoutIntent(ctx, create)
+		if err != nil {
+			if attempt == 0 {
+				return s.createCheckoutAttempt(ctx, input, 1)
+			}
+			return CreateCheckoutResult{}, err
+		}
 	}
 	if intent.RequestDigest == "" || !strings.EqualFold(intent.RequestDigest, create.RequestDigest) {
 		return CreateCheckoutResult{Intent: intent}, NewError("checkout idempotency key is already bound to a different request", ErrorOptions{
@@ -514,7 +616,8 @@ func (s *CommerceService) CreateCheckout(ctx context.Context, input CreateChecko
 		CustomerID:     customerID,
 		CustomerEmail:  input.CustomerEmail,
 		Metadata:       metadata,
-		IdempotencyKey: idempotencyKey,
+		IdempotencyKey: "bursar:checkout:" + intent.ID,
+		Trial:          offer.Trial,
 	})
 	if err != nil {
 		return CreateCheckoutResult{Intent: intent}, err
@@ -634,12 +737,7 @@ func replaceCheckoutIntentURL(value, intentID string) string {
 }
 
 func providerProductID(reference ProviderReference) string {
-	for _, value := range []*string{reference.PriceID, reference.ProductID, reference.ExternalID} {
-		if value != nil && strings.TrimSpace(*value) != "" {
-			return strings.TrimSpace(*value)
-		}
-	}
-	return ""
+	return providerReferenceExternalID(reference)
 }
 
 func checkoutMode(offerType string) string {
@@ -654,6 +752,21 @@ func checkoutIntentKind(offerType string) string {
 		return "subscription"
 	}
 	return "credit_topup"
+}
+
+// compatibleProviderKeys filters catalog providers by registration and environment.
+func (s *CommerceService) compatibleProviderKeys(refs map[string]ProviderReference) []string {
+	registered := s.providers.Configured()
+	result := make([]string, 0, len(refs))
+	for _, name := range sortedProviderKeys(refs) {
+		if !containsText(registered, name) {
+			continue
+		}
+		if _, err := ResolveProviderReference(refs[name], s.providers.Environment()); err == nil {
+			result = append(result, name)
+		}
+	}
+	return result
 }
 
 func sortedProviderKeys(values map[string]ProviderReference) []string {

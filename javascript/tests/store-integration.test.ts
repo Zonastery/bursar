@@ -65,11 +65,17 @@ const CONFIG = {
           },
           free_export: {
             rules: [],
-            unmatched: { action: "charge", charge: { type: "flat", amount: "0" } },
+            unmatched: {
+              action: "charge",
+              charge: { type: "flat", amount: "0" },
+            },
           },
           internal_free: {
             rules: [],
-            unmatched: { action: "charge", charge: { type: "flat", amount: "0" } },
+            unmatched: {
+              action: "charge",
+              charge: { type: "flat", amount: "0" },
+            },
           },
         },
       },
@@ -390,7 +396,11 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     await expect(
       service.deduct(
         USER_ID,
-        { operation: "internal_free", measures: { calls: 1 }, dimensions: {} },
+        {
+          operation: "internal_free",
+          measures: { calls: 1 },
+          dimensions: {},
+        },
         { idempotencyKey: "public-config-free-not-allowed" },
       ),
     ).rejects.toBeInstanceOf(OperationNotAllowedError);
@@ -682,7 +692,10 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     const end = new Date(Date.now() + 60_000);
     await expect(store.spendByUser(start, end)).resolves.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ userId: REPORT_USER_ID, entryCount: expect.any(Number) }),
+        expect.objectContaining({
+          userId: REPORT_USER_ID,
+          entryCount: expect.any(Number),
+        }),
       ]),
     );
     await expect(store.spendByModel(start, end)).resolves.toEqual(
@@ -962,7 +975,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
   it("settles actual overdraft usage above the estimate within the credit line", async () => {
     const userId = "00000000-0000-0000-0000-000000000931";
     const overdraftConfig: BursarConfigData = structuredClone(CONFIG);
-    overdraftConfig.credits.policies = {
+    overdraftConfig.credits!.policies = {
       line: { type: "credit_line", limit: "5" },
     };
     overdraftConfig.plans!.pro!.credit_policy = "line";
@@ -1166,7 +1179,10 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       { operation: "free_export", measures: { calls: 1 }, dimensions: {} },
       { idempotencyKey: "team-service-free" },
     );
-    expect(free).toMatchObject({ teamId: team.teamId, amount: new Decimal(0) });
+    expect(free).toMatchObject({
+      teamId: team.teamId,
+      amount: new Decimal(0),
+    });
     expect(free.teamBalanceAfter?.toString()).toBe("10");
 
     const charged = await service.deductTeam(
@@ -1205,7 +1221,10 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     });
     const usage = await service.deduct(
       USER_ID,
-      { operation: "completion", measures: { input_tokens: 1, output_tokens: 1 } },
+      {
+        operation: "completion",
+        measures: { input_tokens: 1, output_tokens: 1 },
+      },
       { idempotencyKey: "service-refund-source" },
     );
     if (!usage.entryId) throw new Error("expected a refundable usage entry");
@@ -1266,7 +1285,10 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     });
     const deduction = await service.deduct(
       USER_ID,
-      { operation: "completion", measures: { input_tokens: 1, output_tokens: 1 } },
+      {
+        operation: "completion",
+        measures: { input_tokens: 1, output_tokens: 1 },
+      },
       { idempotencyKey: "observable-deduction" },
     );
     expect(deduction.amount.toString()).toBe("2");
@@ -1288,9 +1310,34 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       service.deductTeam(
         emptyTeam.teamId,
         REPLAY_USER_ID,
-        { operation: "completion", measures: { input_tokens: 1, output_tokens: 1 } },
+        {
+          operation: "completion",
+          measures: { input_tokens: 1, output_tokens: 1 },
+        },
         { idempotencyKey: "team-service-insufficient" },
       ),
     ).rejects.toBeInstanceOf(InsufficientCreditsError);
+  });
+
+  it("enforces explicit none for deduction and leases and reports effective access", async () => {
+    const service = new CreditsService(store);
+    // SAFETY: CONFIG is the validated fixture used by this suite; cloning makes it mutable.
+    const config = structuredClone(CONFIG) as BursarConfigData;
+    config.plans!.pro!.allowed_operations = "none";
+    await service.publishAndActivateCatalog(config);
+    const user = "00000000-0000-0000-0000-000000000999";
+    await service.setUserPlan(user, "pro");
+    await service.addCredits(user, new Decimal(10), {
+      type: "purchase",
+      idempotencyKey: "access-none-grant",
+    });
+    expect((await service.getUserPlan(user)).operationAccess).toBe("none");
+    const usage = { operation: "completion", measures: { input_tokens: 1, output_tokens: 0 } };
+    await expect(
+      service.deduct(user, usage, { idempotencyKey: "access-none-charge" }),
+    ).rejects.toBeInstanceOf(OperationNotAllowedError);
+    await expect(
+      service.reserve(user, usage, { idempotencyKey: "access-none-lease" }),
+    ).rejects.toBeInstanceOf(OperationNotAllowedError);
   });
 });

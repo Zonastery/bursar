@@ -44,10 +44,17 @@ def _parse_decimal_string(value: Any) -> Decimal:
     return Decimal(value)
 
 
+def _canonical_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if Decimal(text) == 0 else text
+
+
 DecimalValue = Annotated[
     Decimal,
     BeforeValidator(_parse_decimal_string),
-    PlainSerializer(lambda value: format(value, "f"), return_type=str),
+    PlainSerializer(lambda value: _canonical_decimal(value), return_type=str),
     WithJsonSchema({"type": "string", "pattern": DECIMAL_RE.pattern, "examples": ["10.500000"]}),
 ]
 FeatureValue = bool | SafeInteger | str
@@ -131,6 +138,16 @@ class Availability(StrictModel):
     ends_at: datetime | None = None
     regions: list[str] = Field(default_factory=list)
 
+    @field_validator("starts_at", "ends_at", mode="before")
+    @classmethod
+    def parse_timestamp(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("invalid availability timestamp") from exc
+        return value
+
     @field_validator("starts_at", "ends_at")
     @classmethod
     def validate_timestamp(cls, value: datetime | None, info: Any) -> datetime | None:
@@ -194,6 +211,7 @@ ExpiryPolicy = Annotated[
 
 class MeasureDefinition(StrictModel):
     unit: str
+    required: bool = Field(default=True, description="Require this usage measure; set false to treat omission as zero.")
 
     @field_validator("unit")
     @classmethod
@@ -355,15 +373,14 @@ class OperationPricing(StrictModel):
 
 
 class OperationDefinition(StrictModel):
-    measures: dict[str, MeasureDefinition]
+    measures: dict[str, MeasureDefinition] = Field(default_factory=dict)
+    charge: Charge | None = Field(default=None, description="Inline standard rate-card charge; null means omitted.")
     dimensions: dict[str, DimensionDefinition] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_names(self) -> OperationDefinition:
         _validate_map_keys(self.measures, "pricing.operations.*.measures")
         _validate_map_keys(self.dimensions, "pricing.operations.*.dimensions")
-        if not self.measures:
-            raise ValueError("pricing operations require at least one measure")
         overlap = set(self.measures) & set(self.dimensions)
         if overlap:
             raise ValueError(f"operation reuses names as measures and dimensions: {sorted(overlap)}")
@@ -434,6 +451,9 @@ class CreditDisplay(StrictModel):
 
 
 class CreditsConfig(StrictModel):
+    on_signup: DecimalValue | None = Field(
+        default=None, description="Grant this amount once per subject on account creation; null means omitted."
+    )
     buckets: dict[str, BucketDefinition] = Field(default_factory=dict)
     default_bucket: str | None = None
     policies: dict[str, CreditPolicy] = Field(default_factory=dict)
@@ -578,6 +598,9 @@ class CatalogRollout(StrictModel):
 
 
 class PlanDefinition(StrictModel):
+    tier: NonNegativeSafeInteger = Field(
+        default=0, description="Plan level for subscription changes, distinct from display rank."
+    )
     display_name: str = Field(min_length=1)
     rank: NonNegativeSafeInteger = Field(
         default=0,
@@ -585,7 +608,9 @@ class PlanDefinition(StrictModel):
     )
     description: str | None = None
     rate_card: str | None = None
-    allowed_operations: list[str] = Field(default_factory=list)
+    allowed_operations: Literal["all", "none"] | Annotated[list[str], Field(min_length=1)] = Field(
+        default="none", description="Allow all, none, or a nonempty list of operations; omission denies all."
+    )
     features: dict[str, FeatureValue] = Field(default_factory=dict)
     credit_allowance: CreditAllowance | None = None
     quotas: dict[str, QuotaDefinition] = Field(default_factory=dict)
@@ -616,26 +641,36 @@ class CustomProvider(StrictModel):
 ProviderDefinition = Annotated[StripeProvider | DodoProvider | CustomProvider, Field(discriminator="type")]
 
 
+# IDs retain their complete financial-environment bindings in the catalog.
+ProviderId = (
+    Annotated[str, Field(min_length=1)]
+    | Annotated[dict[Literal["test", "live", "sandbox"], Annotated[str, Field(min_length=1)]], Field(min_length=1)]
+)
+
+
 class StripePriceReference(StrictModel):
-    type: Literal["stripe_price"]
-    price_id: str = Field(min_length=1)
+    type: Literal["stripe_price"] = "stripe_price"
+    price_id: ProviderId = Field(
+        description="Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment."
+    )
 
 
 class DodoProductReference(StrictModel):
-    type: Literal["dodo_product"]
-    product_id: str = Field(min_length=1)
+    type: Literal["dodo_product"] = "dodo_product"
+    product_id: ProviderId = Field(
+        description="Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment."
+    )
 
 
 class CustomObjectReference(StrictModel):
     type: Literal["custom_object"]
     object_kind: Literal["subscription", "one_time"]
-    external_id: str = Field(min_length=1)
+    external_id: ProviderId = Field(
+        description="Provider ID or test/live/sandbox mapping; resolved when using a provider in that environment."
+    )
 
 
-ProviderReference = Annotated[
-    StripePriceReference | DodoProductReference | CustomObjectReference,
-    Field(discriminator="type"),
-]
+ProviderReference = StripePriceReference | DodoProductReference | CustomObjectReference
 
 
 class OfferPrice(StrictModel):
@@ -767,14 +802,14 @@ class CommerceConfig(StrictModel):
 
 class PricingConfig(StrictModel):
     operations: dict[str, OperationDefinition]
-    rate_cards: dict[str, RateCard]
+    rate_cards: dict[str, RateCard] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_pricing(self) -> PricingConfig:
         if not self.operations:
             raise ValueError("pricing.operations must not be empty")
-        if not self.rate_cards:
-            raise ValueError("pricing.rate_cards must not be empty")
+        if not self.rate_cards and not all(operation.charge is not None for operation in self.operations.values()):
+            raise ValueError("pricing.rate_cards must not be empty unless each operation has an inline charge")
         _validate_map_keys(self.operations, "pricing.operations")
         _validate_map_keys(self.rate_cards, "pricing.rate_cards")
         return self
@@ -788,6 +823,13 @@ class PricingConfig(StrictModel):
 
 class CatalogConfig(StrictModel):
     default_plan: str | None = None
+    subscription_end_plan: str | None = Field(
+        default=None,
+        description=(
+            "Plan assigned when a subscription ends; omission clears the entitlement "
+            "if it still comes from that subscription."
+        ),
+    )
 
 
 SumCharge.model_rebuild()
@@ -804,6 +846,7 @@ class BursarConfig(StrictModel):
         description="Usage operations, their measures and dimensions, and reusable rate cards.",
     )
     credits: CreditsConfig = Field(
+        default_factory=CreditsConfig,
         description="Credit buckets, spending policies, grants, and optional display conversion.",
     )
     entitlements: EntitlementsConfig = Field(
@@ -822,3 +865,12 @@ class BursarConfig(StrictModel):
         default_factory=CommerceConfig,
         description="Payment providers, subscription and top-up offers, and purchase guardrails.",
     )
+
+
+def public_config_json_schema() -> dict[str, Any]:
+    """Return the shared public catalog schema for tools and editors."""
+    schema = BursarConfig.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "https://zonastery.github.io/bursar/pricing-config.schema.json"
+    schema["$comment"] = "Structural schema. Run `bursar config validate` for cross-reference and pricing semantics."
+    return schema

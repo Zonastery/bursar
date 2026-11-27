@@ -17,7 +17,7 @@ from bursar.config.types import (
 def _validate_commerce(commerce: CommerceConfig) -> CommerceConfig:
     _validate_map_keys(commerce.providers, "commerce.providers")
     _validate_map_keys(commerce.offers, "commerce.offers")
-    seen_provider_objects: set[tuple[str, str]] = set()
+    seen_provider_objects: set[tuple[str, str, str]] = set()
     for offer_key, offer in commerce.offers.items():
         for provider_key, reference in offer.providers.items():
             provider = commerce.providers.get(provider_key)
@@ -38,8 +38,10 @@ def _validate_commerce(commerce: CommerceConfig) -> CommerceConfig:
                 external_id = reference.product_id
             else:
                 external_id = reference.external_id
-            object_key = (provider_key, external_id)
-            if object_key in seen_provider_objects:
-                raise ValueError(f"duplicate provider object reference {provider_key}/{external_id}")
-            seen_provider_objects.add(object_key)
+            bindings = {"*": external_id} if isinstance(external_id, str) else external_id
+            for environment, value in bindings.items():
+                object_key = (provider_key, environment, value)
+                if object_key in seen_provider_objects:
+                    raise ValueError(f"duplicate provider object reference {provider_key}/{environment}/{value}")
+                seen_provider_objects.add(object_key)
     return commerce

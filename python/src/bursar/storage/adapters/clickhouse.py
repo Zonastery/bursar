@@ -7,7 +7,6 @@ import math
 import re
 import threading
 from collections.abc import Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, ClassVar, Literal, Protocol, cast
@@ -25,6 +24,7 @@ from bursar.credits.types import (
     UsageChargeCursor,
     UsageChargePage,
 )
+from bursar.storage.json_numbers import json_dump
 from bursar.storage.ports import UsageChargeExport
 
 
@@ -291,9 +291,9 @@ class ClickHouseUsageStore:
             event.feature,
             event.model,
             event.region,
-            json.dumps(event.measures, separators=(",", ":")),
-            json.dumps(event.dimensions, separators=(",", ":")),
-            json.dumps(event.metadata, separators=(",", ":")),
+            json_dump(event.measures),
+            json_dump(event.dimensions),
+            json_dump(event.metadata),
             Decimal(event.requested),
             Decimal(event.charged),
             Decimal(event.allowance_requested),
@@ -302,7 +302,7 @@ class ClickHouseUsageStore:
             _optional_uuid(event.catalog_revision_id),
             _optional_uuid(event.plan_id),
             event.rate_card_key,
-            json.dumps(event.pricing_snapshot, separators=(",", ":")),
+            json_dump(event.pricing_snapshot),
             _optional_uuid(event.ledger_entry_id),
             _optional_uuid(event.correction_of_charge_id),
             event.idempotency_key,
@@ -360,8 +360,8 @@ class ClickHouseUsageStore:
             FROM {self._quoted_table} FINAL
             WHERE tenant_id = {{tenant_id:UUID}}
               AND billing_disposition = 'billable'
-              AND event_at >= parseDateTime64BestEffort({{start:String}})
-              AND event_at < parseDateTime64BestEffort({{end:String}})
+              AND event_at >= parseDateTime64BestEffort({{start:String}}, 6)
+              AND event_at < parseDateTime64BestEffort({{end:String}}, 6)
             GROUP BY key
             ORDER BY key
             """,  # noqa: S608
@@ -379,34 +379,25 @@ class ClickHouseUsageStore:
 
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats:
         _validate_range(start, end)
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            # The table name was allowlisted and identifier-quoted during construction.
-            totals_future = executor.submit(
-                self._query_rows,
-                f"""
-                SELECT
-                    toString(sum(charged)) AS total_spend,
-                    toString(uniqExact(subject_id)) AS active_users
-                FROM {self._quoted_table} FINAL
-                WHERE tenant_id = {{tenant_id:UUID}}
-                  AND billing_disposition = 'billable'
-                  AND event_at >= parseDateTime64BestEffort({{start:String}})
-                  AND event_at < parseDateTime64BestEffort({{end:String}})
-                """,  # noqa: S608
-                start,
-                end,
-            )
-            models_future = executor.submit(
-                self._spend_rows,
-                "model",
-                start,
-                end,
-                1,
-            )
-            users_future = executor.submit(self._spend_rows, "subject", start, end, 1)
-            totals = totals_future.result()
-            models = models_future.result()
-            users = users_future.result()
+        # clickhouse-connect clients use one session by default and reject
+        # concurrent queries on that session. Keep one client compatible with
+        # the default native driver configuration.
+        totals = self._query_rows(
+            f"""
+            SELECT
+                toString(sum(charged)) AS total_spend,
+                toString(uniqExact(subject_id)) AS active_users
+            FROM {self._quoted_table} FINAL
+            WHERE tenant_id = {{tenant_id:UUID}}
+              AND billing_disposition = 'billable'
+              AND event_at >= parseDateTime64BestEffort({{start:String}}, 6)
+              AND event_at < parseDateTime64BestEffort({{end:String}}, 6)
+            """,  # noqa: S608
+            start,
+            end,
+        )
+        models = self._spend_rows("model", start, end, 1)
+        users = self._spend_rows("subject", start, end, 1)
         total = Decimal(str(totals[0]["total_spend"])) if totals else Decimal(0)
         seconds = (end - start).total_seconds()
         days = max(math.ceil(seconds / 86_400), 1)
@@ -447,16 +438,17 @@ class ClickHouseUsageStore:
             "subject_id": user_id,
         }
         if from_date is not None:
-            predicates.append("event_at >= parseDateTime64BestEffort({from_date:String})")
+            predicates.append("event_at >= parseDateTime64BestEffort({from_date:String}, 6)")
             parameters["from_date"] = from_date.isoformat()
         if to_date is not None:
-            predicates.append("event_at < parseDateTime64BestEffort({to_date:String})")
+            predicates.append("event_at < parseDateTime64BestEffort({to_date:String}, 6)")
             parameters["to_date"] = to_date.isoformat()
         if not include_record_only:
             predicates.append("billing_disposition = 'billable'")
         if cursor is not None:
             predicates.append(
-                "(event_at, charge_id) < (parseDateTime64BestEffort({cursor_event_at:String}), {cursor_usage_id:UUID})"
+                "(event_at, charge_id) < (parseDateTime64BestEffort({cursor_event_at:String}, 6), "
+                "{cursor_usage_id:UUID})"
             )
             parameters["cursor_event_at"] = cursor.event_at
             parameters["cursor_usage_id"] = cursor.usage_id
@@ -476,7 +468,7 @@ class ClickHouseUsageStore:
                 feature,
                 model,
                 region,
-                toString(event_at) AS event_at,
+                toString(event_at) AS usage_event_at,
                 idempotency_key,
                 metadata,
                 toString(created_at) AS created_at
@@ -502,7 +494,7 @@ class ClickHouseUsageStore:
                 feature=str(row["feature"]) if row.get("feature") is not None else None,
                 model=str(row["model"]) if row.get("model") is not None else None,
                 region=str(row["region"]) if row.get("region") is not None else None,
-                event_at=self._read_timestamp(str(row["event_at"])).isoformat(),
+                event_at=self._read_timestamp(str(row["usage_event_at"])).isoformat(),
                 idempotency_key=str(row["idempotency_key"]),
                 metadata=self._json_object(row.get("metadata")),
                 created_at=self._read_timestamp(str(row["created_at"])).isoformat(),
@@ -575,8 +567,8 @@ class ClickHouseUsageStore:
             FROM {self._quoted_table} FINAL
             WHERE tenant_id = {{tenant_id:UUID}}
               AND billing_disposition = 'billable'
-              AND event_at >= parseDateTime64BestEffort({{start:String}})
-              AND event_at < parseDateTime64BestEffort({{end:String}})
+              AND event_at >= parseDateTime64BestEffort({{start:String}}, 6)
+              AND event_at < parseDateTime64BestEffort({{end:String}}, 6)
             GROUP BY key
             ORDER BY sum(charged) DESC, key{limit_sql}
             """,  # noqa: S608

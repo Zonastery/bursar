@@ -4,6 +4,9 @@
 -- Depends on: 001_schema_and_types.sql.
 -- Security: Defaults ownership to required tenant context and namespaces provider IDs.
 
+-- Tenant-qualified foreign keys are declared explicitly in 005 after all
+-- participating tables exist, including cyclic and forward references.
+
 -- Contents
 --   1. Lifecycle and accounting types
 --   2. Storage retention configuration
@@ -158,7 +161,8 @@ INSERT INTO bursar.storage_settings (singleton) VALUES (true);
 CREATE TABLE bursar.subjects (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
+    id uuid NOT NULL DEFAULT bursar.uuid_v7(),
+    PRIMARY KEY (tenant_id, id),
     pseudonymized_at timestamptz CHECK (pseudonymized_at IS null OR bursar.is_finite_timestamptz(pseudonymized_at)),
     created_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(created_at))
@@ -170,8 +174,7 @@ CREATE TABLE bursar.external_identities (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    subject_id uuid NOT NULL
-    REFERENCES bursar.subjects (id) ON DELETE CASCADE,
+    subject_id uuid NOT NULL,
     provider text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(provider, 100)),
     provider_environment text NOT NULL
@@ -272,8 +275,7 @@ CREATE TABLE bursar.catalog_activation_history (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id),
+    catalog_revision_id uuid NOT NULL,
     activated_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(activated_at)),
     deactivated_at timestamptz CHECK (deactivated_at IS null OR bursar.is_finite_timestamptz(deactivated_at)),
@@ -291,8 +293,7 @@ CREATE TABLE bursar.catalog_buckets (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     bucket_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(bucket_key, 255)),
     label text NOT NULL
@@ -370,8 +371,7 @@ CREATE TABLE bursar.catalog_operations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     operation_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(operation_key, 255)),
     measures jsonb NOT NULL
@@ -409,8 +409,7 @@ CREATE TABLE bursar.catalog_rate_cards (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     rate_card_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(rate_card_key, 255)),
     extends_key text CHECK (
@@ -422,10 +421,7 @@ CREATE TABLE bursar.catalog_rate_cards (
         bursar.is_bounded_json_object(definition, 262144)
         AND bursar.matches_catalog_definitions(definition, 'RateCard')
     ),
-    UNIQUE (catalog_revision_id, rate_card_key),
-    FOREIGN KEY (catalog_revision_id, extends_key)
-    REFERENCES bursar.catalog_rate_cards (catalog_revision_id, rate_card_key)
-    DEFERRABLE INITIALLY DEFERRED
+    UNIQUE (catalog_revision_id, rate_card_key)
 );
 
 -- Keep prepaid and bounded credit-line behavior revision-pinned, with exact
@@ -434,8 +430,7 @@ CREATE TABLE bursar.catalog_credit_policies (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     policy_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(policy_key, 255)),
     policy_type text NOT NULL CHECK (policy_type IN ('prepaid', 'credit_line')),
@@ -466,8 +461,7 @@ CREATE TABLE bursar.catalog_admission_policies (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     policy_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(policy_key, 255)),
     max_in_flight integer CHECK (max_in_flight IS null OR max_in_flight > 0),
@@ -495,17 +489,7 @@ CREATE TABLE bursar.catalog_admission_operation_policies (
         catalog_revision_id,
         admission_policy_key,
         operation_key
-    ),
-    FOREIGN KEY (catalog_revision_id, admission_policy_key)
-    REFERENCES bursar.catalog_admission_policies (
-        catalog_revision_id,
-        policy_key
-    ) ON DELETE CASCADE,
-    FOREIGN KEY (catalog_revision_id, operation_key)
-    REFERENCES bursar.catalog_operations (
-        catalog_revision_id,
-        operation_key
-    ) ON DELETE CASCADE
+    )
 );
 
 -- Project feature type/default metadata for revision-aware entitlement reads;
@@ -514,8 +498,7 @@ CREATE TABLE bursar.catalog_entitlement_features (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     feature_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(feature_key, 255)),
     value_type text NOT NULL CHECK (value_type IN ('boolean', 'integer', 'string', 'enum')),
@@ -543,8 +526,7 @@ CREATE TABLE bursar.catalog_plans (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(plan_key, 255)),
     display_name text NOT NULL
@@ -614,23 +596,6 @@ CREATE TABLE bursar.catalog_plans (
     UNIQUE (catalog_revision_id, plan_key),
     UNIQUE (id, catalog_revision_id),
     UNIQUE (id, catalog_revision_id, plan_key),
-    FOREIGN KEY (catalog_revision_id, rate_card)
-    REFERENCES bursar.catalog_rate_cards (
-        catalog_revision_id,
-        rate_card_key
-    ),
-    FOREIGN KEY (catalog_revision_id, credit_policy_key)
-    REFERENCES bursar.catalog_credit_policies (
-        catalog_revision_id,
-        policy_key
-    ),
-    FOREIGN KEY (catalog_revision_id, admission_policy_key)
-    REFERENCES bursar.catalog_admission_policies (
-        catalog_revision_id,
-        policy_key
-    ),
-    FOREIGN KEY (catalog_revision_id, credit_allowance_bucket)
-    REFERENCES bursar.catalog_buckets (catalog_revision_id, bucket_key),
     CHECK (
         (
             credit_allowance_amount IS null
@@ -664,15 +629,7 @@ CREATE TABLE bursar.catalog_plan_features (
     feature_key text NOT NULL,
     feature_value jsonb NOT NULL
     CHECK (octet_length(feature_value::text) <= 65536),
-    PRIMARY KEY (catalog_revision_id, plan_key, feature_key),
-    FOREIGN KEY (catalog_revision_id, plan_key)
-    REFERENCES bursar.catalog_plans (catalog_revision_id, plan_key)
-    ON DELETE CASCADE,
-    FOREIGN KEY (catalog_revision_id, feature_key)
-    REFERENCES bursar.catalog_entitlement_features (
-        catalog_revision_id,
-        feature_key
-    ) ON DELETE CASCADE
+    PRIMARY KEY (catalog_revision_id, plan_key, feature_key)
 );
 
 -- Materialize exact quota limits and window policies per plan/operation while
@@ -710,15 +667,7 @@ CREATE TABLE bursar.catalog_plan_quotas (
             'QuotaDefinition'
         )
     ),
-    UNIQUE (catalog_revision_id, plan_key, quota_key),
-    FOREIGN KEY (catalog_revision_id, plan_key)
-    REFERENCES bursar.catalog_plans (catalog_revision_id, plan_key)
-    ON DELETE CASCADE,
-    FOREIGN KEY (catalog_revision_id, operation_key)
-    REFERENCES bursar.catalog_operations (
-        catalog_revision_id,
-        operation_key
-    ) ON DELETE CASCADE
+    UNIQUE (catalog_revision_id, plan_key, quota_key)
 );
 
 -- Define revision-pinned award programs with explicit eligibility and
@@ -727,8 +676,7 @@ CREATE TABLE bursar.catalog_grant_programs (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     program_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(program_key, 255)),
     trigger_type text NOT NULL
@@ -805,11 +753,6 @@ CREATE TABLE bursar.catalog_grant_awards (
     ),
     UNIQUE (grant_program_id, award_index),
     UNIQUE (id, catalog_revision_id),
-    FOREIGN KEY (grant_program_id, catalog_revision_id)
-    REFERENCES bursar.catalog_grant_programs (id, catalog_revision_id)
-    ON DELETE CASCADE,
-    FOREIGN KEY (catalog_revision_id, bucket_key)
-    REFERENCES bursar.catalog_buckets (catalog_revision_id, bucket_key),
     CHECK (
         expiry_policy IS null
         OR expiry_policy ->> 'type' <> 'subscription_end'
@@ -822,8 +765,7 @@ CREATE TABLE bursar.catalog_offers (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     offer_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(offer_key, 255)),
     display_name text NOT NULL
@@ -895,10 +837,6 @@ CREATE TABLE bursar.catalog_offers (
     ),
     UNIQUE (catalog_revision_id, offer_key),
     UNIQUE (id, catalog_revision_id),
-    FOREIGN KEY (catalog_revision_id, plan_key)
-    REFERENCES bursar.catalog_plans (catalog_revision_id, plan_key),
-    FOREIGN KEY (catalog_revision_id, cycle_grant_bucket_key)
-    REFERENCES bursar.catalog_buckets (catalog_revision_id, bucket_key),
     CHECK (
         (
             cycle_grant_amount IS null
@@ -922,8 +860,7 @@ CREATE TABLE bursar.catalog_topups (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     topup_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(topup_key, 255)),
     display_name text NOT NULL
@@ -979,8 +916,6 @@ CREATE TABLE bursar.catalog_topups (
     ),
     UNIQUE (catalog_revision_id, topup_key),
     UNIQUE (id, catalog_revision_id),
-    FOREIGN KEY (catalog_revision_id, bucket_key)
-    REFERENCES bursar.catalog_buckets (catalog_revision_id, bucket_key),
     CHECK (
         expiry_policy IS null
         OR expiry_policy ->> 'type' <> 'subscription_end'
@@ -993,8 +928,7 @@ CREATE TABLE bursar.catalog_provider_refs (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    catalog_revision_id uuid NOT NULL
-    REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
+    catalog_revision_id uuid NOT NULL,
     provider text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(provider, 100)),
     provider_environment text NOT NULL
@@ -1024,7 +958,7 @@ CREATE TABLE bursar.credit_accounts (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
+    subject_id uuid NOT NULL,
     account_kind text NOT NULL CHECK (account_kind IN ('personal', 'team')),
     balance bursar.credit_numeric NOT NULL DEFAULT 0,
     version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),

@@ -169,3 +169,63 @@ describe("CreditsService mirror regressions", () => {
     expect(events).toEqual([expect.objectContaining({ amount: new Decimal(0) })]);
   });
 });
+
+describe("flat job convenience", () => {
+  it.each([false, true])(
+    "uses the pinned revision's declared jobs measure: %s",
+    async (declared) => {
+      const { PricingEngine } = await import("../src/engine.js");
+      const operation = declared
+        ? { measures: { jobs: { unit: "job" } }, charge: { type: "flat", amount: "2" } }
+        : { charge: { type: "flat", amount: "2" } };
+      const config = {
+        version: 1,
+        catalog: { default_plan: "free" },
+        pricing: {
+          operations: {
+            job: operation,
+          },
+        },
+        plans: { free: { display_name: "Free", allowed_operations: ["job"] } },
+      };
+      const deductWithAllowance = vi.fn().mockResolvedValue({
+        error: null,
+        amount: new Decimal(2),
+        allowanceConsumed: new Decimal(0),
+        balanceAfter: new Decimal(8),
+        idempotent: false,
+        bucketBreakdown: null,
+      });
+      const store = testStore({
+        getUserPlan: vi.fn().mockResolvedValue({ catalogVersion: 7, rateCard: "standard" }),
+        getCatalogRevision: vi.fn().mockResolvedValue({ config }),
+        listQuotaEvents: vi.fn().mockResolvedValue([]),
+        deductWithAllowance,
+      });
+      const credits = new CreditsService(
+        store,
+        PricingEngine.fromDict({
+          ...config,
+          pricing: {
+            operations: {
+              job: { measures: { jobs: { unit: "job" } }, charge: { type: "flat", amount: "2" } },
+            },
+          },
+        }),
+      );
+      await credits.deductFlatJob("user-1", "job", { idempotencyKey: "job-1" });
+      expect(deductWithAllowance).toHaveBeenCalledWith(
+        "user-1",
+        new Decimal(2),
+        expect.objectContaining({ measures: declared ? { jobs: 1 } : {} }),
+      );
+      await expect(
+        credits.deduct(
+          "user-1",
+          { operation: "job", measures: { arbitrary: 1 } },
+          { idempotencyKey: "job-2" },
+        ),
+      ).rejects.toThrow(/undeclared measures/);
+    },
+  );
+});

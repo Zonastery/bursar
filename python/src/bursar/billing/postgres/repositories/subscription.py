@@ -233,13 +233,12 @@ class BillingSubscriptionRepository:
         expected_provider_updated_at: str,
         plan_assigned_at: datetime | str | None,
         apply_entitlement: bool,
-        terminal_plan_key: str | None,
         reason: str,
     ) -> SubscriptionEntitlementOutcome:
         rows = self._execute(
             "SELECT bursar.reconcile_subscription_entitlement("
             "%s::uuid,%s::uuid,%s::uuid,%s::bursar.billing_subscription_status,"
-            "%s::timestamptz,%s::timestamptz,%s,%s,%s) AS outcome",
+            "%s::timestamptz,%s::timestamptz,%s,%s) AS outcome",
             [
                 subject_id,
                 subscription_id,
@@ -248,7 +247,6 @@ class BillingSubscriptionRepository:
                 expected_provider_updated_at,
                 plan_assigned_at,
                 apply_entitlement,
-                terminal_plan_key,
                 reason,
             ],
         )
@@ -268,11 +266,10 @@ class BillingSubscriptionRepository:
         subscription_id: str,
         expected_grace_ends_at: str,
         expired_at: str,
-        terminal_plan_key: str | None,
     ) -> bool:
         rows = self._execute(
             "SELECT bursar.expire_subscription_grace_period("
-            "%s::uuid,%s::uuid,%s::timestamptz,%s::timestamptz,%s) AS expired",
-            [subject_id, subscription_id, expected_grace_ends_at, expired_at, terminal_plan_key],
+            "%s::uuid,%s::uuid,%s::timestamptz,%s::timestamptz) AS expired",
+            [subject_id, subscription_id, expected_grace_ends_at, expired_at],
         )
         return require_boolean_result(rows, "expired", "BillingSubscriptionRepository.expire_grace_period")

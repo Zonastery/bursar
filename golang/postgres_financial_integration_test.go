@@ -277,8 +277,11 @@ func TestPostgresCheckoutTopupRefundFinancialInvariants(t *testing.T) {
 	if checkout.Intent.ID == "" || checkout.Session.ID == "" || len(provider.checkoutCalls) != 1 {
 		t.Fatalf("checkout = %+v, calls = %d", checkout, len(provider.checkoutCalls))
 	}
-	if checkout.Session.URL != "https://checkout.example/"+checkoutKey {
-		t.Fatalf("checkout URL = %q", checkout.Session.URL)
+	providerKey := "bursar:checkout:" + checkout.Intent.ID
+	if checkout.Session.URL != "https://checkout.example/"+providerKey ||
+		checkout.Session.ID != "session-"+providerKey ||
+		provider.checkoutCalls[0].IdempotencyKey != providerKey {
+		t.Fatalf("checkout provider identity = %+v, request = %+v", checkout.Session, provider.checkoutCalls[0])
 	}
 	if checkout.Session.CustomerID != "cus-"+accountID {
 		t.Fatalf("provider customer ID = %q", checkout.Session.CustomerID)

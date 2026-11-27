@@ -157,13 +157,22 @@ class RecordingBillingArchive:
         self.closed = True
 
 
-def _seed_usage_row(pg_database_url: str) -> tuple[str, str]:
+def _select_clickhouse(pg_database_url: str) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL ROLE bursar_operator")
+        cursor.execute("SELECT bursar.begin_usage_backend_cutover(%s::uuid, 'clickhouse', now())", (TEST_TENANT_ID,))
+        cursor.execute("SELECT bursar.finish_usage_backend_cutover(%s::uuid, 'clickhouse', 0)", (TEST_TENANT_ID,))
+
+
+def _seed_usage_row(pg_database_url: str, *, clickhouse: bool = False, record_only: bool = False) -> tuple[str, str]:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT set_config('bursar.tenant_id', %s, true)",
             (TEST_TENANT_ID,),
         )
         cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
+        if clickhouse:
+            cursor.execute("SELECT set_config('bursar.usage_backend', 'clickhouse', true)")
         cursor.execute(
             """
             WITH subject AS (
@@ -178,8 +187,7 @@ def _seed_usage_row(pg_database_url: str) -> tuple[str, str]:
             """
         )
         _account_id, subject_id = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
-        cursor.execute(
-            """
+        query = """
             SELECT charge_id, error_code
             FROM bursar.charge_usage(
                 %s::uuid,
@@ -192,16 +200,17 @@ def _seed_usage_row(pg_database_url: str) -> tuple[str, str]:
                 p_dimensions => '{"tenant_tier":"starter"}'::jsonb,
                 p_metadata => '{"trace_id":"trace-1"}'::jsonb
             )
-            """,
-            (subject_id,),
-        )
+            """
+        if record_only:
+            query = query.replace("bursar.charge_usage(", "bursar.record_usage(")
+        cursor.execute(query, (subject_id,))
         charge_id, error_code = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         assert error_code is None
         return str(charge_id), str(subject_id)
 
 
-def _seed_storage_rows(pg_database_url: str) -> tuple[str, str]:
-    charge_id, subject_id = _seed_usage_row(pg_database_url)
+def _seed_storage_rows(pg_database_url: str, *, clickhouse: bool = False) -> tuple[str, str]:
+    charge_id, subject_id = _seed_usage_row(pg_database_url, clickhouse=clickhouse)
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
         cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
@@ -239,6 +248,7 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
     client = PostgresClient(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
         access_role="bursar_operator",
         max_connections=2,
     )
@@ -313,7 +323,8 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
 def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
     pg_database_url: str,
 ) -> None:
-    _charge_id, billing_event_id = _seed_storage_rows(pg_database_url)
+    _select_clickhouse(pg_database_url)
+    _charge_id, billing_event_id = _seed_storage_rows(pg_database_url, clickhouse=True)
     clickhouse = RecordingUsageSink()
     archive = RecordingBillingArchive()
     runtime = create_bursar_runtime(
@@ -336,6 +347,7 @@ def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
         client = PostgresClient(
             pg_database_url,
             tenant_id=TEST_TENANT_ID,
+            provider_environment="test",
             access_role="bursar_operator",
             max_connections=2,
         )
@@ -358,7 +370,8 @@ def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
 def test_bursar_runtime_dead_letters_failed_usage_batch_without_leaking_details(
     pg_database_url: str,
 ) -> None:
-    _seed_storage_rows(pg_database_url)
+    _select_clickhouse(pg_database_url)
+    _seed_storage_rows(pg_database_url, clickhouse=True)
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pg_database_url,
@@ -389,6 +402,7 @@ def test_bursar_runtime_dead_letters_failed_usage_batch_without_leaking_details(
 def test_bursar_runtime_start_health_and_no_worker_flush(
     pg_database_url: str,
 ) -> None:
+    _select_clickhouse(pg_database_url)
     clickhouse = RecordingUsageSink()
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
@@ -412,6 +426,7 @@ def test_bursar_runtime_start_health_and_no_worker_flush(
 def test_bursar_runtime_context_loads_catalog_and_reports_worker_dependencies(
     pg_database_url: str,
 ) -> None:
+    _select_clickhouse(pg_database_url)
     clickhouse = RecordingUsageSink()
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
@@ -524,8 +539,10 @@ def test_bursar_runtime_maintenance_expires_composed_credit_store_state(
 def test_clickhouse_usage_mode_keeps_only_receipt_and_outbox_payload(
     pg_database_url: str,
 ) -> None:
+    _select_clickhouse(pg_database_url)
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
         cursor.execute("SELECT set_config('bursar.usage_backend', 'clickhouse', true)")
         cursor.execute(
             """
@@ -769,7 +786,7 @@ def test_operator_maintenance_runs_storage_and_partition_reconciliation(
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT bursar.create_tenant(%s::uuid, %s, %s)",
+            "SELECT bursar.create_tenant(%s::uuid, %s, %s, 'test')",
             ("00000000-0000-0000-0000-000000000099", "other-tenant", "Other tenant"),
         )
     mismatched = create_bursar_runtime(
@@ -792,14 +809,8 @@ def test_operator_maintenance_runs_storage_and_partition_reconciliation(
 def test_runtime_worker_delivers_real_outbox_event_in_background(
     pg_database_url: str,
 ) -> None:
-    charge_id, _subject_id = _seed_usage_row(pg_database_url)
-    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
-        cursor.execute("SELECT set_config('bursar.mutation_context', 'internal', true)")
-        cursor.execute(
-            "UPDATE bursar.credit_usage_charges SET billing_disposition = 'record_only' WHERE id = %s::uuid",
-            (charge_id,),
-        )
+    _select_clickhouse(pg_database_url)
+    _charge_id, _subject_id = _seed_usage_row(pg_database_url, clickhouse=True, record_only=True)
     clickhouse = ExpiringClaimUsageSink(pg_database_url)
     outcomes: list[OutboxEventOutcome] = []
     runtime = create_bursar_runtime(
@@ -836,7 +847,8 @@ def test_runtime_worker_delivers_real_outbox_event_in_background(
 def test_runtime_requeues_transient_usage_projection_failure(
     pg_database_url: str,
 ) -> None:
-    charge_id, _subject_id = _seed_usage_row(pg_database_url)
+    _select_clickhouse(pg_database_url)
+    charge_id, _subject_id = _seed_usage_row(pg_database_url, clickhouse=True)
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
         cursor.execute("SELECT set_config('bursar.mutation_context', 'internal', true)")

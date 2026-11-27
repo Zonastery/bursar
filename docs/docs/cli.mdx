@@ -10,13 +10,13 @@ The `bursar` CLI is the operator interface for migrations, tenant lifecycle,
 and the canonical configuration. Connection values and the financial
 environment come from environment variables, never the command line:
 
-| Variable                        | Required for                                                                                              |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `BURSAR_MIGRATION_DATABASE_URL` | `migrate`; use a dedicated migration owner or administrator                                               |
-| `BURSAR_OPERATOR_DATABASE_URL`  | `tenant create`, `tenant status`, and the provisioning half of `tenant bootstrap`                         |
-| `DATABASE_URL`                  | Database-backed `config` commands, the config half of `tenant bootstrap`, and the application runtime     |
-| `BURSAR_TENANT_ID`              | Database-backed `config` commands and `tenant bootstrap` without `--id`; not local `validate` or `schema` |
-| `BURSAR_PROVIDER_ENVIRONMENT`   | Every database-backed `config` command and `tenant bootstrap`; exactly `live`, `test`, or `sandbox`       |
+| Variable                        | Required for                                                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `BURSAR_MIGRATION_DATABASE_URL` | `migrate`; use a dedicated migration owner or administrator                                                           |
+| `BURSAR_OPERATOR_DATABASE_URL`  | `tenant create`, `tenant status`, and the provisioning half of `tenant bootstrap`                                     |
+| `DATABASE_URL`                  | Database-backed `config` commands, the config half of `tenant bootstrap`, and the application runtime                 |
+| `BURSAR_TENANT_ID`              | Database-backed `config` commands and `tenant bootstrap` without `--id`; not local `validate` or `schema`             |
+| `BURSAR_PROVIDER_ENVIRONMENT`   | `tenant create`, `tenant bootstrap`, and every database-backed `config` command; exactly `live`, `test`, or `sandbox` |
 
 `config validate` and `config schema` are local operations. They do not need a
 database connection, tenant ID, or provider environment.
@@ -59,12 +59,13 @@ Provision tenants with the dedicated operator connection:
 
 ```bash title="Terminal"
 export BURSAR_OPERATOR_DATABASE_URL=postgresql://bursar_ops@db.example.com/bursar
+export BURSAR_PROVIDER_ENVIRONMENT=test
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
 ```
 
-`tenant create` generates the UUID when `--id` is omitted and prints it.
+`tenant create` generates the UUID when `--id` is omitted and prints it. Its provider environment is immutable; create a separate tenant for each environment.
 Change lifecycle state with `tenant status`:
 
 ```bash title="Terminal"
@@ -99,9 +100,13 @@ Database-backed subcommands require the application `DATABASE_URL` and
 print the schema locally without any of those values:
 
 ```bash title="Terminal"
+bursar config init ./bursar.yaml        # create the packaged starter
 bursar config validate ./pricing.yaml   # validate without applying (--json for CI)
+bursar config quote ./bursar.yaml --operation export_report # calculate offline
 bursar config schema                     # print the config JSON Schema
 ```
+
+JavaScript developers can run `npx bursar-config init`, `npx bursar-config validate`, and `npx bursar-config quote` locally.
 
 Then select the database-backed financial namespace:
 
@@ -158,3 +163,44 @@ The CLI deliberately stops at Bursar-owned schema, tenant, and catalog
 operations. The embedding application owns process supervision, scheduling,
 database availability and recovery, secret delivery, and every provider or
 cloud deployment decision.
+
+### Moving a tenant's usage backend
+
+The Python operator CLI can move retained usage between PostgreSQL and ClickHouse.
+Install `bursar[postgres,clickhouse]`, provision a compatible ClickHouse projection
+table first, and set `BURSAR_OPERATOR_DATABASE_URL`, `BURSAR_TENANT_ID`, `BURSAR_PROVIDER_ENVIRONMENT`,
+`BURSAR_CLICKHOUSE_HOST`, `BURSAR_CLICKHOUSE_PORT`, `BURSAR_CLICKHOUSE_USER`,
+`BURSAR_CLICKHOUSE_PASSWORD`, and `BURSAR_CLICKHOUSE_DATABASE`. Set
+`BURSAR_CLICKHOUSE_SECURE=true` for HTTPS. Credentials are environment variables,
+not command arguments. The database role needs the Bursar operator permissions.
+
+```sh
+# Set CUTOFF to the oldest retained, timezone-qualified event timestamp.
+bursar usage-cutover clickhouse --cutoff "$CUTOFF"
+# To move back, choose a cutoff that preserves the retained ClickHouse horizon:
+bursar usage-cutover postgres --cutoff "$CUTOFF"
+```
+
+New tenants start on PostgreSQL. For an empty tenant, set `CUTOFF` to the
+current UTC time and run the ClickHouse command before configuring the runtime.
+For an existing tenant, choose a timezone-qualified cutoff no later than the
+oldest usage that must remain visible. The CLI rejects any retained ClickHouse
+row earlier than the cutoff in either direction; this prevents omitting source
+history or exposing stale rows already in a reused target. If it reports that
+condition, abort and restart with an earlier cutoff.
+
+PostgreSQL also rejects a cutoff that would omit retained receipts or required
+billable rollup contributions. An earlier cutoff is allowed, but copying fails
+if required PostgreSQL detail has already expired. Restore missing detail or
+keep the current backend. Record-only data already removed from both stores
+cannot be reconstructed. ClickHouse retention is independently configured and
+must cover the selected horizon through completion. The target table defaults to
+`bursar_usage_events`; select an existing table with `--table`.
+The command pauses tenant usage, drains available usage exports, copies records,
+compares all immutable fields, and flips routing only after database verification.
+A failure leaves the tenant paused. Rerun the same command to resume; its original
+cutoff remains pinned. Investigate missing source payloads, incompatible schema,
+failed or leased outbox events, and retention before retrying. To abandon a paused
+operation and restore the original routing, run `bursar usage-cutover-abort`.
+Source data is retained. Configure application runtimes for the new backend after
+the flip; stale configurations are rejected.

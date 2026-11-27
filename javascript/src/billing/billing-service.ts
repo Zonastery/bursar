@@ -29,6 +29,10 @@ export type { BillingProvisioningPort, BillingServiceOptions } from "./service-t
 export class BillingService {
   readonly autoRecharge: AutoRechargeService;
   private readonly store: BillingStore;
+
+  get providerEnvironment() {
+    return this.store.providerEnvironment;
+  }
   private readonly management: BillingManagement;
   private readonly events: BillingEventProcessor;
 
@@ -54,6 +58,10 @@ export class BillingService {
     update: Parameters<BillingStore["updateCheckoutIntent"]>[1],
   ): Promise<void> {
     await this.management.updateCheckoutIntent(id, update);
+  }
+
+  async findCheckoutIntent(subjectId: string, operationKey: string, provider?: string) {
+    return this.store.findCheckoutIntent(subjectId, operationKey, provider);
   }
 
   async getCheckoutIntent(id: string, subjectId: string): Promise<CheckoutIntent | null> {
@@ -110,6 +118,10 @@ export class BillingService {
     return this.management.getAutoRechargeProfile(userId);
   }
 
+  async getActiveCatalogRevision(): Promise<{ id: string; config: JsonObject } | null> {
+    return this.store.getActiveCatalogRevision();
+  }
+
   async getActiveCatalogDocument(): Promise<JsonObject | null> {
     return this.management.getActiveCatalogDocument();
   }
@@ -136,6 +148,9 @@ export class BillingService {
   async claimAutoRechargeAttempt(input: {
     userId: string;
     idempotencyKey: string;
+    expectedProductId: string;
+    expectedQuantity: number;
+    expectedTopupKey: string;
   }): Promise<BillingAutoRechargeAttempt | null> {
     return this.management.claimAutoRechargeAttempt(input);
   }
@@ -246,7 +261,6 @@ export class BillingService {
           candidate.subscriptionId,
           candidate.graceEndsAt,
           asOf,
-          this.events.terminalPlanKey,
         )
       ) {
         expiredCount += 1;
@@ -276,7 +290,6 @@ export class BillingService {
       subscription.subscriptionId,
       subscription.graceEndsAt,
       expiredAt,
-      this.events.terminalPlanKey,
     );
     return marked ? { ...subscription, graceExpiredAt: expiredAt } : subscription;
   }

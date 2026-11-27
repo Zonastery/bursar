@@ -395,10 +395,10 @@ describe("ClickHouseUsageStore hardening", () => {
               feature: "chat",
               model: "gpt",
               region: null,
-              event_at: "2026-07-29 12:00:00.123456",
+              event_at_text: "2026-07-29 12:00:00.123456",
               idempotency_key: "usage:42",
               metadata: null,
-              created_at: "2026-07-29 12:00:01.123456",
+              created_at_text: "2026-07-29 12:00:01.123456",
             },
             {
               usage_id: "00000000-0000-0000-0000-000000000041",
@@ -412,10 +412,10 @@ describe("ClickHouseUsageStore hardening", () => {
               feature: null,
               model: null,
               region: "in",
-              event_at: "2026-07-28 12:00:00",
+              event_at_text: "2026-07-28 12:00:00",
               idempotency_key: "usage:41",
               metadata: '{"source":"test"}',
-              created_at: "2026-07-28 12:00:01",
+              created_at_text: "2026-07-28 12:00:01",
             },
           ];
         } else if (query.includes("active_users")) {

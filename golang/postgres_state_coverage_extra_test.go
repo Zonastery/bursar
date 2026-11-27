@@ -131,11 +131,11 @@ func TestPostgresBillingStateValidationCoverage(t *testing.T) {
 			return store.RecordSubscriptionConflict(ctx, BillingSubscriptionConflictCreate{Provider: "stripe", DuplicateProviderSubscriptionID: "sub", AccountID: "bad"})
 		}},
 		{"entitlement account", func() error {
-			_, err := store.reconcileSubscriptionEntitlement(ctx, "", postgresStateCoverageTenant, postgresStateCoverageTenant, "active", now, nil, true, "", "subscription_updated")
+			_, err := store.reconcileSubscriptionEntitlement(ctx, "", postgresStateCoverageTenant, postgresStateCoverageTenant, "active", now, nil, true, "subscription_updated")
 			return err
 		}},
 		{"entitlement id", func() error {
-			_, err := store.reconcileSubscriptionEntitlement(ctx, postgresStateCoverageTenant, "bad", postgresStateCoverageTenant, "active", now, nil, true, "", "subscription_updated")
+			_, err := store.reconcileSubscriptionEntitlement(ctx, postgresStateCoverageTenant, "bad", postgresStateCoverageTenant, "active", now, nil, true, "subscription_updated")
 			return err
 		}},
 		{"pseudonymize account", func() error { _, err := store.PseudonymizeFinancialSubject(ctx, ""); return err }},
@@ -149,11 +149,11 @@ func TestPostgresBillingStateValidationCoverage(t *testing.T) {
 		{"grace limit", func() error { _, err := store.ExpirePastDueGracePeriods(ctx, now, 0); return err }},
 		{"grace list limit", func() error { _, err := store.ListExpiredGraceSubscriptions(ctx, now, 1001); return err }},
 		{"entitlement status", func() error {
-			_, err := store.reconcileSubscriptionEntitlement(ctx, postgresStateCoverageTenant, postgresStateCoverageTenant, postgresStateCoverageTenant, "invalid", now, nil, true, "", "subscription_updated")
+			_, err := store.reconcileSubscriptionEntitlement(ctx, postgresStateCoverageTenant, postgresStateCoverageTenant, postgresStateCoverageTenant, "invalid", now, nil, true, "subscription_updated")
 			return err
 		}},
 		{"entitlement timestamp", func() error {
-			_, err := store.reconcileSubscriptionEntitlement(ctx, postgresStateCoverageTenant, postgresStateCoverageTenant, postgresStateCoverageTenant, "active", time.Time{}, nil, true, "", "subscription_updated")
+			_, err := store.reconcileSubscriptionEntitlement(ctx, postgresStateCoverageTenant, postgresStateCoverageTenant, postgresStateCoverageTenant, "active", time.Time{}, nil, true, "subscription_updated")
 			return err
 		}},
 	}

@@ -1,3 +1,4 @@
+import { loadConfigFromDict } from "../config.js";
 import { LRUCache } from "lru-cache";
 import { z } from "zod";
 import type { NormalizedLogger } from "../shared/logger.js";
@@ -53,7 +54,6 @@ export class BillingEventHandlers {
   private readonly provisioning: BillingProvisioningPort | null;
   private readonly autoSelectEntitlementSource: boolean;
   private readonly pastDueGracePeriodMs: number;
-  private readonly terminalPlanKey: string | null;
   private readonly logger: NormalizedLogger;
   private readonly offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly financial: BillingFinancialEventHandlers;
@@ -61,10 +61,6 @@ export class BillingEventHandlers {
 
   get hasProvisioning(): boolean {
     return this.provisioning !== null;
-  }
-
-  get terminalPlan(): string | null {
-    return this.terminalPlanKey;
   }
 
   constructor(
@@ -77,7 +73,6 @@ export class BillingEventHandlers {
     if (!Number.isFinite(this.pastDueGracePeriodMs) || this.pastDueGracePeriodMs < 0) {
       throw new RangeError("pastDueGracePeriodMs must be a finite non-negative number");
     }
-    this.terminalPlanKey = options?.terminalPlanKey ?? null;
     this.logger = normalizeLogger(options?.logger);
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
@@ -457,7 +452,6 @@ export class BillingEventHandlers {
       expected.providerUpdatedAt,
       planAssignedAt,
       applyEntitlement,
-      this.terminalPlanKey,
       `subscription_${expected.status}`,
     );
     this.logger.info("[BillingService] reconciled subscription entitlement", {
@@ -525,7 +519,9 @@ export class BillingEventHandlers {
     });
     if (outcome === "stale") return { handled: true, action: "stale_subscription_event" };
     if (pending) {
-      await this.store.updateBillingSubscriptionChange(pending.id, { state: "applied" });
+      await this.store.updateBillingSubscriptionChange(pending.id, {
+        state: "applied",
+      });
     }
     return { handled: true, action: options.action };
   }
@@ -791,8 +787,12 @@ export class BillingEventHandlers {
 
   private async revokeCustomerAccess(uid: string): Promise<void> {
     if (!this.provisioning) return;
-    if (this.terminalPlanKey) {
-      await this.provisioning.setUserPlan(uid, this.terminalPlanKey);
+    const raw = await this.store.getActiveCatalogDocument();
+    const terminalPlan = raw
+      ? loadConfigFromDict(raw, this.store.providerEnvironment).catalog.subscriptionEndPlan
+      : undefined;
+    if (terminalPlan) {
+      await this.provisioning.setUserPlan(uid, terminalPlan);
       return;
     }
     await this.provisioning.unsetUserPlan(uid);

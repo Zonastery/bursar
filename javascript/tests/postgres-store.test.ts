@@ -39,7 +39,11 @@ class PostgresStore extends BasePostgresStore {
 
 class PostgresBillingStore extends BasePostgresBillingStore {
   constructor(poolOrUrl: PgPool | string) {
-    super({ postgres: poolOrUrl, tenantId: TEST_TENANT_ID, providerEnvironment: "test" });
+    super({
+      postgres: poolOrUrl,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+    });
   }
 }
 
@@ -151,15 +155,40 @@ describe("PostgresStore", () => {
     await expect(postgres.query("SELECT 1 AS value")).resolves.toEqual([{ value: 1 }]);
 
     const configureCall = query.mock.calls.find(([text]) => text.startsWith("SELECT set_config("));
-    expect(configureCall?.[0]).toContain("bursar.provider_environment");
+    expect(configureCall?.[0]).toContain("bursar.bind_tenant_context($3::uuid, $4::text)");
     expect(configureCall?.[1]).toEqual([
       "30000",
       "30000",
       TEST_TENANT_ID,
-      "postgres",
-      "postgres",
       "sandbox",
+      "postgres",
+      "postgres",
     ]);
+  });
+
+  it("holds the usage fence until the external read completes", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (text: string) => {
+      calls.push(text);
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const postgres = new PostgresClient(
+      testPool({
+        query: vi.fn(),
+        connect: vi.fn().mockResolvedValue(client),
+        end: vi.fn(),
+      }),
+      { tenantId: TEST_TENANT_ID, providerEnvironment: "test" },
+    );
+    const result = await postgres.withUsageBackend("clickhouse", async () => {
+      expect(calls.at(-1)).toContain("check_usage_backend");
+      expect(calls).not.toContain("COMMIT");
+      return "receipt";
+    });
+    expect(result).toBe("receipt");
+    expect(calls.at(-1)).toBe("COMMIT");
+    expect(client.release).toHaveBeenCalled();
   });
 
   it("constructor stores database URL", () => {
@@ -178,7 +207,13 @@ describe("PostgresStore", () => {
     // Postgres returns NUMERIC as a string via pg.
     const store = new PostgresStore(
       "postgresql://localhost/db",
-      makeMockPool([{ bucket_key: "purchased", balance: "100.1234", lifetime_purchased: "0" }]),
+      makeMockPool([
+        {
+          bucket_key: "purchased",
+          balance: "100.1234",
+          lifetime_purchased: "0",
+        },
+      ]),
     );
     const result = await store.getBalance("user-1");
     expect(result.balance.toString()).toBe("100.1234");
@@ -201,6 +236,7 @@ describe("PostgresStore", () => {
           plan_label: "Pro",
           rate_card: null,
           allowed_operations: [],
+          operation_access: "all",
           credit_allowance_amount: "100",
           credit_allowance_priority: 20,
           credit_allowance_reset_unit: "month",
@@ -672,7 +708,9 @@ describe("PostgresStore", () => {
           [{ balance_after: "90.0000", bucket_breakdown: null }],
         ),
       );
-      const result = await store.deductWithAllowance(TEST_USER_ID, D(10), { idempotencyKey: "k" });
+      const result = await store.deductWithAllowance(TEST_USER_ID, D(10), {
+        idempotencyKey: "k",
+      });
       expect(result.idempotent).toBe(true);
       expect(result.entryId).toBe(TEST_LEDGER_ID);
     });
@@ -1314,7 +1352,13 @@ describe("PostgresStore", () => {
         ];
       }
       if (name === "get_credit_operation_details") {
-        return [{ balance_after: "91.876543", allowance_covered: "0", bucket_breakdown: {} }];
+        return [
+          {
+            balance_after: "91.876543",
+            allowance_covered: "0",
+            bucket_breakdown: {},
+          },
+        ];
       }
       throw new Error(`unexpected RPC: ${name}`);
     });

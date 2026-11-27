@@ -545,7 +545,7 @@ func (s *PostgresStore) CreateBillingSubscriptionChange(ctx context.Context, inp
 		if valueErr != nil {
 			return valueErr
 		}
-		rows, openErr := tx.Call(ctx, "open_subscription_change", typedSubscriptionID, typedOfferID, input.EffectiveAt.UTC(), input.Effective, input.OperationKey, input.ProrationBehavior)
+		rows, openErr := tx.Call(ctx, "open_subscription_change", typedSubscriptionID, typedOfferID, input.EffectiveAt.UTC(), input.Effective, input.OperationKey, input.ProrationBehavior, input.Region)
 		if openErr != nil {
 			return openErr
 		}
@@ -1069,6 +1069,10 @@ func (s *PostgresStore) ResolveAutoRechargeTopup(ctx context.Context, lookup Aut
 	if err != nil {
 		return nil, err
 	}
+	lookup.Reference, err = ResolveProviderReference(lookup.Reference, s.providerEnvironment)
+	if err != nil {
+		return nil, err
+	}
 	lookupType, lookupValue := commerceStateProviderReferenceLookup(lookup.Reference)
 	if lookupType == "" {
 		return nil, NewError("auto-recharge top-up provider reference has no product identifier", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
@@ -1108,14 +1112,13 @@ func commerceStateAutoRechargeTopupFromRows(rows []map[string]any, provider, loo
 }
 
 func commerceStateProviderReferenceLookup(reference ProviderReference) (string, string) {
-	if reference.PriceID != nil && strings.TrimSpace(*reference.PriceID) != "" {
-		return "price_id", strings.TrimSpace(*reference.PriceID)
-	}
-	if reference.ProductID != nil && strings.TrimSpace(*reference.ProductID) != "" {
-		return "product_id", strings.TrimSpace(*reference.ProductID)
-	}
-	if reference.ExternalID != nil && strings.TrimSpace(*reference.ExternalID) != "" {
-		return "external_id", strings.TrimSpace(*reference.ExternalID)
+	for _, entry := range []struct {
+		field string
+		id    ProviderID
+	}{{"price_id", reference.PriceID}, {"product_id", reference.ProductID}, {"external_id", reference.ExternalID}} {
+		if value := strings.TrimSpace(entry.id.scalar()); value != "" {
+			return entry.field, value
+		}
 	}
 	return "", ""
 }
@@ -1224,6 +1227,7 @@ func commerceStateAutoRechargeProfileFromRow(row map[string]any, operation strin
 		State:               state,
 		Provider:            optionalRowText(row, "provider"),
 		TopupID:             optionalRowText(row, "topup_id"),
+		TopupKey:            optionalRowText(row, "topup_key"),
 		Quantity:            int64(quantity),
 		Threshold:           threshold,
 		MaxChargesPerWindow: maxCharges,
@@ -1325,7 +1329,7 @@ func (s *PostgresStore) ClaimAutoRechargeAttempt(ctx context.Context, claim Auto
 		return nil, err
 	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "claim_auto_recharge_attempt", typedUserID, claim.IdempotencyKey)
+		rows, callErr := tx.Call(ctx, "claim_auto_recharge_attempt", typedUserID, claim.IdempotencyKey, claim.ExpectedProductID, claim.ExpectedQuantity, claim.ExpectedTopupKey)
 		if callErr != nil {
 			return callErr
 		}

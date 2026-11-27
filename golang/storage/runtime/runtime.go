@@ -156,6 +156,7 @@ type Runtime struct {
 	Bursar               *bursar.Bursar
 	PrimaryStore         *bursar.PostgresStore
 	OperatorClient       *bursar.PostgresClient
+	tenantOperator       *bursar.PostgresClient
 	Recovery             bursar.OutboxRecoveryStore
 	projectionRepository bursar.StorageProjectionRepository
 	Maintenance          *bursar.BursarMaintenance
@@ -235,24 +236,32 @@ func NewBursarRuntime(ctx context.Context, options Options) (*Runtime, error) {
 		cleanupProjections()
 		return nil, fmt.Errorf("create operator PostgreSQL client: %w", err)
 	}
+	tenantOperator, err := operator.ForTenant(tenantID)
+	if err != nil {
+		_ = operator.Close()
+		_ = primary.Close()
+		cleanupProjections()
+		return nil, fmt.Errorf("create tenant operator PostgreSQL client: %w", err)
+	}
 	creditsOptions := options.CreditsOptions
-	if analytics, ok := usageSink.(bursar.UsageAnalyticsStore); ok {
+	if usageSink != nil {
+		analytics, _ := usageSink.(bursar.UsageAnalyticsStore)
 		if creditsOptions.Analytics != nil {
 			_ = operator.Close()
 			_ = primary.Close()
 			cleanupProjections()
 			return nil, errors.New("configure usage analytics through the runtime usage sink")
 		}
-		creditsOptions.Analytics = analytics
-	}
-	if usageStore, ok := usageSink.(bursar.UsageChargeStore); ok {
+		charges, _ := usageSink.(bursar.UsageChargeStore)
+		guarded := guardedUsage{store: primary, analytics: analytics, charges: charges}
+		creditsOptions.Analytics = guarded
 		if creditsOptions.UsageStore != nil {
 			_ = operator.Close()
 			_ = primary.Close()
 			cleanupProjections()
 			return nil, errors.New("configure usage receipts through the runtime usage sink")
 		}
-		creditsOptions.UsageStore = usageStore
+		creditsOptions.UsageStore = guarded
 	}
 
 	facade, err := bursar.New(bursar.Options{
@@ -270,7 +279,7 @@ func NewBursarRuntime(ctx context.Context, options Options) (*Runtime, error) {
 		return nil, fmt.Errorf("create Bursar facade: %w", err)
 	}
 
-	recovery, err := bursar.NewPostgresStorageRepositoryFromStore(primary)
+	recovery, err := bursar.NewPostgresStorageRepository(tenantOperator)
 	if err != nil {
 		_ = operator.Close()
 		_ = primary.Close()
@@ -300,7 +309,7 @@ func NewBursarRuntime(ctx context.Context, options Options) (*Runtime, error) {
 	}
 
 	runtime := &Runtime{
-		Bursar: facade, PrimaryStore: primary, OperatorClient: operator,
+		Bursar: facade, PrimaryStore: primary, OperatorClient: operator, tenantOperator: tenantOperator,
 		Recovery: recovery, Maintenance: maintenance, OperatorMaintenance: operatorMaintenance,
 		projectionRepository: projectionRepository, UsageSink: usageSink, BillingArchive: archive,
 		components: projectionComponents, ownsBursar: true, tenantID: tenantID, tenantSlug: tenantSlug,
@@ -541,6 +550,15 @@ func (r *Runtime) Start(ctx context.Context, options ...StartOptions) error {
 	}
 	if err := r.verifyTenantIdentity(ctx); err != nil {
 		return err
+	}
+	if r.PrimaryStore != nil {
+		backend := "postgres"
+		if r.UsageSink != nil {
+			backend = "clickhouse"
+		}
+		if err := r.PrimaryStore.WithUsageBackend(ctx, backend, func() error { return nil }); err != nil {
+			return err
+		}
 	}
 	loadCatalog := true
 	if startOptions.LoadCatalog != nil {
@@ -816,6 +834,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	bursarFacade := r.Bursar
 	ownsBursar := r.ownsBursar
 	operator := r.OperatorClient
+	tenantOperator := r.tenantOperator
 	r.mu.Unlock()
 	var failures []error
 	for index := len(components) - 1; index >= 0; index-- {
@@ -838,6 +857,11 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 	if ownsBursar && bursarFacade != nil {
 		if err := bursarFacade.Close(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if tenantOperator != nil {
+		if err := tenantOperator.Close(); err != nil {
 			failures = append(failures, err)
 		}
 	}

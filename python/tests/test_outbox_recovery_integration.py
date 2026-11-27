@@ -24,7 +24,7 @@ def _seed_dead_letters(pg_database_url: str) -> list[str]:
     created_at = datetime(2026, 8, 10, tzinfo=UTC)
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
+            "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text, 'test')",
             (OTHER_TENANT_ID, "outbox-other", "Outbox other tenant"),
         )
         for index in range(2):
@@ -98,6 +98,7 @@ def test_recovery_rpc_cursor_requeue_renewal_and_tenant_boundary(pg_database_url
     client = PostgresClient(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
+        provider_environment="test",
         access_role="bursar_operator",
         max_connections=2,
     )

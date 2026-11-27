@@ -19,6 +19,7 @@ export interface CheckoutParams {
   productId: string;
   type: "subscription" | "credit_pack";
   quantity?: number;
+  trial?: { unit: "day" | "week" | "month" | "year"; count: number };
   returnUrl: string;
   cancelUrl: string;
   metadata: Record<string, string>;
@@ -167,7 +168,7 @@ export interface ChangePlanParams {
 }
 export interface PlanSelection {
   planId: string;
-  interval: "month" | "year";
+  interval: "day" | "week" | "month" | "year";
 }
 
 export interface PreviewChangePlanParams {

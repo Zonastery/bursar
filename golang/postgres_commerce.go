@@ -62,6 +62,10 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 	if input.RequestDigest != "" && !strings.EqualFold(input.RequestDigest, hex.EncodeToString(digest[:])) {
 		return intent, NewError("checkout request digest does not match its resolved request", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict})
 	}
+	expectedRevision, err := nullablePostgresUUID(input.ExpectedRevisionID, "checkout catalog revision ID")
+	if err != nil {
+		return intent, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
 		rows, callErr := tx.Call(
 			ctx,
@@ -76,6 +80,7 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 			nil,
 			nil,
 			nullableText(strings.ToUpper(strings.TrimSpace(input.Region))),
+			expectedRevision,
 		)
 		if callErr != nil {
 			return callErr
@@ -92,6 +97,9 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 			return NewStoreError("checkout intent could not be read after creation", ErrorOptions{Indeterminate: true, Details: map[string]any{"checkout_intent_id": intentID}})
 		}
 		intent = *loaded
+		if !strings.EqualFold(intent.RequestDigest, hex.EncodeToString(digest[:])) {
+			return NewError("checkout operation key is already bound to a different request", ErrorOptions{Code: ErrorCodeCheckoutConflict, Category: ErrorCategoryConflict})
+		}
 		return nil
 	})
 	return intent, err
@@ -162,6 +170,40 @@ func (s *PostgresStore) UpdateCheckoutIntent(ctx context.Context, intentID, subj
 		}
 		return nil
 	})
+}
+
+// FindCheckoutIntent recovers the original immutable catalog for a checkout.
+func (s *PostgresStore) FindCheckoutIntent(ctx context.Context, subjectID, operationKey, provider string) (intent *CheckoutIntent, catalog map[string]any, err error) {
+	typedSubject, err := postgresUUID(subjectID, "checkout subject ID")
+	if err != nil {
+		return nil, nil, err
+	}
+	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		rows, callErr := tx.Call(ctx, "find_checkout_intent", typedSubject, operationKey, nullableText(provider))
+		if callErr != nil {
+			return callErr
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		if len(rows) != 1 {
+			return NewStoreError("checkout operation key matches multiple providers", ErrorOptions{})
+		}
+		id, callErr := requiredRowText(rows[0], "intent_id", "find_checkout_intent")
+		if callErr != nil {
+			return callErr
+		}
+		catalog, callErr = jsonMap(rowValue(rows[0], "source_document"), "find_checkout_intent.source_document")
+		if callErr != nil {
+			return callErr
+		}
+		intent, callErr = s.checkoutIntent(ctx, tx, id, subjectID)
+		if callErr == nil && intent == nil {
+			return NewStoreError("checkout intent disappeared", ErrorOptions{})
+		}
+		return callErr
+	})
+	return intent, catalog, err
 }
 
 // GetCheckoutIntent returns a subject-scoped intent, if it exists in the

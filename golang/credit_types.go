@@ -309,6 +309,7 @@ type GetUserPlanResult struct {
 	CreditPolicy          *PlanCreditPolicy
 	Admission             *PlanAdmissionPolicy
 	AllowedOperations     []string
+	OperationAccess       string
 	PlanAssignedAt        *time.Time
 	PlanAssignmentEndsAt  *time.Time
 	AssignmentSourceType  string

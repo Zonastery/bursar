@@ -8,6 +8,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from bursar.shared.postgres_types import QueryFn
+from bursar.storage.json_numbers import json_load
 from bursar.storage.ports import (
     BillingEventPayloadExport,
     OutboxDeadLetter,
@@ -135,7 +136,10 @@ class PostgresStorageRepository:
     ) -> list[OutboxEvent]:
         rows = self._query(
             """
-            SELECT * FROM bursar.claim_outbox_events(
+            SELECT event_id, tenant_id, topic, aggregate_type, aggregate_id,
+                   payload_version, payload::text AS payload, claim_token,
+                   attempt_count, created_at
+            FROM bursar.claim_outbox_events(
                 %s::uuid,
                 %s::integer,
                 %s::integer,
@@ -147,6 +151,16 @@ class PostgresStorageRepository:
         events: list[OutboxEvent] = []
         for raw in rows:
             row = _as_row(raw, "claim_outbox_events")
+            payload = row.get("payload")
+            if isinstance(payload, str):
+                # Only usage storage needs exact decimals; other topics retain
+                # the SDK's ordinary JSON number semantics.
+                if row.get("topic") == "usage.charge_recorded":
+                    payload = json_load(payload)
+                else:
+                    import json
+
+                    payload = json.loads(payload)
             events.append(
                 OutboxEvent(
                     event_id=_required_string(row, "event_id", "outbox event"),
@@ -155,7 +169,7 @@ class PostgresStorageRepository:
                     aggregate_type=_required_string(row, "aggregate_type", "outbox event"),
                     aggregate_id=_required_string(row, "aggregate_id", "outbox event"),
                     payload_version=int(row["payload_version"]),
-                    payload=_json_object(row.get("payload"), "outbox event.payload"),
+                    payload=_json_object(payload, "outbox event.payload"),
                     claim_token=_required_string(row, "claim_token", "outbox event"),
                     attempt_count=int(row["attempt_count"]),
                     created_at=_required_string(row, "created_at", "outbox event"),
@@ -308,13 +322,13 @@ class PostgresStorageRepository:
 
     def get_usage_charge(self, charge_id: str) -> UsageChargeExport | None:
         rows = self._query(
-            "SELECT bursar.export_usage_charge(%s::uuid) AS payload",
+            "SELECT bursar.export_usage_charge(%s::uuid)::text AS payload",
             [charge_id],
         )
         value = _as_row(rows[0], "export_usage_charge").get("payload") if rows else None
         if value is None:
             return None
-        row = _as_row(value, "export_usage_charge payload")
+        row = _as_row(json_load(value) if isinstance(value, str) else value, "export_usage_charge payload")
         if row.get("payload_available") is not True:
             msg = f"Usage charge {charge_id} payload expired before export"
             raise RuntimeError(msg)

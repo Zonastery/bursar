@@ -18,7 +18,8 @@ RETURNS TABLE (
     catalog_revision_id uuid,
     plan_id uuid,
     minimum_balance numeric,
-    max_concurrent integer
+    max_concurrent integer,
+    global_max_concurrent integer
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     WITH assignment AS (
@@ -30,7 +31,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
             COALESCE(
                 operation_policy.max_in_flight,
                 admission_policy.max_in_flight
-            ) AS max_in_flight
+            ) AS max_in_flight,
+            admission_policy.max_in_flight AS global_max_in_flight
         FROM bursar.credit_accounts ca
         JOIN bursar.account_plan_assignments a ON a.account_id = ca.id
         JOIN bursar.catalog_plans p ON p.id = a.plan_id AND p.catalog_revision_id = a.catalog_revision_id
@@ -60,7 +62,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
             WHEN 'credit_line' THEN -credit_limit
             ELSE 0
         END,
-        max_in_flight
+        max_in_flight,
+        global_max_in_flight
     FROM assignment
 $$;
 

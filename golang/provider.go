@@ -82,6 +82,26 @@ type CheckoutSessionRequest struct {
 	CustomerEmail  string
 	Metadata       map[string]string
 	IdempotencyKey string
+	Trial          *BillingInterval
+}
+
+// CheckoutTrialDays validates and converts a subscription trial for a provider.
+func CheckoutTrialDays(request CheckoutSessionRequest, maximum int) (int64, error) {
+	if request.Trial == nil {
+		return 0, nil
+	}
+	trial := request.Trial
+	if request.Mode != "subscription" || (trial.Unit != "day" && trial.Unit != "week") || trial.Count < 1 {
+		return 0, NewError("checkout trials require a subscription and day or week units", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	factor := 1
+	if trial.Unit == "week" {
+		factor = 7
+	}
+	if trial.Count > maximum/factor {
+		return 0, NewError("checkout trial exceeds provider limit", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
+	}
+	return int64(trial.Count * factor), nil
 }
 
 // CheckoutSession is the minimum provider result required by Bursar's
