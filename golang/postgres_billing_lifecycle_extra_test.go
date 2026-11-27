@@ -4,6 +4,7 @@
 package bursar
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -326,5 +327,19 @@ func TestSubscriptionEntitlementOutcomeMatchesDurableStatus(t *testing.T) {
 				t.Fatal("invalid entitlement outcome accepted")
 			}
 		})
+	}
+}
+
+func TestPostgresBillingEventRejectsCallerClaimAndFallsBackToAccount(t *testing.T) {
+	t.Parallel()
+	store := &PostgresStore{}
+	if _, err := store.ProcessBillingEvent(context.Background(), BillingEvent{BillingEventID: "internal-claim"}, ""); err == nil || !strings.Contains(err.Error(), "identifiers are internal") {
+		t.Fatalf("ProcessBillingEvent() with caller claim error = %v", err)
+	}
+	_, err := store.ProcessBillingEvent(context.Background(), BillingEvent{
+		EventID: "evt-account-fallback", Provider: "stripe", Type: BillingEventCustomerUpdated,
+	}, "account-1")
+	if err == nil {
+		t.Fatal("ProcessBillingEvent() unexpectedly succeeded without a PostgreSQL client")
 	}
 }

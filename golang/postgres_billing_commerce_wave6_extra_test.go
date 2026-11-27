@@ -321,6 +321,20 @@ func TestCheckoutRequestDigestNormalizesLegacyTopupKind(t *testing.T) {
 	}
 }
 
+func TestCheckoutIntentRejectsInvalidCatalogRevisionBeforeDatabaseAccess(t *testing.T) {
+	t.Parallel()
+	store := &PostgresStore{client: &PostgresClient{}}
+	input := CheckoutIntentCreate{
+		SubjectID: storageTestTenant, AccountID: storageTestTenant, Provider: "stripe",
+		CheckoutKind: "subscription", ProductKey: "starter", Quantity: 1,
+		IdempotencyKey: "checkout-revision", ExpiresAt: time.Now().UTC().Add(time.Hour),
+		ExpectedRevisionID: "not-a-uuid",
+	}
+	if _, err := store.CreateOrGetCheckoutIntent(context.Background(), input); err == nil {
+		t.Fatal("invalid checkout catalog revision was accepted")
+	}
+}
+
 func TestPostgresCommerceAndBillingProjectionRowsFailClosed(t *testing.T) {
 	if _, err := firstScalar(map[string]any{"result": true, "other": false}, "scalar"); err == nil {
 		t.Fatal("multi-column scalar result accepted")

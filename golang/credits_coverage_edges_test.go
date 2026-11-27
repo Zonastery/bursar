@@ -30,6 +30,10 @@ func (s creditsCoverageErrorStore) SweepExpiredCredits(context.Context, bool, st
 	return SweepResult{}, s.err
 }
 
+func (s creditsCoverageErrorStore) RefundCredits(context.Context, string, *Amount, string, CreditMetadata, string) (RefundResult, error) {
+	return RefundResult{}, s.err
+}
+
 func (creditsCoverageErrorStore) Close() error { return nil }
 
 func TestCreditsServicePreservesStoreAndLazyExpiryErrors(t *testing.T) {
@@ -47,10 +51,16 @@ func TestCreditsServicePreservesStoreAndLazyExpiryErrors(t *testing.T) {
 	}
 
 	service := &CreditsService{store: store}
+	if _, err := service.Deduct(ctx, "user-1", MustAmount("1"), DeductWithAllowanceOptions{IdempotencyKey: "deduct-2"}); !errors.Is(err, want) {
+		t.Fatalf("Deduct() store error = %v", err)
+	}
 	if _, err := service.AddCredits(ctx, "user-1", MustAmount("1"), AddCreditsOptions{}); !errors.Is(err, want) {
 		t.Fatalf("AddCredits() store error = %v", err)
 	}
 	if _, err := service.DeductCredits(ctx, "user-1", MustAmount("1"), AddCreditsOptions{}); !errors.Is(err, want) {
 		t.Fatalf("DeductCredits() store error = %v", err)
+	}
+	if _, err := service.RefundCredits(ctx, "entry-1", nil, "test", nil, "refund-1"); !errors.Is(err, want) {
+		t.Fatalf("RefundCredits() store error = %v", err)
 	}
 }

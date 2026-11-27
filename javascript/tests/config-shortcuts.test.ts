@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { canonicalBursarConfigDict } from "../src/config.js";
+import { normalizeConfig } from "../src/config/normalize.js";
 import { PricingEngine } from "../src/engine.js";
+import type { JsonObject } from "../src/shared/json.js";
 
 const starter = {
   version: 1,
@@ -67,5 +69,38 @@ describe("configuration shortcuts", () => {
       offers: { pack: { ...commerce.offers.pack, providers: { stripe: { product_id: "wrong" } } } },
     };
     expect(() => canonicalBursarConfigDict({ ...starter, commerce: invalid })).toThrow();
+  });
+
+  it("rejects ambiguous signup and rate-card shorthand", () => {
+    // @ts-expect-error Invalid environments must also be rejected for untyped callers.
+    expect(() => normalizeConfig({}, "staging")).toThrow("invalid provider environment");
+
+    const missingDefaultBucket: JsonObject = {
+      credits: { buckets: { bonus: { priority: 1 } }, on_signup: "10" },
+    };
+    expect(() => normalizeConfig(missingDefaultBucket)).toThrow(
+      "credits.on_signup requires credits.default_bucket",
+    );
+
+    const conflictingSignupGrant: JsonObject = {
+      credits: {
+        default_bucket: "default",
+        on_signup: "10",
+        grant_programs: { welcome: { trigger: "account_created" } },
+      },
+    };
+    expect(() => normalizeConfig(conflictingSignupGrant)).toThrow(
+      "credits.on_signup conflicts with an account_created grant program",
+    );
+
+    const invalidRateCard: JsonObject = {
+      pricing: {
+        operations: { chat: { charge: { type: "flat", amount: "1" } } },
+        rate_cards: { standard: { operations: "invalid" } },
+      },
+    };
+    expect(() => normalizeConfig(invalidRateCard)).toThrow(
+      "pricing.rate_cards.standard.operations must be an object",
+    );
   });
 });
