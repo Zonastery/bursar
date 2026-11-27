@@ -6,7 +6,27 @@ page after the Python and TypeScript packages are published successfully.
 
 ## [Unreleased]
 
-See the [comparison with 2.0.6](https://github.com/Zonastery/bursar/compare/v2.0.6...HEAD).
+See the [comparison with 2.1.0](https://github.com/Zonastery/bursar/compare/v2.1.0...HEAD).
+
+## [2.1.0] - 2026-11-27
+
+### Added
+
+- Added a unified version 1 pricing configuration model with consistent
+  authoring and validation across the Python, JavaScript, and Go SDKs.
+- Added guarded usage-storage cutover and bounded storage maintenance paths.
+
+### Changed
+
+- Simplified catalog and storage contracts across SDKs and updated the original
+  PostgreSQL migrations in place.
+- Aligned provider adapters and maintenance jobs with the canonical catalog
+  and tenant-scoped database contracts.
+
+### Fixed
+
+- Hardened cross-SDK catalog round trips, provider checkout handling, and
+  maintenance behavior.
 
 ## [2.0.6] - 2026-11-17
 
@@ -160,6 +180,8 @@ See the [comparison with 2.0.6](https://github.com/Zonastery/bursar/compare/v2.0
 - [0.0.2](https://github.com/Zonastery/bursar/compare/v0.0.1...v0.0.2)
 - [0.0.1](https://github.com/Zonastery/bursar/releases/tag/v0.0.1)
 
+[Unreleased]: https://github.com/Zonastery/bursar/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Zonastery/bursar/compare/v2.0.6...v2.1.0
 [2.0.6]: https://github.com/Zonastery/bursar/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/Zonastery/bursar/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/Zonastery/bursar/compare/v2.0.3...v2.0.4

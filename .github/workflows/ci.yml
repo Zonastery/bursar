@@ -245,11 +245,19 @@ jobs:
         with:
           go-version: "1.26.11"
           cache-dependency-path: golang/integrations/googleadk/go.sum
-      - name: Verify optional module metadata and formatting
+      # The core SDK and adapter ship from one shared release commit. The
+      # nested core-module tag does not exist until release-preflight passes,
+      # so validate the adapter against the core module in this checkout.
+      - name: Configure the in-tree core module for Go checks
         working-directory: golang/integrations/googleadk
         run: |
+          cp go.mod "${RUNNER_TEMP}/bursar-googleadk-go.mod"
+          cp go.sum "${RUNNER_TEMP}/bursar-googleadk-go.sum"
+          go mod edit -replace=github.com/Zonastery/bursar/golang/v2=../..
           go mod tidy
-          git diff --exit-code -- go.mod go.sum
+      - name: Verify optional module formatting
+        working-directory: golang/integrations/googleadk
+        run: |
           files="$(git ls-files '*.go')"
           if [ -n "$files" ]; then
             test -z "$(gofmt -l $files)"
@@ -265,6 +273,12 @@ jobs:
           go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/adk.out ./...
           go run github.com/vladopajic/go-test-coverage/v2@v2.19.0 --config=.testcoverage.yml
         working-directory: golang/integrations/googleadk
+      - name: Restore published module metadata
+        if: always()
+        working-directory: golang/integrations/googleadk
+        run: |
+          cp "${RUNNER_TEMP}/bursar-googleadk-go.mod" go.mod
+          cp "${RUNNER_TEMP}/bursar-googleadk-go.sum" go.sum
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-adk-coverage-report

@@ -62,10 +62,10 @@ versioned SDK module separately:
 go get github.com/Zonastery/bursar/golang/v2
 ```
 
-Go consumers select ordinary module versions such as `@v2.0.6`. Because the
+Go consumers select ordinary module versions such as `@v2.1.0`. Because the
 module is rooted in `golang/`, maintainers publish the corresponding repository
-tag as `golang/v2.0.6`; the release workflow creates and verifies that nested
-tag from the same commit as the shared `v2.0.6` release tag.
+tag as `golang/v2.1.0`; the release workflow creates and verifies that nested
+tag from the same commit as the shared `v2.1.0` release tag.
 
 Google ADK applications install the optional adapter separately:
 
@@ -75,7 +75,7 @@ go get github.com/Zonastery/bursar/golang/integrations/googleadk/v2
 
 The core SDK and web service require Go 1.26 or newer. The optional ADK adapter
 requires Go 1.26.11 or newer. Releases publish its matching
-`golang/integrations/googleadk/v2.0.6` tag from the same commit.
+`golang/integrations/googleadk/v2.1.0` tag from the same commit.
 
 Create a tenant, then build the facade:
 
