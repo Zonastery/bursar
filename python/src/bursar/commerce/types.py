@@ -110,6 +110,7 @@ class CreateCheckoutInput(_CommerceModel):
     provider: NonEmptyString | None = None
     type: CommerceCheckoutKind | None = None
     quantity: PositiveSafeInteger | None = None
+    region: str | None = Field(default=None, pattern=r"^[A-Z]{2}(?:-[A-Z0-9]{1,3})?$")
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("metadata")
@@ -139,7 +140,7 @@ class SubscriptionCommandResult(_CommerceModel):
 
 class NormalizedPendingPlanChange(_CommerceModel):
     plan_key: str
-    interval: Literal["month", "year"]
+    interval: Literal["day", "week", "month", "year"]
     effective_at: str
     scheduled: bool
     provider_operation_id: str | None = None
@@ -178,7 +179,7 @@ class PlanChangePreviewResult(_CommerceModel):
     classification: PlanChangeClassification
     scheduled: bool
     plan_id: str
-    interval: Literal["month", "year"]
+    interval: Literal["day", "week", "month", "year"]
     preview: ChangePlanPreview | None = None
     quote_fingerprint: str | None = None
 
@@ -200,6 +201,7 @@ class PlanChangePreviewResult(_CommerceModel):
 class PreviewPlanChangeInput(_CommerceModel):
     account_id: NonEmptyString
     offer_key: NonEmptyString
+    region: str | None = None
 
 
 class ConfirmPlanChangeInput(PreviewPlanChangeInput):
@@ -210,7 +212,7 @@ class ConfirmPlanChangeInput(PreviewPlanChangeInput):
 class ConfirmPlanChangeResult(_CommerceModel):
     success: Literal[True]
     plan_id: str
-    interval: Literal["month", "year"]
+    interval: Literal["day", "week", "month", "year"]
     unchanged: bool | None = None
     pending: bool | None = None
     scheduled: bool | None = None

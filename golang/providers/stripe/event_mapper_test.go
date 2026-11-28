@@ -189,3 +189,52 @@ func boolJSON(value bool) string {
 	}
 	return "false"
 }
+
+func TestInvoiceEventsInheritCheckoutMetadataFromSubscription(t *testing.T) {
+	resources := &stripeWebhookResourcesStub{subscription: &stripego.Subscription{
+		ID: "sub_1", Status: stripego.SubscriptionStatusActive,
+		Metadata: map[string]string{"bursar_account_id": "account-sub", "checkout_intent_id": "intent-sub", "source": "subscription"},
+		Items:    &stripego.SubscriptionItemList{Data: []*stripego.SubscriptionItem{{Price: &stripego.Price{ID: "price-pinned", Product: &stripego.Product{ID: "prod-pinned"}}}}},
+	}}
+	for _, tc := range []struct{ eventType, invoiceMetadata, wantIntent, wantSource string }{
+		{"invoice.paid", `{}`, "intent-sub", "subscription"},
+		{"invoice.payment_failed", `{}`, "intent-sub", "subscription"},
+		{"invoice.paid", `{"checkout_intent_id":"intent-invoice","source":"invoice"}`, "intent-invoice", "invoice"},
+		{"invoice.payment_failed", `{"checkout_intent_id":"intent-invoice","source":"invoice"}`, "intent-invoice", "invoice"},
+	} {
+		t.Run(tc.eventType+"/"+tc.wantIntent, func(t *testing.T) {
+			payload := `{"id":"in_1","customer":"cus_1","currency":"usd","amount_paid":1000,"amount_due":1000,"subtotal":1000,"metadata":` + tc.invoiceMetadata + `,"parent":{"subscription_details":{"subscription":"sub_1"}}}`
+			event := stripego.Event{ID: "evt_1", Created: 1784351724, Type: stripego.EventType(tc.eventType), Data: &stripego.EventData{Raw: json.RawMessage(payload)}}
+			mapped, err := mapStripeEvent(context.Background(), event, []byte(payload), resources)
+			if err != nil || mapped == nil {
+				t.Fatalf("invoice mapping = %#v, %v", mapped, err)
+			}
+			if mapped.AccountID != "account-sub" || mapped.Metadata["checkout_intent_id"] != tc.wantIntent || mapped.Metadata["source"] != tc.wantSource {
+				t.Fatalf("invoice metadata = %#v, account = %q", mapped.Metadata, mapped.AccountID)
+			}
+			if mapped.Subscription == nil || mapped.Subscription.Refs == nil || mapped.Subscription.Refs.PriceID != "price-pinned" {
+				t.Fatalf("invoice subscription reference = %#v", mapped.Subscription)
+			}
+		})
+	}
+}
+
+func TestInvoiceMappingRejectsInvalidSettlementData(t *testing.T) {
+	resources := &stripeWebhookResourcesStub{subscription: &stripego.Subscription{ID: "sub_1", Status: stripego.SubscriptionStatusActive}}
+	for _, tc := range []struct{ name, eventType, body string }{
+		{"missing paid invoice", "invoice.paid", `{"currency":"usd","parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+		{"negative amount paid", "invoice.paid", `{"id":"in_1","currency":"usd","amount_paid":-1,"parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+		{"negative amount due", "invoice.paid", `{"id":"in_1","currency":"usd","amount_due":-1,"parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+		{"invalid paid currency", "invoice.paid", `{"id":"in_1","currency":"bad!","parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+		{"negative failed subtotal", "invoice.payment_failed", `{"id":"in_1","currency":"usd","subtotal":-1,"parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+		{"negative failed tax", "invoice.payment_failed", `{"id":"in_1","currency":"usd","total_taxes":[{"amount":-1}],"parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+		{"invalid failed currency", "invoice.payment_failed", `{"id":"in_1","currency":"bad!","parent":{"subscription_details":{"subscription":"sub_1"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := stripego.Event{ID: "evt_invalid", Created: 1784351724, Type: stripego.EventType(tc.eventType), Data: &stripego.EventData{Raw: json.RawMessage(tc.body)}}
+			if mapped, err := mapStripeEvent(context.Background(), event, []byte(tc.body), resources); err == nil {
+				t.Fatalf("invalid invoice accepted: %#v", mapped)
+			}
+		})
+	}
+}

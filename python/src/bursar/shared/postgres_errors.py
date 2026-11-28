@@ -136,6 +136,10 @@ def normalize_postgres_error(
         "details": details,
         "indeterminate": indeterminate and _has_indeterminate_outcome(error, code),
     }
+    if code == "PZ002":
+        return StoreError("Usage backend is unavailable or does not match the tenant", **options)
+    if code == "PZ001":
+        return StoreError("Bursar tenant is inactive or provider environment does not match", **options)
     if _is_timeout(error, code):
         return StoreTimeoutError(f"PostgreSQL {operation} timed out", **options)
     if _is_unavailable(error, code):

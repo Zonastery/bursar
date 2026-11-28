@@ -299,6 +299,9 @@ class FakeAutoRecharge:
 
 
 class FakeBilling:
+    def find_checkout_intent(self, subject_id: str, operation_key: str, provider: str | None = None):
+        return None
+
     def __init__(self) -> None:
         self.catalog = commerce_catalog()
         self.auto_recharge = FakeAutoRecharge()
@@ -324,6 +327,9 @@ class FakeBilling:
 
     def get_active_catalog_document(self) -> dict[str, Any]:
         return self.catalog
+
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]]:
+        return "00000000-0000-0000-0000-000000000001", self.catalog
 
     def get_blocking_subscription(self, account_id: str | None) -> BillingSubscriptionState | None:
         del account_id
@@ -406,7 +412,7 @@ class FakeBilling:
         del provider
         return BillingOfferResult(
             offer_id=f"offer-{lookup_key}",
-            offer_key=lookup_key,
+            offer_key=lookup_key.removeprefix("alpha-").replace("-", "_"),
             plan_id="plan-pro" if lookup_key == "alpha-pro-month" else "plan-starter",
             plan="pro" if lookup_key == "alpha-pro-month" else "starter",
             interval="year" if lookup_key.endswith("year") else "month",
@@ -591,6 +597,7 @@ def active_subscription(**overrides: Any) -> BillingSubscriptionState:
         "provider_subscription_id": "subscription-1",
         "provider_customer_id": "customer-1",
         "plan": "starter",
+        "offer_key": "starter_month",
         "interval": "month",
         "interval_count": 1,
         "status": BillingSubscriptionStatus.active,
@@ -672,6 +679,61 @@ def service(provider: RecordingProvider) -> CommerceService:
 
 def run(awaitable: Any) -> Any:
     return asyncio.run(awaitable)
+
+
+@pytest.mark.asyncio
+async def test_subscription_checkout_forwards_catalog_trial() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _, _ = make_harness(provider)
+    billing.catalog["commerce"]["offers"]["starter_month"]["trial"] = {"unit": "week", "count": 2}
+    await commerce.create_checkout(
+        CreateCheckoutInput(
+            subject_id="subject-1",
+            account_id="account-1",
+            offer_key="starter_month",
+            return_url="https://return",
+            cancel_url="https://cancel",
+            operation_key="trial",
+        )
+    )
+    assert provider.checkout_params[0].trial is not None
+    assert provider.checkout_params[0].trial.model_dump() == {"unit": "week", "count": 2}
+
+
+@pytest.mark.asyncio
+async def test_checkout_recovery_uses_pinned_subscription_trial(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = RecordingProvider()
+    commerce, billing, _, _ = make_harness(provider)
+    billing.catalog["commerce"]["offers"]["starter_month"]["trial"] = {"unit": "week", "count": 2}
+    saved_catalog = deepcopy(billing.catalog)
+    original_create = billing.create_or_get_checkout_intent
+    saved_intents: list[CheckoutIntent] = []
+
+    def save_intent(value: CheckoutIntentCreate) -> CheckoutIntent:
+        billing.intent_factory = None
+        result = original_create(value)
+        saved_intents.append(result)
+        return result
+
+    billing.intent_factory = save_intent
+    checkout = CreateCheckoutInput(
+        subject_id="subject-1",
+        account_id="account-1",
+        offer_key="starter_month",
+        return_url="https://return",
+        cancel_url="https://cancel",
+        operation_key="trial-retry",
+    )
+    await commerce.create_checkout(checkout)
+    billing.catalog["commerce"]["offers"]["starter_month"]["trial"] = {"unit": "day", "count": 1}
+    monkeypatch.setattr(billing, "find_checkout_intent", lambda *_args: (saved_intents[0], saved_catalog))
+    await commerce.create_checkout(checkout)
+    assert len(provider.checkout_params) == 2
+    assert all(
+        params.trial is not None and params.trial.count == 2 and params.trial.unit == "week"
+        for params in provider.checkout_params
+    )
+    assert provider.checkout_params[0].idempotency_key == provider.checkout_params[1].idempotency_key
 
 
 @pytest.mark.asyncio
@@ -791,7 +853,7 @@ async def test_checkout_persistence_failure_remains_replayable_not_terminal() ->
     recovered = await commerce.create_checkout(checkout)
     assert recovered.intent_id == "intent-1"
     assert len(provider.checkout_params) == 2
-    assert all(params.idempotency_key == "checkout-persistence-retry" for params in provider.checkout_params)
+    assert all(params.idempotency_key == "bursar:checkout:intent-1" for params in provider.checkout_params)
     assert billing.updates == [
         (
             "intent-1",
@@ -826,7 +888,7 @@ async def test_checkout_customer_persistence_failure_remains_replayable_not_term
     recovered = await commerce.create_checkout(checkout)
     assert recovered.intent_id == "intent-1"
     assert len(provider.checkout_params) == 2
-    assert all(params.idempotency_key == "checkout-customer-retry" for params in provider.checkout_params)
+    assert all(params.idempotency_key == "bursar:checkout:intent-1" for params in provider.checkout_params)
     assert billing.updates == [
         (
             "intent-1",
@@ -992,6 +1054,41 @@ async def test_subscription_commands_and_cancel_all_emit_provider_neutral_events
         ("subscription-2", "cancel-all:cancel-all:5#alpha:14#subscription-2"),
     ]
     assert len(billing.events) == 4
+
+
+@pytest.mark.asyncio
+async def test_plan_change_checks_offer_identity_cadence_and_availability() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.active_subscription = active_subscription()
+    pro = billing.catalog["commerce"]["offers"]["pro_month"]
+    pro["availability"] = {"regions": ["IN"]}
+    with pytest.raises(UnknownOfferError, match="availability"):
+        await commerce.preview_plan_change("user-1", offer_key="pro_month")
+    with pytest.raises(UnknownOfferError, match="availability"):
+        await commerce.preview_plan_change("user-1", offer_key="pro_month", region="US")
+    preview = await commerce.preview_plan_change("user-1", offer_key="pro_month", region="in")
+    assert preview.classification == "upgrade"
+    offers = billing.catalog["commerce"]["offers"]
+    offers["starter_alt"] = {
+        **offers["starter_month"],
+        "providers": {
+            "alpha": {"type": "custom_object", "object_kind": "subscription", "external_id": "alpha-starter-alt"}
+        },
+    }
+    lateral = await commerce.preview_plan_change("user-1", offer_key="starter_alt")
+    assert lateral.classification == "lateral"
+    await commerce.confirm_plan_change(
+        "user-1", "lateral", offer_key="starter_alt", quote_fingerprint=lateral.quote_fingerprint or ""
+    )
+    assert provider.change_params
+    pro["availability"] = {"starts_at": "2099-01-01T00:00:00Z"}
+    with pytest.raises(UnknownOfferError, match="availability"):
+        await commerce.confirm_plan_change("user-1", "expired", offer_key="pro_month", quote_fingerprint="quote")
+    billing.active_subscription = active_subscription(offer_key=None)
+    pro.pop("availability")
+    with pytest.raises(CoreBillingDataUnavailableError, match="offer is unknown"):
+        await commerce.preview_plan_change("user-1", offer_key="pro_month")
 
 
 @pytest.mark.asyncio

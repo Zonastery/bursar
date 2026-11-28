@@ -22,10 +22,6 @@ export class BillingEventProcessor {
     return this.handlers.hasProvisioning;
   }
 
-  get terminalPlanKey(): string | null {
-    return this.handlers.terminalPlan;
-  }
-
   constructor(
     private readonly store: BillingStore,
     options?: BillingServiceOptions,

@@ -178,7 +178,7 @@ func TestCommercePlanChangeImmediateAndCapabilityBranches(t *testing.T) {
 	offers := commerce["offers"].(map[string]any)
 	pro := offers["pro_month"].(map[string]any)
 	pro["providers"] = map[string]any{"stripe": map[string]any{"type": "custom_object", "object_kind": "subscription", "external_id": "stripe-pro-month"}}
-	state.offers["pro_month"] = &BillingOffer{ID: "offer-pro", Provider: "stripe", OfferKey: "pro_month", PlanKey: "pro", PriceID: "stripe-pro-month", Interval: "month", IntervalCnt: 1}
+	state.offers["pro_month"] = &BillingOffer{ID: "offer-pro", Provider: "stripe", OfferKey: "pro_month", PlanKey: "pro", LookupKey: "stripe-pro-month", Interval: "month", IntervalCnt: 1}
 	state.subscription.Interval = "month"
 	preview, err := service.PreviewPlanChange(ctx, PreviewPlanChangeInput{AccountID: accountID, OfferKey: "pro_month"})
 	if err != nil || preview.Classification != PlanChangeUpgrade || preview.Scheduled || preview.Preview == nil {

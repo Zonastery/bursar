@@ -40,6 +40,7 @@ from bursar.commerce.errors import (
     CoreBillingDataUnavailableError,
     InvalidOfferQuantityError,
     ProviderCapabilityNotSupportedError,
+    ProviderSelectionError,
     QuoteChangedError,
     UnknownOfferError,
 )
@@ -78,7 +79,9 @@ from bursar.config import (
     SubscriptionOffer,
     TopupOffer,
     load_config_from_dict,
+    resolve_provider_id,
 )
+from bursar.config.availability import offer_is_available
 from bursar.config.types import BursarConfig, CommerceOffer, ProviderReference, SubscriptionChangePolicy
 from bursar.credits.types import (
     AllowanceResult,
@@ -97,6 +100,7 @@ from bursar.providers.types import (
     ChangePlanPreview,
     CheckoutParams,
     CheckoutStatusProvider,
+    CheckoutTrial,
     CustomerPortalProvider,
     InvoiceUrlProvider,
     PaymentMethodSetupParams,
@@ -185,6 +189,9 @@ class _CommerceBillingPort(BillingEventSink, Protocol):
 
     def get_active_catalog_document(self) -> dict[str, Any] | None: ...
 
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None:
+        raise NotImplementedError
+
     def get_user_subscription(self, account_id: str, /) -> BillingSubscriptionState | None: ...
 
     def get_active_subscription(self, account_id: str, /) -> BillingSubscriptionState | None: ...
@@ -205,6 +212,11 @@ class _CommerceBillingPort(BillingEventSink, Protocol):
     def update_checkout_intent(self, id: str, update: CheckoutIntentUpdate, /) -> None: ...
 
     def get_checkout_intent(self, id: str, subject_id: str, /) -> CheckoutIntent | None: ...
+
+    def find_checkout_intent(
+        self, subject_id: str, operation_key: str, provider: str | None = None, /
+    ) -> tuple[CheckoutIntent, dict] | None:
+        raise NotImplementedError
 
     def upsert_customer(
         self,
@@ -279,13 +291,13 @@ class _CommerceCreditsPort(Protocol):
     def get_ledger_entry(self, account_id: str, entry_id: str, /) -> LedgerEntry | None: ...
 
 
-def _external_id(reference: ProviderReference) -> str:
+def _external_id(reference: ProviderReference, environment: str | None) -> str:
     if isinstance(reference, StripePriceReference):
-        return reference.price_id
+        return resolve_provider_id(reference.price_id, environment)
     if isinstance(reference, DodoProductReference):
-        return reference.product_id
+        return resolve_provider_id(reference.product_id, environment)
     if isinstance(reference, CustomObjectReference):
-        return reference.external_id
+        return resolve_provider_id(reference.external_id, environment)
     raise UnknownOfferError("Unsupported provider reference")
 
 
@@ -361,12 +373,14 @@ class CommerceAutoRecharge:
     async def retry(self, input: AutoRechargeInput) -> BillingAutoRechargeStatus | None:
         provider = await self._commerce.provider_for_account(input.account_id)
         balance = self._commerce.credits.get_balance(input.account_id)
-        await self._commerce.billing.auto_recharge.retry(
+        result = await self._commerce.billing.auto_recharge.retry(
             input.account_id,
             provider,
             balance=balance.balance,
             return_url=input.return_url,
         )
+        if result.outcome == "not_configured":
+            return None
         return await self._commerce.billing.auto_recharge.get_status(
             input.account_id,
             provider,
@@ -428,7 +442,7 @@ class CommerceService:
         if raw is None:
             raise CoreBillingDataUnavailableError("The active commerce catalog is unavailable")
         try:
-            return load_config_from_dict(raw)
+            return load_config_from_dict(raw, self.options.provider_environment)
         except Exception as exc:
             raise CoreBillingDataUnavailableError("The active commerce catalog is invalid") from exc
 
@@ -496,72 +510,52 @@ class CommerceService:
             offer=offer,
         )
 
-    async def create_checkout(
-        self,
-        input: CreateCheckoutInput,
-    ) -> CreateCheckoutResult:
-        _config, offer_key, offer = self._resolve_offer(
-            offer_key=input.offer_key,
-            checkout_type=input.type,
-        )
-        quantity = self._quantity(offer, input.quantity)
-        blocking = self.billing.get_blocking_subscription(input.account_id)
-        customer = self.billing.get_customer_by_user_id(input.account_id)
-        if isinstance(offer, SubscriptionOffer) and blocking is not None:
-            raise ActiveSubscriptionError("The account already has a blocking subscription")
-        provider = await self._providers.select(
-            requested=input.provider,
-            current=customer.provider if customer else None,
-            offer=offer,
-        )
-        reference = offer.providers.get(provider.provider)
-        if reference is None:
-            raise UnknownOfferError("Offer has no reference for the selected provider")
+    def _find_checkout_winner(self, input: CreateCheckoutInput) -> tuple[CheckoutIntent, dict] | None:
+        return self.billing.find_checkout_intent(input.subject_id, input.operation_key, input.provider)
 
-        provider_customer = self.billing.get_customer_by_user_id(
-            input.account_id,
-            provider.provider,
-        )
-        metadata = dict(input.metadata)
-        metadata["bursar_account_id"] = input.account_id
-        if isinstance(offer, SubscriptionOffer):
-            metadata["plan_slug"] = offer.plan
-            metadata["billing_interval"] = offer.billing_interval.unit
-            checkout_kind = "subscription"
+    def _checkout_offer(
+        self, input: CreateCheckoutInput
+    ) -> tuple[tuple[CheckoutIntent, dict] | None, str, CommerceOffer, int, str | None]:
+        replay = self._find_checkout_winner(input)
+        snapshot = None
+        if replay:
+            if input.provider and input.provider != replay[0].provider:
+                raise CheckoutConflictError("This operation key is already bound to a different checkout request")
+            config = load_config_from_dict(replay[1], self.options.provider_environment)
+            offer = config.commerce.offers.get(input.offer_key)
+            if offer is None:
+                raise CheckoutConflictError("This operation key is already bound to a different checkout request")
+            try:
+                self._assert_offer_type(offer, input.type)
+            except UnknownOfferError as exc:
+                raise CheckoutConflictError(
+                    "This operation key is already bound to a different checkout request"
+                ) from exc
+            offer_key = input.offer_key
         else:
-            metadata["credits"] = str(offer.credits_per_unit * quantity)
-            metadata["quantity"] = str(quantity)
-            checkout_kind = "credit_topup"
+            revision = self.billing.get_active_catalog_revision()
+            if revision is None:
+                raise CoreBillingDataUnavailableError("The active commerce catalog is unavailable")
+            snapshot, document = revision
+            config = load_config_from_dict(document, self.options.provider_environment)
+            offer_key = input.offer_key
+            offer = config.commerce.offers.get(offer_key)
+            if offer is None:
+                raise UnknownOfferError(f"Unknown offer {offer_key!r}")
+            self._assert_offer_type(offer, input.type)
+        try:
+            quantity = self._quantity(offer, input.quantity)
+        except InvalidOfferQuantityError as exc:
+            if replay:
+                raise CheckoutConflictError(
+                    "This operation key is already bound to a different checkout request"
+                ) from exc
+            raise
+        return replay, offer_key, offer, quantity, snapshot
 
-        digest_value = {
-            "accountId": input.account_id,
-            "checkoutKind": "subscription" if checkout_kind == "subscription" else "topup",
-            "offerKey": offer_key,
-            "provider": provider.provider,
-            "quantity": quantity,
-        }
-        request_digest = hashlib.sha256(
-            json.dumps(digest_value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-        ).hexdigest()
-
-        def create_intent() -> CheckoutIntent:
-            return self.billing.create_or_get_checkout_intent(
-                CheckoutIntentCreate(
-                    subject_id=input.subject_id,
-                    provider=provider.provider,
-                    operation_key=input.operation_key,
-                    checkout_kind=checkout_kind,
-                    product_key=offer_key,
-                    request_digest=request_digest,
-                    expires_at=(
-                        datetime.now(UTC) + timedelta(milliseconds=self.options.checkout_intent_ttl_ms)
-                    ).isoformat(),
-                )
-            )
-
-        intent = create_intent()
-        if intent.request_digest != request_digest:
-            raise CheckoutConflictError("This operation key is already bound to a different checkout request")
+    async def _existing_checkout_result(
+        self, intent: CheckoutIntent, provider: PaymentProvider, offer_key: str
+    ) -> CreateCheckoutResult | None:
         if intent.status == CheckoutIntentStatus.completed:
             raise CheckoutCompletedError()
         if intent.status != CheckoutIntentStatus.open:
@@ -593,18 +587,138 @@ class CommerceService:
                 offer_key=offer_key,
             )
 
+        return None
+
+    async def _checkout_provider(
+        self,
+        input: CreateCheckoutInput,
+        replay: tuple[CheckoutIntent, dict] | None,
+        offer: CommerceOffer,
+        customer: BillingCustomerRecord | None,
+        attempt: int,
+    ) -> PaymentProvider | None:
+        try:
+            return await self._providers.select(
+                requested=replay[0].provider if replay else input.provider,
+                current=customer.provider if customer else None,
+                offer=offer,
+            )
+        except ProviderSelectionError:
+            if not replay and attempt == 0 and self._find_checkout_winner(input):
+                return None
+            raise
+
+    @staticmethod
+    def _checkout_digest_matches(intent: CheckoutIntent, digest: str, replay: bool, attempt: int) -> bool:
+        if intent.request_digest == digest:
+            return True
+        if not replay and attempt == 0:
+            return False
+        raise CheckoutConflictError("This operation key is already bound to a different checkout request")
+
+    async def create_checkout(self, input: CreateCheckoutInput) -> CreateCheckoutResult:
+        return await self._create_checkout_attempt(input, 0)
+
+    async def _create_checkout_attempt(self, input: CreateCheckoutInput, attempt: int) -> CreateCheckoutResult:
+        try:
+            replay, offer_key, offer, quantity, snapshot = self._checkout_offer(input)
+        except (UnknownOfferError, InvalidOfferQuantityError):
+            if attempt == 0 and self._find_checkout_winner(input):
+                return await self._create_checkout_attempt(input, 1)
+            raise
+        blocking = self.billing.get_blocking_subscription(input.account_id)
+        customer = self.billing.get_customer_by_user_id(input.account_id)
+        if not replay and isinstance(offer, SubscriptionOffer) and blocking is not None:
+            if attempt == 0 and self._find_checkout_winner(input):
+                return await self._create_checkout_attempt(input, 1)
+            raise ActiveSubscriptionError("The account already has a blocking subscription")
+        provider = await self._checkout_provider(input, replay, offer, customer, attempt)
+        if provider is None:
+            return await self._create_checkout_attempt(input, 1)
+        reference = offer.providers.get(provider.provider)
+        if reference is None:
+            raise UnknownOfferError("Offer has no reference for the selected provider")
+
+        provider_customer = self.billing.get_customer_by_user_id(
+            input.account_id,
+            provider.provider,
+        )
+        metadata = dict(input.metadata)
+        metadata["bursar_account_id"] = input.account_id
+        if isinstance(offer, SubscriptionOffer):
+            metadata["plan_slug"] = offer.plan
+            metadata["billing_interval"] = offer.billing_interval.unit
+            checkout_kind = "subscription"
+        else:
+            metadata["credits"] = str(offer.credits_per_unit * quantity)
+            metadata["quantity"] = str(quantity)
+            checkout_kind = "credit_topup"
+
+        digest_value = {
+            "accountId": input.account_id,
+            "checkoutKind": "subscription" if checkout_kind == "subscription" else "topup",
+            "offerKey": offer_key,
+            "provider": provider.provider,
+            "quantity": quantity,
+        }
+        if input.region is not None:
+            digest_value["region"] = input.region
+        request_digest = hashlib.sha256(
+            json.dumps(digest_value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+
+        def create_intent() -> CheckoutIntent:
+            return self.billing.create_or_get_checkout_intent(
+                CheckoutIntentCreate(
+                    subject_id=input.subject_id,
+                    account_id=input.account_id,
+                    provider=provider.provider,
+                    operation_key=input.operation_key,
+                    checkout_kind=checkout_kind,
+                    product_key=offer_key,
+                    request_digest=request_digest,
+                    region=input.region,
+                    expected_revision_id=snapshot,
+                    expires_at=(
+                        datetime.now(UTC) + timedelta(milliseconds=self.options.checkout_intent_ttl_ms)
+                    ).isoformat(),
+                )
+            )
+
+        try:
+            intent = replay[0] if replay else create_intent()
+        except Exception as exc:
+            from bursar.errors import StoreError
+
+            if attempt == 0 and (
+                (isinstance(exc, StoreError) and exc.details and exc.details.get("sql_state") == "40001")
+                or self._find_checkout_winner(input)
+            ):
+                return await self._create_checkout_attempt(input, 1)
+            raise
+        if not self._checkout_digest_matches(intent, request_digest, replay is not None, attempt):
+            return await self._create_checkout_attempt(input, 1)
+        existing = await self._existing_checkout_result(intent, provider, offer_key)
+        if existing is not None:
+            return existing
+
         session = await provider.create_checkout_session(
             CheckoutParams(
                 account_id=input.account_id,
                 customer_id=(provider_customer.provider_customer_id if provider_customer else None),
                 email=input.email,
-                product_id=_external_id(reference),
+                product_id=_external_id(reference, self.options.provider_environment),
                 type=("subscription" if isinstance(offer, SubscriptionOffer) else "credit_pack"),
                 quantity=quantity,
+                trial=(
+                    CheckoutTrial.model_validate(offer.trial.model_dump())
+                    if isinstance(offer, SubscriptionOffer) and offer.trial
+                    else None
+                ),
                 return_url=_replace_intent(input.return_url, intent.id),
                 cancel_url=_replace_intent(input.cancel_url, intent.id),
                 metadata={**metadata, "checkout_intent_id": intent.id},
-                idempotency_key=input.operation_key,
+                idempotency_key=f"bursar:checkout:{intent.id}",
             )
         )
         # Complete every fallible local write before publishing the session on
@@ -891,6 +1005,7 @@ class CommerceService:
         self,
         account_id: str,
         offer_key: str,
+        region: str | None = None,
     ) -> dict[str, Any]:
         subscription = self.billing.get_active_subscription(account_id)
         entitlement = self.credits.get_user_plan(account_id)
@@ -902,6 +1017,14 @@ class CommerceService:
             raise CommerceResourceNotFoundError("No active subscription found")
         if not isinstance(offer, SubscriptionOffer):
             raise UnknownOfferError()
+        if region is not None:
+            import re
+
+            region = region.strip().upper()
+            if not re.fullmatch(r"[A-Z]{2}(-[A-Z0-9]{1,3})?", region):
+                raise UnknownOfferError("Invalid trusted region")
+        if not offer_is_available(offer.availability, region):
+            raise UnknownOfferError("Target offer is outside its availability")
         provider = await self._providers.select(
             requested=subscription.provider,
             current=subscription.provider,
@@ -914,21 +1037,25 @@ class CommerceService:
             persisted = self.billing.resolve_offer(
                 provider.provider,
                 None,
-                reference.price_id,
+                resolve_provider_id(reference.price_id, self.options.provider_environment),
             )
         elif isinstance(reference, DodoProductReference):
             persisted = self.billing.resolve_offer(
                 provider.provider,
-                reference.product_id,
+                resolve_provider_id(reference.product_id, self.options.provider_environment),
                 None,
             )
         else:
             persisted = self.billing.resolve_offer_by_lookup(
                 provider.provider,
-                reference.external_id,
+                resolve_provider_id(reference.external_id, self.options.provider_environment),
             )
         if persisted is None:
             raise CommerceResourceNotFoundError("Target offer is not present in persisted billing state")
+        if persisted.offer_key != offer_key:
+            raise CoreBillingDataUnavailableError("Target provider reference resolves to a different offer")
+        if not subscription.offer_key:
+            raise CoreBillingDataUnavailableError("Current subscription offer is unknown")
         current_plan = entitlement.plan_key or subscription.plan
         if not current_plan:
             raise CommerceResourceNotFoundError("Current subscription plan is unknown")
@@ -937,13 +1064,15 @@ class CommerceService:
             current_plan,
             subscription.interval,
             offer,
+            subscription.interval_count,
+            subscription.offer_key == persisted.offer_key,
         )
         return {
             "subscription": subscription,
             "provider": provider,
             "persisted": persisted,
             "offer": offer,
-            "product_id": _external_id(reference),
+            "product_id": _external_id(reference, self.options.provider_environment),
             "classification": classified.classification,
             "policy": classified.policy,
             "target_interval": classified.target_interval,
@@ -991,8 +1120,9 @@ class CommerceService:
         account_id: str,
         *,
         offer_key: str,
+        region: str | None = None,
     ) -> PlanChangePreviewResult:
-        context = await self._plan_context(account_id, offer_key)
+        context = await self._plan_context(account_id, offer_key, region)
         offer = cast(SubscriptionOffer, context["offer"])
         if context["classification"] == "unchanged":
             return PlanChangePreviewResult(
@@ -1020,9 +1150,10 @@ class CommerceService:
         *,
         offer_key: str,
         quote_fingerprint: str,
+        region: str | None = None,
     ) -> ConfirmPlanChangeResult:
         operation_key = require_stable_key(operation_key, "operation_key")
-        context = await self._plan_context(account_id, offer_key)
+        context = await self._plan_context(account_id, offer_key, region)
         offer = cast(SubscriptionOffer, context["offer"])
         if context["classification"] == "unchanged":
             return ConfirmPlanChangeResult(
@@ -1083,6 +1214,7 @@ class CommerceService:
                 provider=subscription.provider,
                 provider_subscription_id=subscription.provider_subscription_id,
                 to_offer_id=context["persisted"].offer_id,
+                region=region,
                 effective_at=effective_at,
                 effective=context["policy"].effective,
                 idempotency_key=operation_key,

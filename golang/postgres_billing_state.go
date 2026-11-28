@@ -6,7 +6,6 @@ package bursar
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -310,12 +309,16 @@ func (s *PostgresStore) UpsertBillingPaymentState(ctx context.Context, input Bil
 	if err != nil {
 		return "", err
 	}
+	typedTopupID, err := nullablePostgresUUID(input.TopupID, "billing top-up ID")
+	if err != nil {
+		return "", err
+	}
 	metadata, err := marshalMetadata(CreditMetadata(input.Metadata))
 	if err != nil {
 		return "", err
 	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "upsert_billing_payment", typedAccountID, input.Provider, input.ProviderPaymentID, input.AmountMinor, input.TaxMinor, input.Currency, input.Purpose, input.Status, input.ProviderUpdatedAt.UTC(), nullableText(input.ProviderInvoiceID), metadata)
+		rows, callErr := tx.Call(ctx, "upsert_billing_payment", typedAccountID, input.Provider, input.ProviderPaymentID, input.AmountMinor, input.TaxMinor, input.Currency, input.Purpose, input.Status, input.ProviderUpdatedAt.UTC(), nullableText(input.ProviderInvoiceID), metadata, typedTopupID)
 		if callErr != nil {
 			return callErr
 		}
@@ -339,6 +342,35 @@ func (s *PostgresStore) ResolveBillingTopup(ctx context.Context, provider, produ
 			return callErr
 		}
 		result, callErr = billingTopupResultFromRows(rows, "resolve_catalog_topup")
+		return callErr
+	})
+	return result, err
+}
+
+// ResolveCheckoutBillingTopup uses the revision that created the checkout.
+func (s *PostgresStore) ResolveCheckoutBillingTopup(ctx context.Context, intentID, attemptID, subjectID, provider, paymentID, productID, priceID, lookupKey string) (result *BillingTopupResult, err error) {
+	typedIntent, err := nullablePostgresUUID(intentID, "checkout intent ID")
+	if err != nil {
+		return nil, err
+	}
+	typedAttempt, err := nullablePostgresUUID(attemptID, "recharge attempt ID")
+	if err != nil {
+		return nil, err
+	}
+	typedSubject, err := nullablePostgresUUID(subjectID, "checkout subject ID")
+	if err != nil {
+		return nil, err
+	}
+	lookupType, lookupValue := commerceStateOfferLookup(productID, priceID, lookupKey)
+	if lookupType == "" {
+		return nil, nil
+	}
+	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		rows, callErr := tx.Call(ctx, "resolve_purchase_catalog_topup", typedSubject, provider, paymentID, lookupType, lookupValue, typedIntent, typedAttempt)
+		if callErr != nil {
+			return callErr
+		}
+		result, callErr = billingTopupResultFromRows(rows, "resolve_purchase_catalog_topup")
 		return callErr
 	})
 	return result, err
@@ -710,7 +742,6 @@ func (s *PostgresStore) reconcileSubscriptionEntitlement(
 	expectedProviderUpdatedAt time.Time,
 	planAssignedAt *time.Time,
 	applyEntitlement bool,
-	terminalPlanKey string,
 	reason string,
 ) (outcome subscriptionEntitlementOutcome, err error) {
 	typedAccountID, err := postgresUUID(accountID, "billing entitlement account ID")
@@ -731,9 +762,6 @@ func (s *PostgresStore) reconcileSubscriptionEntitlement(
 	if expectedProviderUpdatedAt.IsZero() {
 		return "", NewError("billing entitlement provider update time is required", ErrorOptions{Code: ErrorCodeBilling, Category: ErrorCategoryInvalidRequest})
 	}
-	if terminalPlanKey = strings.TrimSpace(terminalPlanKey); len(terminalPlanKey) > 255 {
-		return "", NewError("billing terminal plan key is too long", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
-	}
 	if reason, err = requireText(reason, "billing subscription entitlement transition reason"); err != nil {
 		return "", err
 	}
@@ -751,7 +779,6 @@ func (s *PostgresStore) reconcileSubscriptionEntitlement(
 			expectedProviderUpdatedAt.UTC(),
 			nullableTime(planAssignedAt),
 			applyEntitlement,
-			nullableText(terminalPlanKey),
 			reason,
 		)
 		if callErr != nil {
@@ -834,7 +861,7 @@ func (s *PostgresStore) ExpirePastDueGracePeriods(ctx context.Context, asOf time
 		if candidate.GraceEndsAt == nil || candidate.Status != "past_due" || candidate.GraceExpiredAt != nil {
 			continue
 		}
-		marked, markErr := s.expirePastDueGracePeriod(ctx, candidate, asOf, "")
+		marked, markErr := s.expirePastDueGracePeriod(ctx, candidate, asOf)
 		if markErr != nil {
 			return expired, markErr
 		}
@@ -845,7 +872,7 @@ func (s *PostgresStore) ExpirePastDueGracePeriods(ctx context.Context, asOf time
 	return expired, nil
 }
 
-func (s *PostgresStore) expirePastDueGracePeriod(ctx context.Context, candidate CommerceSubscription, expiredAt time.Time, terminalPlanKey string) (marked bool, err error) {
+func (s *PostgresStore) expirePastDueGracePeriod(ctx context.Context, candidate CommerceSubscription, expiredAt time.Time) (marked bool, err error) {
 	typedSubscriptionID, err := postgresUUID(candidate.ID, "billing subscription ID")
 	if err != nil {
 		return false, err
@@ -862,7 +889,6 @@ func (s *PostgresStore) expirePastDueGracePeriod(ctx context.Context, candidate 
 			typedSubscriptionID,
 			candidate.GraceEndsAt.UTC(),
 			expiredAt.UTC(),
-			nullableText(terminalPlanKey),
 		)
 		if callErr != nil {
 			return callErr

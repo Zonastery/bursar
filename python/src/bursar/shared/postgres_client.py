@@ -337,14 +337,13 @@ class PostgresClient:
         if self._tenant_id is not None:
             expressions.extend(
                 [
-                    "set_config('bursar.tenant_id', %s, true)",
+                    "bursar.bind_tenant_context(%s::uuid, %s::text)",
                     "set_config('bursar.usage_backend', %s, true)",
                     "set_config('bursar.billing_payload_backend', %s, true)",
-                    "set_config('bursar.provider_environment', %s, true)",
                 ]
             )
             params.extend(
-                [self._tenant_id, self._usage_backend, self._billing_payload_backend, self._provider_environment]
+                [self._tenant_id, self._provider_environment, self._usage_backend, self._billing_payload_backend]
             )
         for name, value in settings:
             expressions.append(f"set_config('{name}', %s, true)")

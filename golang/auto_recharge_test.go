@@ -231,7 +231,7 @@ func autoRechargeTestConfig() *BursarConfig {
 			"credits_100": {
 				Type: "topup",
 				Providers: map[string]ProviderReference{
-					"stripe": {Type: "stripe_price", PriceID: &priceID},
+					"stripe": {Type: "stripe_price", PriceID: ScalarProviderID(priceID)},
 				},
 			},
 		},
@@ -251,7 +251,7 @@ func autoRechargeTestConfig() *BursarConfig {
 
 func autoRechargeActiveProfile() *AutoRechargeProfile {
 	return &AutoRechargeProfile{
-		UserID: "user-1", Enabled: true, State: AutoRechargeStateActive, Armed: true, Provider: "stripe", TopupID: "topup-1",
+		UserID: "user-1", Enabled: true, State: AutoRechargeStateActive, Armed: true, Provider: "stripe", TopupID: "topup-1", TopupKey: "credits_100",
 		Quantity: 2, Threshold: MustAmount("5"), MaxChargesPerWindow: 3, WindowUnit: "day", WindowCount: 1, WindowAnchor: "rolling", WindowTimezone: "UTC",
 	}
 }
@@ -299,6 +299,13 @@ func (s *autoRechargeStoreStub) UpsertAutoRechargeProfile(_ context.Context, pro
 	return nil
 }
 
+func (s *autoRechargeStoreStub) ResumeAutoRechargeProfile(_ context.Context, profile AutoRechargeProfile) (bool, error) {
+	profile.State = AutoRechargeStateActive
+	profile.Armed = true
+	s.profile = cloneAutoRechargeProfile(&profile)
+	return true, nil
+}
+
 func (s *autoRechargeStoreStub) ClaimAutoRechargeAttempt(_ context.Context, claim AutoRechargeAttemptClaim) (*AutoRechargeAttempt, error) {
 	s.claim = claim
 	if s.claimNil {
@@ -313,6 +320,11 @@ func (s *autoRechargeStoreStub) ClaimAutoRechargeAttempt(_ context.Context, clai
 func (s *autoRechargeStoreStub) UpdateAutoRechargeAttempt(_ context.Context, update AutoRechargeAttemptUpdate) error {
 	s.updates = append(s.updates, update)
 	return nil
+}
+
+func (s *autoRechargeStoreStub) GetAutoRechargeOperationalWindow(context.Context, string) (*AutoRechargeOperationalWindow, error) {
+	now := time.Now().UTC()
+	return &AutoRechargeOperationalWindow{MaxRecharges: 3, Start: now.Add(-24 * time.Hour), End: now, Count: s.count}, nil
 }
 
 func (s *autoRechargeStoreStub) CountAutoRechargeAttempts(context.Context, string, time.Time) (int, error) {
@@ -374,4 +386,45 @@ type autoRechargeMethodsOnlyProvider struct {
 
 func (p *autoRechargeMethodsOnlyProvider) ListPaymentMethods(context.Context, string) ([]PaymentMethodInfo, error) {
 	return append([]PaymentMethodInfo(nil), p.methods...), nil
+}
+
+func TestAutoRechargeSkipsUnavailableOffers(t *testing.T) {
+	future, past := "2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z"
+	for _, availability := range []*Availability{{Regions: []string{"IN"}}, {StartsAt: &future}, {EndsAt: &past}} {
+		config := autoRechargeTestConfig()
+		offer := config.Commerce.Offers["credits_100"]
+		offer.Availability = availability
+		config.Commerce.Offers["credits_100"] = offer
+		store := &autoRechargeStoreStub{topup: &AutoRechargeTopup{ID: "topup-1"}, profile: autoRechargeActiveProfile()}
+		service, err := NewAutoRechargeService(&autoRechargeCatalogStub{config: config}, store, AutoRechargeServiceOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := service.resolvePolicy(context.Background(), "stripe")
+		if err != nil || policy != nil {
+			t.Fatalf("unavailable policy = %#v, %v", policy, err)
+		}
+		if store.claim.IdempotencyKey != "" {
+			t.Fatal("attempt was claimed")
+		}
+	}
+}
+
+func TestAutoRechargeKeepsSavedSelectionWhenDefaultsChange(t *testing.T) {
+	config := autoRechargeTestConfig()
+	original := config.Commerce.Offers["credits_100"]
+	other := original
+	other.Providers = map[string]ProviderReference{"stripe": {Type: "stripe_price", PriceID: ScalarProviderID("other-price")}}
+	config.Commerce.Offers["other"] = other
+	config.Commerce.AutoRecharge.EligibleTopups = []string{"other", "credits_100"}
+	config.Commerce.AutoRecharge.Quantity.Default = 3
+	store := &autoRechargeStoreStub{topup: &AutoRechargeTopup{ID: "new-revision-topup"}, profile: autoRechargeActiveProfile()}
+	service, err := NewAutoRechargeService(&autoRechargeCatalogStub{config: config}, store, AutoRechargeServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := service.resolvePolicy(context.Background(), "stripe", store.profile)
+	if err != nil || policy == nil || policy.TopupKey != "credits_100" || policy.ProductID != "price-credits" || policy.Quantity != 2 {
+		t.Fatalf("policy = %#v, %v", policy, err)
+	}
 }

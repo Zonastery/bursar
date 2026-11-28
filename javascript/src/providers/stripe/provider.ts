@@ -35,7 +35,9 @@ function requireStripeText(
 ): string {
   const parsed = z.string().trim().min(1).safeParse(value);
   if (!parsed.success) {
-    throw new ProviderResponseError("stripe", operation, { details: { field } });
+    throw new ProviderResponseError("stripe", operation, {
+      details: { field },
+    });
   }
   return parsed.data;
 }
@@ -48,7 +50,9 @@ function requireStripeInteger(
 ): number {
   const parsed = z.number().safeParse(value);
   if (!parsed.success || !Number.isSafeInteger(parsed.data) || parsed.data < minimum) {
-    throw new ProviderResponseError("stripe", operation, { details: { field } });
+    throw new ProviderResponseError("stripe", operation, {
+      details: { field },
+    });
   }
   return parsed.data;
 }
@@ -72,7 +76,9 @@ function requireStripeNumber(
     // Provider validation below converts hostile value coercion into a stable SDK error.
   }
   if (!Number.isFinite(parsed)) {
-    throw new ProviderResponseError("stripe", operation, { details: { field } });
+    throw new ProviderResponseError("stripe", operation, {
+      details: { field },
+    });
   }
   return parsed;
 }
@@ -213,6 +219,17 @@ export class StripeProvider implements PaymentProvider {
       hasAccountId: Boolean(params.accountId),
     });
     if (!params.accountId) throw new TypeError("Financial account is required for checkout");
+    const trial = params.trial;
+    if (trial && (params.type !== "subscription" || !["day", "week"].includes(trial.unit))) {
+      throw new TypeError("Stripe checkout trials require a subscription and day or week units");
+    }
+    const trialDays = trial ? trial.count * (trial.unit === "week" ? 7 : 1) : undefined;
+    if (
+      trialDays !== undefined &&
+      (!Number.isSafeInteger(trialDays) || trialDays < 1 || trialDays > 730)
+    ) {
+      throw new TypeError("Stripe checkout trial must be between 1 and 730 days");
+    }
     const stripe = this.getStripe();
 
     let customerId = params.customerId;
@@ -240,15 +257,23 @@ export class StripeProvider implements PaymentProvider {
       ...(params.type === "subscription"
         ? {
             subscription_data: {
-              metadata: { ...params.metadata, bursar_account_id: params.accountId },
+              metadata: {
+                ...params.metadata,
+                bursar_account_id: params.accountId,
+              },
             },
           }
         : {
             payment_intent_data: {
-              metadata: { ...params.metadata, bursar_account_id: params.accountId },
+              metadata: {
+                ...params.metadata,
+                bursar_account_id: params.accountId,
+              },
             },
           }),
     };
+    if (trialDays !== undefined && sessionOpts.subscription_data)
+      sessionOpts.subscription_data.trial_period_days = trialDays;
     const session = await stripe.checkout.sessions.create(
       sessionOpts,
       requestOptions(idempotencyKey),
@@ -307,7 +332,9 @@ export class StripeProvider implements PaymentProvider {
       customer: params.customerId,
       return_url: params.returnUrl,
     });
-    return { url: requireStripeText(session.url, "createCustomerPortalSession", "url") };
+    return {
+      url: requireStripeText(session.url, "createCustomerPortalSession", "url"),
+    };
   }
 
   async createUpdatePaymentMethodSession(
@@ -319,7 +346,9 @@ export class StripeProvider implements PaymentProvider {
       return_url: params.returnUrl,
       flow_data: { type: "payment_method_update" },
     });
-    return { url: requireStripeText(session.url, "createUpdatePaymentMethodSession", "url") };
+    return {
+      url: requireStripeText(session.url, "createUpdatePaymentMethodSession", "url"),
+    };
   }
 
   async createPaymentMethodSetupSession(
@@ -333,7 +362,9 @@ export class StripeProvider implements PaymentProvider {
       cancel_url: params.cancelUrl ?? params.returnUrl,
       allowed_payment_method_types: ["card"],
     });
-    return { url: requireStripeText(session.url, "createPaymentMethodSetupSession", "url") };
+    return {
+      url: requireStripeText(session.url, "createPaymentMethodSetupSession", "url"),
+    };
   }
 
   async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
@@ -507,7 +538,9 @@ export class StripeProvider implements PaymentProvider {
       },
       requestOptions(idempotencyKey),
     );
-    return { customerId: requireStripeText(customer.id, "createCustomer", "id") };
+    return {
+      customerId: requireStripeText(customer.id, "createCustomer", "id"),
+    };
   }
 
   async getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null> {
@@ -560,7 +593,13 @@ export class StripeProvider implements PaymentProvider {
       };
     }
     const updateParams: Stripe.SubscriptionUpdateParams = {
-      items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
+      items: [
+        {
+          id: item.id,
+          price: params.productId,
+          quantity: params.quantity ?? 1,
+        },
+      ],
       proration_behavior: stripeProrationBehavior(params.prorationBillingMode),
       payment_behavior:
         params.onPaymentFailure === "apply_change" ? "allow_incomplete" : "pending_if_incomplete",
@@ -588,7 +627,13 @@ export class StripeProvider implements PaymentProvider {
       customer: String(subscription.customer),
       subscription: params.providerSubscriptionId,
       subscription_details: {
-        items: [{ id: item.id, price: params.productId, quantity: params.quantity ?? 1 }],
+        items: [
+          {
+            id: item.id,
+            price: params.productId,
+            quantity: params.quantity ?? 1,
+          },
+        ],
         proration_behavior:
           params.effectiveAt === "next_billing_date"
             ? "none"

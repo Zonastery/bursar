@@ -78,6 +78,7 @@ BEGIN
     -- the active catalog revision or clear a revision pin.
     IF v_current.account_id IS NOT NULL
        AND v_current.plan_key = v_plan.plan_key
+       AND (p_starts_at IS NULL OR p_starts_at <= now())
     THEN
         PERFORM set_config(
             'bursar.assignment_reason',
@@ -106,6 +107,15 @@ BEGIN
               END
           );
 
+        RETURN true;
+    END IF;
+
+    -- Re-requesting the exact current plan at a future time changes nothing;
+    -- retain the current interval and report it as applied.
+    IF v_current.account_id IS NOT NULL
+       AND v_current.plan_id = p_plan_id
+       AND p_starts_at IS NOT NULL AND p_starts_at > now()
+    THEN
         RETURN true;
     END IF;
 
@@ -271,10 +281,22 @@ BEGIN
       AND account.subject_id = p_subject_id
       AND account.account_kind = 'personal'
       AND assignment.plan_key = v_plan.plan_key
+      AND (p_starts_at IS NULL OR p_starts_at <= now())
       AND ROW(assignment.source_type, assignment.source_id)
           IS DISTINCT FROM ROW('manual'::text, NULL::uuid);
 
-    IF p_starts_at IS NOT NULL AND p_starts_at > now() THEN
+    IF p_starts_at IS NOT NULL AND p_starts_at > now() AND EXISTS (
+        SELECT 1 FROM bursar.plan_assignment_changes AS change
+        JOIN bursar.credit_accounts AS account ON account.id = change.account_id
+        WHERE account.subject_id = p_subject_id AND account.account_kind = 'personal'
+          AND change.change_kind = 'manual' AND change.state = 'scheduled'
+          AND change.to_plan_id = v_plan.id AND change.effective_at = p_starts_at
+    ) OR (p_starts_at IS NOT NULL AND p_starts_at > now() AND EXISTS (
+        SELECT 1 FROM bursar.account_plan_assignments AS assignment
+        JOIN bursar.credit_accounts AS account ON account.id = assignment.account_id
+        WHERE account.subject_id = p_subject_id AND account.account_kind = 'personal'
+          AND assignment.plan_id = v_plan.id AND assignment.starts_at = p_starts_at
+    )) THEN
         RETURN QUERY SELECT
             p_subject_id,
             v_plan.id,
@@ -411,7 +433,6 @@ $$;
 CREATE FUNCTION bursar.replace_subscription_entitlement_if_source(
     p_subject_id uuid,
     p_subscription_id uuid,
-    p_terminal_plan_key text,
     p_reason text
 )
 RETURNS boolean
@@ -421,6 +442,7 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_replaced boolean;
+    v_terminal_plan_key text;
 BEGIN
     -- Keep the shared subject -> account lock order used by subscription
     -- upserts before unassign_plan_if_source locks the personal account.
@@ -444,11 +466,17 @@ BEGIN
         RETURN false;
     END IF;
 
-    IF NULLIF(btrim(p_terminal_plan_key), '') IS NOT NULL THEN
+    -- The active catalog controls the terminal entitlement.
+    SELECT NULLIF(revision.source_document #>> '{catalog,subscription_end_plan}', '')
+    INTO v_terminal_plan_key
+    FROM bursar.catalog_revisions revision
+    WHERE revision.tenant_id = bursar.require_tenant_id() AND revision.status = 'active';
+
+    IF NULLIF(btrim(v_terminal_plan_key), '') IS NOT NULL THEN
         PERFORM 1
         FROM bursar.set_subject_plan(
             p_subject_id,
-            btrim(p_terminal_plan_key),
+            btrim(v_terminal_plan_key),
             NULL
         );
 
@@ -475,7 +503,6 @@ CREATE FUNCTION bursar.reconcile_subscription_entitlement(
     p_expected_provider_updated_at timestamptz,
     p_plan_assigned_at timestamptz,
     p_apply_entitlement boolean,
-    p_terminal_plan_key text,
     p_reason text
 )
 RETURNS text
@@ -503,13 +530,6 @@ BEGIN
        OR (
            p_plan_assigned_at IS NOT NULL
            AND NOT bursar.is_finite_timestamptz(p_plan_assigned_at)
-       )
-       OR (
-           p_terminal_plan_key IS NOT NULL
-           AND NOT bursar.is_nonempty_bounded_text(
-               p_terminal_plan_key,
-               255
-           )
        )
        OR NOT bursar.is_nonempty_bounded_text(p_reason, 255)
     THEN
@@ -733,7 +753,6 @@ BEGIN
         v_replaced := bursar.replace_subscription_entitlement_if_source(
             p_subject_id,
             p_subscription_id,
-            p_terminal_plan_key,
             p_reason
         );
 
@@ -779,8 +798,7 @@ CREATE FUNCTION bursar.expire_subscription_grace_period(
     p_subject_id uuid,
     p_subscription_id uuid,
     p_expected_grace_ends_at timestamptz,
-    p_expired_at timestamptz,
-    p_terminal_plan_key text
+    p_expired_at timestamptz
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -837,7 +855,6 @@ BEGIN
     PERFORM bursar.replace_subscription_entitlement_if_source(
         p_subject_id,
         p_subscription_id,
-        p_terminal_plan_key,
         'subscription_grace_expired'
     );
 
@@ -1064,6 +1081,54 @@ AS $function$
     $schema$::json
 $function$;
 
+-- Compare only the configuration a plan actually uses. Rate-card inheritance
+-- and operation pricing are included, while unrelated offers and labels do not
+-- cause account transitions. The result is computed once per plan pair below.
+CREATE FUNCTION bursar.effective_plan_configuration(p_plan_id uuid)
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY INVOKER SET search_path TO '' AS $$
+    WITH RECURSIVE context AS (
+        SELECT plan.*, revision.source_document AS doc
+        FROM bursar.catalog_plans AS plan
+        JOIN bursar.catalog_revisions AS revision ON revision.id = plan.catalog_revision_id
+        WHERE plan.id = p_plan_id
+    ), cards AS (
+        SELECT context.rate_card AS card_key,
+               context.doc #> ARRAY['pricing', 'rate_cards', context.rate_card] AS card,
+               ARRAY[context.rate_card] AS visited
+        FROM context WHERE context.rate_card IS NOT NULL
+        UNION ALL
+        SELECT cards.card->>'extends',
+               context.doc #> ARRAY['pricing', 'rate_cards', cards.card->>'extends'],
+               cards.visited || (cards.card->>'extends')
+        FROM cards CROSS JOIN context
+        WHERE cards.card->>'extends' IS NOT NULL
+          AND NOT (cards.card->>'extends') = ANY(cards.visited)
+    )
+    SELECT jsonb_build_object(
+        'plan', context.definition - 'display_name' - 'description' - 'evolution',
+        'credit_policy', context.doc #> ARRAY['credits', 'policies', context.credit_policy_key],
+        'admission_policy', context.doc #> ARRAY['admission', 'policies', context.admission_policy_key],
+        'entitlements', context.doc->'entitlements',
+        'operations', COALESCE((
+            SELECT jsonb_object_agg(entry.key, entry.value)
+            FROM jsonb_each(COALESCE(context.doc #> '{pricing,operations}', '{}'::jsonb)) AS entry
+            WHERE context.definition->'allowed_operations' = '"all"'::jsonb
+               OR entry.key = ANY(context.allowed_operations)
+        ), '{}'::jsonb),
+        'rate_cards', COALESCE((
+            SELECT jsonb_object_agg(cards.card_key,
+                (cards.card - 'operations') || jsonb_build_object('operations', COALESCE((
+                    SELECT jsonb_object_agg(entry.key, entry.value)
+                    FROM jsonb_each(COALESCE(cards.card->'operations', '{}'::jsonb)) AS entry
+                    WHERE context.definition->'allowed_operations' = '"all"'::jsonb
+                       OR entry.key = ANY(context.allowed_operations)
+                ), '{}'::jsonb)))
+            FROM cards
+        ), '{}'::jsonb)
+    ) FROM context
+$$;
+
 -- Validate a newly activated revision's rollout manifest, apply explicit pin
 -- overrides, and schedule or apply each eligible plan change.
 CREATE FUNCTION bursar.schedule_catalog_plan_rollout(
@@ -1156,14 +1221,28 @@ BEGIN
     END IF;
 
     FOR assignment_row IN
+        WITH plan_pairs AS MATERIALIZED (
+            SELECT old_plan.id AS old_id, replacement.id AS new_id,
+                bursar.effective_plan_configuration(old_plan.id)
+                    IS NOT DISTINCT FROM
+                bursar.effective_plan_configuration(replacement.id) AS unchanged
+            FROM bursar.catalog_plans AS old_plan
+            JOIN bursar.catalog_plans AS replacement
+              ON replacement.catalog_revision_id = p_catalog_revision_id
+             AND replacement.plan_key = old_plan.plan_key
+            WHERE old_plan.catalog_revision_id <> p_catalog_revision_id
+        )
         SELECT
             assignment.account_id,
             assignment.plan_id AS from_plan_id,
             assignment.ends_at AS assignment_ends_at,
+            assignment.source_type,
+            assignment.source_id,
             assignment.catalog_revision_pinned,
             replacement.id AS to_plan_id,
             replacement.catalog_revision_id,
             replacement.plan_key,
+            plan_pairs.unchanged,
             COALESCE(
                 p_rollout #>> ARRAY[
                     'plans', assignment.plan_key, 'effective'
@@ -1182,13 +1261,31 @@ BEGIN
         JOIN bursar.catalog_plans AS replacement
           ON replacement.catalog_revision_id = p_catalog_revision_id
          AND replacement.plan_key = assignment.plan_key
+        JOIN plan_pairs ON plan_pairs.old_id = assignment.plan_id
+                       AND plan_pairs.new_id = replacement.id
         WHERE assignment.catalog_revision_id <> p_catalog_revision_id
+          AND (NOT plan_pairs.unchanged OR EXISTS (
+              SELECT 1 FROM bursar.plan_assignment_changes AS pending
+              WHERE pending.account_id = assignment.account_id
+                AND pending.change_kind = 'catalog_revision'
+                AND pending.state = 'scheduled'
+          ))
         ORDER BY assignment.account_id
         FOR UPDATE OF assignment
     LOOP
         IF assignment_row.catalog_revision_pinned
            AND NOT assignment_row.include_pinned
         THEN
+            CONTINUE;
+        END IF;
+
+        IF assignment_row.unchanged THEN
+            -- No effective plan/policy change: preserve the existing revision
+            -- and discard an obsolete pending catalog transition.
+            UPDATE bursar.plan_assignment_changes
+            SET state = 'canceled', error_message = NULL
+            WHERE account_id = assignment_row.account_id
+              AND change_kind = 'catalog_revision' AND state = 'scheduled';
             CONTINUE;
         END IF;
 
@@ -1249,6 +1346,8 @@ BEGIN
               ON account.subject_id = source.subject_id
              AND account.account_kind = 'personal'
             WHERE account.id = assignment_row.account_id
+              AND assignment_row.source_type = 'subscription'
+              AND subscription.id = assignment_row.source_id
               AND source.selected
               AND source.provider_environment =
                   bursar.current_provider_environment()
@@ -1264,11 +1363,13 @@ BEGIN
             );
 
             IF v_effective_at IS NULL THEN
-                RAISE EXCEPTION
-                    'next renewal is unavailable for account % plan %',
-                    assignment_row.account_id,
-                    assignment_row.plan_key
-                    USING ERRCODE = '22023';
+                -- Open-ended manual assignments have no renewal to schedule.
+                -- Keep their existing revision while other accounts progress.
+                UPDATE bursar.plan_assignment_changes
+                SET state = 'canceled', error_message = NULL
+                WHERE account_id = assignment_row.account_id
+                  AND change_kind = 'catalog_revision' AND state = 'scheduled';
+                CONTINUE;
             END IF;
 
             INSERT INTO bursar.plan_assignment_changes(
@@ -1621,7 +1722,8 @@ CREATE FUNCTION bursar.open_subscription_change(
     p_effective_at timestamptz,
     p_effective_behavior text,
     p_idempotency_key text,
-    p_proration_behavior text DEFAULT 'provider_default'
+    p_proration_behavior text DEFAULT 'provider_default',
+    p_region text DEFAULT NULL
 )
 RETURNS TABLE (
     change_id bigint,
@@ -1643,6 +1745,7 @@ BEGIN
        OR NOT bursar.is_finite_timestamptz(p_effective_at)
        OR p_effective_behavior IS NULL
        OR p_effective_behavior NOT IN ('immediate', 'renewal')
+       OR (p_region IS NOT NULL AND (octet_length(p_region) > 16 OR upper(btrim(p_region)) !~ '^[A-Z]{2}(-[A-Z0-9]{1,3})?$'))
        OR p_proration_behavior IS NULL
        OR p_proration_behavior NOT IN (
            'provider_default',
@@ -1665,6 +1768,31 @@ BEGIN
         RETURN;
     END IF;
 
+    SELECT *
+    INTO change_row
+    FROM bursar.billing_subscription_changes
+    WHERE subscription_id = p_subscription_id
+      AND idempotency_key = p_idempotency_key
+    FOR UPDATE;
+
+    IF FOUND THEN
+        IF change_row.from_offer_id <> subscription_row.offer_id
+           OR change_row.to_offer_id <> p_to_offer_id
+           OR change_row.region IS DISTINCT FROM upper(btrim(p_region))
+           OR change_row.effective_at IS DISTINCT FROM p_effective_at
+           OR change_row.effective_behavior <> p_effective_behavior
+           OR change_row.proration_behavior <>
+              p_proration_behavior
+        THEN
+            RETURN QUERY
+            SELECT NULL::bigint, NULL::text, 'idempotency_conflict';
+        ELSE
+            RETURN QUERY
+            SELECT change_row.id, change_row.state, NULL::text;
+        END IF;
+        RETURN;
+    END IF;
+
     SELECT offer.*
     INTO target_offer
     FROM bursar.catalog_offers AS offer
@@ -1678,27 +1806,8 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT *
-    INTO change_row
-    FROM bursar.billing_subscription_changes
-    WHERE subscription_id = p_subscription_id
-      AND idempotency_key = p_idempotency_key
-    FOR UPDATE;
-
-    IF FOUND THEN
-        IF change_row.from_offer_id <> subscription_row.offer_id
-           OR change_row.to_offer_id <> p_to_offer_id
-           OR change_row.effective_at IS DISTINCT FROM p_effective_at
-           OR change_row.effective_behavior <> p_effective_behavior
-           OR change_row.proration_behavior <>
-              p_proration_behavior
-        THEN
-            RETURN QUERY
-            SELECT NULL::bigint, NULL::text, 'idempotency_conflict';
-        ELSE
-            RETURN QUERY
-            SELECT change_row.id, change_row.state, NULL::text;
-        END IF;
+    IF NOT bursar.offer_is_available(target_offer.availability, p_region) THEN
+        RETURN QUERY SELECT NULL::bigint, NULL::text, 'offer_unavailable';
         RETURN;
     END IF;
 
@@ -1723,7 +1832,8 @@ BEGIN
         effective_at,
         effective_behavior,
         proration_behavior,
-        idempotency_key
+        idempotency_key,
+        region
     )
     VALUES (
         p_subscription_id,
@@ -1738,7 +1848,8 @@ BEGIN
         p_effective_at,
         p_effective_behavior,
         p_proration_behavior,
-        p_idempotency_key
+        p_idempotency_key,
+        upper(btrim(p_region))
     )
     RETURNING * INTO change_row;
 

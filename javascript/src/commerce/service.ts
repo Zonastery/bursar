@@ -2,9 +2,15 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import type { BillingCapability, BillingEventSink } from "../billing/contracts.js";
-import type { BillingPreferences, BillingSubscriptionState } from "../billing/types/index.js";
+import type {
+  BillingPreferences,
+  BillingSubscriptionState,
+  CheckoutIntent,
+} from "../billing/types/index.js";
 import { Decimal } from "decimal.js";
 import { loadConfigFromDict } from "../config.js";
+import { offerIsAvailable } from "../config/availability.js";
+import { resolveProviderId } from "../config/parse-commerce.js";
 import type {
   CommerceOffer,
   ParsedBursarConfig,
@@ -24,7 +30,7 @@ import type {
   ListUsageChargesOptions,
   UsageChargePage,
 } from "../credits/types/index.js";
-import { ProviderResponseError } from "../errors.js";
+import { ProviderResponseError, StoreError } from "../errors.js";
 import type {
   ChangePlanPreview,
   CheckoutParams,
@@ -95,6 +101,15 @@ function requireOptionalNonEmptyText(value: string | null | undefined, field: st
   if (value !== null && value !== undefined) requireNonEmptyText(value, field);
 }
 
+function assertTrustedRegion(region: string | undefined): void {
+  if (
+    region !== undefined &&
+    (typeof region !== "string" || !/^[A-Z]{2}(?:-[A-Z0-9]{1,3})?$/.test(region))
+  ) {
+    throw new TypeError("region must be an uppercase ISO region code");
+  }
+}
+
 function assertCreateCheckoutInput(input: CreateCheckoutInput): void {
   requireNonEmptyText(input.subjectId, "subjectId");
   requireNonEmptyText(input.accountId, "accountId");
@@ -104,6 +119,7 @@ function assertCreateCheckoutInput(input: CreateCheckoutInput): void {
   requireStableKey(input.operationKey, "operationKey");
   requireOptionalNonEmptyText(input.email, "email");
   requireOptionalNonEmptyText(input.provider, "provider");
+  assertTrustedRegion(input.region);
   if (input.type !== undefined && input.type !== "subscription" && input.type !== "credit_pack") {
     throw new TypeError("type must be 'subscription' or 'credit_pack'");
   }
@@ -126,14 +142,17 @@ const TERMINAL_SUBSCRIPTION_STATUSES = new Set([
   "expired",
 ]);
 
-function externalId(reference: ProviderReference): string {
+function externalId(
+  reference: ProviderReference,
+  environment: CommerceOptions["providerEnvironment"],
+): string {
   switch (reference.type) {
     case "stripe_price":
-      return reference.priceId;
+      return resolveProviderId(reference.priceId, environment);
     case "dodo_product":
-      return reference.productId;
+      return resolveProviderId(reference.productId, environment);
     case "custom_object":
-      return reference.externalId;
+      return resolveProviderId(reference.externalId, environment);
   }
 }
 
@@ -232,6 +251,15 @@ function providerPlanChangeParams(
   };
 }
 
+interface CheckoutDigest {
+  accountId: string;
+  checkoutKind: string;
+  offerKey: string;
+  provider: string;
+  quantity: number;
+  region?: string;
+}
+
 interface ResolvedOffer {
   config: ParsedBursarConfig;
   offerKey: string;
@@ -244,7 +272,7 @@ interface PlanChangeContext {
   targetOfferId: string;
   targetOffer: SubscriptionOffer;
   targetProductId: string;
-  targetInterval: "month" | "year";
+  targetInterval: "day" | "week" | "month" | "year";
   classification: PlanChangeClassification;
   policy?: SubscriptionChangePolicy;
 }
@@ -297,12 +325,13 @@ class CommerceAutoRechargeService implements CommerceAutoRecharge {
       this.commerce.providerForAccount(input.accountId),
       this.commerce.credits.getBalance(input.accountId),
     ]);
-    await this.commerce.billing.autoRecharge.retry({
+    const result = await this.commerce.billing.autoRecharge.retry({
       userId: input.accountId,
       provider,
       balance: balance.balance,
       returnUrl: input.returnUrl,
     });
+    if (result.outcome === "not_configured") return null;
     return this.commerce.billing.autoRecharge.getStatus({
       userId: input.accountId,
       provider,
@@ -367,7 +396,7 @@ export class CommerceService {
       throw new CoreBillingDataUnavailableError("The active commerce catalog is unavailable");
     }
     try {
-      return loadConfigFromDict(raw);
+      return loadConfigFromDict(raw, this.options.providerEnvironment);
     } catch (error) {
       throw new CoreBillingDataUnavailableError("The active commerce catalog is invalid", error);
     }
@@ -428,24 +457,87 @@ export class CommerceService {
 
   async createCheckout(input: CreateCheckoutInput): Promise<CreateCheckoutResult> {
     assertCreateCheckoutInput(input);
-    const resolved = await this.resolveOffer(input);
-    const quantity = this.quantity(resolved.offer, input.quantity);
+    return this.createCheckoutAttempt(input, 0);
+  }
+
+  private async createCheckoutAttempt(
+    input: CreateCheckoutInput,
+    attempt: number,
+  ): Promise<CreateCheckoutResult> {
+    const findWinner = () =>
+      this.billing.findCheckoutIntent(input.subjectId, input.operationKey, input.provider);
+    const replay = await findWinner();
+    if (replay && input.provider && replay.intent.provider !== input.provider) {
+      throw new CheckoutConflictError(
+        "This operation key is already bound to a different checkout request",
+      );
+    }
+    let resolved: ResolvedOffer;
+    let expectedRevisionId: string | undefined;
+    if (replay) {
+      const config = loadConfigFromDict(replay.catalog, this.options.providerEnvironment);
+      const offer = config.commerce.offers[input.offerKey];
+      if (!offer)
+        throw new CheckoutConflictError(
+          "This operation key is already bound to a different checkout request",
+        );
+      try {
+        this.assertOfferType(offer, input.type);
+      } catch {
+        throw new CheckoutConflictError(
+          "This operation key is already bound to a different checkout request",
+        );
+      }
+      resolved = { config, offerKey: input.offerKey, offer };
+    } else {
+      const revision = await this.billing.getActiveCatalogRevision();
+      if (!revision)
+        throw new CoreBillingDataUnavailableError("The active commerce catalog is unavailable");
+      expectedRevisionId = revision.id;
+      const config = loadConfigFromDict(revision.config, this.options.providerEnvironment);
+      const offer = config.commerce.offers[input.offerKey];
+      if (!offer) {
+        if (attempt === 0 && (await findWinner())) return this.createCheckoutAttempt(input, 1);
+        throw new UnknownOfferError(`Unknown offer '${input.offerKey}'`);
+      }
+      this.assertOfferType(offer, input.type);
+      resolved = { config, offerKey: input.offerKey, offer };
+    }
+    let quantity: number;
+    try {
+      quantity = this.quantity(resolved.offer, input.quantity);
+    } catch (error) {
+      if (replay)
+        throw new CheckoutConflictError(
+          "This operation key is already bound to a different checkout request",
+        );
+      if (attempt === 0 && (await findWinner())) return this.createCheckoutAttempt(input, 1);
+      throw error;
+    }
     const accountState = await Promise.all([
       this.billing.getBlockingSubscription(input.accountId),
       this.billing.getCustomerByUserId(input.accountId),
     ]);
-    if (resolved.offer.type === "subscription" && accountState[0]) {
+    if (!replay && resolved.offer.type === "subscription" && accountState[0]) {
+      if (attempt === 0 && (await findWinner())) return this.createCheckoutAttempt(input, 1);
       throw new ActiveSubscriptionError();
     }
 
-    const provider = await this.providers.select({
-      requested: input.provider,
-      current: accountState[1]?.provider,
-      offer: resolved.offer,
-    });
+    let provider: PaymentProvider;
+    try {
+      provider = await this.providers.select({
+        requested: replay?.intent.provider ?? input.provider,
+        current: accountState[1]?.provider,
+        offer: resolved.offer,
+      });
+    } catch (error) {
+      if (!replay && attempt === 0 && (await findWinner()))
+        return this.createCheckoutAttempt(input, 1);
+      throw error;
+    }
     const reference = resolved.offer.providers[provider.provider];
     if (!reference) throw new UnknownOfferError("Offer has no reference for the selected provider");
-    const productId = externalId(reference);
+    const productId = externalId(reference, this.options.providerEnvironment);
     const customer = await this.billing.getCustomerByUserId(input.accountId, provider.provider);
 
     interface CheckoutMetadata {
@@ -464,13 +556,14 @@ export class CommerceService {
       metadata.quantity = String(quantity);
     }
 
-    const digestValue = {
+    const digestValue: CheckoutDigest = {
       accountId: input.accountId,
       checkoutKind: resolved.offer.type,
       offerKey: resolved.offerKey,
       provider: provider.provider,
       quantity,
     };
+    if (input.region !== undefined) digestValue.region = input.region;
     const requestDigest = createHash("sha256")
       .update(JSON.stringify(digestValue, Object.keys(digestValue).sort()))
       .digest("hex");
@@ -478,18 +571,37 @@ export class CommerceService {
       new Date(
         Date.now() + (this.options.checkoutIntentTtlMs ?? DEFAULT_CHECKOUT_INTENT_TTL_MS),
       ).toISOString();
-    const createIntent = () =>
-      this.billing.createOrGetCheckoutIntent({
+    const createIntent = () => {
+      const request: Parameters<BillingCapability["createOrGetCheckoutIntent"]>[0] = {
         subjectId: input.subjectId,
+        accountId: input.accountId,
         provider: provider.provider,
         operationKey: input.operationKey,
         checkoutKind: resolved.offer.type === "subscription" ? "subscription" : "credit_topup",
         productKey: resolved.offerKey,
         requestDigest,
         expiresAt: expiresAt(),
-      });
+      };
+      if (input.region !== undefined) request.region = input.region;
+      if (expectedRevisionId) request.expectedRevisionId = expectedRevisionId;
+      return this.billing.createOrGetCheckoutIntent(request);
+    };
 
-    const intent = await createIntent();
+    let intent: CheckoutIntent;
+    try {
+      intent = replay?.intent ?? (await createIntent());
+    } catch (error) {
+      if (
+        attempt === 0 &&
+        ((error instanceof StoreError && error.details?.sqlState === "40001") ||
+          (await findWinner()))
+      )
+        return this.createCheckoutAttempt(input, 1);
+      throw error;
+    }
+    if (intent.requestDigest !== requestDigest && !replay && attempt === 0) {
+      return this.createCheckoutAttempt(input, 1);
+    }
     if (intent.requestDigest !== requestDigest) {
       throw new CheckoutConflictError(
         "This operation key is already bound to a different checkout request",
@@ -504,7 +616,9 @@ export class CommerceService {
     if (intent.checkoutUrl) {
       const locallyExpired = new Date(intent.expiresAt).getTime() <= Date.now();
       if (locallyExpired) {
-        await this.billing.updateCheckoutIntent(intent.id, { status: "expired" });
+        await this.billing.updateCheckoutIntent(intent.id, {
+          status: "expired",
+        });
         throw new CheckoutConflictError(
           "This checkout operation expired; start a new checkout with a new operation key",
         );
@@ -512,14 +626,18 @@ export class CommerceService {
       if (intent.providerSessionId && provider.getCheckoutSessionStatus) {
         const providerState = await provider.getCheckoutSessionStatus(intent.providerSessionId);
         if (providerState?.paymentStatus === "succeeded") {
-          await this.billing.updateCheckoutIntent(intent.id, { status: "completed" });
+          await this.billing.updateCheckoutIntent(intent.id, {
+            status: "completed",
+          });
           throw new CheckoutCompletedError();
         }
         if (
           providerState !== null &&
           TERMINAL_CHECKOUT_STATUSES.has(providerState.paymentStatus ?? "")
         ) {
-          await this.billing.updateCheckoutIntent(intent.id, { status: "failed" });
+          await this.billing.updateCheckoutIntent(intent.id, {
+            status: "failed",
+          });
           throw new CheckoutConflictError(
             "This checkout operation is no longer active; start a new checkout with a new operation key",
           );
@@ -541,8 +659,10 @@ export class CommerceService {
       returnUrl: checkoutRedirectUrl(input.returnUrl, intent.id),
       cancelUrl: checkoutRedirectUrl(input.cancelUrl, intent.id),
       metadata: { ...metadata, checkout_intent_id: intent.id },
-      idempotencyKey: input.operationKey,
+      idempotencyKey: `bursar:checkout:${intent.id}`,
     };
+    if (resolved.offer.type === "subscription" && resolved.offer.trial)
+      checkoutParams.trial = resolved.offer.trial;
     if (customer?.providerCustomerId) checkoutParams.customerId = customer.providerCustomerId;
     if (input.email) checkoutParams.email = input.email;
     const session = await provider.createCheckoutSession(checkoutParams);
@@ -726,7 +846,10 @@ export class CommerceService {
       if (
         !planKey ||
         !config.plans[planKey] ||
-        (interval !== "month" && interval !== "year") ||
+        (interval !== "day" &&
+          interval !== "week" &&
+          interval !== "month" &&
+          interval !== "year") ||
         !pending.effectiveAt
       ) {
         throw new CoreBillingDataUnavailableError(
@@ -736,6 +859,7 @@ export class CommerceService {
       pendingChange = {
         planKey,
         interval,
+        intervalCount: pending.toOffer.intervalCount,
         effectiveAt: pending.effectiveAt,
         scheduled: pending.effective === "renewal",
         providerOperationId: pending.providerOperationId ?? null,
@@ -799,6 +923,11 @@ export class CommerceService {
       throw new CommerceResourceNotFoundError("No active subscription found");
     }
     if (resolved.offer.type !== "subscription") throw new UnknownOfferError();
+    assertTrustedRegion(input.region);
+    const region = input.region;
+    if (!offerIsAvailable(resolved.offer.availability, region)) {
+      throw new UnknownOfferError("Target offer is outside its availability");
+    }
     const provider = await this.providers.select({
       requested: subscription.provider,
       current: subscription.provider,
@@ -808,14 +937,33 @@ export class CommerceService {
     if (!reference) throw new UnknownOfferError("Target offer is unavailable from the provider");
     const persistedOffer =
       reference.type === "stripe_price"
-        ? await this.billing.resolveOffer(provider.provider, null, reference.priceId)
+        ? await this.billing.resolveOffer(
+            provider.provider,
+            null,
+            externalId(reference, this.options.providerEnvironment),
+          )
         : reference.type === "dodo_product"
-          ? await this.billing.resolveOffer(provider.provider, reference.productId, null)
-          : await this.billing.resolveOfferByLookup(provider.provider, reference.externalId);
+          ? await this.billing.resolveOffer(
+              provider.provider,
+              externalId(reference, this.options.providerEnvironment),
+              null,
+            )
+          : await this.billing.resolveOfferByLookup(
+              provider.provider,
+              externalId(reference, this.options.providerEnvironment),
+            );
     if (!persistedOffer) {
       throw new CommerceResourceNotFoundError(
         "Target offer is not present in persisted billing state",
       );
+    }
+    if (persistedOffer.offerKey !== input.offerKey) {
+      throw new CoreBillingDataUnavailableError(
+        "Target provider reference resolves to a different offer",
+      );
+    }
+    if (!subscription.offerKey) {
+      throw new CoreBillingDataUnavailableError("Current subscription offer is unknown");
     }
     const currentPlan = entitlement.planKey ?? subscription.plan;
     if (!currentPlan) {
@@ -826,13 +974,15 @@ export class CommerceService {
       currentPlan,
       subscription.interval,
       resolved.offer,
+      subscription.intervalCount,
+      subscription.offerKey === persistedOffer.offerKey,
     );
     return {
       subscription,
       provider,
       targetOfferId: persistedOffer.offerId,
       targetOffer: resolved.offer,
-      targetProductId: externalId(reference),
+      targetProductId: externalId(reference, this.options.providerEnvironment),
       targetInterval,
       classification,
       policy,
@@ -864,6 +1014,7 @@ export class CommerceService {
         scheduled: false,
         planId: context.targetOffer.plan,
         interval: context.targetInterval,
+        intervalCount: context.targetOffer.billingInterval.count,
       };
     }
     const preview = await this.refreshPlanPreview(context);
@@ -873,6 +1024,7 @@ export class CommerceService {
       scheduled: context.policy!.effective === "renewal",
       planId: context.targetOffer.plan,
       interval: context.targetInterval,
+      intervalCount: context.targetOffer.billingInterval.count,
       preview,
       quoteFingerprint: quoteFingerprint(preview),
     };
@@ -887,6 +1039,7 @@ export class CommerceService {
         unchanged: true,
         planId: context.targetOffer.plan,
         interval: context.targetInterval,
+        intervalCount: context.targetOffer.billingInterval.count,
       };
     }
     const preview = await this.refreshPlanPreview(context);
@@ -897,6 +1050,7 @@ export class CommerceService {
       scheduled: context.policy!.effective === "renewal",
       planId: context.targetOffer.plan,
       interval: context.targetInterval,
+      intervalCount: context.targetOffer.billingInterval.count,
       preview,
       quoteFingerprint: fingerprint,
     };
@@ -926,7 +1080,7 @@ export class CommerceService {
         "The provider did not return the scheduled change date",
       );
     }
-    const change = await this.billing.createBillingSubscriptionChange({
+    const changeInput: Parameters<BillingCapability["createBillingSubscriptionChange"]>[0] = {
       provider: context.subscription.provider,
       providerSubscriptionId: context.subscription.providerSubscriptionId,
       toOfferId: context.targetOfferId,
@@ -934,7 +1088,9 @@ export class CommerceService {
       effective: context.policy!.effective,
       idempotencyKey: input.operationKey,
       prorationBehavior: context.policy!.proration === "none" ? "none" : "invoice_immediately",
-    });
+    };
+    if (input.region !== undefined) changeInput.region = input.region;
+    const change = await this.billing.createBillingSubscriptionChange(changeInput);
 
     let cancellationWasReactivated = false;
     try {
@@ -1001,6 +1157,7 @@ export class CommerceService {
       effectiveAt,
       planId: context.targetOffer.plan,
       interval: context.targetInterval,
+      intervalCount: context.targetOffer.billingInterval.count,
     };
   }
 
@@ -1027,7 +1184,9 @@ export class CommerceService {
       change.providerOperationId,
       input.operationKey,
     );
-    await this.billing.updateBillingSubscriptionChange(change.id, { state: "canceled" });
+    await this.billing.updateBillingSubscriptionChange(change.id, {
+      state: "canceled",
+    });
     return { success: true };
   }
 
@@ -1093,7 +1252,10 @@ export class CommerceService {
     patch: PreferencePatch;
   }): Promise<BillingPreferences> {
     const current = await this.billing.getUserPreferences(input.accountId);
-    const next = { ...this.preferences(input.accountId, current), ...input.patch };
+    const next = {
+      ...this.preferences(input.accountId, current),
+      ...input.patch,
+    };
     await this.billing.updateUserPreferences(next);
     return next;
   }
@@ -1169,7 +1331,10 @@ export class CommerceService {
     );
     const [transactionsResult, usageResult, invoicesResult] = await Promise.allSettled([
       this.credits.listLedgerEntries(accountId, { limit: 50 }),
-      this.credits.listUsageCharges(accountId, { limit: 100, includeRecordOnly: false }),
+      this.credits.listUsageCharges(accountId, {
+        limit: 100,
+        includeRecordOnly: false,
+      }),
       this.billing.listBillingInvoices(accountId),
     ]);
     const transactions =

@@ -1,3 +1,6 @@
+import { offerIsAvailable } from "./config/availability.js";
+import { hasProviderBinding } from "./config/parse-commerce.js";
+import type { ProviderEnvironment } from "./providers/environment.js";
 import type { CommerceOffer, FeatureValue, ParsedBursarConfig, Window } from "./config/types.js";
 
 export interface PublicCatalogWindow {
@@ -19,6 +22,8 @@ export interface PublicCatalogOffer {
     taxBehavior: "inclusive" | "exclusive" | "unspecified";
   };
   billingInterval?: { unit: string; count: number };
+  availability?: { startsAt?: string; endsAt?: string; regions: string[] };
+  trial?: { unit: string; count: number };
   creditsPerUnit?: string;
   quantity?: { minimum: number; maximum: number; default: number };
 }
@@ -28,6 +33,7 @@ export interface PublicCatalogPlan {
   displayName: string;
   description?: string;
   rank: number;
+  tier: number;
   features: Record<string, FeatureValue>;
   allowance?: {
     amount: string;
@@ -91,7 +97,13 @@ function publicOffer(key: string, offer: CommerceOffer): PublicCatalogOffer {
     price: { ...offer.price },
   };
   if (offer.description) result.description = offer.description;
+  if (offer.availability)
+    result.availability = {
+      ...offer.availability,
+      regions: [...offer.availability.regions],
+    };
   if (offer.type === "subscription") {
+    if (offer.trial) result.trial = { ...offer.trial };
     result.billingInterval = {
       unit: offer.billingInterval.unit,
       count: offer.billingInterval.count,
@@ -103,16 +115,47 @@ function publicOffer(key: string, offer: CommerceOffer): PublicCatalogOffer {
   return result;
 }
 
-/** Produce a provider-secret-free, JSON-safe catalog for product surfaces. */
-export function projectPublicCatalog(config: ParsedBursarConfig): PublicCatalog {
-  const offers = Object.entries(config.commerce.offers);
+/** Scope storefront offers to registered providers in the current environment. */
+export interface PublicCatalogScope {
+  providers?: readonly string[];
+  providerEnvironment: ProviderEnvironment;
+}
+
+/** Produce a provider-secret-free catalog; omit scope to inspect all configured offers. */
+export function projectPublicCatalog(
+  config: ParsedBursarConfig,
+  scope?: PublicCatalogScope,
+  availability?: { region?: string; at?: Date },
+): PublicCatalog {
+  const at = availability?.at ?? new Date();
+  if (!Number.isFinite(at.getTime())) throw new RangeError("at must be a valid date");
+  const offers = Object.entries(config.commerce.offers).filter(
+    ([, offer]) =>
+      (availability === undefined ||
+        offerIsAvailable(offer.availability, availability.region, at)) &&
+      (scope === undefined ||
+        Object.entries(offer.providers).some(
+          ([name, reference]) =>
+            (scope.providers === undefined || scope.providers.includes(name)) &&
+            hasProviderBinding(reference, scope.providerEnvironment),
+        )),
+  );
   const plans = Object.entries(config.plans)
     .map(([key, plan]): PublicCatalogPlan => {
       const publicPlan: PublicCatalogPlan = {
         key,
         displayName: plan.displayName,
         rank: plan.rank,
-        features: { ...plan.features },
+        tier: plan.tier,
+        features: {
+          ...Object.fromEntries(
+            Object.entries(config.entitlements.features).map(([featureKey, definition]) => [
+              featureKey,
+              definition.default,
+            ]),
+          ),
+          ...plan.features,
+        },
         quotas: Object.fromEntries(
           Object.entries(plan.quotas).map(([quotaKey, quota]) => [
             quotaKey,

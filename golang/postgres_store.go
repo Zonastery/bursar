@@ -1753,6 +1753,11 @@ func (s *PostgresStore) PublishAndActivateCatalog(ctx context.Context, config ma
 	if config == nil {
 		return "", errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "catalog config is required")
 	}
+	parsed, parseErr := LoadConfigFromMapWithEnvironment(config, string(s.providerEnvironment))
+	if parseErr != nil {
+		return "", parseErr
+	}
+	config = scopeScalarProviderBindings(CanonicalParsedBursarConfigDict(parsed), string(s.providerEnvironment))
 	if _, err = json.Marshal(config); err != nil {
 		return "", NewError("catalog config must be JSON serializable", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest, Cause: err})
 	}
@@ -1796,6 +1801,11 @@ func (s *PostgresStore) PublishCatalogDraft(ctx context.Context, config map[stri
 	if config == nil {
 		return "", errorf(ErrorCodeConfig, ErrorCategoryInvalidRequest, "catalog config is required")
 	}
+	parsed, parseErr := LoadConfigFromMapWithEnvironment(config, string(s.providerEnvironment))
+	if parseErr != nil {
+		return "", parseErr
+	}
+	config = scopeScalarProviderBindings(CanonicalParsedBursarConfigDict(parsed), string(s.providerEnvironment))
 	if _, err = json.Marshal(config); err != nil {
 		return "", NewError("catalog config must be JSON serializable", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest, Cause: err})
 	}
@@ -2060,6 +2070,7 @@ func userPlanFromRow(userID string, row map[string]any) (GetUserPlanResult, erro
 		CreditPolicy:          creditPolicy,
 		Admission:             admission,
 		AllowedOperations:     operations,
+		OperationAccess:       optionalRowText(row, "operation_access"),
 		PlanAssignedAt:        planAssignedAt,
 		PlanAssignmentEndsAt:  planEndsAt,
 		AssignmentSourceType:  optionalRowText(row, "assignment_source_type"),
@@ -3253,4 +3264,17 @@ func teamDeductionResultFromRow(requested Amount, row map[string]any) (TeamDeduc
 		return TeamDeductionResult{}, NewStoreError("deduct_team committed amount differs from request", ErrorOptions{Indeterminate: true})
 	}
 	return TeamDeductionResult{EntryID: optionalRowText(row, "entry_id"), TeamID: optionalRowText(row, "team_id"), UserID: optionalRowText(row, "subject_id"), Amount: requested, TeamBalanceAfter: balanceAfter, Idempotent: idempotent, ErrorCode: errorCode}, nil
+}
+
+// WithUsageBackend holds the tenant cutover fence while a projection is read.
+func (s *PostgresStore) WithUsageBackend(ctx context.Context, backend string, read func() error) error {
+	if s == nil || s.client == nil {
+		return NewStoreError("PostgreSQL store is not initialized", ErrorOptions{})
+	}
+	return s.client.WithTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		if _, err := tx.Query(ctx, "SELECT bursar.check_usage_backend($1::text)", backend); err != nil {
+			return err
+		}
+		return read()
+	})
 }

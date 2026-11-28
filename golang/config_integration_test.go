@@ -611,10 +611,6 @@ func TestConfigurationPricingAndPlanParsersFailClosed(t *testing.T) {
 			_, err := parsePricing(map[string]any{"operations": map[string]any{"usage": map[string]any{"measures": "measures"}}, "rate_cards": map[string]any{"standard": map[string]any{}}})
 			return err
 		},
-		"operation empty measures": func() error {
-			_, err := parsePricing(map[string]any{"operations": map[string]any{"usage": map[string]any{}}, "rate_cards": map[string]any{"standard": map[string]any{}}})
-			return err
-		},
 		"measure unit": func() error {
 			_, err := parsePricing(map[string]any{"operations": map[string]any{"usage": map[string]any{"measures": map[string]any{"units": map[string]any{}}}}, "rate_cards": map[string]any{"standard": map[string]any{}}})
 			return err

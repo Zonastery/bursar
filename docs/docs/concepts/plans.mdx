@@ -18,6 +18,7 @@ application code.
 | --------------------------- | -------------------------------------------------------------------------------- |
 | `display_name`              | Customer-facing label                                                            |
 | `rank`                      | Catalog ordering; lower ranks first (default `0`)                                |
+| `tier`                      | Upgrade and downgrade ordering, independent of display rank                      |
 | `rate_card`                 | The rate card that prices allowed operations                                     |
 | `allowed_operations`        | Operations the plan may run                                                      |
 | `features`                  | Feature values for the plan (`{ voice_mode: true, max_context: 200000 }`)        |
@@ -29,7 +30,7 @@ application code.
 
 `catalog.default_plan` names the signup plan and is required whenever the
 catalog defines plans. `rank` controls display order only; it never selects an
-implicit default.
+implicit default. `tier` determines upgrade and downgrade classification; equal tiers are lateral changes. An omitted tier defaults to zero.
 
 ## Allowances
 
@@ -132,7 +133,7 @@ admission:
 
 A plan references one policy (`pro` uses `default`). `reserve` enforces the
 limit; exceeding it raises `ConcurrencyLimitError` before any hold is taken.
-The same policy can be shared by several plans.
+The same policy can be shared by several plans. The global limit counts all active leases for the account; an operation override also limits leases for that operation.
 
 ## Credit policies
 
@@ -160,7 +161,7 @@ Large installations use resumable, bounded plan-migration batches instead of one
 Each plan declares `evolution.default_rollout`. `immediate` moves existing
 assignments when the revision activates, `next_renewal` schedules
 subscription-backed assignments for their next provider renewal, and
-`new_assignments_only` leaves current assignments on their existing revision.
+`new_assignments_only` leaves current assignments on their existing revision. When `next_renewal` has no known renewal or assignment end, the account remains on its existing revision and does not block other accounts. Assignments whose plan and shared policy context are unchanged also remain on their existing revision.
 
 ```yaml
 plans:

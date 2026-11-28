@@ -34,6 +34,8 @@ DECLARE
     v_default_bucket text;
     v_provider_environment text := bursar.current_provider_environment();
     v_status bursar.catalog_revision_status;
+    v_binding record;
+    v_provider_id jsonb;
 BEGIN
     IF p_activate IS NULL
        OR p_yaml_schema_version IS NULL
@@ -56,6 +58,79 @@ BEGIN
     END IF;
 
     PERFORM bursar.require_catalog_document_shape(p_source_document);
+
+    -- The public shape permits omitting the redundant built-in discriminator.
+    -- Normalize it before projection and reject unknown or mismatched providers.
+    FOR v_binding IN
+        SELECT offer.key AS offer_key, provider.key AS provider_key,
+               provider.value AS reference,
+               p_source_document #>> ARRAY['commerce','providers',provider.key,'type'] AS provider_type
+        FROM jsonb_each(COALESCE(p_source_document #> '{commerce,offers}', '{}'::jsonb)) offer
+        CROSS JOIN LATERAL jsonb_each(COALESCE(offer.value->'providers', '{}'::jsonb)) provider
+    LOOP
+        IF v_binding.provider_type = 'stripe'
+           AND COALESCE(v_binding.reference->>'type', 'stripe_price') = 'stripe_price'
+           AND v_binding.reference ? 'price_id' THEN
+            p_source_document := jsonb_set(p_source_document,
+                ARRAY['commerce','offers',v_binding.offer_key,'providers',v_binding.provider_key,'type'],
+                '"stripe_price"'::jsonb);
+        ELSIF v_binding.provider_type = 'dodo'
+           AND COALESCE(v_binding.reference->>'type', 'dodo_product') = 'dodo_product'
+           AND v_binding.reference ? 'product_id' THEN
+            p_source_document := jsonb_set(p_source_document,
+                ARRAY['commerce','offers',v_binding.offer_key,'providers',v_binding.provider_key,'type'],
+                '"dodo_product"'::jsonb);
+        ELSIF v_binding.provider_type = 'custom'
+           AND v_binding.reference->>'type' = 'custom_object'
+           AND v_binding.reference ? 'external_id' THEN
+            NULL;
+        ELSE
+            RAISE EXCEPTION 'unknown or incompatible catalog provider reference' USING ERRCODE = '22023';
+        END IF;
+
+        v_provider_id := CASE v_binding.provider_type
+            WHEN 'stripe' THEN v_binding.reference->'price_id'
+            WHEN 'dodo' THEN v_binding.reference->'product_id'
+            ELSE v_binding.reference->'external_id'
+        END;
+        IF jsonb_typeof(v_provider_id) = 'object' AND (
+            v_provider_id = '{}'::jsonb OR EXISTS (
+                SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(v_provider_id) = 'object'
+                    THEN v_provider_id ELSE '{}'::jsonb END) binding
+                WHERE binding.key NOT IN ('test', 'live', 'sandbox')
+                   OR jsonb_typeof(binding.value) <> 'string'
+                   OR NOT bursar.is_nonempty_bounded_text(binding.value #>> '{}', 255)
+            )
+        ) THEN
+            RAISE EXCEPTION 'invalid catalog provider environment bindings' USING ERRCODE = '22023';
+        END IF;
+    END LOOP;
+
+    -- Publication stores a fully expanded catalog. Shorthand is resolved by
+    -- SDKs before this boundary so no accepted authoring field is ignored.
+    IF COALESCE(p_source_document->'credits', '{}'::jsonb) ? 'on_signup'
+       OR EXISTS (
+           SELECT 1 FROM jsonb_each(COALESCE(p_source_document #> '{pricing,operations}', '{}'::jsonb)) op
+           WHERE op.value ? 'charge'
+       )
+    THEN
+        RAISE EXCEPTION 'catalog shorthand must be expanded before publication' USING ERRCODE = '22023';
+    END IF;
+
+    -- Bind bare IDs before hashing: the same scalar published in two
+    -- namespaces must not reuse a revision with only one namespace projected.
+    FOR v_binding IN
+        SELECT offer.key AS offer_key, provider.key AS provider_key, field.name AS field_name,
+               provider.value->field.name AS value
+        FROM jsonb_each(COALESCE(p_source_document #> '{commerce,offers}', '{}'::jsonb)) offer
+        CROSS JOIN LATERAL jsonb_each(COALESCE(offer.value->'providers', '{}'::jsonb)) provider
+        CROSS JOIN (VALUES ('price_id'), ('product_id'), ('external_id')) AS field(name)
+        WHERE jsonb_typeof(provider.value->field.name) = 'string'
+    LOOP
+        p_source_document := jsonb_set(p_source_document,
+            ARRAY['commerce','offers',v_binding.offer_key,'providers',v_binding.provider_key,v_binding.field_name],
+            jsonb_build_object(v_provider_environment, v_binding.value));
+    END LOOP;
 
     v_default_bucket := p_source_document #>> '{credits,default_bucket}';
 
@@ -385,7 +460,7 @@ BEGIN
     SELECT
         v_revision,
         operation_entry.key,
-        operation_entry.value->'measures',
+        COALESCE(operation_entry.value->'measures', '{}'::jsonb),
         COALESCE(operation_entry.value->'dimensions', '{}'::jsonb),
         operation_entry.value
     FROM jsonb_each(
@@ -524,10 +599,8 @@ BEGIN
         plan_entry.value->>'rate_card',
         ARRAY(
             SELECT jsonb_array_elements_text(
-                COALESCE(
-                    plan_entry.value->'allowed_operations',
-                    '[]'::jsonb
-                )
+                CASE WHEN jsonb_typeof(plan_entry.value->'allowed_operations') = 'array'
+                    THEN plan_entry.value->'allowed_operations' ELSE '[]'::jsonb END
             )
         ),
         plan_entry.value->>'credit_policy',
@@ -867,21 +940,14 @@ BEGIN
     SELECT
         v_revision,
         provider_entry.key,
-        v_provider_environment,
+        binding.key,
         CASE provider_entry.value->>'type'
             WHEN 'stripe_price' THEN 'price_id'
             WHEN 'dodo_product' THEN 'product_id'
             WHEN 'custom_object'
                 THEN provider_entry.value->>'object_kind'
         END,
-        CASE provider_entry.value->>'type'
-            WHEN 'stripe_price'
-                THEN provider_entry.value->>'price_id'
-            WHEN 'dodo_product'
-                THEN provider_entry.value->>'product_id'
-            WHEN 'custom_object'
-                THEN provider_entry.value->>'external_id'
-        END,
+        binding.value,
         CASE offer_entry.value->>'type'
             WHEN 'subscription' THEN 'offer'
             ELSE 'topup'
@@ -895,7 +961,12 @@ BEGIN
     ) AS offer_entry(key, value)
     CROSS JOIN LATERAL jsonb_each(
         COALESCE(offer_entry.value->'providers', '{}'::jsonb)
-    ) AS provider_entry(key, value);
+    ) AS provider_entry(key, value)
+    CROSS JOIN LATERAL jsonb_each_text(CASE provider_entry.value->>'type'
+        WHEN 'stripe_price' THEN provider_entry.value->'price_id'
+        WHEN 'dodo_product' THEN provider_entry.value->'product_id'
+        WHEN 'custom_object' THEN provider_entry.value->'external_id'
+    END) AS binding(key, value);
 
     IF p_source_document #> '{commerce,auto_recharge}' IS NOT NULL THEN
         INSERT INTO bursar.catalog_auto_recharge_policies(

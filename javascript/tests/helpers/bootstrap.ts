@@ -73,7 +73,7 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
         [file, checksum],
       );
     }
-    await client.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+    await client.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text, 'test')", [
       TEST_TENANT_ID,
       "bursar-tests",
       "Bursar tests",
@@ -90,7 +90,7 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
 /** Reset all Bursar data and provision the canonical test tenant. */
 export async function truncateBursarTables(pool: pg.Pool): Promise<void> {
   await pool.query(RESET_SQL);
-  await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+  await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text, 'test')", [
     TEST_TENANT_ID,
     "bursar-tests",
     "Bursar tests",

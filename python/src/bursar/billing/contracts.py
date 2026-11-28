@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
@@ -21,14 +22,24 @@ class _BillingContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AutoRechargeOperationalWindow(_BillingContract):
+    max_recharges: PositiveSafeInteger
+    window_start: datetime
+    window_end: datetime
+    attempt_count: NonNegativeSafeInteger
+
+
 class CheckoutIntentCreate(_BillingContract):
     subject_id: str
+    account_id: str | None = None
     provider: str
     operation_key: StableKey
     checkout_kind: Literal["subscription", "credit_topup"]
     product_key: str
     request_digest: str
     expires_at: str
+    region: str | None = None
+    expected_revision_id: str | None = None
 
 
 class CheckoutIntentUpdate(_BillingContract):
@@ -56,6 +67,7 @@ class BillingPaymentUpsert(_BillingContract):
     provider: str
     provider_payment_id: str
     provider_invoice_id: str | None = None
+    topup_id: str | None = None
     user_id: str
     amount_minor: NonNegativeSafeInteger
     tax_minor: NonNegativeSafeInteger
@@ -116,6 +128,9 @@ class BillingDisputeUpsert(_BillingContract):
 class AutoRechargeAttemptClaim(_BillingContract):
     user_id: str
     idempotency_key: str
+    expected_product_id: str
+    expected_quantity: int
+    expected_topup_key: str
 
 
 class AutoRechargeAttemptUpdate(_BillingContract):

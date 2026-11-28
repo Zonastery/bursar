@@ -21,7 +21,10 @@ type CatalogServiceOptions struct {
 // the database-authoritative catalog revision. Catalog writes remain atomic
 // database RPCs exposed through CreditStore.
 type CatalogService struct {
-	store CreditStore
+	store                         CreditStore
+	storefrontProviders           []string
+	storefrontProvidersConfigured bool
+	storefrontEnvironment         ProviderEnvironment
 
 	mu             sync.RWMutex
 	refreshMu      sync.Mutex
@@ -48,10 +51,12 @@ func NewCatalogServiceWithOptions(store CreditStore, options CatalogServiceOptio
 	if options.CacheTTL < 0 {
 		return nil, NewError("catalog cache TTL must not be negative", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
-	return &CatalogService{
+	service := &CatalogService{
 		store: store, versionEngines: make(map[int]*PricingEngine),
 		cacheTTL: options.CacheTTL, now: time.Now,
-	}, nil
+	}
+	service.storefrontEnvironment = ProviderEnvironment(service.providerEnvironment())
+	return service, nil
 }
 
 // GetActive returns the currently active persisted catalog revision, if any.
@@ -158,16 +163,26 @@ func (s *CatalogService) GetConfig(ctx context.Context) (*BursarConfig, error) {
 	if revision == nil {
 		return nil, NewError("no active Bursar catalog is available", ErrorOptions{Code: ErrorCodeCatalogNotLoaded, Category: ErrorCategoryNotFound})
 	}
-	return LoadConfigFromMap(revision.Config)
+	return LoadConfigFromMapWithEnvironment(revision.Config, s.providerEnvironment())
 }
 
 // PublicView projects the active catalog into a provider-safe product surface.
-func (s *CatalogService) PublicView(ctx context.Context) (PublicCatalog, error) {
+func (s *CatalogService) PublicView(ctx context.Context, options ...PublicCatalogOptions) (PublicCatalog, error) {
+	if len(options) > 1 {
+		return PublicCatalog{}, newConfigError("public view accepts at most one options value", nil)
+	}
 	config, err := s.GetConfig(ctx)
 	if err != nil {
 		return PublicCatalog{}, err
 	}
-	return ProjectPublicCatalog(config), nil
+	scope := PublicCatalogOptions{At: time.Now()}
+	if len(options) > 0 {
+		scope = options[0]
+		if scope.At.IsZero() {
+			scope.At = time.Now()
+		}
+	}
+	return projectPublicCatalog(config, &scope, s.storefrontEnvironment, s.storefrontProviders, s.storefrontProvidersConfigured), nil
 }
 
 // Engine returns the current exact pricing engine after Load or Refresh.
@@ -260,7 +275,7 @@ func (s *CatalogService) engineForVersion(ctx context.Context, version *int) (*P
 			Details:  map[string]any{"catalog_version": *version},
 		})
 	}
-	config, err := LoadConfigFromMap(revision.Config)
+	config, err := LoadConfigFromMapWithEnvironment(revision.Config, s.providerEnvironment())
 	if err != nil {
 		return nil, err
 	}
@@ -284,11 +299,11 @@ func (s *CatalogService) PublishDraft(ctx context.Context, config map[string]any
 	if s == nil || s.store == nil {
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	parsed, err := LoadConfigFromMap(config)
+	parsed, err := LoadConfigFromMapWithEnvironment(config, s.providerEnvironment())
 	if err != nil {
 		return "", err
 	}
-	return s.store.PublishCatalogDraft(ctx, CanonicalParsedBursarConfigDict(parsed), label)
+	return s.store.PublishCatalogDraft(ctx, scopeScalarProviderBindings(CanonicalParsedBursarConfigDict(parsed), s.providerEnvironment()), label)
 }
 
 // Activate makes one existing revision active with the catalog-defined rollout
@@ -315,11 +330,11 @@ func (s *CatalogService) PublishAndActivate(ctx context.Context, config map[stri
 	if s == nil || s.store == nil {
 		return "", NewError("catalog service is not initialized", ErrorOptions{Code: ErrorCodeStoreClosed, Category: ErrorCategoryUnavailable})
 	}
-	parsed, err := LoadConfigFromMap(config)
+	parsed, err := LoadConfigFromMapWithEnvironment(config, s.providerEnvironment())
 	if err != nil {
 		return "", err
 	}
-	result, err := s.store.PublishAndActivateCatalog(ctx, CanonicalParsedBursarConfigDict(parsed), label, rollout)
+	result, err := s.store.PublishAndActivateCatalog(ctx, scopeScalarProviderBindings(CanonicalParsedBursarConfigDict(parsed), s.providerEnvironment()), label, rollout)
 	if err != nil {
 		return result, err
 	}
@@ -351,7 +366,7 @@ func (s *CatalogService) ApplyDueChanges(ctx context.Context, limit int) (int, e
 }
 
 func (s *CatalogService) install(revision *CatalogRevision) error {
-	config, err := LoadConfigFromMap(revision.Config)
+	config, err := LoadConfigFromMapWithEnvironment(revision.Config, s.providerEnvironment())
 	if err != nil {
 		return err
 	}
@@ -368,4 +383,12 @@ func (s *CatalogService) install(revision *CatalogRevision) error {
 	s.loadedAt = s.now().UTC()
 	s.mu.Unlock()
 	return nil
+}
+
+// providerEnvironment returns the store's bound namespace for publication.
+func (s *CatalogService) providerEnvironment() string {
+	if bound, ok := s.store.(interface{ ProviderEnvironment() ProviderEnvironment }); ok {
+		return string(bound.ProviderEnvironment())
+	}
+	return ""
 }

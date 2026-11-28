@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -292,7 +293,7 @@ func (s *CommerceService) ConfirmPlanChange(ctx context.Context, input ConfirmPl
 	if err != nil {
 		return ConfirmPlanChangeResult{}, err
 	}
-	planContext, err := s.planChangeContext(ctx, PreviewPlanChangeInput{AccountID: input.AccountID, OfferKey: input.OfferKey})
+	planContext, err := s.planChangeContext(ctx, PreviewPlanChangeInput{AccountID: input.AccountID, OfferKey: input.OfferKey, Region: input.Region})
 	if err != nil {
 		return ConfirmPlanChangeResult{}, err
 	}
@@ -341,6 +342,7 @@ func (s *CommerceService) ConfirmPlanChange(ctx context.Context, input ConfirmPl
 		Provider:               planContext.subscription.Provider,
 		ProviderSubscriptionID: planContext.subscription.ProviderSubscriptionID,
 		ToOfferID:              planContext.offer.ID,
+		Region:                 input.Region,
 		ToOfferKey:             input.OfferKey,
 		ToPlanKey:              planContext.targetPlan,
 		ToInterval:             planContext.targetInterval,
@@ -849,6 +851,16 @@ func (s *CommerceService) planChangeContext(ctx context.Context, input PreviewPl
 	if !found || target.Type != "subscription" || target.Plan == nil || target.BillingInterval == nil {
 		return commercePlanChangeContext{}, NewError("target offer is not a subscription offer", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryNotFound, Details: map[string]any{"offer_key": offerKey}})
 	}
+	region := ""
+	if input.Region != nil {
+		region = strings.ToUpper(strings.TrimSpace(*input.Region))
+		if ok, _ := regexp.MatchString(`^[A-Z]{2}(-[A-Z0-9]{1,3})?$`, region); !ok {
+			return commercePlanChangeContext{}, NewError("invalid trusted region", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryInvalidRequest})
+		}
+	}
+	if !offerIsAvailable(target.Availability, region) {
+		return commercePlanChangeContext{}, NewError("target offer is outside its availability", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryInvalidRequest})
+	}
 	provider, err := s.providers.Get(ctx, subscription.Provider)
 	if err != nil {
 		return commercePlanChangeContext{}, err
@@ -856,6 +868,10 @@ func (s *CommerceService) planChangeContext(ctx context.Context, input PreviewPl
 	reference, found := target.Providers[provider.Name()]
 	if !found {
 		return commercePlanChangeContext{}, NewError("target offer is unavailable from the subscription provider", ErrorOptions{Code: ErrorCodeUnknownOffer, Category: ErrorCategoryNotFound, Details: map[string]any{"offer_key": offerKey, "provider": provider.Name()}})
+	}
+	reference, err = ResolveProviderReference(reference, s.providers.context.ProviderEnvironment)
+	if err != nil {
+		return commercePlanChangeContext{}, err
 	}
 	productID, priceID, lookupKey := providerReferenceIDs(reference)
 	offer, err := state.ResolveBillingOffer(ctx, provider.Name(), productID, priceID, lookupKey)
@@ -865,6 +881,12 @@ func (s *CommerceService) planChangeContext(ctx context.Context, input PreviewPl
 	if offer == nil {
 		return commercePlanChangeContext{}, NewError("target offer is not available in persisted billing state", ErrorOptions{Code: ErrorCodeCommerceResourceNotFound, Category: ErrorCategoryNotFound})
 	}
+	if offer.OfferKey != offerKey {
+		return commercePlanChangeContext{}, NewError("target reference resolves to a different offer", ErrorOptions{Code: ErrorCodeCoreBillingDataUnavailable, Category: ErrorCategoryUnavailable})
+	}
+	if subscription.OfferKey == "" {
+		return commercePlanChangeContext{}, NewError("current subscription offer is unknown", ErrorOptions{Code: ErrorCodeCoreBillingDataUnavailable, Category: ErrorCategoryUnavailable})
+	}
 	entitlement, err := s.credits.GetUserPlan(ctx, accountID)
 	if err != nil {
 		return commercePlanChangeContext{}, err
@@ -873,7 +895,7 @@ func (s *CommerceService) planChangeContext(ctx context.Context, input PreviewPl
 	if currentPlan == "" {
 		return commercePlanChangeContext{}, NewError("current subscription plan is unknown", ErrorOptions{Code: ErrorCodeCommerceResourceNotFound, Category: ErrorCategoryNotFound})
 	}
-	classification, err := classifyPlanChange(config, currentPlan, subscription.Interval, *target.Plan, target.BillingInterval.Unit)
+	classification, err := classifyPlanChangeWithOffer(config, currentPlan, subscription.Interval, subscription.IntervalCount, *target.Plan, target.BillingInterval.Unit, target.BillingInterval.Count, subscription.OfferKey == offer.OfferKey)
 	if err != nil {
 		return commercePlanChangeContext{}, err
 	}
@@ -958,9 +980,52 @@ func buildSubscriptionSummary(accountID string, subscription *CommerceSubscripti
 	return AccountSubscriptionSummary{AccountID: accountID, PlanKey: planKey, Status: status, LifecycleState: firstNonEmpty(status, "none"), AccessState: access, IsCurrent: isCurrent, IsEntitled: isEntitled, IsBlockingCheckout: containsText(blockingSubscriptionStatuses, status), IsCancellable: containsText(cancellableSubscriptionStates, status) && (subscription == nil || !subscription.CancelAtPeriodEnd), IsTerminal: containsText(terminalSubscriptionStatuses, status), Subscription: subscription, PendingChange: pending}
 }
 
+func offerIsAvailable(a *Availability, region string) bool {
+	return offerIsAvailableAt(a, region, time.Now())
+}
+
+func offerIsAvailableAt(a *Availability, region string, now time.Time) bool {
+	if a == nil {
+		return true
+	}
+	if a.StartsAt != nil {
+		start, err := time.Parse(time.RFC3339Nano, *a.StartsAt)
+		if err != nil || start.After(now) {
+			return false
+		}
+	}
+	if a.EndsAt != nil {
+		end, err := time.Parse(time.RFC3339Nano, *a.EndsAt)
+		if err != nil || !end.After(now) {
+			return false
+		}
+	}
+	return len(a.Regions) == 0 || containsText(a.Regions, region)
+}
+
 func classifyPlanChange(config *BursarConfig, currentPlan, currentInterval, targetPlan, targetInterval string) (PlanChangeClassification, error) {
+	return classifyPlanChangeWithOffer(config, currentPlan, currentInterval, 1, targetPlan, targetInterval, 1, true)
+}
+func classifyPlanChangeWithOffer(config *BursarConfig, currentPlan, currentInterval string, currentCount int, targetPlan, targetInterval string, targetCount int, sameOffer bool) (PlanChangeClassification, error) {
+	currentInterval = strings.ToLower(currentInterval)
+	targetInterval = strings.ToLower(targetInterval)
+	if !containsText([]string{"day", "week", "month", "year"}, currentInterval) || !containsText([]string{"day", "week", "month", "year"}, targetInterval) {
+		return "", NewError("subscription cadence is unknown", ErrorOptions{Code: ErrorCodeCoreBillingDataUnavailable, Category: ErrorCategoryUnavailable})
+	}
+	if _, ok := config.Plans[currentPlan]; !ok {
+		return "", NewError("subscription plan is absent from the active catalog", ErrorOptions{Code: ErrorCodeCoreBillingDataUnavailable, Category: ErrorCategoryUnavailable})
+	}
+	if _, ok := config.Plans[targetPlan]; !ok {
+		return "", NewError("subscription plan is absent from the active catalog", ErrorOptions{Code: ErrorCodeCoreBillingDataUnavailable, Category: ErrorCategoryUnavailable})
+	}
+	if currentCount == 0 {
+		currentCount = 1
+	}
 	if currentPlan == targetPlan {
-		if currentInterval == targetInterval {
+		if currentInterval == targetInterval && currentCount == targetCount {
+			if !sameOffer {
+				return PlanChangeLateral, nil
+			}
 			return PlanChangeUnchanged, nil
 		}
 		return PlanChangeCadenceChange, nil
@@ -970,26 +1035,17 @@ func classifyPlanChange(config *BursarConfig, currentPlan, currentInterval, targ
 	if !currentFound || !targetFound {
 		return "", NewError("subscription plan is absent from the active catalog", ErrorOptions{Code: ErrorCodeCoreBillingDataUnavailable, Category: ErrorCategoryUnavailable, Retryable: true})
 	}
-	if target.Rank > current.Rank {
+	if target.Tier > current.Tier {
 		return PlanChangeUpgrade, nil
 	}
-	if target.Rank < current.Rank {
+	if target.Tier < current.Tier {
 		return PlanChangeDowngrade, nil
 	}
 	return PlanChangeLateral, nil
 }
 
 func providerReferenceIDs(reference ProviderReference) (productID, priceID, lookupKey string) {
-	if reference.ProductID != nil {
-		productID = *reference.ProductID
-	}
-	if reference.PriceID != nil {
-		priceID = *reference.PriceID
-	}
-	if reference.ExternalID != nil {
-		lookupKey = *reference.ExternalID
-	}
-	return productID, priceID, lookupKey
+	return reference.ProductID.scalar(), reference.PriceID.scalar(), reference.ExternalID.scalar()
 }
 
 func planChangeQuoteFingerprint(preview PlanChangePreview) (string, error) {

@@ -381,16 +381,15 @@ export class PostgresClient {
           ];
           if (this.tenantId) {
             settings.push(
-              `set_config('bursar.tenant_id', $3, true)`,
-              `set_config('bursar.usage_backend', $4, true)`,
-              `set_config('bursar.billing_payload_backend', $5, true)`,
-              `set_config('bursar.provider_environment', $6, true)`,
+              `bursar.bind_tenant_context($3::uuid, $4::text)`,
+              `set_config('bursar.usage_backend', $5, true)`,
+              `set_config('bursar.billing_payload_backend', $6, true)`,
             );
             values.push(
               this.tenantId,
+              this.providerEnvironment,
               this.usageBackend,
               this.billingPayloadBackend,
-              this.providerEnvironment,
             );
           }
           await client.query(`SELECT ${settings.join(", ")}`, values);
@@ -436,6 +435,56 @@ export class PostgresClient {
         }
       },
     );
+
+  /** Hold the database cutover fence until an external usage read finishes. */
+  async withUsageBackend<T>(
+    expected: "postgres" | "clickhouse",
+    action: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.tenantId) throw new TypeError("a tenant is required for usage access");
+    const pool = await this.getPool();
+    const client = await pool.connect();
+    let started = false;
+    let discard: Error | undefined;
+    try {
+      await client.query("BEGIN");
+      started = true;
+      if (this.accessRole) await client.query(`SET LOCAL ROLE ${this.accessRole}`);
+      await client.query(
+        "SELECT bursar.bind_tenant_context($1::uuid, $2::text), " +
+          "set_config('statement_timeout', $3, true), " +
+          "set_config('idle_in_transaction_session_timeout', $4, true)",
+        [
+          this.tenantId,
+          this.providerEnvironment,
+          String(this.connectionOptions.statementTimeoutMs),
+          String(this.connectionOptions.idleTransactionTimeoutMs),
+        ],
+      );
+      try {
+        await client.query("SELECT bursar.check_usage_backend($1::text)", [expected]);
+      } catch (cause) {
+        throw normalizePostgresError(cause, {
+          operation: "usage backend validation",
+          phase: "query",
+        });
+      }
+      const result = await action();
+      await client.query("COMMIT");
+      return result;
+    } catch (cause) {
+      if (started) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (error) {
+          discard = error instanceof Error ? error : new Error("PostgreSQL rollback failed");
+        }
+      }
+      throw cause;
+    } finally {
+      client.release(discard);
+    }
+  }
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;

@@ -1,6 +1,6 @@
 import {
   asArray,
-  asDecimal,
+  positiveDecimal,
   asInteger,
   asObject,
   asString,
@@ -61,7 +61,10 @@ export function parseCredits(value: JsonValue): CreditsConfig {
     const policy = asObject(input);
     policies[key] =
       policy.type === "credit_line"
-        ? { type: "credit_line", limit: asDecimal(policy.limit) }
+        ? {
+            type: "credit_line",
+            limit: positiveDecimal(policy.limit, `credits.policies.${key}.limit`),
+          }
         : { type: "prepaid" };
   }
 
@@ -69,7 +72,7 @@ export function parseCredits(value: JsonValue): CreditsConfig {
   for (const [key, input] of Object.entries(programsRaw)) {
     const program = asObject(input);
     const awards = asArray(program.awards, `credits.grant_programs.${key}.awards`).map(
-      (awardInput) => {
+      (awardInput, index) => {
         const award = asObject(awardInput);
         const bucket = asString(award.bucket);
         if (!buckets[bucket]) {
@@ -84,7 +87,10 @@ export function parseCredits(value: JsonValue): CreditsConfig {
         }
         const parsedAward: GrantProgram["awards"][number] = {
           recipient: recipientSchema.parse(award.recipient ?? "subject"),
-          amount: asDecimal(award.amount),
+          amount: positiveDecimal(
+            award.amount,
+            `credits.grant_programs.${key}.awards[${index}].amount`,
+          ),
           bucket,
         };
         if (parsedExpiry) parsedAward.expiry = parsedExpiry;
@@ -137,7 +143,7 @@ export function parseCredits(value: JsonValue): CreditsConfig {
   if (displayRaw) {
     result.display = {
       currency: asString(displayRaw.currency).toUpperCase(),
-      unitsPerMajor: asDecimal(displayRaw.units_per_major),
+      unitsPerMajor: positiveDecimal(displayRaw.units_per_major, "credits.display.units_per_major"),
     };
   }
   return result;

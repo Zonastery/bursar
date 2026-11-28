@@ -337,7 +337,9 @@ class CreditsService:
         if cfg is None or cfg.config is None:
             raise CatalogNotLoadedError(f"Catalog revision {catalog_version} is unavailable for the pinned plan")
 
-        engine = PricingEngine.from_dict(cfg.config if isinstance(cfg.config, dict) else {})
+        engine = PricingEngine.from_dict(
+            cfg.config if isinstance(cfg.config, dict) else {}, getattr(self._store, "provider_environment", None)
+        )
         self._version_engines[catalog_version] = engine
         return engine
 
@@ -431,7 +433,7 @@ class CreditsService:
         if active is None:
             raise CatalogNotLoadedError("No active catalog revision is available")
         engine_dict = active.config if isinstance(active.config, dict) else {}
-        self._engine = PricingEngine.from_dict(engine_dict)
+        self._engine = PricingEngine.from_dict(engine_dict, getattr(self._store, "provider_environment", None))
         self._version_engines.clear()
         self._catalog_loaded_at = time.monotonic()
 
@@ -444,8 +446,8 @@ class CreditsService:
         """Publish and activate a catalog revision, then update the local engine."""
         from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_bursar_config_dict(config)
-        next_engine = PricingEngine.from_dict(canonical)
+        canonical = canonical_bursar_config_dict(config, getattr(self._store, "provider_environment", None))
+        next_engine = PricingEngine.from_dict(canonical, getattr(self._store, "provider_environment", None))
         revision_id = (
             self._store.publish_and_activate_catalog(canonical, label)
             if rollout is None
@@ -464,7 +466,7 @@ class CreditsService:
         """Publish an inactive catalog draft without mutating the live catalog."""
         from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_bursar_config_dict(config)
+        canonical = canonical_bursar_config_dict(config, getattr(self._store, "provider_environment", None))
         return self._store.publish_catalog_draft(canonical, label)
 
     def activate_catalog_revision(
@@ -1801,9 +1803,13 @@ class CreditsService:
         feature: str | None = None,
     ) -> DeductionResult:
         """Deduct the configured fixed cost for one named job."""
+        engine = self._engine_for_user(user_id)
+        pricing = engine._config.pricing
+        operation = pricing.operations.get(job_name) if pricing is not None else None
+        measures = {"jobs": Decimal(1)} if operation is not None and "jobs" in operation.measures else {}
         return self.deduct(
             user_id,
-            UsageMetrics(operation=job_name, measures={"jobs": Decimal(1)}),
+            UsageMetrics(operation=job_name, measures=measures),
             idempotency_key=idempotency_key,
             metadata=metadata,
             feature=feature,

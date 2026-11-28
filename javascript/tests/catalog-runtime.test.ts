@@ -156,3 +156,53 @@ describe("CatalogRuntime lease pricing", () => {
     ).rejects.toBeInstanceOf(LeaseNotFoundError);
   });
 });
+
+describe("catalog provider environments", () => {
+  it.each(["test", "live"] as const)(
+    "preserves all bindings when publishing and drafting from %s",
+    async (environment) => {
+      const publishAndActivateCatalog = vi.fn().mockResolvedValue("revision");
+      const publishCatalogDraft = vi.fn().mockResolvedValue("draft");
+      const store = testStore({
+        providerEnvironment: environment,
+        publishAndActivateCatalog,
+        publishCatalogDraft,
+      });
+      const runtime = new CatalogRuntime(store, null, noopLogger, 0);
+      const config: BursarConfigData = {
+        ...CONFIG,
+        commerce: {
+          providers: { stripe: { type: "stripe" } },
+          offers: {
+            monthly: {
+              type: "subscription",
+              display_name: "Monthly",
+              plan: "captured_plan",
+              billing_interval: { unit: "month" },
+              price: { amount_minor: 100, currency: "USD" },
+              providers: {
+                stripe: {
+                  type: "stripe_price",
+                  price_id: { test: "price_test", live: "price_live" },
+                },
+              },
+            },
+          },
+        },
+      };
+      const original = structuredClone(config);
+      await runtime.publishAndActivate(config);
+      await runtime.publishDraft(config);
+      for (const call of [
+        publishAndActivateCatalog.mock.calls[0],
+        publishCatalogDraft.mock.calls[0],
+      ]) {
+        expect(call?.[0].commerce.offers.monthly.providers.stripe.price_id).toEqual({
+          test: "price_test",
+          live: "price_live",
+        });
+      }
+      expect(config).toEqual(original);
+    },
+  );
+});

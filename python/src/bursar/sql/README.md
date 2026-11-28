@@ -11,7 +11,7 @@
 
 These files are the canonical database contract shared by the Python and
 JavaScript SDKs. The migration runner applies every `NNN_*.sql` file in numeric
-order and records its SHA-256 checksum in `bursar.schema_migrations`.
+order and records its SHA-256 checksum in `bursar.schema_migrations`. The runner discovers files automatically; there is no separate migration manifest.
 
 The baseline requires PostgreSQL 16+, pg_partman 5.x, and pg_jsonschema 0.3+.
 Both server extension packages must be available before migration; the

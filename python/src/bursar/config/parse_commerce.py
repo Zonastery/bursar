@@ -8,16 +8,28 @@ from bursar.config.types import (
     CustomProvider,
     DodoProductReference,
     DodoProvider,
+    ProviderReference,
     StripePriceReference,
     StripeProvider,
     _validate_map_keys,
 )
 
 
+def has_provider_binding(reference: ProviderReference, environment: str) -> bool:
+    """Return whether a reference has an ID in the selected environment."""
+    if isinstance(reference, StripePriceReference):
+        value = reference.price_id
+    elif isinstance(reference, DodoProductReference):
+        value = reference.product_id
+    else:
+        value = reference.external_id
+    return isinstance(value, str) or environment in value
+
+
 def _validate_commerce(commerce: CommerceConfig) -> CommerceConfig:
     _validate_map_keys(commerce.providers, "commerce.providers")
     _validate_map_keys(commerce.offers, "commerce.offers")
-    seen_provider_objects: set[tuple[str, str]] = set()
+    seen_provider_objects: set[tuple[str, str, str]] = set()
     for offer_key, offer in commerce.offers.items():
         for provider_key, reference in offer.providers.items():
             provider = commerce.providers.get(provider_key)
@@ -38,8 +50,10 @@ def _validate_commerce(commerce: CommerceConfig) -> CommerceConfig:
                 external_id = reference.product_id
             else:
                 external_id = reference.external_id
-            object_key = (provider_key, external_id)
-            if object_key in seen_provider_objects:
-                raise ValueError(f"duplicate provider object reference {provider_key}/{external_id}")
-            seen_provider_objects.add(object_key)
+            bindings = {"*": external_id} if isinstance(external_id, str) else external_id
+            for environment, value in bindings.items():
+                object_key = (provider_key, environment, value)
+                if object_key in seen_provider_objects:
+                    raise ValueError(f"duplicate provider object reference {provider_key}/{environment}/{value}")
+                seen_provider_objects.add(object_key)
     return commerce

@@ -10,11 +10,13 @@ import (
 
 type autoRechargeBoundaryStore struct {
 	*autoRechargeStoreStub
-	profileErr error
-	upsertErr  error
-	claimErr   error
-	updateErr  error
-	countErr   error
+	profileErr     error
+	upsertErr      error
+	claimErr       error
+	updateErr      error
+	countErr       error
+	windowMissing  bool
+	resumeRejected bool
 }
 
 func (s *autoRechargeBoundaryStore) GetAutoRechargeProfile(ctx context.Context, userID string) (*AutoRechargeProfile, error) {
@@ -31,6 +33,16 @@ func (s *autoRechargeBoundaryStore) UpsertAutoRechargeProfile(ctx context.Contex
 	return s.autoRechargeStoreStub.UpsertAutoRechargeProfile(ctx, profile, options)
 }
 
+func (s *autoRechargeBoundaryStore) ResumeAutoRechargeProfile(ctx context.Context, profile AutoRechargeProfile) (bool, error) {
+	if s.upsertErr != nil {
+		return false, s.upsertErr
+	}
+	if s.resumeRejected {
+		return false, nil
+	}
+	return s.autoRechargeStoreStub.ResumeAutoRechargeProfile(ctx, profile)
+}
+
 func (s *autoRechargeBoundaryStore) ClaimAutoRechargeAttempt(ctx context.Context, claim AutoRechargeAttemptClaim) (*AutoRechargeAttempt, error) {
 	if s.claimErr != nil {
 		return nil, s.claimErr
@@ -43,6 +55,16 @@ func (s *autoRechargeBoundaryStore) UpdateAutoRechargeAttempt(ctx context.Contex
 		return s.updateErr
 	}
 	return s.autoRechargeStoreStub.UpdateAutoRechargeAttempt(ctx, update)
+}
+
+func (s *autoRechargeBoundaryStore) GetAutoRechargeOperationalWindow(ctx context.Context, userID string) (*AutoRechargeOperationalWindow, error) {
+	if s.windowMissing {
+		return nil, nil
+	}
+	if s.countErr != nil {
+		return nil, s.countErr
+	}
+	return s.autoRechargeStoreStub.GetAutoRechargeOperationalWindow(ctx, userID)
 }
 
 func (s *autoRechargeBoundaryStore) CountAutoRechargeAttempts(ctx context.Context, userID string, since time.Time) (int, error) {
@@ -447,5 +469,22 @@ func TestCommerceAutoRechargeProviderResolutionPrecedenceAndErrors(t *testing.T)
 	commerce = &CommerceService{providers: registry, catalog: &CatalogService{store: catalogStore}}
 	if _, err := commerce.autoRechargeProvider(ctx, "user-1", service); err == nil {
 		t.Fatal("catalog without auto-recharge policy was accepted")
+	}
+}
+
+func TestAutoRechargeStatusAndRetryFailClosedOnUnavailableStoreState(t *testing.T) {
+	ctx := context.Background()
+	provider := autoRechargeBoundaryProvider()
+	store := &autoRechargeBoundaryStore{autoRechargeStoreStub: &autoRechargeStoreStub{
+		topup: &AutoRechargeTopup{ID: "topup-1"}, customer: &AutoRechargeCustomer{UserID: "user-1", Provider: "stripe", ProviderCustomerID: "cus-1"}, profile: autoRechargeActiveProfile(),
+	}, windowMissing: true, resumeRejected: true}
+	service := newAutoRechargeBoundaryService(t, store, "key")
+	status, err := service.GetStatus(ctx, "user-1", provider)
+	if err != nil || status != nil {
+		t.Fatalf("missing window status = %+v, error = %v", status, err)
+	}
+	result, err := service.Retry(ctx, provider, AutoRechargeProcessInput{UserID: "user-1", Balance: MustAmount("0")})
+	if err != nil || result.Outcome != AutoRechargeOutcomeNotConfigured {
+		t.Fatalf("rejected retry = %+v, error = %v", result, err)
 	}
 }

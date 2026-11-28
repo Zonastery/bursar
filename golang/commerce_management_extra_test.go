@@ -25,7 +25,7 @@ func TestCommerceManagementPureValidationAndSerializationHelpers(t *testing.T) {
 		t.Fatal("empty scoped key accepted")
 	}
 
-	ref := ProviderReference{ProductID: stringPointer("product"), PriceID: stringPointer("price")}
+	ref := ProviderReference{ProductID: ScalarProviderID("product"), PriceID: ScalarProviderID("price")}
 	if product, price, lookup := providerReferenceIDs(ref); product != "product" || price != "price" || lookup != "" {
 		t.Fatalf("reference IDs = %q, %q, %q", product, price, lookup)
 	}

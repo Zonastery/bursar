@@ -376,14 +376,33 @@ func (s *CreditsService) DeductUsage(ctx context.Context, userID string, metrics
 	})
 }
 
-// DeductFlatJob charges one configured named job with the canonical jobs=1
-// measure rather than making applications duplicate pricing metadata.
+// DeductFlatJob charges one configured named job, supplying jobs=1 when declared.
 func (s *CreditsService) DeductFlatJob(ctx context.Context, userID, jobName string, options PricedUsageOptions) (DeductionResult, error) {
 	return runInstrumentedValue(ctx, s.telemetry(), telemetryOperationCreditsDeduct, nil, func(ctx context.Context) (DeductionResult, error) {
-		return s.DeductUsage(ctx, userID, UsageMetrics{
-			Operation: jobName,
-			Measures:  map[string]Amount{"jobs": MustAmount("1")},
-		}, options)
+		measures := map[string]Amount{}
+		if s != nil && s.catalog != nil && s.catalog.store != nil {
+			plan, err := s.catalog.store.GetUserPlan(ctx, userID)
+			if err != nil {
+				return DeductionResult{}, err
+			}
+			if plan.CatalogVersion == nil {
+				if err := s.catalog.RefreshIfStale(ctx); err != nil {
+					return DeductionResult{}, err
+				}
+			}
+			engine, err := s.catalog.engineForVersion(ctx, plan.CatalogVersion)
+			if err != nil {
+				return DeductionResult{}, err
+			}
+			if engine.config.Pricing != nil {
+				if operation, ok := engine.config.Pricing.Operations[jobName]; ok {
+					if _, declared := operation.Measures["jobs"]; declared {
+						measures["jobs"] = MustAmount("1")
+					}
+				}
+			}
+		}
+		return s.DeductUsage(ctx, userID, UsageMetrics{Operation: jobName, Measures: measures}, options)
 	})
 }
 

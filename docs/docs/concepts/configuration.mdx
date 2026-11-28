@@ -13,6 +13,12 @@ keywords:
 
 `BursarConfig` brings the pricing, credit, access, and commerce models together in one strict versioned document. Python and TypeScript validate the same schema, so one active catalog revision produces the same policy decisions in both SDKs.
 
+## Start with a configuration file
+
+Run `bursar config init bursar.yaml` or `npx bursar-config init bursar.yaml` to generate the packaged starter. The same version 1 schema defines configuration and stored catalogs. Plans deny operations by default: explicitly list allowed operations, use `all`, or use `none`. Explicitly declared measures are required by default; set `required: false` to treat an omitted measure as zero. A flat charge requires no caller-supplied measures. Rate cards hold reusable pricing rules; rates determine a quote while the ledger records actual grants and charges. The `on_signup` grant is distinct from a recurring plan allowance and a subscription cycle grant.
+
+Provider object IDs may have `test`, `live`, and `sandbox` bindings. A tenant has one active policy catalog containing all authored bindings; each provider operation selects the ID for its store’s financial environment. A missing binding makes that offer unavailable in that environment. Use `loadConfigFile(path, environment)` from `@zonastery/bursar/node` for a validated publishable document, or `loadRawConfigFile` to parse without validation. A bare provider ID is scoped to the explicit environment at load or publication. Publishing a catalog with only one environment binding replaces the active catalog and leaves the other environments without that offer. Credentials belong in runtime adapters, not the file.
+
 ## One document owns product policy
 
 Each top-level section owns one part of the product model:
@@ -43,23 +49,46 @@ The validation boundary also enforces these accounting rules:
 - Credit buckets and allowance priorities share one collision-free ordering namespace
 - Subscription-backed plans declare when catalog revisions take effect
 
-The smallest valid document declares its schema version and credit boundary:
+The packaged starter is a small document:
 
 ```yaml
+# yaml-language-server: $schema=https://zonastery.github.io/bursar/pricing-config.schema.json
 version: 1
-credits:
-  buckets:
-    purchased: { priority: 10 }
-  default_bucket: purchased
+catalog: { default_plan: free }
+credits: { on_signup: "20" }
+pricing:
+  operations:
+    export_report:
+      charge: { type: flat, amount: "2" }
+plans:
+  free:
+    display_name: Free
+    allowed_operations: [export_report]
 ```
 
-Run validation before publication:
+Run `bursar config init bursar.yaml` to create this starter, and `bursar config validate bursar.yaml` to validate it. Use the [configuration schema](https://zonastery.github.io/bursar/pricing-config.schema.json) for editor completion.
 
-```bash title="Terminal"
-bursar config validate bursar.yaml
+## Provider references and rate cards
+
+A Stripe or Dodo offer references an ID beneath the declared provider; the reference kind is inferred from that provider. Custom providers still require `type: custom_object` and `object_kind`.
+
+```yaml
+commerce:
+  providers:
+    stripe: { type: stripe }
+  offers:
+    monthly:
+      type: subscription
+      display_name: Monthly
+      plan: pro
+      billing_interval: { unit: month, count: 1 }
+      price: { amount_minor: 1000, currency: USD }
+      providers:
+        stripe:
+          price_id: { test: price_test, live: price_live }
 ```
 
-Use `--json` for structured diagnostics in continuous integration (CI) and editor integrations. Use the [published JSON Schema](https://zonastery.github.io/bursar/pricing-config.schema.json) for editor completion and the [validated complete example](https://github.com/zonastery/bursar/blob/main/skills/bursar/assets/pricing.config.example.yaml) as the canonical full configuration sample.
+A single rate card is selected automatically regardless of its name. When multiple cards exist, plans that allow operations must choose a `rate_card`. An operation's inline `charge` supplies the base price for each root card that does not define that operation; explicit card prices and inherited rules take precedence. Null `on_signup` or `charge` has the same effect as omission.
 
 ## Catalog revisions are immutable
 
@@ -95,6 +124,19 @@ Subscription-backed plans default to `next_renewal`; other plans default to `imm
 ## Public projections exclude private configuration
 
 The active configuration remains the internal policy document. Catalog projection methods expose only the product fields needed by a client application and keep provider identifiers, internal policies, and private configuration out of public responses.
+
+The catalog public view (`publicView`, `public_view`, or `PublicView`) scopes storefront offers to the runtime provider environment and registered commerce providers when configured. An offer needs a binding for at least one provider in that scope. Plans remain visible even when no eligible subscription offer is available; top-ups are filtered by the same provider binding rule. The public view also applies offer availability at the current time: start is inclusive, end is exclusive, and region-restricted offers are hidden unless a matching trusted region is supplied. Pass `{ region, at }` to `publicView` (Python: `region=`, `at=`; Go: `PublicCatalogOptions`) for a trusted region or an explicit evaluation time. Checkout independently enforces the same rules. Use `getConfig` / `get_config` / `GetConfig` for unscoped administrative inspection.
+
+For offline inspection of every configured offer, call the standalone projection without a scope:
+
+```ts
+import { loadConfigFromDict, projectPublicCatalog } from "@zonastery/bursar";
+
+const config = loadConfigFromDict(document);
+const allConfiguredOffers = projectPublicCatalog(config);
+```
+
+Passing a scope with `providerEnvironment` and optional `providers` to `projectPublicCatalog` selects the offers with matching provider bindings instead.
 
 ## Related
 

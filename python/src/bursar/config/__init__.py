@@ -42,6 +42,7 @@ from bursar.config.types import (
     PrefixMatcher,
     PriceRule,
     PricingConfig,
+    ProviderId,
     RangeMatcher,
     StringFeature,
     StripePriceReference,
@@ -119,9 +120,13 @@ def _validate_plan_pricing(config: BursarConfig, plan_key: str, plan: PlanDefini
     pricing = config.pricing
     if plan.rate_card is not None and (pricing is None or plan.rate_card not in pricing.rate_cards):
         raise ValueError(f"plans.{plan_key}.rate_card references unknown rate card '{plan.rate_card}'")
-    if plan.allowed_operations and pricing is None:
+    access = plan.allowed_operations
+    if access == "none":
+        return
+    if pricing is None:
         raise ValueError(f"plans.{plan_key}.allowed_operations requires pricing")
-    for operation in plan.allowed_operations:
+    operations = list(pricing.operations) if access == "all" else access
+    for operation in operations:
         if pricing is None or operation not in pricing.operations:
             raise ValueError(f"plans.{plan_key} references unknown operation '{operation}'")
         if plan.rate_card is None or not pricing.resolves_operation(plan.rate_card, operation):
@@ -208,6 +213,20 @@ def _validate_grant_programs(config: BursarConfig) -> None:
 def _validate_commerce_offers(config: BursarConfig) -> None:
     for offer_key, offer in config.commerce.offers.items():
         if isinstance(offer, SubscriptionOffer):
+            if offer.trial is not None:
+                provider_types = {config.commerce.providers[key].type for key in offer.providers}
+                if provider_types & {"stripe", "dodo"}:
+                    if offer.trial.unit not in {"day", "week"}:
+                        raise ValueError(
+                            f"commerce.offers.{offer_key}.trial requires day or week units for Stripe and Dodo"
+                        )
+                    days = offer.trial.count * (7 if offer.trial.unit == "week" else 1)
+                    if (
+                        days < 1
+                        or ("stripe" in provider_types and days > 730)
+                        or ("dodo" in provider_types and days > 10000)
+                    ):
+                        raise ValueError(f"commerce.offers.{offer_key}.trial is outside the supported provider range")
             if offer.plan not in config.plans:
                 raise ValueError(f"commerce.offers.{offer_key}.plan references unknown plan '{offer.plan}'")
             if offer.cycle_grant is not None and offer.cycle_grant.bucket not in config.credits.buckets:
@@ -249,6 +268,10 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:
         raise ValueError("catalog.default_plan is required when plans are configured")
     if config.catalog.default_plan is not None and config.catalog.default_plan not in config.plans:
         raise ValueError(f"catalog.default_plan references unknown plan '{config.catalog.default_plan}'")
+    if config.catalog.subscription_end_plan is not None and config.catalog.subscription_end_plan not in config.plans:
+        raise ValueError(
+            f"catalog.subscription_end_plan references unknown plan '{config.catalog.subscription_end_plan}'"
+        )
     subscription_plans = {
         offer.plan for offer in config.commerce.offers.values() if isinstance(offer, SubscriptionOffer)
     }
@@ -262,8 +285,11 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:
     return config
 
 
-def load_config_from_dict(data: dict[str, Any]) -> BursarConfig:
+def load_config_from_dict(data: dict[str, Any], environment: str | None = None) -> BursarConfig:
     try:
+        from bursar.config.authoring import normalize_config
+
+        data = normalize_config(data, environment)
         config = BursarConfig.model_validate(data)
         validate_bursar_config(config)
         return config
@@ -275,9 +301,18 @@ def load_config_from_dict(data: dict[str, Any]) -> BursarConfig:
         raise ConfigError(str(exc)) from exc
 
 
-def canonical_bursar_config_dict(data: BursarConfigData) -> dict[str, Any]:
-    config = data if isinstance(data, BursarConfig) else load_config_from_dict(data)
-    validate_bursar_config(config)
+def resolve_provider_id(value: ProviderId, environment: str | None) -> str:
+    """Resolve a provider ID only for the selected financial namespace."""
+    if isinstance(value, str):
+        return value
+    if environment not in ("test", "live", "sandbox") or environment not in value:
+        raise ConfigError(f"provider ID has no binding for environment {environment or '<unspecified>'}")
+    return value[environment]
+
+
+def canonical_bursar_config_dict(data: BursarConfigData, environment: str | None = None) -> dict[str, Any]:
+    raw = data.model_dump(mode="json", exclude_unset=True) if isinstance(data, BursarConfig) else data
+    config = load_config_from_dict(raw, environment)
     return config.model_dump(mode="json", exclude_none=True)
 
 

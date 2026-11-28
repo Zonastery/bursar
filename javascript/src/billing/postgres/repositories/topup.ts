@@ -29,7 +29,10 @@ const BillingTopupRowSchema = z
   .strict()
   .superRefine((row, ctx) => {
     if (row.max_quantity < row.min_quantity) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "max_quantity is below min_quantity" });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "max_quantity is below min_quantity",
+      });
     }
     if (row.default_quantity < row.min_quantity || row.default_quantity > row.max_quantity) {
       ctx.addIssue({
@@ -49,9 +52,22 @@ export class BillingTopupRepository {
     provider: string,
     priceId: string | null,
     productId: string | null,
+    checkoutIntentId?: string | null,
+    subjectId?: string | null,
+    providerPaymentId?: string | null,
+    rechargeAttemptId?: string | null,
   ): Promise<BillingTopupRow | null> {
     const lookupType = priceId !== null ? "price_id" : "product_id";
-    return this.resolve(provider, lookupType, priceId ?? productId, "resolveByPrice");
+    return this.resolve(
+      provider,
+      lookupType,
+      priceId ?? productId,
+      "resolveByPrice",
+      checkoutIntentId,
+      subjectId,
+      providerPaymentId,
+      rechargeAttemptId,
+    );
   }
 
   async resolveByLookup(provider: string, lookupKey: string): Promise<BillingTopupRow | null> {
@@ -63,16 +79,34 @@ export class BillingTopupRepository {
     lookupType: "price_id" | "product_id" | "external_id",
     lookupValue: string | null,
     operation: string,
+    checkoutIntentId?: string | null,
+    subjectId?: string | null,
+    providerPaymentId?: string | null,
+    rechargeAttemptId?: string | null,
   ): Promise<BillingTopupRow | null> {
     if (!provider.trim()) throw new TypeError("provider must not be empty");
     if (!lookupValue?.trim()) return null;
 
     const context = `BillingTopupRepository.${operation}`;
-    const rows = await this.query("SELECT * FROM bursar.resolve_catalog_topup($1, $2, $3)", [
-      provider,
-      lookupType,
-      lookupValue,
-    ]);
+    const rows =
+      providerPaymentId && subjectId
+        ? await this.query(
+            "SELECT * FROM bursar.resolve_purchase_catalog_topup($1::uuid, $2, $3, $4, $5, $6::uuid, $7::uuid)",
+            [
+              subjectId,
+              provider,
+              providerPaymentId,
+              lookupType,
+              lookupValue,
+              checkoutIntentId ?? null,
+              rechargeAttemptId ?? null,
+            ],
+          )
+        : await this.query("SELECT * FROM bursar.resolve_catalog_topup($1, $2, $3)", [
+            provider,
+            lookupType,
+            lookupValue,
+          ]);
     if (rows.length > 1) {
       throw new StoreError(`${context}: expected at most one top-up`, {
         details: { rowCount: rows.length },

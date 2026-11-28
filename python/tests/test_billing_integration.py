@@ -683,7 +683,7 @@ class TestAutoRechargeProfile:
 
             subscription_ids: dict[str, str] = {}
             event_ids: dict[str, str] = {}
-            for environment in ("live", "test"):
+            for environment in ("test",):
                 cursor.execute(
                     """
                     INSERT INTO bursar.billing_subscriptions(
@@ -743,7 +743,7 @@ class TestAutoRechargeProfile:
                 )
                 event_ids[environment] = str(cursor.fetchone()[0])  # type: ignore[index]
 
-        for environment in ("live", "test"):
+        for environment in ("test",):
             environment_store = PostgresBillingStore(
                 pg_database_url,
                 tenant_id=TEST_TENANT_ID,
@@ -758,7 +758,6 @@ class TestAutoRechargeProfile:
                 "2025-01-01T00:00:00Z",
                 None,
                 True,
-                "free",
                 "subscription_active",
             )
             assert outcome == "applied"
@@ -775,7 +774,12 @@ class TestAutoRechargeProfile:
                 """,
                 (USER_ID,),
             )
-            assert cursor.fetchall() == [("live",), ("test",)]
+            assert cursor.fetchall() == [("test",)]
+
+        wrong_environment = PostgresBillingStore(pg_database_url, tenant_id=TEST_TENANT_ID, provider_environment="live")
+        _COMPONENT_STORES.append(wrong_environment)
+        with pytest.raises(StoreError, match="environment"):
+            wrong_environment.get_billing_subscription(PROVIDER, "sub-entitlement-test")
 
 
 # ── Customer CRUD ─────────────────────────────────────────────────────
@@ -1335,7 +1339,10 @@ class TestFinancialReadModels:
         pg_store: object,
     ) -> None:
         bs, credits, _sink = _make_components(pg_database_url, pg_store)
-        service = BillingService(bs, provisioning=credits, terminal_plan_key="free")
+        config = deepcopy(PRICING_DICT)
+        config["catalog"]["subscription_end_plan"] = "free"
+        credits.publish_and_activate_catalog(config)
+        service = BillingService(bs, provisioning=credits)
         subscription_id = "sub_terminal_plan_reconciliation"
         created = service.ingest_billing_event(
             BillingEvent(
@@ -2341,7 +2348,6 @@ class TestBillingServiceLifecycle:
                 timestamp,
                 None,
                 True,
-                None,
                 "subscription_active",
             )
             == "applied"

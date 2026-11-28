@@ -41,7 +41,6 @@ class BillingServiceOptions(BaseModel):
         default=7 * 24 * 60 * 60 * 1_000,
         ge=0,
     )
-    terminal_plan_key: str | None = None
     logger: SkipValidation[Logger] | None = None
 
 

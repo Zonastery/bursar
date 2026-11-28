@@ -95,6 +95,7 @@ class GetUserPlanResult(BaseModel):
     credit_policy: PlanCreditPolicy | None
     admission: PlanAdmissionPolicy | None
     allowed_operations: list[str]
+    operation_access: Literal["all", "none", "listed"] | None = None
     plan_assigned_at: datetime | None
     plan_assignment_ends_at: datetime | None
     assignment_source_type: Literal["manual", "subscription", "migration", "system"] | None

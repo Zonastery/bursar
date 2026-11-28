@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { loadConfigFile } from "../src/load-config-file.js";
 import { Decimal } from "decimal.js";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
@@ -25,7 +27,10 @@ const CONFIG: BursarConfigData = {
         },
       },
       batch: { measures: { jobs: { unit: "job" } }, dimensions: {} },
-      storage: { measures: { gigabytes: { unit: "gigabyte" } }, dimensions: {} },
+      storage: {
+        measures: { gigabytes: { unit: "gigabyte" } },
+        dimensions: {},
+      },
     },
     rate_cards: {
       standard: {
@@ -145,8 +150,14 @@ const CONFIG: BursarConfigData = {
         sort_order: 1,
         plan: "pro",
         billing_interval: { unit: "month", count: 1 },
-        price: { amount_minor: 2900, currency: "USD", tax_behavior: "exclusive" },
-        providers: { stripe: { type: "stripe_price", price_id: "price_private" } },
+        price: {
+          amount_minor: 2900,
+          currency: "USD",
+          tax_behavior: "exclusive",
+        },
+        providers: {
+          stripe: { type: "stripe_price", price_id: "price_private" },
+        },
       },
       credits_100: {
         type: "topup",
@@ -155,8 +166,14 @@ const CONFIG: BursarConfigData = {
         credits_per_unit: "100",
         quantity: { minimum: 1, maximum: 10, default: 1 },
         bucket: "general",
-        price: { amount_minor: 500, currency: "USD", tax_behavior: "inclusive" },
-        providers: { stripe: { type: "stripe_price", price_id: "topup_private" } },
+        price: {
+          amount_minor: 500,
+          currency: "USD",
+          tax_behavior: "inclusive",
+        },
+        providers: {
+          stripe: { type: "stripe_price", price_id: "topup_private" },
+        },
       },
     },
   },
@@ -174,6 +191,25 @@ describe.runIf(DATABASE_URL)("production pricing integration", () => {
   beforeEach(() => truncateBursarTables(pool));
   afterAll(() => pool.end());
 
+  it("runs the packaged starter through signup replay and one export", async () => {
+    const bursar = new Bursar({ creditStore: store });
+    const config = await loadConfigFile(
+      fileURLToPath(new URL("../../python/src/bursar/starter.yaml", import.meta.url)),
+    );
+    await bursar.catalog.publishAndActivate(config);
+    const signup = { accountId: ACCOUNT_ID, eventKey: "signup:starter" };
+    await bursar.accounts.onAccountCreated(signup);
+    expect((await bursar.credits.getBalance(ACCOUNT_ID)).balance.toString()).toBe("20");
+    await bursar.accounts.onAccountCreated(signup);
+    expect((await bursar.credits.getBalance(ACCOUNT_ID)).balance.toString()).toBe("20");
+    await bursar.credits.deduct(
+      ACCOUNT_ID,
+      { operation: "export_report", measures: {}, dimensions: {} },
+      { idempotencyKey: "export:starter" },
+    );
+    expect((await bursar.credits.getBalance(ACCOUNT_ID)).balance.toString()).toBe("18");
+  });
+
   it("onboards once and exposes a provider-secret-free sellable catalog", async () => {
     const bursar = new Bursar({ creditStore: store });
     await bursar.catalog.publishAndActivate(CONFIG, "production-catalog");
@@ -189,13 +225,20 @@ describe.runIf(DATABASE_URL)("production pricing integration", () => {
       eventKey: "signup:940",
       region: "US",
     });
+    const exactReplay = await bursar.accounts.onAccountCreated({
+      accountId: ACCOUNT_ID,
+      eventKey: "signup:940",
+      region: "US",
+      metadata: { referenceType: "signup" },
+    });
     const catalog = await bursar.catalog.publicView();
 
     expect(created).toMatchObject({ planKey: "pro", planAssigned: true });
     expect(created.grants).toHaveLength(1);
     expect(created.grants[0]).toMatchObject({ replayed: false, error: null });
     expect(replay).toMatchObject({ planKey: "pro", planAssigned: false });
-    expect(replay.grants[0]).toMatchObject({ replayed: true, error: null });
+    expect(replay.grants[0]).toMatchObject({ replayed: false, error: "idempotency_conflict" });
+    expect(exactReplay.grants[0]).toMatchObject({ replayed: true, error: null });
     expect((await bursar.credits.getBalance(ACCOUNT_ID)).balance.toString()).toBe("25");
     expect(catalog.plans[0]).toMatchObject({
       key: "pro",
@@ -246,7 +289,12 @@ describe.runIf(DATABASE_URL)("production pricing integration", () => {
         metrics: {
           operation: "completion",
           measures: { tokens: 1 },
-          dimensions: { region: "APAC", segment: "paid", seats: 20, cached: false },
+          dimensions: {
+            region: "APAC",
+            segment: "paid",
+            seats: 20,
+            cached: false,
+          },
         },
         expected: "4",
       },
@@ -254,11 +302,19 @@ describe.runIf(DATABASE_URL)("production pricing integration", () => {
         metrics: {
           operation: "completion",
           measures: { tokens: 1 },
-          dimensions: { region: "EU-WEST", segment: "paid", seats: 1, cached: false },
+          dimensions: {
+            region: "EU-WEST",
+            segment: "paid",
+            seats: 1,
+            cached: false,
+          },
         },
         expected: "3",
       },
-      { metrics: { operation: "batch", measures: { jobs: 15 } }, expected: "12.5" },
+      {
+        metrics: { operation: "batch", measures: { jobs: 15 } },
+        expected: "12.5",
+      },
       {
         metrics: { operation: "storage", measures: { gigabytes: 15 } },
         expected: "30",
@@ -273,7 +329,9 @@ describe.runIf(DATABASE_URL)("production pricing integration", () => {
     }
 
     const balance = await bursar.credits.getBalance(ACCOUNT_ID);
-    const usage = await bursar.credits.listUsageCharges(ACCOUNT_ID, { limit: 20 });
+    const usage = await bursar.credits.listUsageCharges(ACCOUNT_ID, {
+      limit: 20,
+    });
     expect(balance.balance.toString()).toBe("49.3");
     expect(usage.items).toHaveLength(scenarios.length);
     expect(Decimal.sum(...usage.items.map((item) => item.charged)).toString()).toBe("50.7");

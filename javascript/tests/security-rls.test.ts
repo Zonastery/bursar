@@ -76,7 +76,7 @@ describe.runIf(DATABASE_URL)("configuration catalog RLS", () => {
   beforeAll(async () => {
     await applyMigrations(pool);
     await truncateBursarTables(pool);
-    await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+    await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text, 'test')", [
       SECOND_TENANT_ID,
       "security-second",
       "Security second tenant",

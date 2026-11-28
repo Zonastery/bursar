@@ -319,6 +319,14 @@ BEGIN
           AND function_info.prosecdef
           AND function_info.proowner = current_user::regrole
           AND function_info.proname NOT IN (
+              'get_usage_backend_status',
+              'begin_usage_backend_cutover',
+              'abort_usage_backend_cutover',
+              'usage_cutover_projection',
+              'list_usage_cutover_postgres',
+              'import_usage_cutover_item',
+              'verify_usage_cutover_item',
+              'finish_usage_backend_cutover',
               'get_storage_settings',
               'configure_storage',
               'claim_outbox_events',
@@ -369,6 +377,7 @@ DO $$
 DECLARE
     v_function text;
     v_client_functions constant text[] := ARRAY[
+        'bursar.bind_tenant_context(uuid,text)',
         'bursar.publish_and_activate_catalog(integer,jsonb,text,boolean,jsonb)',
         'bursar.catalog_revision_by_number(bigint)',
         'bursar.list_catalog_revisions(integer)',
@@ -400,27 +409,30 @@ DECLARE
         'bursar.fail_billing_event(text,text,uuid,text)',
         'bursar.record_subscription_conflict(uuid,text,text,text,text,jsonb)',
         'bursar.pseudonymize_financial_subject(uuid)',
-        'bursar.claim_auto_recharge_attempt(uuid,text)',
+        'bursar.claim_auto_recharge_attempt(uuid,text,text,integer,text)',
         'bursar.advance_auto_recharge_attempt(uuid,bursar.recharge_attempt_status,text,text,text,jsonb)',
         'bursar.upsert_billing_customer(uuid,text,text,text)',
         'bursar.upsert_billing_subscription(uuid,text,text,text,uuid,bursar.billing_subscription_status,timestamptz,timestamptz,boolean,jsonb,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz)',
-        'bursar.upsert_billing_payment(uuid,text,text,bigint,bigint,text,text,bursar.billing_payment_status,timestamptz,text,jsonb)',
+        'bursar.upsert_billing_payment(uuid,text,text,bigint,bigint,text,text,bursar.billing_payment_status,timestamptz,text,jsonb,uuid)',
         'bursar.create_billing_credit_grant(uuid,uuid,uuid,numeric,integer,uuid)',
         'bursar.upsert_billing_refund(uuid,text,bigint,text,text,timestamptz,uuid,text,jsonb)',
-        'bursar.upsert_auto_recharge_profile(uuid,boolean,text,uuid,integer,numeric,integer,text,integer,text,text,boolean,text,boolean)',
+        'bursar.upsert_auto_recharge_profile(uuid,boolean,text,uuid,integer,numeric,integer,text,integer,text,text,boolean,text)',
+        'bursar.resume_auto_recharge_profile(uuid,text,uuid,integer,numeric)',
+        'bursar.get_auto_recharge_operational_window(uuid)',
         'bursar.upsert_billing_preferences(uuid,boolean,boolean,boolean,boolean,boolean)',
         'bursar.upsert_billing_invoice(uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz,jsonb,timestamptz)',
         'bursar.upsert_billing_dispute(text,text,uuid,text,text,jsonb,timestamptz)',
-        'bursar.create_checkout_intent(uuid,text,text,text,text,bytea,timestamptz,text,text,text)',
+        'bursar.create_checkout_intent(uuid,text,text,text,text,bytea,timestamptz,text,text,text,uuid,uuid)',
         'bursar.advance_checkout_intent(uuid,text,text,text)',
+        'bursar.check_usage_backend(text)',
         'bursar.set_subject_plan(uuid,text,timestamptz)',
         'bursar.unassign_plan(uuid,text)',
-        'bursar.reconcile_subscription_entitlement(uuid,uuid,uuid,bursar.billing_subscription_status,timestamptz,timestamptz,boolean,text,text)',
-        'bursar.expire_subscription_grace_period(uuid,uuid,timestamptz,timestamptz,text)',
+        'bursar.reconcile_subscription_entitlement(uuid,uuid,uuid,bursar.billing_subscription_status,timestamptz,timestamptz,boolean,text)',
+        'bursar.expire_subscription_grace_period(uuid,uuid,timestamptz,timestamptz)',
         'bursar.set_plan_revision_pin(uuid,boolean)',
         'bursar.start_plan_migration(uuid,uuid)',
         'bursar.migrate_plan_batch(uuid,integer)',
-        'bursar.open_subscription_change(uuid,uuid,timestamptz,text,text,text)',
+        'bursar.open_subscription_change(uuid,uuid,timestamptz,text,text,text,text)',
         'bursar.advance_subscription_change(bigint,text,text,text)',
         'bursar.apply_due_plan_assignment_changes(integer)',
         'bursar.get_credit_bucket_balances(uuid)',
@@ -445,12 +457,14 @@ DECLARE
         'bursar.get_auto_recharge_attempt(uuid)',
         'bursar.get_auto_recharge_attempt_by_provider(text,text)',
         'bursar.count_auto_recharge_attempts(uuid,timestamptz)',
-        'bursar.resolve_catalog_offer(text,text,text)',
+        'bursar.resolve_catalog_offer(text,text,text,uuid,uuid)',
         'bursar.resolve_active_catalog_offer(text)',
         'bursar.get_catalog_offer_context(uuid,uuid)',
         'bursar.resolve_catalog_topup(text,text,text)',
+        'bursar.resolve_purchase_catalog_topup(uuid,text,text,text,text,uuid,uuid)',
         'bursar.resolve_catalog_plan(text,text,text)',
         'bursar.get_checkout_intent(uuid,uuid)',
+        'bursar.find_checkout_intent(uuid,text,text)',
         'bursar.get_open_billing_subscription_change(text,text)',
         'bursar.get_billing_subscription_change(bigint)',
         'bursar.get_billing_credit_grant_by_payment(uuid)',
@@ -472,6 +486,8 @@ BEGIN
     END LOOP;
 END
 $$;
+
+GRANT EXECUTE ON FUNCTION bursar.bind_tenant_context(uuid, text) TO bursar_operator;
 
 RESET ROLE;
 
@@ -572,7 +588,8 @@ USING (id = (SELECT bursar.current_tenant_id()));
 CREATE FUNCTION bursar.create_tenant(
     p_tenant_id uuid,
     p_slug text,
-    p_display_name text DEFAULT NULL
+    p_display_name text,
+    p_provider_environment text
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -582,7 +599,8 @@ AS $$
 DECLARE
     v_id uuid;
 BEGIN
-    IF NOT bursar.is_bounded_text(p_slug, 100)
+    IF p_provider_environment IS NULL OR p_provider_environment NOT IN ('live', 'test', 'sandbox')
+       OR NOT bursar.is_bounded_text(p_slug, 100)
        OR lower(btrim(p_slug))
           !~ '^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$'
        OR (
@@ -594,26 +612,39 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    INSERT INTO bursar.tenants AS existing(id, slug, display_name)
+    INSERT INTO bursar.tenants AS existing(id, slug, display_name, provider_environment)
     VALUES (
         COALESCE(p_tenant_id, bursar.uuid_v7()),
         lower(btrim(p_slug)),
-        p_display_name
+        p_display_name,
+        p_provider_environment
     )
     ON CONFLICT (slug) DO UPDATE
     SET display_name = EXCLUDED.display_name
-    WHERE p_tenant_id IS NULL
-       OR existing.id = EXCLUDED.id
+    WHERE (p_tenant_id IS NULL OR existing.id = EXCLUDED.id)
+      AND existing.provider_environment = EXCLUDED.provider_environment
     RETURNING id INTO v_id;
 
     IF v_id IS NULL THEN
-        RAISE EXCEPTION 'tenant slug is already assigned to another id'
+        RAISE EXCEPTION 'tenant slug is already assigned to another id or provider environment'
             USING ERRCODE = '23505';
     END IF;
 
     RETURN v_id;
 END
 $$;
+
+-- Cross-tenant deployment workers resolve an active tenant without requiring
+-- any ambient tenant context, including before the host bootstraps a tenant.
+CREATE FUNCTION bursar.get_tenant_context_by_slug(p_slug text)
+RETURNS TABLE (tenant_id uuid, provider_environment text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+    SELECT id, tenants.provider_environment FROM bursar.tenants
+    WHERE slug = lower(btrim(p_slug)) AND status = 'active'
+$$;
+REVOKE ALL ON FUNCTION bursar.get_tenant_context_by_slug(text) FROM PUBLIC;
+COMMENT ON FUNCTION bursar.get_tenant_context_by_slug(text) IS
+'Resolves an active tenant and its provider environment for operator workers.';
 
 -- Apply one allow-listed tenant lifecycle status by exact tenant identity.
 CREATE FUNCTION bursar.set_tenant_status(
@@ -633,7 +664,7 @@ AS $$
 $$;
 
 -- Close both global tenant lifecycle functions before the operator grant below.
-REVOKE ALL ON FUNCTION bursar.create_tenant(uuid, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.create_tenant(uuid, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.set_tenant_status(uuid, text) FROM PUBLIC;
 
 -- Cross-tenant workers and deployment tooling use a distinct caller role. The
@@ -662,7 +693,7 @@ COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) IS
 COMMENT ON FUNCTION bursar.claim_outbox_events(uuid, integer, integer, text []) IS
 'Claims outbox work for one active tenant and returns the owning tenant UUID.';
 
-COMMENT ON FUNCTION bursar.create_tenant(uuid, text, text) IS
+COMMENT ON FUNCTION bursar.create_tenant(uuid, text, text, text) IS
 'Operator-only idempotent tenant provisioning RPC.';
 
 COMMENT ON FUNCTION bursar.set_tenant_status(uuid, text) IS

@@ -107,7 +107,10 @@ func (e *PricingEngine) Calculate(metrics UsageMetrics, options ...PricingOption
 		dimensions[name] = parsed
 	}
 	measures := make(map[string]Amount, len(operation.Measures))
-	for name := range operation.Measures {
+	for name, definition := range operation.Measures {
+		if _, exists := metrics.Measures[name]; !exists && definition.Required {
+			return CostBreakdown{}, newConfigError(fmt.Sprintf("operation '%s' requires measure '%s'", metrics.Operation, name), nil)
+		}
 		value := decimal.Zero
 		if input, exists := metrics.Measures[name]; exists {
 			value = input

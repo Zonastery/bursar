@@ -3,6 +3,7 @@ package bursar
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,15 @@ func commerceBoundaryRegistry(t *testing.T, providers map[string]*checkoutProvid
 		t.Fatal(err)
 	}
 	return registry
+}
+
+type commerceEnvironmentBoundaryStore struct {
+	CommerceStore
+	environment ProviderEnvironment
+}
+
+func (s commerceEnvironmentBoundaryStore) ProviderEnvironment() ProviderEnvironment {
+	return s.environment
 }
 
 func validCommerceCheckoutInput() CreateCheckoutInput {
@@ -56,6 +66,101 @@ func TestCommerceConstructionRejectsMissingOrUnsafeCapabilities(t *testing.T) {
 				t.Fatal("invalid commerce construction succeeded")
 			}
 		})
+	}
+}
+
+func TestCommerceConstructorRegistersExistingAutoRechargeService(t *testing.T) {
+	t.Parallel()
+	base := newCheckoutService(t, &checkoutStoreStub{config: checkoutTestConfig(t)}, map[string]*checkoutProviderStub{
+		"stripe": {name: "stripe"},
+	}, 0)
+	billing := &BillingService{AutoRecharge: &AutoRechargeService{}}
+	service, err := NewCommerceService(billing, base.catalog, base.credits, CommerceOptions{
+		Store: base.store, Providers: base.providers,
+	})
+	if err != nil {
+		t.Fatalf("NewCommerceService() error = %v", err)
+	}
+	if service.AutoRecharge == nil || service.autoRechargeCore != billing.AutoRecharge {
+		t.Fatal("existing auto-recharge service was not composed into commerce")
+	}
+	service.Close()
+}
+
+func TestCommerceRejectsStoreFromDifferentProviderEnvironment(t *testing.T) {
+	t.Parallel()
+	base := newCheckoutService(t, &checkoutStoreStub{config: checkoutTestConfig(t)}, map[string]*checkoutProviderStub{
+		"stripe": {name: "stripe"},
+	}, 0)
+	store := commerceEnvironmentBoundaryStore{CommerceStore: base.store, environment: ProviderEnvironmentLive}
+	_, err := NewCommerceService(&BillingService{}, base.catalog, base.credits, CommerceOptions{
+		Store: store, Providers: base.providers,
+	})
+	if err == nil || !strings.Contains(err.Error(), "store environments differ") {
+		t.Fatalf("NewCommerceService() with mismatched environment error = %v", err)
+	}
+}
+
+func TestClassifyPlanChangeRecognizesLateralOfferSwitch(t *testing.T) {
+	t.Parallel()
+	config := &BursarConfig{Plans: map[string]PlanDefinition{"basic": {Tier: 1}}}
+	got, err := classifyPlanChangeWithOffer(config, "basic", "month", 0, "basic", "month", 1, false)
+	if err != nil || got != PlanChangeLateral {
+		t.Fatalf("classifyPlanChangeWithOffer() = %q, %v; want lateral", got, err)
+	}
+}
+
+func TestClassifyPlanChangeRejectsUnknownCadenceAndMissingPlans(t *testing.T) {
+	t.Parallel()
+	config := &BursarConfig{Plans: map[string]PlanDefinition{
+		"basic": {Tier: 1}, "pro": {Tier: 2}, "same-tier": {Tier: 1},
+	}}
+	tests := []struct {
+		name, currentPlan, currentInterval, targetPlan, targetInterval string
+		want                                                           PlanChangeClassification
+		wantErr                                                        bool
+	}{
+		{name: "unknown current cadence", currentPlan: "basic", currentInterval: "quarter", targetPlan: "pro", targetInterval: "month", wantErr: true},
+		{name: "missing current plan", currentPlan: "missing", currentInterval: "month", targetPlan: "pro", targetInterval: "month", wantErr: true},
+		{name: "missing target plan", currentPlan: "basic", currentInterval: "month", targetPlan: "missing", targetInterval: "month", wantErr: true},
+		{name: "upgrade", currentPlan: "basic", currentInterval: "month", targetPlan: "pro", targetInterval: "month", want: PlanChangeUpgrade},
+		{name: "downgrade", currentPlan: "pro", currentInterval: "month", targetPlan: "basic", targetInterval: "month", want: PlanChangeDowngrade},
+		{name: "same tier", currentPlan: "basic", currentInterval: "month", targetPlan: "same-tier", targetInterval: "month", want: PlanChangeLateral},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := classifyPlanChange(config, test.currentPlan, test.currentInterval, test.targetPlan, test.targetInterval)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("invalid plan change was accepted")
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("classifyPlanChange() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckoutQuantityEnforcesOfferBounds(t *testing.T) {
+	t.Parallel()
+	offer := CommerceOffer{
+		Type:     "credit_pack",
+		Quantity: &OfferQuantity{Minimum: 2, Maximum: 5},
+	}
+
+	if _, err := checkoutQuantity(offer, int64Pointer(1)); err == nil {
+		t.Fatal("checkout quantity below the offer minimum was accepted")
+	}
+	if _, err := checkoutQuantity(CommerceOffer{Type: "credit_pack"}, int64Pointer(0)); err == nil {
+		t.Fatal("non-positive checkout quantity was accepted")
+	}
+	if got, err := checkoutQuantity(offer, int64Pointer(2)); err != nil || got != 2 {
+		t.Fatalf("checkoutQuantity() at the minimum = %d, %v; want 2, nil", got, err)
+	}
+	if _, err := checkoutQuantity(offer, int64Pointer(6)); err == nil {
+		t.Fatal("checkout quantity above the offer maximum was accepted")
 	}
 }
 

@@ -35,6 +35,11 @@ export default defineConfig({
       exclude: [
         "src/index.ts",
         "src/node.ts",
+        // The browser entrypoint is only a public re-export, and the CLI is
+        // exercised as a packaged child process by cli-package.test.ts, which
+        // Vitest's in-process coverage cannot instrument.
+        "src/browser.ts",
+        "src/cli.ts",
         "src/metrics.ts",
         // Vitest 5 uses picomatch matching, so directory exclusions need a glob.
         "src/providers/**",

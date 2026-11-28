@@ -253,6 +253,7 @@ func TestPostgresCheckoutTopupRefundFinancialInvariants(t *testing.T) {
 	provider := &financialProvider{name: "alpha"}
 	sdk, _ := newFinancialSDK(t, ctx, config, provider)
 	accountID := uuid.NewString()
+	actorID := uuid.NewString()
 	runID := uuid.NewString()
 	checkoutKey := "go-financial:" + runID + ":checkout"
 	paymentID := "go-financial:" + runID + ":payment"
@@ -262,7 +263,7 @@ func TestPostgresCheckoutTopupRefundFinancialInvariants(t *testing.T) {
 	}
 
 	checkout, err := sdk.Commerce.CreateCheckout(ctx, CreateCheckoutInput{
-		SubjectID:      accountID,
+		SubjectID:      actorID,
 		AccountID:      accountID,
 		OfferKey:       "credit_pack",
 		Type:           "credit_pack",
@@ -277,8 +278,11 @@ func TestPostgresCheckoutTopupRefundFinancialInvariants(t *testing.T) {
 	if checkout.Intent.ID == "" || checkout.Session.ID == "" || len(provider.checkoutCalls) != 1 {
 		t.Fatalf("checkout = %+v, calls = %d", checkout, len(provider.checkoutCalls))
 	}
-	if checkout.Session.URL != "https://checkout.example/"+checkoutKey {
-		t.Fatalf("checkout URL = %q", checkout.Session.URL)
+	providerKey := "bursar:checkout:" + checkout.Intent.ID
+	if checkout.Session.URL != "https://checkout.example/"+providerKey ||
+		checkout.Session.ID != "session-"+providerKey ||
+		provider.checkoutCalls[0].IdempotencyKey != providerKey {
+		t.Fatalf("checkout provider identity = %+v, request = %+v", checkout.Session, provider.checkoutCalls[0])
 	}
 	if checkout.Session.CustomerID != "cus-"+accountID {
 		t.Fatalf("provider customer ID = %q", checkout.Session.CustomerID)
@@ -316,13 +320,13 @@ func TestPostgresCheckoutTopupRefundFinancialInvariants(t *testing.T) {
 	if !balance.Balance.Equal(MustAmount("2469.135782")) {
 		t.Fatalf("top-up balance = %s, want 2469.135782", balance.Balance)
 	}
-	status, err := sdk.Commerce.GetCheckoutStatus(ctx, checkout.Intent.ID, accountID)
+	status, err := sdk.Commerce.GetCheckoutStatus(ctx, checkout.Intent.ID, actorID)
 	if err != nil || status.Status != CheckoutStatusSucceeded {
 		t.Fatalf("checkout status = %+v, error = %v", status, err)
 	}
 
 	_, err = sdk.Commerce.CreateCheckout(ctx, CreateCheckoutInput{
-		SubjectID:      accountID,
+		SubjectID:      actorID,
 		AccountID:      accountID,
 		OfferKey:       "credit_pack",
 		Type:           "credit_pack",
@@ -746,4 +750,117 @@ func seedFinancialOutboxEvent(t *testing.T, ctx context.Context, config postgres
 		t.Fatalf("seed outbox event: %v", err)
 	}
 	return strconv.FormatInt(eventID, 10)
+}
+
+func TestPostgresCheckoutSubscriptionPinsFirstPayment(t *testing.T) {
+	ctx, cancel, config := financialContext(t)
+	defer cancel()
+	provider := &financialProvider{name: "alpha"}
+	sdk, store := newFinancialSDK(t, ctx, config, provider)
+	accountID, actorID, runID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for _, invalid := range []CheckoutIntentCreate{
+		{SubjectID: actorID, AccountID: "invalid-account", Provider: "alpha", CheckoutKind: "subscription", ProductKey: "pro_month", Quantity: 1, IdempotencyKey: "invalid-account-" + runID},
+		{SubjectID: actorID, AccountID: accountID, Provider: "alpha", CheckoutKind: "subscription", ProductKey: "pro_month", Quantity: 1, IdempotencyKey: "invalid-revision-" + runID, ExpectedRevisionID: "invalid-revision"},
+	} {
+		if _, err := store.CreateOrGetCheckoutIntent(ctx, invalid); err == nil {
+			t.Fatal("invalid checkout identifiers accepted")
+		}
+	}
+	checkout, err := sdk.Commerce.CreateCheckout(ctx, CreateCheckoutInput{
+		SubjectID: actorID, AccountID: accountID, OfferKey: "pro_month", Type: "subscription",
+		SuccessURL: "https://app.example/success/{intentId}", CancelURL: "https://app.example/cancel/{intentId}",
+		IdempotencyKey: "pinned-subscription-" + runID,
+	})
+	if err != nil {
+		t.Fatalf("create checkout: %v", err)
+	}
+	changed := financialCatalogConfig(t)
+	delete(changed["commerce"].(map[string]any)["offers"].(map[string]any), "pro_month")
+	if _, err := sdk.Catalog.PublishAndActivate(ctx, changed, "retire-checkout-offer-"+runID, newAssignmentsRollout(changed)); err != nil {
+		t.Fatalf("retire checkout offer: %v", err)
+	}
+	base := BillingEvent{Provider: "alpha", Type: BillingEventPaymentSucceeded, OccurredAt: time.Now().UTC(), AccountID: accountID,
+		Metadata:     map[string]any{"checkout_intent_id": checkout.Intent.ID},
+		Payment:      &BillingPayment{ProviderPaymentID: "payment-" + runID, AmountMinor: 2000, Currency: "USD", Purpose: "subscription", Status: "succeeded"},
+		Subscription: &BillingSubscription{ProviderSubscriptionID: "sub-" + runID, Status: "active", Refs: &ProviderRef{PriceID: "alpha-pro-month"}},
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*BillingEvent)
+	}{
+		{"invalid intent type", func(e *BillingEvent) { e.Metadata = map[string]any{"checkout_intent_id": 7} }},
+		{"invalid intent uuid", func(e *BillingEvent) { e.Metadata = map[string]any{"checkout_intent_id": "bad-id"} }},
+		{"wrong account", func(e *BillingEvent) { e.AccountID = uuid.NewString() }},
+		{"missing refs", func(e *BillingEvent) { e.Subscription.Refs = nil }},
+		{"wrong price", func(e *BillingEvent) { e.Subscription.Refs = &ProviderRef{PriceID: "wrong-price"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := base
+			subscription := *base.Subscription
+			event.Subscription = &subscription
+			event.EventID = "reject-" + tc.name + runID
+			tc.edit(&event)
+			if _, err := store.ProcessBillingEvent(ctx, event, event.AccountID); err == nil {
+				t.Fatalf("%s was accepted", tc.name)
+			}
+		})
+	}
+	base.EventID = "payment-first-" + runID
+	result, err := store.ProcessBillingEvent(ctx, base, accountID)
+	if err != nil || !result.Handled {
+		t.Fatalf("payment first = %+v, %v", result, err)
+	}
+	stored, err := store.GetBillingSubscriptionByProvider(ctx, "alpha", base.Subscription.ProviderSubscriptionID)
+	if err != nil || stored == nil || stored.OfferKey != "pro_month" || stored.PlanKey != "pro" {
+		t.Fatalf("pinned subscription = %+v, %v", stored, err)
+	}
+}
+
+func TestPostgresCheckoutIntentReplayAndTransitions(t *testing.T) {
+	ctx, cancel, config := financialContext(t)
+	defer cancel()
+	_, store := newFinancialSDK(t, ctx, config, &financialProvider{name: "alpha"})
+	actor, account, key := uuid.NewString(), uuid.NewString(), "intent-replay-"+uuid.NewString()
+	input := CheckoutIntentCreate{SubjectID: actor, AccountID: account, Provider: "alpha", CheckoutKind: "credit_topup", ProductKey: "credit_pack", Quantity: 1, IdempotencyKey: key}
+	intent, err := store.CreateOrGetCheckoutIntent(ctx, input)
+	if err != nil {
+		t.Fatalf("create intent: %v", err)
+	}
+	replay, err := store.CreateOrGetCheckoutIntent(ctx, input)
+	if err != nil || replay.ID != intent.ID {
+		t.Fatalf("replay = %+v, %v", replay, err)
+	}
+	found, catalog, err := store.FindCheckoutIntent(ctx, actor, key, "alpha")
+	if err != nil || found == nil || found.ID != intent.ID || catalog == nil {
+		t.Fatalf("find = %+v, %v, %v", found, catalog, err)
+	}
+	otherProvider, _, err := store.FindCheckoutIntent(ctx, actor, key, "other-provider")
+	if err != nil || otherProvider == nil || otherProvider.ID != intent.ID {
+		t.Fatalf("wrong-provider replay winner = %+v, %v", otherProvider, err)
+	}
+	missing, _, err := store.FindCheckoutIntent(ctx, actor, key+"-missing", "alpha")
+	if err != nil || missing != nil {
+		t.Fatalf("missing checkout = %+v, %v", missing, err)
+	}
+	if _, _, err := store.FindCheckoutIntent(ctx, "bad-actor", key, "alpha"); err == nil {
+		t.Fatal("invalid actor accepted")
+	}
+	if err := store.UpdateCheckoutIntent(ctx, intent.ID, account, CheckoutIntentUpdate{Status: "completed"}); err == nil {
+		t.Fatal("billed account changed actor-owned checkout")
+	}
+	if err := store.UpdateCheckoutIntent(ctx, intent.ID, actor, CheckoutIntentUpdate{Status: "completed"}); err != nil {
+		t.Fatalf("complete intent: %v", err)
+	}
+	if err := store.UpdateCheckoutIntent(ctx, intent.ID, actor, CheckoutIntentUpdate{Status: "open"}); err == nil {
+		t.Fatal("terminal checkout reopened")
+	}
+	input.Quantity = 2
+	if _, err := store.CreateOrGetCheckoutIntent(ctx, input); err == nil {
+		t.Fatal("different checkout request replayed")
+	}
+	input.IdempotencyKey = key + "-missing-product"
+	input.ProductKey = "missing-product"
+	if _, err := store.CreateOrGetCheckoutIntent(ctx, input); err == nil {
+		t.Fatal("missing catalog product accepted")
+	}
 }

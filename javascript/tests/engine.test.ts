@@ -11,7 +11,7 @@ function mutableConfig(): BursarConfigData {
 }
 
 function completionPricing(config: BursarConfigData) {
-  return config.pricing!.rate_cards.standard!.operations!.completion!;
+  return config.pricing!.rate_cards!.standard!.operations!.completion!;
 }
 
 describe("typed pricing engine", () => {
@@ -21,6 +21,73 @@ describe("typed pricing engine", () => {
     expect(schema.version).toBe(1);
     expect(schema).toHaveProperty("pricing.rate_cards.standard");
     expect(schema).not.toHaveProperty("pricing.rateCards");
+  });
+
+  it("preserves sub-micro rates through canonical serialization", () => {
+    const config = mutableConfig();
+    completionPricing(config).rules = [];
+    completionPricing(config).unmatched = {
+      action: "charge",
+      charge: { type: "per_unit", measure: "input_tokens", rate: "0.0000004" },
+    };
+    const engine = PricingEngine.fromDict(config);
+    const reloaded = PricingEngine.fromDict(engine.pricingSchema);
+    expect(
+      reloaded
+        .calculate({
+          operation: "completion",
+          measures: { input_tokens: 1000000 },
+          dimensions: { model: "other" },
+        })
+        .total.toString(),
+    ).toBe("0.4");
+  });
+
+  it("requires explicitly required measures while keeping optional measures sparse", () => {
+    const config = mutableConfig();
+    config.pricing!.operations.completion!.measures!.input_tokens!.required = true;
+    const engine = PricingEngine.fromDict(config);
+    expect(() =>
+      engine.calculate({
+        operation: "completion",
+        dimensions: { model: "other" },
+      }),
+    ).toThrow(/requires usage measure 'input_tokens'/);
+    expect(
+      engine
+        .calculate({
+          operation: "completion",
+          measures: { input_tokens: 0 },
+          dimensions: { model: "other" },
+        })
+        .total.isZero(),
+    ).toBe(true);
+  });
+
+  it("rejects invalid decimal charge rates and unit sizes", () => {
+    const config = mutableConfig();
+    completionPricing(config).unmatched = {
+      action: "charge",
+      charge: {
+        type: "per_unit",
+        measure: "input_tokens",
+        rate: "-1",
+        unit_size: "1",
+      },
+    };
+    expect(() => PricingEngine.fromDict(config)).toThrow(/unmatched.charge.rate.*non-negative/);
+    completionPricing(config).unmatched = {
+      action: "charge",
+      charge: {
+        type: "per_unit",
+        measure: "input_tokens",
+        rate: "0",
+        unit_size: "0",
+      },
+    };
+    expect(() => PricingEngine.fromDict(config)).toThrow(
+      /unmatched.charge.unit_size.*greater than zero/,
+    );
   });
 
   it("uses a matching typed rule", () => {
@@ -163,7 +230,7 @@ describe("typed pricing engine", () => {
 
   it("requires a rate card when more than one is configured", () => {
     const config = mutableConfig();
-    config.pricing!.rate_cards.enterprise = {
+    config.pricing!.rate_cards!.enterprise = {
       extends: "standard",
       operations: {},
     };
@@ -200,7 +267,7 @@ describe("typed pricing engine", () => {
 
   it("fails when a rate card lacks the operation and cannot extend", () => {
     const config = mutableConfig();
-    config.pricing!.rate_cards.isolated = { operations: {} };
+    config.pricing!.rate_cards!.isolated = { operations: {} };
     const pricing = PricingEngine.fromDict(config);
     expect(() =>
       pricing.calculate(
@@ -286,7 +353,10 @@ describe("typed pricing engine", () => {
       },
       {
         when: { model: { op: "eq", value: "expression" } },
-        charge: { type: "expression", formula: "input_tokens * 2 + output_tokens" },
+        charge: {
+          type: "expression",
+          formula: "input_tokens * 2 + output_tokens",
+        },
       },
       {
         when: { model: { op: "eq", value: "sum" } },

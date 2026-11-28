@@ -23,7 +23,7 @@ type BillingLifecycleProcessor interface {
 }
 
 type configuredBillingLifecycleProcessor interface {
-	processBillingEvent(context.Context, BillingEvent, string, BillingProvisioningPort, bool, time.Duration, string) (BillingEventResult, error)
+	processBillingEvent(context.Context, BillingEvent, string, BillingProvisioningPort, bool, time.Duration) (BillingEventResult, error)
 }
 
 // IsBillingLifecycleEventType reports whether eventType belongs to Bursar's

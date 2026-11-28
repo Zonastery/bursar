@@ -143,6 +143,8 @@ def _subscription_refs(data: dict[str, Any], metadata: dict[str, str]) -> Provid
     product_id = _product_id(data)
     if product_id:
         return ProviderRef(product_id=product_id)
+    if "checkout_intent_id" in metadata:
+        return None
     lookup_key = metadata.get("plan_slug", "").strip()
     return ProviderRef(lookup_key=lookup_key) if lookup_key else None
 
@@ -553,6 +555,7 @@ async def _handle_payment_succeeded(
     if subscription_id:
         kw["subscription"] = BillingSubscriptionInfo(
             provider_subscription_id=subscription_id,
+            refs=refs,
             status=(
                 BillingSubscriptionStatus.active
                 if data.get("subscription_status") is None

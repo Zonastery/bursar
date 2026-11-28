@@ -2,11 +2,12 @@
  * DB-backed storage repository integration tests for the JavaScript SDK.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
 import { Decimal } from "decimal.js";
 import pg from "pg";
 import { z } from "zod";
 import { PostgresClient } from "../src/shared/postgres-client.js";
+import { utcTimestamp } from "../src/shared/timestamp.js";
 import type { JsonObject } from "../src/shared/json.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
 import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
@@ -16,16 +17,29 @@ import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers
 const DATABASE_URL = inject("DATABASE_URL");
 const OTHER_TENANT_ID = "00000000-0000-0000-0000-000000000002";
 
+async function selectClickhouse(pool: pg.Pool): Promise<void> {
+  await pool.query("SELECT bursar.begin_usage_backend_cutover($1::uuid, 'clickhouse', now())", [
+    TEST_TENANT_ID,
+  ]);
+  await pool.query("SELECT bursar.finish_usage_backend_cutover($1::uuid, 'clickhouse', 0)", [
+    TEST_TENANT_ID,
+  ]);
+}
+
 async function seedUsageOnly(
   pool: pg.Pool,
   idempotencyKey = "storage-repo-usage-1",
   traceId = "trace-1",
+  clickhouse = false,
+  precise = false,
 ): Promise<{ chargeId: string; subjectId: string }> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
     await client.query("SELECT set_config('bursar.provider_environment', 'test', true)");
+    if (clickhouse)
+      await client.query("SELECT set_config('bursar.usage_backend', 'clickhouse', true)");
     const account = await client.query(`
       WITH subject AS (
         INSERT INTO bursar.subjects DEFAULT VALUES
@@ -41,19 +55,26 @@ async function seedUsageOnly(
     const usage = await client.query(
       `
       SELECT charge_id, error_code
-      FROM bursar.charge_usage(
+      FROM bursar.${precise ? "record_usage" : "charge_usage"}(
         $1::uuid,
         'completion',
         0,
         $2,
         p_model => 'small-model',
         p_region => 'in',
-        p_measures => '{"input_tokens":12}'::jsonb,
+        p_measures => $4::jsonb,
         p_dimensions => '{"tenant_tier":"starter"}'::jsonb,
-        p_metadata => jsonb_build_object('trace_id', $3::text)
+        p_metadata => jsonb_build_object('trace_id', $3::text) ||
+          CASE WHEN $5::boolean THEN '{"nested":{"fraction":0.123456789012345678901234567890123456789}}'::jsonb ELSE '{}'::jsonb END
       )
       `,
-      [subjectId, idempotencyKey, traceId],
+      [
+        subjectId,
+        idempotencyKey,
+        traceId,
+        precise ? '{"input_tokens":99999999999999.123456}' : '{"input_tokens":12}',
+        precise,
+      ],
     );
     expect(usage.rows[0]?.error_code).toBeNull();
 
@@ -67,11 +88,14 @@ async function seedUsageOnly(
   }
 }
 
-async function seedStorageRows(pool: pg.Pool): Promise<{
+async function seedStorageRows(
+  pool: pg.Pool,
+  clickhouse = false,
+): Promise<{
   chargeId: string;
   billingEventId: string;
 }> {
-  const { chargeId, subjectId } = await seedUsageOnly(pool);
+  const { chargeId, subjectId } = await seedUsageOnly(pool, undefined, undefined, clickhouse);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -196,7 +220,7 @@ async function enqueueOutboxReplay(pool: pg.Pool, replay: OutboxReplay): Promise
 }
 
 async function seedDeadLetters(pool: pg.Pool): Promise<string[]> {
-  await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+  await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text, 'test')", [
     OTHER_TENANT_ID,
     "outbox-other",
     "Outbox other tenant",
@@ -383,7 +407,8 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
   });
 
   it("flushes usage and billing outbox events through runtime handlers", async () => {
-    const { billingEventId } = await seedStorageRows(pool);
+    await selectClickhouse(pool);
+    const { billingEventId } = await seedStorageRows(pool, true);
     const usageWrites: Array<{ event: UsageChargeExport; outboxEventId: string }> = [];
     const archivedBillingEvents: BillingEventPayloadExport[] = [];
     let initialized = false;
@@ -453,23 +478,55 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
     );
   });
 
-  it("coalesces usage exports through the optional batch sink", async () => {
-    await seedUsageOnly(pool);
-    await seedUsageOnly(pool, "storage-repo-usage-2", "trace-2");
-    const usageRows = await pool.query<{ aggregate_id: string }>(
-      `SELECT aggregate_id::text
-       FROM bursar.event_outbox
-       WHERE topic = 'usage.charge_recorded'
-       ORDER BY id`,
+  it("projects exact JSON numerics and microsecond timestamps from the durable outbox", async () => {
+    await selectClickhouse(pool);
+    const { chargeId } = await seedUsageOnly(pool, "precision", "trace", true, true);
+    const expected = await pool.query(
+      "SELECT event_at::text, created_at::text FROM bursar.credit_usage_charges WHERE id = $1::uuid",
+      [chargeId],
     );
-    for (const row of usageRows.rows) {
-      const usage = await repository.getUsageCharge(row.aggregate_id);
-      await pool.query(
-        `UPDATE bursar.event_outbox SET payload = $1::jsonb
-         WHERE aggregate_id = $2::uuid AND topic = 'usage.charge_recorded'`,
-        [JSON.stringify(usageOutboxPayload(usage!)), row.aggregate_id],
+    const insert = vi.fn().mockResolvedValue(undefined);
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      operatorPostgres: operatorPool,
+      tenantId: TEST_TENANT_ID,
+      providerEnvironment: "test",
+      clickhouse: {
+        tenantId: TEST_TENANT_ID,
+        client: {
+          command: vi.fn(),
+          insert,
+          query: vi.fn(),
+        },
+      },
+      outbox: { batchSize: 10, pollIntervalMs: 60_000 },
+    });
+    try {
+      await expect(runtime.flush()).resolves.toMatchObject({ delivered: 1, failed: 0 });
+      const row = insert.mock.calls[0]![0].values[0];
+      expect(row.measures).toContain("99999999999999.123456");
+      expect(row.metadata).toContain("0.123456789012345678901234567890123456789");
+      expect(row.event_at).toBe(
+        utcTimestamp(expected.rows[0].event_at)
+          .replace("T", " ")
+          .replace("Z", "")
+          .replace(/(\.\d{3})$/, "$1000"),
       );
+      expect(row.created_at).toBe(
+        utcTimestamp(expected.rows[0].created_at)
+          .replace("T", " ")
+          .replace("Z", "")
+          .replace(/(\.\d{3})$/, "$1000"),
+      );
+    } finally {
+      await runtime.close();
     }
+  });
+
+  it("coalesces usage exports through the optional batch sink", async () => {
+    await selectClickhouse(pool);
+    await seedUsageOnly(pool, undefined, undefined, true);
+    await seedUsageOnly(pool, "storage-repo-usage-2", "trace-2", true);
     const batches: (readonly [UsageChargeExport, string])[][] = [];
     const clickhouse = {
       initialize: async () => {},
@@ -516,7 +573,8 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
   });
 
   it("records a failed batch export while keeping the runtime closable", async () => {
-    await seedUsageOnly(pool);
+    await selectClickhouse(pool);
+    await seedUsageOnly(pool, undefined, undefined, true);
     const clickhouse = {
       initialize: async () => {},
       writeUsage: async () => {},
@@ -870,6 +928,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
   });
 
   it("records manual and background diagnostics when the operator database is unavailable", async () => {
+    await selectClickhouse(pool);
     const failedOperatorPool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     const clickhouse = {
       initialize: async () => {},
@@ -1037,7 +1096,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
   });
 
   it("closes cleanly when tenant verification fails during startup", async () => {
-    await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+    await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text, 'test')", [
       OTHER_TENANT_ID,
       "missing-tenant",
       "Missing tenant",

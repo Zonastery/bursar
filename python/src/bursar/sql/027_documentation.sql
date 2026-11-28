@@ -204,11 +204,19 @@ IS
 'Read the immutable catalog revision and rate-card context captured by a '
 'subject-owned lease for deterministic settlement pricing.';
 COMMENT ON FUNCTION bursar.upsert_auto_recharge_profile(
-    uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text, boolean, text, boolean
+    uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text, boolean, text
 )
 IS
 'Enable or revise auto-recharge against active catalog policy, or disable an '
 'existing profile without catalog lookup.';
+COMMENT ON FUNCTION bursar.resume_auto_recharge_profile(uuid, text, uuid, integer, numeric)
+IS
+'Rearm an existing auto-recharge profile only when its saved preferences and '
+'commercial terms remain eligible under the active catalog.';
+COMMENT ON FUNCTION bursar.get_auto_recharge_operational_window(uuid)
+IS
+'Read the active auto-recharge policy limit, window, and counted attempts '
+'using the same database calculation as charge admission.';
 COMMENT ON FUNCTION bursar.record_subscription_conflict(uuid, text, text, text, text, jsonb)
 IS
 'Idempotently record a duplicate provider-subscription admission conflict '
@@ -241,7 +249,7 @@ COMMENT ON FUNCTION bursar.list_billing_invoices(
     integer
 )
 IS 'List one bounded keyset page of invoices for a subject and provider environment.';
-COMMENT ON FUNCTION bursar.resolve_catalog_offer(text, text, text)
+COMMENT ON FUNCTION bursar.resolve_catalog_offer(text, text, text, uuid, uuid)
 IS 'Resolve an active provider reference to its catalog subscription offer.';
 COMMENT ON FUNCTION bursar.resolve_catalog_topup(text, text, text)
 IS 'Resolve an active provider reference to its catalog credit top-up.';
@@ -257,7 +265,9 @@ COMMENT ON FUNCTION bursar.create_checkout_intent(
     timestamptz,
     text,
     text,
-    text
+    text,
+    uuid,
+    uuid
 )
 IS
 'Create or replay one checkout intent bound to the caller operation key and '
@@ -296,7 +306,7 @@ COMMENT ON FUNCTION bursar.grant_billing_credit(uuid, text) IS
 COMMENT ON FUNCTION bursar.post_billing_refund(uuid, uuid, bigint, text) IS
 'Claw back one bounded billing grant amount with refund-scoped idempotency and explicit debt for consumed credits.';
 
-COMMENT ON FUNCTION bursar.claim_auto_recharge_attempt(uuid, text) IS
+COMMENT ON FUNCTION bursar.claim_auto_recharge_attempt(uuid, text, text, integer, text) IS
 'Claim or replay one subject recharge attempt under catalog, balance, cooldown, and window limits.';
 COMMENT ON FUNCTION bursar.advance_auto_recharge_attempt(
     uuid, bursar.recharge_attempt_status, text, text, text, jsonb
@@ -317,7 +327,7 @@ COMMENT ON FUNCTION bursar.list_expired_grace_subscriptions(timestamptz, integer
 'List one bounded tenant batch across provider environments whose entitlement grace deadline elapsed.';
 COMMENT ON FUNCTION bursar.upsert_billing_payment(
     uuid, text, text, bigint, bigint, text, text,
-    bursar.billing_payment_status, timestamptz, text, jsonb
+    bursar.billing_payment_status, timestamptz, text, jsonb, uuid
 ) IS
 'Reconcile provider payment truth with immutable subject, currency, purpose, and environment identity.';
 
@@ -407,7 +417,7 @@ COMMENT ON FUNCTION bursar.get_credit_lease(uuid, uuid) IS
 COMMENT ON FUNCTION bursar.resolve_active_plan(text) IS
 'Resolve one plan reference from the current tenant active catalog revision.';
 COMMENT ON FUNCTION bursar.get_subject_plan(uuid) IS
-'Read the effective plan assignment, revision pin, and transition context for one subject.';
+'Read the effective plan assignment, operation access, revision pin, and transition context for one subject.';
 COMMENT ON FUNCTION bursar.get_subject_allowance(uuid, timestamptz) IS
 'Read normalized allowance consumption and reservation state for one subject window.';
 
@@ -433,16 +443,16 @@ COMMENT ON FUNCTION bursar.unassign_plan(uuid, text) IS
 COMMENT ON FUNCTION bursar.unassign_plan_if_source(uuid, text, uuid, text) IS
 'End a subject plan assignment only while its durable source identity still matches.';
 COMMENT ON FUNCTION bursar.replace_subscription_entitlement_if_source(
-    uuid, uuid, text, text
+    uuid, uuid, text
 ) IS
 'Atomically replace only the plan assignment owned by one exact subscription source.';
 COMMENT ON FUNCTION bursar.reconcile_subscription_entitlement(
     uuid, uuid, uuid, bursar.billing_subscription_status,
-    timestamptz, timestamptz, boolean, text, text
+    timestamptz, timestamptz, boolean, text
 ) IS
 'Fence one exact provider subscription version and atomically apply, preserve, or revoke its entitlement.';
 COMMENT ON FUNCTION bursar.expire_subscription_grace_period(
-    uuid, uuid, timestamptz, timestamptz, text
+    uuid, uuid, timestamptz, timestamptz
 ) IS
 'Atomically commit one expected grace marker and replace its source-owned assignment when still matched.';
 COMMENT ON FUNCTION bursar.set_plan_revision_pin(uuid, boolean) IS
@@ -460,8 +470,23 @@ COMMENT ON FUNCTION bursar.start_plan_migration(uuid, uuid) IS
 COMMENT ON FUNCTION bursar.migrate_plan_batch(uuid, integer) IS
 'Advance one plan migration through a bounded account batch and stable cursor.';
 COMMENT ON FUNCTION bursar.open_subscription_change(
-    uuid, uuid, timestamptz, text, text, text
+    uuid, uuid, timestamptz, text, text, text, text
 ) IS
-'Create or replay an immutable offer transition for a tenant-scoped subscription UUID.';
+'Create or replay an immutable tenant-scoped offer transition. New transitions enforce target availability
+against the trusted region; replays require the same normalized region.';
 COMMENT ON FUNCTION bursar.advance_subscription_change(bigint, text, text, text) IS
 'Advance an open transition through a legal outcome and store the latest non-null provider operation ID.';
+
+COMMENT ON FUNCTION bursar.find_checkout_intent(uuid, text, text) IS
+'Recover checkout intent and its immutable catalog document by operation key.';
+COMMENT ON FUNCTION bursar.resolve_purchase_catalog_topup(uuid, text, text, text, text, uuid, uuid) IS
+'Resolve payment top-up terms from the bound payment, checkout, or active catalog.';
+
+COMMENT ON FUNCTION bursar.check_usage_backend(text) IS
+'Checks tenant usage routing and holds a shared lock through the transaction.';
+
+COMMENT ON TABLE bursar.usage_backend_cutover_items IS
+'Temporary verified usage identities for a tenant backend cutover.';
+
+COMMENT ON TABLE bursar.usage_rollup_contributions IS
+'Compact deduplication evidence for retained daily usage rollups.';

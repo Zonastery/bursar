@@ -70,6 +70,13 @@ describe.runIf(DATABASE_URL)("PostgreSQL-owned runtime integration", () => {
         topUser: "",
       }),
     };
+    await adminPool.query(
+      "SELECT bursar.begin_usage_backend_cutover($1::uuid,'clickhouse',now())",
+      [TEST_TENANT_ID],
+    );
+    await adminPool.query("SELECT bursar.finish_usage_backend_cutover($1::uuid,'clickhouse',0)", [
+      TEST_TENANT_ID,
+    ]);
     const runtime = await createBursarRuntime({
       postgres: `${DATABASE_URL!}?application_name=bursar-owned-runtime`,
       operatorPostgres: `${DATABASE_URL!}?application_name=bursar-owned-operator`,

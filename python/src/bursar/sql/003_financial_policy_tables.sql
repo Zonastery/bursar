@@ -4,6 +4,9 @@
 -- Depends on: 002_schema_types_tables.sql.
 -- Security: Makes every financial fact tenant-owned and preserves exact audit lineage.
 
+-- Tenant-qualified foreign keys are declared explicitly in 005 after all
+-- participating tables exist, including cyclic and forward references.
+
 -- Contents
 --   1. Immutable ledger and lot provenance
 --   2. Usage payload contracts and charges
@@ -22,13 +25,13 @@ CREATE TABLE bursar.credit_ledger_entries (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     kind bursar.ledger_entry_kind NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount <> 0),
     balance_after bursar.credit_numeric NOT NULL,
-    reference_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
-    catalog_revision_id uuid REFERENCES bursar.catalog_revisions (id),
+    reference_entry_id uuid,
+    catalog_revision_id uuid,
     idempotency_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(idempotency_key, 255)),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
@@ -56,9 +59,8 @@ CREATE TABLE bursar.credit_lots (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
-    source_entry_id uuid NOT NULL UNIQUE
-    REFERENCES bursar.credit_ledger_entries (id),
+    account_id uuid NOT NULL,
+    source_entry_id uuid NOT NULL UNIQUE,
     catalog_revision_id uuid NOT NULL,
     bucket_key text NOT NULL,
     priority integer NOT NULL CHECK (priority >= 0),
@@ -86,9 +88,7 @@ CREATE TABLE bursar.credit_lots (
     )),
     source_id uuid,
     created_at timestamptz NOT NULL DEFAULT now()
-    CHECK (bursar.is_finite_timestamptz(created_at)),
-    FOREIGN KEY (catalog_revision_id, bucket_key)
-    REFERENCES bursar.catalog_buckets (catalog_revision_id, bucket_key)
+    CHECK (bursar.is_finite_timestamptz(created_at))
 );
 
 -- Preserve each positive ledger contribution to a lot, including merged lots,
@@ -97,9 +97,8 @@ CREATE TABLE bursar.credit_lot_sources (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    lot_id uuid NOT NULL REFERENCES bursar.credit_lots (id) ON DELETE CASCADE,
-    ledger_entry_id uuid NOT NULL UNIQUE
-    REFERENCES bursar.credit_ledger_entries (id),
+    lot_id uuid NOT NULL,
+    ledger_entry_id uuid NOT NULL UNIQUE,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     source_type text NOT NULL CHECK (bursar.is_nonempty_text(source_type)),
@@ -114,9 +113,8 @@ CREATE TABLE bursar.credit_lot_allocations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    debit_entry_id uuid NOT NULL
-    REFERENCES bursar.credit_ledger_entries (id),
-    lot_id uuid NOT NULL REFERENCES bursar.credit_lots (id),
+    debit_entry_id uuid NOT NULL,
+    lot_id uuid NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     allocation_kind text NOT NULL
@@ -132,9 +130,8 @@ CREATE TABLE bursar.credit_lot_source_allocations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    lot_allocation_id uuid NOT NULL
-    REFERENCES bursar.credit_lot_allocations (id),
-    lot_source_id uuid NOT NULL REFERENCES bursar.credit_lot_sources (id),
+    lot_allocation_id uuid NOT NULL,
+    lot_source_id uuid NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     created_at timestamptz NOT NULL DEFAULT now()
@@ -148,11 +145,9 @@ CREATE TABLE bursar.credit_lot_restorations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    refund_entry_id uuid NOT NULL
-    REFERENCES bursar.credit_ledger_entries (id),
-    original_allocation_id uuid NOT NULL
-    REFERENCES bursar.credit_lot_allocations (id),
-    lot_id uuid NOT NULL REFERENCES bursar.credit_lots (id),
+    refund_entry_id uuid NOT NULL,
+    original_allocation_id uuid NOT NULL,
+    lot_id uuid NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     created_at timestamptz NOT NULL DEFAULT now()
@@ -166,10 +161,8 @@ CREATE TABLE bursar.credit_lot_source_restorations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    lot_restoration_id uuid NOT NULL
-    REFERENCES bursar.credit_lot_restorations (id),
-    source_allocation_id uuid NOT NULL
-    REFERENCES bursar.credit_lot_source_allocations (id),
+    lot_restoration_id uuid NOT NULL,
+    source_allocation_id uuid NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     created_at timestamptz NOT NULL DEFAULT now()
@@ -182,9 +175,8 @@ CREATE TABLE bursar.credit_lot_source_restorations (
 CREATE TABLE bursar.credit_unallocated_debits (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    ledger_entry_id uuid PRIMARY KEY
-    REFERENCES bursar.credit_ledger_entries (id),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    ledger_entry_id uuid PRIMARY KEY,
+    account_id uuid NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     reason text NOT NULL CHECK (reason IN ('credit_line', 'refund_debt')),
@@ -197,9 +189,8 @@ CREATE TABLE bursar.credit_unallocated_debits (
 CREATE TABLE bursar.credit_debt_repayments (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    ledger_entry_id uuid PRIMARY KEY
-    REFERENCES bursar.credit_ledger_entries (id),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    ledger_entry_id uuid PRIMARY KEY,
+    account_id uuid NOT NULL,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
     created_at timestamptz NOT NULL DEFAULT now()
@@ -376,7 +367,7 @@ CREATE TABLE bursar.credit_usage_charges (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     operation text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(operation, 255)),
     event_at timestamptz NOT NULL DEFAULT now()
@@ -395,21 +386,19 @@ CREATE TABLE bursar.credit_usage_charges (
     ),
     billing_disposition text NOT NULL DEFAULT 'billable'
     CHECK (billing_disposition IN ('billable', 'record_only')),
-    catalog_revision_id uuid REFERENCES bursar.catalog_revisions (id),
+    catalog_revision_id uuid,
     plan_id uuid,
     rate_card_key text CHECK (
         rate_card_key IS NULL OR bursar.is_nonempty_text(rate_card_key)
     ),
-    ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
+    ledger_entry_id uuid,
+    correction_of_charge_id uuid,
     idempotency_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(idempotency_key, 255)),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     created_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(created_at)),
     UNIQUE (account_id, idempotency_key),
-    UNIQUE (id, event_at),
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id),
     CONSTRAINT credit_usage_charges_accounting_by_disposition_check
     CHECK (
         (
@@ -462,10 +451,7 @@ CREATE TABLE bursar.usage_charge_payloads (
     ),
     created_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(created_at)),
-    PRIMARY KEY (event_at, charge_id),
-    FOREIGN KEY (charge_id, event_at)
-    REFERENCES bursar.credit_usage_charges (id, event_at)
-    ON DELETE CASCADE
+    PRIMARY KEY (event_at, charge_id)
 ) PARTITION BY RANGE (event_at);
 
 -- 3. Usage projections and transactional outbox
@@ -476,7 +462,7 @@ CREATE TABLE bursar.usage_daily_rollups (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     usage_day date NOT NULL CHECK (bursar.is_finite_date(usage_day)),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     operation text NOT NULL
     CHECK (bursar.is_bounded_text(operation, 255)),
     model_key text NOT NULL DEFAULT ''
@@ -565,7 +551,7 @@ CREATE TABLE bursar.event_outbox (
 CREATE TABLE bursar.account_plan_assignments (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    account_id uuid PRIMARY KEY REFERENCES bursar.credit_accounts (id),
+    account_id uuid PRIMARY KEY,
     assignment_id uuid NOT NULL DEFAULT bursar.uuid_v7() UNIQUE,
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
@@ -581,12 +567,6 @@ CREATE TABLE bursar.account_plan_assignments (
     CHECK (bursar.is_finite_timestamptz(created_at)),
     updated_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(updated_at)),
-    FOREIGN KEY (plan_id, catalog_revision_id, plan_key)
-    REFERENCES bursar.catalog_plans (
-        id,
-        catalog_revision_id,
-        plan_key
-    ),
     CHECK (ends_at IS NULL OR ends_at > starts_at)
 );
 
@@ -597,7 +577,7 @@ CREATE TABLE bursar.account_plan_assignment_history (
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     assignment_id uuid NOT NULL,
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
@@ -612,12 +592,6 @@ CREATE TABLE bursar.account_plan_assignment_history (
     CHECK (bursar.is_finite_timestamptz(replaced_at)),
     replacement_reason text NOT NULL DEFAULT 'reassigned'
     CHECK (bursar.is_nonempty_text(replacement_reason)),
-    FOREIGN KEY (plan_id, catalog_revision_id, plan_key)
-    REFERENCES bursar.catalog_plans (
-        id,
-        catalog_revision_id,
-        plan_key
-    ),
     CHECK (ends_at >= starts_at),
     UNIQUE (assignment_id, ends_at)
 );
@@ -628,9 +602,9 @@ CREATE TABLE bursar.plan_assignment_changes (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
-    from_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans (id),
-    to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans (id),
+    account_id uuid NOT NULL,
+    from_plan_id uuid NOT NULL,
+    to_plan_id uuid NOT NULL,
     change_kind text NOT NULL DEFAULT 'manual'
     CHECK (change_kind IN ('manual', 'catalog_revision')),
     pin_overridden boolean NOT NULL DEFAULT FALSE,
@@ -661,7 +635,7 @@ CREATE TABLE bursar.allowance_windows (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     allowance_key text NOT NULL
@@ -701,9 +675,7 @@ CREATE TABLE bursar.allowance_windows (
         allowance_key,
         window_start,
         window_end
-    ),
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id)
+    )
 );
 
 -- Cache windowed quota state for admission while retaining exact limit,
@@ -712,7 +684,7 @@ CREATE TABLE bursar.quota_windows (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     quota_key text NOT NULL,
@@ -747,9 +719,7 @@ CREATE TABLE bursar.quota_windows (
         quota_key,
         window_start,
         window_end
-    ),
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id)
+    )
 );
 
 -- 5. Quota measurements and notifications
@@ -760,10 +730,10 @@ CREATE TABLE bursar.quota_usage_events (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
-    catalog_quota_id uuid NOT NULL REFERENCES bursar.catalog_plan_quotas (id),
+    catalog_quota_id uuid NOT NULL,
     quota_key text NOT NULL,
     operation_key text NOT NULL,
     measure_key text NOT NULL,
@@ -771,8 +741,8 @@ CREATE TABLE bursar.quota_usage_events (
     CHECK (amount <> 0),
     event_at timestamptz NOT NULL
     CHECK (bursar.is_finite_timestamptz(event_at)),
-    usage_charge_id uuid REFERENCES bursar.credit_usage_charges (id),
-    correction_of_event_id uuid REFERENCES bursar.quota_usage_events (id),
+    usage_charge_id uuid,
+    correction_of_event_id uuid,
     idempotency_key text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(idempotency_key, 255)),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
@@ -781,8 +751,6 @@ CREATE TABLE bursar.quota_usage_events (
     created_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(created_at)),
     UNIQUE (account_id, catalog_quota_id, idempotency_key),
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id),
     CHECK (
         correction_of_event_id IS NULL
         OR correction_of_event_id <> id
@@ -799,8 +767,8 @@ CREATE TABLE bursar.quota_events (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    quota_window_id uuid NOT NULL REFERENCES bursar.quota_windows (id),
-    usage_charge_id uuid REFERENCES bursar.credit_usage_charges (id),
+    quota_window_id uuid NOT NULL,
+    usage_charge_id uuid,
     event_type text NOT NULL CHECK (event_type IN ('threshold', 'blocked')),
     threshold_percent integer,
     idempotency_key text NOT NULL
@@ -831,7 +799,7 @@ CREATE TABLE bursar.credit_leases (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
+    account_id uuid NOT NULL,
     operation text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(operation, 255)),
     feature text CHECK (
@@ -845,7 +813,7 @@ CREATE TABLE bursar.credit_leases (
     CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
-    catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions (id),
+    catalog_revision_id uuid NOT NULL,
     plan_id uuid,
     reserved_amount bursar.credit_numeric NOT NULL
     CHECK (reserved_amount >= 0),
@@ -854,7 +822,7 @@ CREATE TABLE bursar.credit_leases (
         reserved_allowance >= 0
         AND reserved_allowance <= reserved_amount
     ),
-    allowance_window_id uuid REFERENCES bursar.allowance_windows (id),
+    allowance_window_id uuid,
     minimum_balance bursar.credit_numeric NOT NULL DEFAULT 0,
     max_concurrent integer CHECK (max_concurrent IS NULL OR max_concurrent > 0),
     expires_at timestamptz NOT NULL
@@ -873,15 +841,13 @@ CREATE TABLE bursar.credit_leases (
         settlement_request_digest IS NULL
         OR octet_length(settlement_request_digest) = 32
     ),
-    ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
-    usage_charge_id uuid REFERENCES bursar.credit_usage_charges (id),
+    ledger_entry_id uuid,
+    usage_charge_id uuid,
     created_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(created_at)),
     updated_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(updated_at)),
     UNIQUE (account_id, idempotency_key),
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id),
     CHECK (
         settled_amount IS NULL
         OR settled_amount >= 0
@@ -920,9 +886,9 @@ CREATE TABLE bursar.credit_leases (
 CREATE TABLE bursar.credit_lease_quota_reservations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    lease_id uuid NOT NULL REFERENCES bursar.credit_leases (id),
-    catalog_quota_id uuid NOT NULL REFERENCES bursar.catalog_plan_quotas (id),
-    quota_window_id uuid REFERENCES bursar.quota_windows (id),
+    lease_id uuid NOT NULL,
+    catalog_quota_id uuid NOT NULL,
+    quota_window_id uuid,
     amount bursar.credit_numeric NOT NULL
     CHECK (amount >= 0),
     window_start timestamptz NOT NULL
@@ -945,7 +911,7 @@ CREATE TABLE bursar.credit_teams (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
+    subject_id uuid NOT NULL,
     name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
     creation_idempotency_key text NOT NULL
     CONSTRAINT credit_teams_creation_idempotency_key_check
@@ -965,9 +931,8 @@ CREATE TABLE bursar.credit_teams (
 CREATE TABLE bursar.credit_team_members (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    team_id uuid NOT NULL
-    REFERENCES bursar.credit_teams (id) ON DELETE CASCADE,
-    subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
+    team_id uuid NOT NULL,
+    subject_id uuid NOT NULL,
     role text NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
     spend_cap bursar.credit_numeric
     CHECK (
@@ -988,10 +953,9 @@ CREATE TABLE bursar.credit_team_usage_charges (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    team_id uuid NOT NULL REFERENCES bursar.credit_teams (id),
-    subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
-    ledger_entry_id uuid NOT NULL UNIQUE
-    REFERENCES bursar.credit_ledger_entries (id),
+    team_id uuid NOT NULL,
+    subject_id uuid NOT NULL,
+    ledger_entry_id uuid NOT NULL UNIQUE,
     operation text NOT NULL CHECK (bursar.is_nonempty_text(operation)),
     amount bursar.credit_numeric NOT NULL
     CHECK (amount > 0),
@@ -1002,9 +966,7 @@ CREATE TABLE bursar.credit_team_usage_charges (
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     created_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(created_at)),
-    UNIQUE (team_id, idempotency_key),
-    FOREIGN KEY (team_id, subject_id)
-    REFERENCES bursar.credit_team_members (team_id, subject_id)
+    UNIQUE (team_id, idempotency_key)
 );
 
 -- 8. Grant execution and plan migration
@@ -1018,13 +980,11 @@ CREATE TABLE bursar.grant_program_events (
     catalog_revision_id uuid NOT NULL,
     grant_program_id uuid NOT NULL,
     program_key text NOT NULL CHECK (bursar.is_nonempty_text(program_key)),
-    subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
+    subject_id uuid NOT NULL,
     event_key text NOT NULL CHECK (bursar.is_nonempty_text(event_key)),
     idempotency_scope text NOT NULL
     CHECK (idempotency_scope IN ('subject', 'event')),
-    idempotency_key text NOT NULL
-    CHECK (bursar.is_nonempty_text(idempotency_key)),
-    referrer_subject_id uuid REFERENCES bursar.subjects (id),
+    referrer_subject_id uuid,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     occurred_at timestamptz NOT NULL DEFAULT now()
@@ -1034,10 +994,12 @@ CREATE TABLE bursar.grant_program_events (
     -- Program keys are stable business identities across catalog revisions.
     -- This prevents a catalog publish from accidentally re-awarding a
     -- lifetime promotion whose projection received a new UUID.
-    UNIQUE (tenant_id, program_key, subject_id, idempotency_key),
-    FOREIGN KEY (grant_program_id, catalog_revision_id)
-    REFERENCES bursar.catalog_grant_programs (id, catalog_revision_id)
+    UNIQUE (tenant_id, program_key, subject_id, event_key)
 );
+
+CREATE UNIQUE INDEX grant_program_events_subject_scope_unique
+ON bursar.grant_program_events (tenant_id, program_key, subject_id)
+WHERE idempotency_scope = 'subject';
 
 -- Prove each configured award executed once for an event and link the resulting
 -- positive ledger entry to its exact revision-local award definition.
@@ -1045,17 +1007,14 @@ CREATE TABLE bursar.grant_award_executions (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    grant_event_id uuid NOT NULL REFERENCES bursar.grant_program_events (id),
+    grant_event_id uuid NOT NULL,
     catalog_grant_award_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
-    recipient_subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
-    ledger_entry_id uuid NOT NULL UNIQUE
-    REFERENCES bursar.credit_ledger_entries (id),
+    recipient_subject_id uuid NOT NULL,
+    ledger_entry_id uuid NOT NULL UNIQUE,
     granted_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(granted_at)),
-    UNIQUE (grant_event_id, catalog_grant_award_id),
-    FOREIGN KEY (catalog_grant_award_id, catalog_revision_id)
-    REFERENCES bursar.catalog_grant_awards (id, catalog_revision_id)
+    UNIQUE (grant_event_id, catalog_grant_award_id)
 );
 
 -- Track resumable bulk plan rollout by cursor and terminal state so operators
@@ -1064,8 +1023,8 @@ CREATE TABLE bursar.credit_plan_migrations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    from_plan_id uuid REFERENCES bursar.catalog_plans (id),
-    to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans (id),
+    from_plan_id uuid,
+    to_plan_id uuid NOT NULL,
     strategy text NOT NULL DEFAULT 'immediate'
     CHECK (strategy IN ('immediate', 'next_renewal')),
     effective_at timestamptz CHECK (effective_at IS NULL OR bursar.is_finite_timestamptz(effective_at)),
@@ -1082,4 +1041,21 @@ CREATE TABLE bursar.credit_plan_migrations (
     updated_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(updated_at)),
     CHECK (from_plan_id IS NULL OR from_plan_id <> to_plan_id)
+);-- Compact proof that a billable receipt has already contributed to a daily
+-- rollup. Payload expiry and backend cutovers must not count it twice.
+CREATE TABLE bursar.usage_rollup_contributions (
+    tenant_id uuid NOT NULL REFERENCES bursar.tenants (id) ON DELETE CASCADE,
+    charge_id uuid NOT NULL,
+    event_at timestamptz NOT NULL CHECK (bursar.is_finite_timestamptz(event_at)),
+    PRIMARY KEY (tenant_id, charge_id)
+);
+
+-- Ephemeral, tenant-scoped verification receipts for an in-progress cutover.
+-- Detailed usage remains in the source/destination, not in this work table.
+CREATE TABLE bursar.usage_backend_cutover_items (
+    tenant_id uuid NOT NULL REFERENCES bursar.tenants (id) ON DELETE CASCADE,
+    charge_id uuid NOT NULL,
+    event_at timestamptz NOT NULL CHECK (bursar.is_finite_timestamptz(event_at)),
+    digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+    PRIMARY KEY (tenant_id, charge_id, event_at)
 );

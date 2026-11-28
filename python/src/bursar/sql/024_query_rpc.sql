@@ -187,11 +187,14 @@ RETURNS TABLE (
     allowance_covered numeric,
     charge_count bigint
 )
-LANGUAGE sql
-STABLE
+LANGUAGE plpgsql
+VOLATILE
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
+BEGIN
+    PERFORM bursar.check_usage_backend('postgres');
+    RETURN QUERY
     WITH bounds AS (
         SELECT
             CASE
@@ -269,7 +272,8 @@ AS $$
     )
     SELECT * FROM complete_days
     UNION ALL
-    SELECT * FROM edge_rows
+    SELECT * FROM edge_rows;
+END
 $$;
 
 -- Page one subject's monetary ledger by stable created-at/ID cursor with optional
@@ -438,19 +442,22 @@ RETURNS TABLE (
     metadata jsonb,
     created_at timestamptz
 )
-LANGUAGE sql
-STABLE
+LANGUAGE plpgsql
+VOLATILE
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
+BEGIN
+    PERFORM bursar.check_usage_backend('postgres');
+    RETURN QUERY
     SELECT
         charge.id,
         charge.account_id,
         charge.operation,
-        charge.requested,
-        charge.charged,
-        charge.allowance_requested,
-        charge.allowance_covered,
+        charge.requested::numeric,
+        charge.charged::numeric,
+        charge.allowance_requested::numeric,
+        charge.allowance_covered::numeric,
         charge.billing_disposition,
         payload.feature,
         payload.model,
@@ -491,7 +498,8 @@ AS $$
           )
       )
     ORDER BY charge.event_at DESC, charge.id DESC
-    LIMIT p_page_size
+    LIMIT p_page_size;
+END
 $$;
 
 -- Aggregate charged usage by subject for the current tenant and half-open interval.
@@ -716,15 +724,29 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 -- Read the subject's recharge profile in the configured provider environment.
-CREATE FUNCTION bursar.get_auto_recharge_profile(
-    p_subject_id uuid
+CREATE FUNCTION bursar.get_auto_recharge_profile(p_subject_id uuid)
+RETURNS TABLE (
+    subject_id uuid, enabled boolean, armed boolean, state text, provider text,
+    topup_id uuid, topup_key text, quantity integer, threshold numeric,
+    max_charges_per_window integer, window_unit text, window_count integer,
+    window_anchor text, window_timezone text, updated_at timestamptz
 )
-RETURNS SETOF bursar.billing_auto_recharge_profiles
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
- SELECT *
- FROM bursar.billing_auto_recharge_profiles
- WHERE subject_id=p_subject_id
- AND provider_environment=bursar.current_provider_environment()
+ SELECT profile.subject_id, profile.enabled, profile.armed, profile.state,
+        profile.provider, profile.topup_id, topup.topup_key, profile.quantity,
+        profile.threshold, policy.max_purchases, policy.period_unit,
+        policy.period_count, policy.period_anchor, policy.period_timezone,
+        profile.updated_at
+ FROM bursar.billing_auto_recharge_profiles AS profile
+ LEFT JOIN bursar.catalog_auto_recharge_policies AS policy
+   ON policy.tenant_id = profile.tenant_id
+  AND policy.catalog_revision_id = profile.catalog_revision_id
+ LEFT JOIN bursar.catalog_topups AS topup
+   ON topup.id = profile.topup_id
+  AND topup.catalog_revision_id = profile.catalog_revision_id
+  AND topup.tenant_id = profile.tenant_id
+ WHERE profile.subject_id = p_subject_id
+   AND profile.provider_environment = bursar.current_provider_environment()
 $$;
 
 -- Read one tenant-owned recharge attempt by internal identity.
@@ -742,29 +764,44 @@ $$;
 CREATE FUNCTION bursar.resolve_catalog_offer(
     p_provider text,
     p_lookup_type text,
-    p_lookup_value text
+    p_lookup_value text,
+    p_account_id uuid DEFAULT NULL,
+    p_intent_id uuid DEFAULT NULL
 )
 RETURNS SETOF bursar.catalog_offers
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE v_revision uuid; v_key text;
+BEGIN
+ IF p_intent_id IS NOT NULL THEN
+   SELECT i.catalog_revision_id, i.product_key INTO v_revision, v_key
+   FROM bursar.billing_checkout_intents i
+   WHERE i.id = p_intent_id AND i.account_id = p_account_id
+     AND i.provider = p_provider AND i.checkout_kind = 'subscription'
+     AND i.provider_environment = bursar.current_provider_environment();
+   IF NOT FOUND THEN
+     RAISE EXCEPTION 'invalid checkout intent' USING ERRCODE = '22023';
+   END IF;
+ END IF;
+ RETURN QUERY
  SELECT o.*
  FROM bursar.catalog_provider_refs r
- JOIN bursar.catalog_revisions cr
- ON cr.id=r.catalog_revision_id
- JOIN bursar.catalog_offers o
- ON o.catalog_revision_id=r.catalog_revision_id
- AND o.offer_key=r.object_key
+ JOIN bursar.catalog_revisions cr ON cr.id = r.catalog_revision_id
+ JOIN bursar.catalog_offers o ON o.catalog_revision_id = r.catalog_revision_id
+   AND o.offer_key = r.object_key
  WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
- AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
- AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
- AND r.provider=p_provider
- AND cr.status='active'
- AND r.provider_environment=bursar.current_provider_environment()
- AND r.lookup_type=p_lookup_type
- AND r.lookup_value=p_lookup_value
- AND r.object_type='offer'
- ORDER BY cr.revision_no DESC
- LIMIT 1
-$$;
+   AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
+   AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
+   AND r.provider = p_provider
+   AND r.provider_environment = bursar.current_provider_environment()
+   AND r.lookup_type = p_lookup_type AND r.lookup_value = p_lookup_value
+   AND r.object_type = 'offer'
+   AND CASE WHEN p_intent_id IS NULL THEN cr.status = 'active'
+     ELSE o.catalog_revision_id = v_revision AND o.offer_key = v_key END
+ ORDER BY cr.revision_no DESC LIMIT 1;
+ IF NOT FOUND AND p_intent_id IS NOT NULL THEN
+   RAISE EXCEPTION 'checkout offer reference mismatch' USING ERRCODE = '22023';
+ END IF;
+END $$;
 
 -- Resolve an active top-up through one environment-specific provider reference.
 CREATE FUNCTION bursar.resolve_catalog_topup(
@@ -793,6 +830,57 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  ORDER BY cr.revision_no DESC
  LIMIT 1
 $$;
+
+-- Resolve immutable purchase terms from an existing payment or checkout;
+-- provider-only first observations use the current catalog.
+CREATE FUNCTION bursar.resolve_purchase_catalog_topup(
+    p_subject_id uuid, p_provider text, p_payment_id text,
+    p_lookup_type text, p_lookup_value text, p_intent_id uuid DEFAULT NULL,
+    p_attempt_id uuid DEFAULT NULL
+) RETURNS SETOF bursar.catalog_topups
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE v_topup uuid; v_intent_revision uuid; v_intent_key text; v_attempt_topup uuid;
+BEGIN
+ SELECT payment.topup_id INTO v_topup FROM bursar.billing_payments AS payment
+ WHERE payment.subject_id = p_subject_id AND payment.provider = p_provider
+   AND payment.provider_payment_id = p_payment_id
+   AND payment.provider_environment = bursar.current_provider_environment();
+ IF p_attempt_id IS NOT NULL THEN
+   SELECT attempt.topup_id INTO v_attempt_topup
+   FROM bursar.billing_auto_recharge_attempts AS attempt
+   WHERE attempt.id = p_attempt_id AND attempt.subject_id = p_subject_id
+     AND attempt.provider = p_provider
+     AND attempt.provider_environment = bursar.current_provider_environment();
+   IF NOT FOUND OR (v_topup IS NOT NULL AND v_topup <> v_attempt_topup)
+     THEN RAISE EXCEPTION 'invalid recharge attempt' USING ERRCODE='22023'; END IF;
+   v_topup := v_attempt_topup;
+ END IF;
+ IF p_intent_id IS NOT NULL THEN
+   SELECT intent.catalog_revision_id, intent.product_key INTO v_intent_revision, v_intent_key
+   FROM bursar.billing_checkout_intents AS intent
+   WHERE intent.id = p_intent_id AND intent.account_id = p_subject_id
+     AND intent.provider = p_provider AND intent.checkout_kind = 'credit_topup'
+     AND intent.provider_environment = bursar.current_provider_environment();
+   IF NOT FOUND THEN RAISE EXCEPTION 'invalid checkout intent' USING ERRCODE='22023'; END IF;
+ END IF;
+ RETURN QUERY
+ SELECT topup.* FROM bursar.catalog_topups AS topup
+ JOIN bursar.catalog_revisions AS revision ON revision.id = topup.catalog_revision_id
+ JOIN bursar.catalog_provider_refs AS ref
+   ON ref.catalog_revision_id = topup.catalog_revision_id
+  AND ref.object_type = 'topup' AND ref.object_key = topup.topup_key
+  AND ref.provider = p_provider
+  AND ref.provider_environment = bursar.current_provider_environment()
+ WHERE ref.lookup_type = p_lookup_type AND ref.lookup_value = p_lookup_value
+   AND CASE WHEN v_topup IS NOT NULL THEN topup.id = v_topup
+            WHEN p_intent_id IS NOT NULL THEN topup.catalog_revision_id = v_intent_revision
+              AND topup.topup_key = v_intent_key
+            ELSE revision.status = 'active' END
+   AND (p_intent_id IS NULL OR (topup.catalog_revision_id = v_intent_revision
+            AND topup.topup_key = v_intent_key));
+ IF NOT FOUND AND (v_topup IS NOT NULL OR p_intent_id IS NOT NULL OR p_attempt_id IS NOT NULL)
+ THEN RAISE EXCEPTION 'purchase top-up reference mismatch' USING ERRCODE='22023'; END IF;
+END $$;
 
 -- Resolve the plan behind an active environment-specific provider offer reference.
 CREATE FUNCTION bursar.resolve_catalog_plan(
@@ -1081,6 +1169,7 @@ RETURNS TABLE (
     plan_label text,
     rate_card text,
     allowed_operations text [],
+    operation_access text,
     credit_allowance_amount numeric,
     credit_allowance_priority integer,
     credit_allowance_reset_unit text,
@@ -1111,6 +1200,12 @@ AS $$
         plan.display_name,
         plan.rate_card,
         plan.allowed_operations,
+        CASE
+          WHEN plan.definition->'allowed_operations' = '"all"'::jsonb THEN 'all'
+          WHEN jsonb_typeof(plan.definition->'allowed_operations') = 'array' THEN 'listed'
+          ELSE 'none'
+        END,
+
         plan.credit_allowance_amount,
         plan.credit_allowance_priority,
         plan.credit_allowance_reset_unit,
@@ -1512,6 +1607,21 @@ AS $$
     WHERE id = p_intent_id
       AND subject_id = p_subject_id
       AND provider_environment = bursar.current_provider_environment()
+$$;
+
+-- Recover a checkout with its immutable catalog document before resolving
+-- current catalog availability. Operation keys are unique across providers
+-- within a tenant, subject, and environment; p_provider is retained for callers.
+CREATE FUNCTION bursar.find_checkout_intent(
+    p_subject_id uuid, p_operation_key text, p_provider text DEFAULT NULL
+) RETURNS TABLE (intent_id uuid, source_document jsonb)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+ SELECT intent.id, revision.source_document
+ FROM bursar.billing_checkout_intents AS intent
+ JOIN bursar.catalog_revisions AS revision
+   ON revision.id = intent.catalog_revision_id AND revision.tenant_id = intent.tenant_id
+ WHERE intent.subject_id = p_subject_id AND intent.operation_key = p_operation_key
+   AND intent.provider_environment = bursar.current_provider_environment()
 $$;
 
 -- Resolve one offer key from the current tenant's active catalog revision.

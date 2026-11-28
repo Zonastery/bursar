@@ -71,6 +71,10 @@ func (s *checkoutStoreStub) UpdateCheckoutIntent(_ context.Context, _ string, _ 
 	return nil
 }
 
+func (s *checkoutStoreStub) FindCheckoutIntent(context.Context, string, string, string) (*CheckoutIntent, map[string]any, error) {
+	return nil, nil, nil
+}
+
 func (s *checkoutStoreStub) GetCheckoutIntent(context.Context, string, string) (*CheckoutIntent, error) {
 	return &s.intent, nil
 }
@@ -215,6 +219,23 @@ func newCheckoutService(t *testing.T, store *checkoutStoreStub, providers map[st
 		t.Fatal(err)
 	}
 	return service
+}
+
+func TestCreateCheckoutForwardsCatalogTrial(t *testing.T) {
+	config := checkoutTestConfig(t)
+	commerce := config["commerce"].(map[string]any)
+	offers := commerce["offers"].(map[string]any)
+	offers["starter_month"].(map[string]any)["trial"] = map[string]any{"unit": "week", "count": 2}
+	store := &checkoutStoreStub{config: config}
+	provider := &checkoutProviderStub{name: "stripe"}
+	service := newCheckoutService(t, store, map[string]*checkoutProviderStub{"stripe": provider}, time.Hour)
+	_, err := service.CreateCheckout(context.Background(), CreateCheckoutInput{SubjectID: "subject-1", AccountID: "account-1", OfferKey: "starter_month", SuccessURL: "https://success", CancelURL: "https://cancel", IdempotencyKey: "trial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.request.Trial == nil || provider.request.Trial.Unit != "week" || provider.request.Trial.Count != 2 {
+		t.Fatalf("trial = %+v", provider.request.Trial)
+	}
 }
 
 func TestCreateCheckoutUsesAccountProviderCustomerAndProtectedMetadata(t *testing.T) {
@@ -462,5 +483,54 @@ func TestHandleWebhookSelectsOnlyConfiguredProviderWhenOmitted(t *testing.T) {
 	}, 0)
 	if _, err := ambiguous.HandleWebhook(context.Background(), "", WebhookRequest{RawBody: []byte("raw")}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("ambiguous webhook error = %v", err)
+	}
+}
+
+func TestCheckoutResolvesOnlySelectedProviderEnvironment(t *testing.T) {
+	config := checkoutTestConfig(t)
+	offers := config["commerce"].(map[string]any)["offers"].(map[string]any)
+	offer := offers["starter_month"].(map[string]any)
+	offer["providers"] = map[string]any{"stripe": map[string]any{"type": "custom_object", "object_kind": "subscription", "external_id": map[string]any{"test": "test-starter", "live": "live-starter"}}}
+	store := &checkoutStoreStub{config: config}
+	provider := &checkoutProviderStub{name: "stripe"}
+	service := newCheckoutService(t, store, map[string]*checkoutProviderStub{"stripe": provider}, 0)
+	_, err := service.CreateCheckout(context.Background(), CreateCheckoutInput{SubjectID: "subject-1", AccountID: "account-1", OfferKey: "starter_month", SuccessURL: "https://app.test/success", CancelURL: "https://app.test/cancel", IdempotencyKey: "environment"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.request.ProductID != "test-starter" {
+		t.Fatalf("selected ID = %q", provider.request.ProductID)
+	}
+}
+
+func TestCheckoutSelectsProviderWithBindingForEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		environment           ProviderEnvironment
+		selected, unavailable string
+	}{{ProviderEnvironmentTest, "dodo", "stripe"}, {ProviderEnvironmentLive, "stripe", "dodo"}} {
+		t.Run(string(tc.environment), func(t *testing.T) {
+			config := checkoutTestConfig(t)
+			offer := config["commerce"].(map[string]any)["offers"].(map[string]any)["starter_month"].(map[string]any)
+			offer["providers"] = map[string]any{
+				"stripe": map[string]any{"type": "custom_object", "object_kind": "subscription", "external_id": map[string]any{"live": "live-id"}},
+				"dodo":   map[string]any{"type": "custom_object", "object_kind": "subscription", "external_id": map[string]any{"test": "test-id"}},
+			}
+			stripe, dodo := &checkoutProviderStub{name: "stripe"}, &checkoutProviderStub{name: "dodo"}
+			service := newCheckoutService(t, &checkoutStoreStub{config: config}, map[string]*checkoutProviderStub{"stripe": stripe, "dodo": dodo}, 0)
+			service.providers.context.ProviderEnvironment = tc.environment
+			input := CreateCheckoutInput{SubjectID: "subject", AccountID: "account", OfferKey: "starter_month", SuccessURL: "https://app.test/success", CancelURL: "https://app.test/cancel", IdempotencyKey: "selected"}
+			_, err := service.CreateCheckout(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			chosen := map[string]*checkoutProviderStub{"stripe": stripe, "dodo": dodo}[tc.selected]
+			if chosen.request.ProductID == "" {
+				t.Fatalf("%s provider was not called", tc.selected)
+			}
+			input.Provider, input.IdempotencyKey = tc.unavailable, "unavailable"
+			if _, err = service.CreateCheckout(context.Background(), input); err == nil {
+				t.Fatal("unavailable explicit provider accepted")
+			}
+		})
 	}
 }

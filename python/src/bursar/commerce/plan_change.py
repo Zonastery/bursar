@@ -17,7 +17,7 @@ class ClassifiedSubscriptionChange(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     classification: PlanChangeClassification
-    target_interval: Literal["month", "year"]
+    target_interval: Literal["day", "week", "month", "year"]
     policy: SubscriptionChangePolicy | None = None
 
 
@@ -26,6 +26,8 @@ def classify_subscription_change(
     current_plan: str,
     current_interval_value: str | None,
     target_offer: SubscriptionOffer,
+    current_interval_count: int | None = 1,
+    same_offer: bool = True,
 ) -> ClassifiedSubscriptionChange:
     current_definition = config.plans.get(current_plan)
     target_definition = config.plans.get(target_offer.plan)
@@ -33,20 +35,24 @@ def classify_subscription_change(
         raise CommerceResourceNotFoundError("Subscription plan is absent from the catalog")
     current_interval = (
         current_interval_value.lower()
-        if current_interval_value and current_interval_value.lower() in {"month", "year"}
+        if current_interval_value and current_interval_value.lower() in {"day", "week", "month", "year"}
         else None
     )
     target_interval_value = target_offer.billing_interval.unit
-    if current_interval is None or target_interval_value not in {"month", "year"}:
+    if current_interval is None or target_interval_value not in {"day", "week", "month", "year"}:
         raise CommerceResourceNotFoundError("Subscription cadence is unknown")
-    target_interval = cast(Literal["month", "year"], target_interval_value)
+    target_interval = cast(Literal["day", "week", "month", "year"], target_interval_value)
 
     classification: PlanChangeClassification
-    if target_offer.plan == current_plan and target_interval == current_interval:
-        classification = "unchanged"
-    elif target_definition.rank > current_definition.rank:
+    if (
+        target_offer.plan == current_plan
+        and target_interval == current_interval
+        and target_offer.billing_interval.count == (current_interval_count or 1)
+    ):
+        classification = "unchanged" if same_offer else "lateral"
+    elif target_definition.tier > current_definition.tier:
         classification = "upgrade"
-    elif target_definition.rank < current_definition.rank:
+    elif target_definition.tier < current_definition.tier:
         classification = "downgrade"
     elif target_offer.plan != current_plan:
         classification = "lateral"

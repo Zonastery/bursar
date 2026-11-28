@@ -228,7 +228,9 @@ describe("Bursar runtime diagnostics", () => {
     const order: string[] = [];
     const pool: PostgresPool = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
-      connect: vi.fn(),
+      connect: vi
+        .fn()
+        .mockResolvedValue({ query: vi.fn().mockResolvedValue({ rows: [] }), release: vi.fn() }),
       end: vi.fn().mockResolvedValue(undefined),
     };
     const runtime = await createBursarRuntime({

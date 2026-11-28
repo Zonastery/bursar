@@ -266,7 +266,6 @@ export async function handleStripeWebhook(
         const subscriptionId = expandableId(session.subscription);
         if (session.mode === "subscription" && subscriptionId) {
           const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-          const planSlug = metadata.plan_slug;
           await callBillingEventSink(sink, {
             provider: "stripe",
             eventId: event.id,
@@ -274,10 +273,7 @@ export async function handleStripeWebhook(
             occurredAt,
             accountId,
             customer,
-            subscription: subscriptionInfo(
-              subscription,
-              planSlug ? { lookupKey: planSlug } : subscriptionRefs(subscription),
-            ),
+            subscription: subscriptionInfo(subscription, subscriptionRefs(subscription)),
             metadata,
           });
         } else {
@@ -441,8 +437,8 @@ export async function handleStripeWebhook(
           break;
         }
 
-        const metadata = invoiceMetadata(invoice);
         const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        const metadata = { ...(subscription.metadata ?? {}), ...invoiceMetadata(invoice) };
         const periodEnd = buildEnd(subscription) ?? buildEndFromInvoice(invoice);
         const periodStart = buildStart(subscription) ?? buildStartFromInvoice(invoice);
 
@@ -481,8 +477,8 @@ export async function handleStripeWebhook(
           log.debug("invoice.payment_failed: no subscription reference", { invoiceId: invoice.id });
           break;
         }
-        const metadata = invoiceMetadata(invoice);
         const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        const metadata = { ...(subscription.metadata ?? {}), ...invoiceMetadata(invoice) };
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,

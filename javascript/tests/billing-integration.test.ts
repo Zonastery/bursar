@@ -774,7 +774,6 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         timestamp,
         null,
         true,
-        null,
         "subscription_active",
       ),
     ).resolves.toBe("applied");
@@ -951,7 +950,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
       },
     });
-    expect(first).toMatchObject({ handled: true, action: "subscription_created" });
+    expect(first).toMatchObject({
+      handled: true,
+      action: "subscription_created",
+    });
     expect(second).toEqual({ handled: false, error: "subscription_conflict" });
     expect(await bs.getBillingSubscription(PROVIDER, "sub_conflict_second")).toBeNull();
     const conflicts = await pool.query(
@@ -2213,10 +2215,13 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     });
     expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
 
+    await cm.publishAndActivateCatalog({
+      ...PRICING_DICT,
+      catalog: { ...PRICING_DICT.catalog, subscription_end_plan: "free" },
+    });
     await cm.setUserPlan(USER_ID, "pro");
     const terminalPlanBilling = new BillingService(bs, {
       provisioning: cm,
-      terminalPlanKey: "free",
     });
     await terminalPlanBilling.ingestBillingEvent({
       provider: PROVIDER,
@@ -2288,7 +2293,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       },
     });
 
-    expect(result).toMatchObject({ handled: true, action: "payment_succeeded" });
+    expect(result).toMatchObject({
+      handled: true,
+      action: "payment_succeeded",
+    });
     expect(await bm.listBillingInvoices(USER_ID)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -2560,12 +2568,24 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       provider,
       balance: new Decimal(2000),
     });
-    expect(enabled).toMatchObject({ enabled: true, state: "active", quoteAmountMinor: 1000 });
+    expect(enabled).toMatchObject({
+      enabled: true,
+      state: "active",
+      quoteAmountMinor: 1000,
+    });
     await expect(
-      bm.autoRecharge.processIfNeeded({ userId: USER_ID, provider, balance: new Decimal(0) }),
+      bm.autoRecharge.processIfNeeded({
+        userId: USER_ID,
+        provider,
+        balance: new Decimal(0),
+      }),
     ).resolves.toMatchObject({ outcome: "submitted" });
     await expect(
-      bm.autoRecharge.retry({ userId: USER_ID, provider, balance: new Decimal(0) }),
+      bm.autoRecharge.retry({
+        userId: USER_ID,
+        provider,
+        balance: new Decimal(0),
+      }),
     ).resolves.toMatchObject({ outcome: "already_processing" });
     await expect(
       bm.ingestBillingEvent({
@@ -2587,12 +2607,20 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     ).resolves.toMatchObject({ handled: true, action: "payment_succeeded" });
     expect((await cm.getBalance(USER_ID)).balance.toString()).toBe("1000");
     await expect(
-      bm.autoRecharge.processIfNeeded({ userId: USER_ID, provider, balance: new Decimal(2000) }),
+      bm.autoRecharge.processIfNeeded({
+        userId: USER_ID,
+        provider,
+        balance: new Decimal(2000),
+      }),
     ).resolves.toEqual({ outcome: "above_threshold" });
 
     await bm.autoRecharge.disable(USER_ID);
     await expect(
-      bm.autoRecharge.retry({ userId: USER_ID, provider, balance: new Decimal(0) }),
+      bm.autoRecharge.retry({
+        userId: USER_ID,
+        provider,
+        balance: new Decimal(0),
+      }),
     ).rejects.toThrow("disabled");
   });
 
@@ -2648,7 +2676,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     await bs.upsertBillingCustomer(PROVIDER, "cus_auto_retry", USER_ID2, "retry@example.com");
 
     await expect(
-      bm.autoRecharge.enable({ userId: USER_ID2, provider, balance: new Decimal(0) }),
+      bm.autoRecharge.enable({
+        userId: USER_ID2,
+        provider,
+        balance: new Decimal(0),
+      }),
     ).resolves.toMatchObject({ enabled: true, state: "active" });
     await expect(
       pool.query(
@@ -2663,7 +2695,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
     });
 
     await expect(
-      bm.autoRecharge.retry({ userId: USER_ID2, provider, balance: new Decimal(0) }),
+      bm.autoRecharge.retry({
+        userId: USER_ID2,
+        provider,
+        balance: new Decimal(0),
+      }),
     ).resolves.toMatchObject({ outcome: "submitted" });
     const attempts = await pool.query(
       `SELECT state, provider_attempt_id
@@ -3359,7 +3395,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { priceId: PRICE_ID },
       },
     });
-    expect(created).toMatchObject({ handled: true, action: "subscription_created" });
+    expect(created).toMatchObject({
+      handled: true,
+      action: "subscription_created",
+    });
 
     const paused = await bm.ingestBillingEvent({
       provider: PROVIDER,
@@ -3368,7 +3407,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       occurredAt: new Date().toISOString(),
       subscription: { providerSubscriptionId: "sub_identity" },
     });
-    expect(paused).toMatchObject({ handled: true, action: "subscription_paused" });
+    expect(paused).toMatchObject({
+      handled: true,
+      action: "subscription_paused",
+    });
     expect((await bs.getBillingSubscription(PROVIDER, "sub_identity"))?.status).toBe("paused");
 
     const resumed = await bm.ingestBillingEvent({
@@ -3381,7 +3423,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { priceId: PRICE_ID },
       },
     });
-    expect(resumed).toMatchObject({ handled: true, action: "subscription_resumed" });
+    expect(resumed).toMatchObject({
+      handled: true,
+      action: "subscription_resumed",
+    });
     expect((await bs.getBillingSubscription(PROVIDER, "sub_identity"))?.status).toBe("active");
 
     await bs.upsertBillingPayment({
@@ -3409,7 +3454,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         status: "failed",
       },
     });
-    expect(failed).toMatchObject({ handled: true, action: "payment_failed_recorded" });
+    expect(failed).toMatchObject({
+      handled: true,
+      action: "payment_failed_recorded",
+    });
   });
 
   it("rejects subscription events without a resolvable account", async () => {
@@ -3428,7 +3476,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         occurredAt: new Date().toISOString(),
         subscription: { providerSubscriptionId: "sub-missing-account" },
       });
-      expect(withoutAccount).toMatchObject({ handled: false, error: "account_not_found" });
+      expect(withoutAccount).toMatchObject({
+        handled: false,
+        error: "account_not_found",
+      });
     }
   });
 
@@ -3460,7 +3511,9 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         if (persisted.rowCount) break;
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
-      throw Object.assign(new Error("simulated unique constraint race"), { code: "23505" });
+      throw Object.assign(new Error("simulated unique constraint race"), {
+        code: "23505",
+      });
     };
     vi.spyOn(firstStore, "upsertBillingSubscription").mockImplementation((state) =>
       pauseBeforeUpsert(state),
@@ -3524,7 +3577,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { priceId: PRICE_ID },
       },
     });
-    expect(created).toMatchObject({ handled: true, action: "subscription_created" });
+    expect(created).toMatchObject({
+      handled: true,
+      action: "subscription_created",
+    });
     expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
 
     const refreshed = await bm.ingestBillingEvent({
@@ -3533,9 +3589,15 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventType: "subscription.updated",
       occurredAt: "2026-08-19T13:00:01.000Z",
       accountId: USER_ID,
-      subscription: { providerSubscriptionId: subscriptionId, status: "active" },
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "active",
+      },
     });
-    expect(refreshed).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect(refreshed).toMatchObject({
+      handled: true,
+      action: "subscription_updated",
+    });
     expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
 
     const grace = await bm.ingestBillingEvent({
@@ -3550,7 +3612,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { priceId: PRICE_ID },
       },
     });
-    expect(grace).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect(grace).toMatchObject({
+      handled: true,
+      action: "subscription_updated",
+    });
     expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
 
     const unmappedGrace = await bm.ingestBillingEvent({
@@ -3565,7 +3630,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         refs: { lookupKey: "provider-plan-slug-not-yet-catalogued" },
       },
     });
-    expect(unmappedGrace).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect(unmappedGrace).toMatchObject({
+      handled: true,
+      action: "subscription_updated",
+    });
     expect((await cm.getUserPlan(USER_ID)).planKey).toBe("pro");
 
     const storedGrace = await bs.getBillingSubscription(PROVIDER, subscriptionId);
@@ -3589,7 +3657,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
         status: "past_due",
       },
     });
-    expect(expiredGrace).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect(expiredGrace).toMatchObject({
+      handled: true,
+      action: "subscription_updated",
+    });
     expect((await cm.getUserPlan(USER_ID)).planKey).toBeNull();
 
     const canceled = await bm.ingestBillingEvent({
@@ -3598,12 +3669,111 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
       eventType: "subscription.updated",
       occurredAt: "2026-08-19T13:00:06.000Z",
       accountId: USER_ID,
-      subscription: { providerSubscriptionId: subscriptionId, status: "canceled" },
+      subscription: {
+        providerSubscriptionId: subscriptionId,
+        status: "canceled",
+      },
     });
-    expect(canceled).toMatchObject({ handled: true, action: "subscription_updated" });
+    expect(canceled).toMatchObject({
+      handled: true,
+      action: "subscription_updated",
+    });
     expect((await cm.getUserPlan(USER_ID)).planKey).toBeNull();
     await expect(bs.getBillingSubscription(PROVIDER, subscriptionId)).resolves.toMatchObject({
       status: "canceled",
     });
   });
+});
+
+describe.runIf(DATABASE_URL)("top-up grant purchase identity", () => {
+  it("does not grant the same payment again after catalog activation", async () => {
+    const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
+    try {
+      await applyMigrations(pool);
+      await truncateBursarTables(pool);
+      const { cm, bm } = await makePgComponents(pool);
+      const event = {
+        provider: PROVIDER,
+        eventId: "review-1",
+        eventType: "payment.succeeded",
+        occurredAt: new Date().toISOString(),
+        accountId: USER_ID2,
+        payment: {
+          providerPaymentId: "review-payment",
+          amountMinor: 1000,
+          taxMinor: 0,
+          currency: "USD",
+          refs: { priceId: PRICE_ID_TOPUP },
+          purpose: "credit_topup",
+          status: "succeeded",
+        },
+      } satisfies BillingEvent;
+      const one = await bm.ingestBillingEvent(event);
+      const control = await bm.ingestBillingEvent({
+        ...event,
+        eventId: "review-2",
+      });
+      const before = await cm.getBalance(USER_ID2);
+      const next = structuredClone(PRICING_DICT);
+      next.commerce.offers.standard_topup.display_name = "Revised topup";
+      next.commerce.offers.standard_topup.credits_per_unit = "2000";
+      await cm.publishAndActivateCatalog(next);
+      const afterEvent = await bm.ingestBillingEvent({
+        ...event,
+        eventId: "review-3",
+      });
+      const after = await cm.getBalance(USER_ID2);
+      const grants = await pool.query("SELECT count(*) AS n FROM bursar.billing_credit_grants");
+      expect(one.handled).toBe(true);
+      expect(control.handled).toBe(true);
+      expect(afterEvent.handled).toBe(true);
+      expect(before.balance.toString()).toBe("1000");
+      expect(after.balance.toString()).toBe("1000");
+      expect(grants.rows[0]?.n).toBe("1");
+    } finally {
+      await pool.end();
+    }
+  }, 120000);
+});
+
+describe.runIf(DATABASE_URL)("provider-only payment recovery", () => {
+  it("retains original terms when a grant insertion fails before catalog activation", async () => {
+    const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
+    try {
+      await applyMigrations(pool);
+      await truncateBursarTables(pool);
+      const { cm, bm, bs } = await makePgComponents(pool);
+      const original = bs.createBillingCreditGrant.bind(bs);
+      const fail = vi
+        .spyOn(bs, "createBillingCreditGrant")
+        .mockRejectedValueOnce(new Error("temporary failure"));
+      const event = {
+        provider: PROVIDER,
+        eventId: "recover-purchase",
+        eventType: "payment.succeeded",
+        occurredAt: new Date().toISOString(),
+        accountId: USER_ID2,
+        payment: {
+          providerPaymentId: "recover-payment",
+          amountMinor: 1000,
+          taxMinor: 0,
+          currency: "USD",
+          refs: { priceId: PRICE_ID_TOPUP },
+          purpose: "credit_topup",
+          status: "succeeded",
+        },
+      } satisfies BillingEvent;
+      expect((await bm.ingestBillingEvent(event)).handled).toBe(false);
+      fail.mockImplementation(original);
+      const next = structuredClone(PRICING_DICT);
+      next.commerce.offers.standard_topup.credits_per_unit = "2000";
+      await cm.publishAndActivateCatalog(next);
+      expect((await bm.ingestBillingEvent(event)).handled).toBe(true);
+      expect((await cm.getBalance(USER_ID2)).balance.toString()).toBe("1000");
+      const rows = await pool.query("SELECT count(*) AS n FROM bursar.billing_credit_grants");
+      expect(rows.rows[0]?.n).toBe("1");
+    } finally {
+      await pool.end();
+    }
+  }, 120000);
 });

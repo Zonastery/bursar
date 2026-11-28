@@ -39,7 +39,7 @@ func TestHandleWebhookVerifiesAndMapsCanonicalPayment(t *testing.T) {
 	if event.AccountID != "acct_123" || event.Payment.ProviderPaymentID != "pay_123" || event.Payment.AmountMinor != 2999 || event.Payment.TaxMinor != 240 || event.Payment.Currency != "USD" || event.Payment.Purpose != "subscription" {
 		t.Fatalf("unexpected payment: %#v", event.Payment)
 	}
-	if event.Subscription == nil || event.Subscription.ProviderSubscriptionID != "sub_123" || event.Subscription.Status != "active" {
+	if event.Subscription == nil || event.Subscription.ProviderSubscriptionID != "sub_123" || event.Subscription.Status != "active" || event.Subscription.Refs == nil || event.Subscription.Refs.ProductID != "prod_123" {
 		t.Fatalf("unexpected subscription: %#v", event.Subscription)
 	}
 	if event.Payment.Refs == nil || event.Payment.Refs.ProductID != "prod_123" {

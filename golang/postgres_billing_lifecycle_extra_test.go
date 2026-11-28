@@ -4,6 +4,7 @@
 package bursar
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -297,5 +298,86 @@ func TestBillingLifecycleHelpers(t *testing.T) {
 	}
 	if got := subscriptionEventID(BillingEvent{}); got != "" {
 		t.Fatalf("subscriptionEventID(empty) = %q", got)
+	}
+}
+
+func TestSubscriptionEntitlementOutcomeMatchesDurableStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status           string
+		outcome          subscriptionEntitlementOutcome
+		applyEntitlement bool
+		valid            bool
+	}{
+		{"active", subscriptionEntitlementApplied, true, true},
+		{"trialing", subscriptionEntitlementPreserved, false, true},
+		{"past_due", subscriptionEntitlementPreserved, true, true},
+		{"canceled", subscriptionEntitlementRevoked, false, true},
+		{"canceled", subscriptionEntitlementPreserved, false, true},
+		{"active", subscriptionEntitlementPreserved, true, false},
+		{"unknown", subscriptionEntitlementApplied, true, false},
+	}
+	for _, test := range tests {
+		t.Run(test.status+"/"+string(test.outcome), func(t *testing.T) {
+			err := validateSubscriptionEntitlementOutcome(test.status, test.outcome, test.applyEntitlement)
+			if test.valid && err != nil {
+				t.Fatalf("valid entitlement outcome rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid entitlement outcome accepted")
+			}
+		})
+	}
+}
+
+func TestPostgresBillingEventRejectsCallerClaimAndFallsBackToAccount(t *testing.T) {
+	t.Parallel()
+	store := &PostgresStore{}
+	if _, err := store.ProcessBillingEvent(context.Background(), BillingEvent{BillingEventID: "internal-claim"}, ""); err == nil || !strings.Contains(err.Error(), "identifiers are internal") {
+		t.Fatalf("ProcessBillingEvent() with caller claim error = %v", err)
+	}
+	_, err := store.ProcessBillingEvent(context.Background(), BillingEvent{
+		EventID: "evt-account-fallback", Provider: "stripe", Type: BillingEventCustomerUpdated,
+	}, "account-1")
+	if err == nil {
+		t.Fatal("ProcessBillingEvent() unexpectedly succeeded without a PostgreSQL client")
+	}
+}
+
+func TestPostgresBillingLifecycleReturnsAccountResolutionError(t *testing.T) {
+	t.Parallel()
+	processor := postgresBillingLifecycle{store: &PostgresStore{}}
+	_, err := processor.paymentSucceeded(context.Background(), BillingEvent{
+		Provider: "stripe",
+		Payment: &BillingPayment{
+			ProviderPaymentID: "pay-1",
+			Purpose:           "credit_topup",
+			Refs:              &ProviderRef{ProductID: "prod-1"},
+		},
+		Metadata: map[string]any{"checkout_intent_id": 42},
+	}, "account-1")
+	if err == nil || !strings.Contains(err.Error(), "invalid checkout intent") {
+		t.Fatalf("paymentSucceeded() invalid checkout-intent metadata error = %v", err)
+	}
+	if err := processor.updateCheckoutFromEvent(context.Background(), BillingEvent{
+		Metadata: map[string]any{"checkout_intent_id": "not-a-uuid"},
+	}, "completed"); err == nil {
+		t.Fatal("updateCheckoutFromEvent() accepted an invalid checkout intent ID")
+	}
+	_, err = processor.process(context.Background(), BillingEvent{
+		Provider: "stripe",
+		Type:     BillingEventCustomerUpdated,
+		Customer: &BillingCustomer{ProviderCustomerID: "cus-1"},
+	}, "")
+	if err == nil || !strings.Contains(err.Error(), "PostgreSQL store is not initialized") {
+		t.Fatalf("process() account-resolution error = %v", err)
+	}
+	for name, event := range map[string]BillingEvent{
+		"subscription": {Provider: "stripe", Subscription: &BillingSubscription{ProviderSubscriptionID: "sub-1"}},
+		"payment":      {Provider: "stripe", Payment: &BillingPayment{ProviderPaymentID: "pay-1"}},
+	} {
+		if _, err := processor.resolveAccount(context.Background(), event, ""); err == nil || !strings.Contains(err.Error(), "PostgreSQL store is not initialized") {
+			t.Errorf("resolveAccount() for %s = %v", name, err)
+		}
 	}
 }

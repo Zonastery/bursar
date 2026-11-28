@@ -379,8 +379,8 @@ func (s *ClickHouseUsageStore) DailySpend(ctx context.Context, start, end time.T
 FROM %s FINAL
 WHERE tenant_id = {tenant_id:UUID}
   AND billing_disposition = 'billable'
-  AND event_at >= parseDateTime64BestEffort({start:String})
-  AND event_at < parseDateTime64BestEffort({end:String})
+  AND event_at >= parseDateTime64BestEffort({start:String}, 6)
+  AND event_at < parseDateTime64BestEffort({end:String}, 6)
 GROUP BY key
 ORDER BY key`, s.quotedTable)
 	rows, err := s.query(ctx, query, analyticsParameters(s.tenantID, start, end))
@@ -429,8 +429,8 @@ func (s *ClickHouseUsageStore) AggregateStats(ctx context.Context, start, end ti
 FROM %s FINAL
 WHERE tenant_id = {tenant_id:UUID}
   AND billing_disposition = 'billable'
-  AND event_at >= parseDateTime64BestEffort({start:String})
-  AND event_at < parseDateTime64BestEffort({end:String})`, s.quotedTable)
+  AND event_at >= parseDateTime64BestEffort({start:String}, 6)
+  AND event_at < parseDateTime64BestEffort({end:String}, 6)`, s.quotedTable)
 		rows, err := s.query(groupCtx, query, analyticsParameters(s.tenantID, start, end))
 		if err != nil {
 			return err
@@ -503,14 +503,14 @@ func (s *ClickHouseUsageStore) ListUsageCharges(ctx context.Context, userID stri
 		if options.From.IsZero() {
 			return bursar.UsageChargePage{}, errors.New("usage charge from time must not be zero")
 		}
-		predicates = append(predicates, "event_at >= parseDateTime64BestEffort({from_date:String})")
+		predicates = append(predicates, "event_at >= parseDateTime64BestEffort({from_date:String}, 6)")
 		parameters["from_date"] = options.From.UTC().Format(time.RFC3339Nano)
 	}
 	if options.To != nil {
 		if options.To.IsZero() {
 			return bursar.UsageChargePage{}, errors.New("usage charge to time must not be zero")
 		}
-		predicates = append(predicates, "event_at < parseDateTime64BestEffort({to_date:String})")
+		predicates = append(predicates, "event_at < parseDateTime64BestEffort({to_date:String}, 6)")
 		parameters["to_date"] = options.To.UTC().Format(time.RFC3339Nano)
 	}
 	if options.IncludeRecordOnly != nil && !*options.IncludeRecordOnly {
@@ -524,7 +524,7 @@ func (s *ClickHouseUsageStore) ListUsageCharges(ctx context.Context, userID stri
 		if err != nil {
 			return bursar.UsageChargePage{}, fmt.Errorf("usage charge cursor ID must be a UUID: %w", err)
 		}
-		predicates = append(predicates, "(event_at, charge_id) < (parseDateTime64BestEffort({cursor_event_at:String}), {cursor_usage_id:UUID})")
+		predicates = append(predicates, "(event_at, charge_id) < (parseDateTime64BestEffort({cursor_event_at:String}, 6), {cursor_usage_id:UUID})")
 		parameters["cursor_event_at"] = options.Cursor.EventAt.UTC().Format(time.RFC3339Nano)
 		parameters["cursor_usage_id"] = cursorID.String()
 	}
@@ -541,10 +541,10 @@ func (s *ClickHouseUsageStore) ListUsageCharges(ctx context.Context, userID stri
   feature,
   model,
   region,
-  toString(event_at) AS event_at,
+  toString(event_at) AS event_at_text,
   idempotency_key,
   metadata,
-  toString(created_at) AS created_at
+  toString(created_at) AS created_at_text
 FROM %s FINAL
 WHERE %s
 ORDER BY event_at DESC, charge_id DESC
@@ -647,8 +647,8 @@ func (s *ClickHouseUsageStore) spendRows(ctx context.Context, keyExpression stri
 FROM %s FINAL
 WHERE tenant_id = {tenant_id:UUID}
   AND billing_disposition = 'billable'
-  AND event_at >= parseDateTime64BestEffort({start:String})
-  AND event_at < parseDateTime64BestEffort({end:String})
+  AND event_at >= parseDateTime64BestEffort({start:String}, 6)
+  AND event_at < parseDateTime64BestEffort({end:String}, 6)
 GROUP BY key
 ORDER BY sum(charged) DESC, key%s`, keyExpression, s.quotedTable, limitSQL)
 	rows, err := s.query(ctx, query, analyticsParameters(s.tenantID, start, end))
@@ -896,7 +896,9 @@ func readUsageCharge(usageID, accountID, operation, requestedText, chargedText, 
 		return bursar.UsageCharge{}, err
 	}
 	metadata := make(map[string]any)
-	if err := json.Unmarshal([]byte(metadataText), &metadata); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(metadataText))
+	decoder.UseNumber()
+	if err := decoder.Decode(&metadata); err != nil {
 		return bursar.UsageCharge{}, fmt.Errorf("decode projected usage metadata: %w", err)
 	}
 	return bursar.UsageCharge{

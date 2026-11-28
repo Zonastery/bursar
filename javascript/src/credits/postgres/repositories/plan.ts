@@ -12,7 +12,10 @@ const decimal = z.union([z.string().min(1), z.number().finite()] as const);
 const timestamp = z.union([z.string().min(1), z.date()] as const).transform((value, context) => {
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    context.addIssue({ code: "custom", message: "expected a valid timestamp" });
+    context.addIssue({
+      code: "custom",
+      message: "expected a valid timestamp",
+    });
     return z.NEVER;
   }
   return parsed;
@@ -39,6 +42,7 @@ const UserPlanRowSchema = z
     plan_label: z.string().min(1),
     rate_card: z.string().min(1).nullable(),
     allowed_operations: z.array(z.string().min(1)),
+    operation_access: z.enum(["all", "none", "listed"]),
     credit_allowance_amount: decimal.nullable(),
     credit_allowance_priority: z.number().int().nonnegative().nullable(),
     credit_allowance_reset_unit: z
@@ -76,7 +80,10 @@ const UserPlanRowSchema = z
       (row.credit_policy_type === "prepaid" && row.credit_limit !== null) ||
       (row.credit_policy_type === "credit_line" && row.credit_limit === null)
     ) {
-      context.addIssue({ code: "custom", message: "credit policy fields are inconsistent" });
+      context.addIssue({
+        code: "custom",
+        message: "credit policy fields are inconsistent",
+      });
     }
   });
 

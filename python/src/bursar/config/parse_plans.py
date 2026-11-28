@@ -10,10 +10,11 @@ from bursar.config.types import (
 
 
 def _validate_plan(plan: PlanDefinition) -> PlanDefinition:
-    if len(plan.allowed_operations) != len(set(plan.allowed_operations)):
-        raise ValueError("plans.*.allowed_operations must not contain duplicates")
-    for operation in plan.allowed_operations:
-        _validate_identifier(operation, "plans.*.allowed_operations")
+    if isinstance(plan.allowed_operations, list):
+        if len(plan.allowed_operations) != len(set(plan.allowed_operations)):
+            raise ValueError("plans.*.allowed_operations must not contain duplicates")
+        for operation in plan.allowed_operations:
+            _validate_identifier(operation, "plans.*.allowed_operations")
     _validate_map_keys(plan.features, "plans.*.features")
     _validate_map_keys(plan.quotas, "plans.*.quotas")
     return plan

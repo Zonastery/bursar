@@ -442,6 +442,7 @@ class BillingSubscriptionChangeInput(BaseModel):
     provider: str
     provider_subscription_id: str
     to_offer_id: str
+    region: str | None = None
     effective_at: str
     effective: Literal["immediate", "renewal"]
     idempotency_key: str
@@ -518,6 +519,7 @@ class BillingAutoRechargeProfile(BaseModel):
     armed: bool = True
     provider: str | None
     topup_id: str | None
+    topup_key: str | None = None
     quantity: PositiveSafeInteger
     threshold: Decimal
     max_charges_per_window: PositiveSafeInteger | None

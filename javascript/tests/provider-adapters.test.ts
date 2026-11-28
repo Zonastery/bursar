@@ -46,7 +46,10 @@ describe("payment provider adapter contracts", () => {
 
       await vi.runAllTimersAsync();
 
-      await expect(pending).resolves.toMatchObject({ handled: true, action: "duplicate" });
+      await expect(pending).resolves.toMatchObject({
+        handled: true,
+        action: "duplicate",
+      });
       expect(ingestBillingEvent).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
@@ -106,12 +109,17 @@ describe("payment provider adapter contracts", () => {
           if (isExternalObject(args[0]) && args[0].confirm === true) {
             return { session_id: "sess_auto", payment_id: "pay_auto" };
           }
-          return { checkout_url: "https://checkout.test", session_id: "sess_1" };
+          return {
+            checkout_url: "https://checkout.test",
+            session_id: "sess_1",
+          };
         },
         retrieve: async () => ({ payment_status: "paid" }),
       },
       customers: {
-        customerPortal: { create: async () => ({ link: "https://portal.test" }) },
+        customerPortal: {
+          create: async () => ({ link: "https://portal.test" }),
+        },
         retrievePaymentMethods: async () => ({
           items: [
             {
@@ -144,7 +152,12 @@ describe("payment provider adapter contracts", () => {
       payments: {
         retrieve: async (id: string) =>
           id === "pay_auto"
-            ? { payment_id: id, status: "succeeded", total_amount: 500, currency: "USD" }
+            ? {
+                payment_id: id,
+                status: "succeeded",
+                total_amount: 500,
+                currency: "USD",
+              }
             : {
                 invoice_url: "https://invoice.test/document.pdf",
                 payment_link: "https://checkout.test/not-an-invoice",
@@ -157,7 +170,11 @@ describe("payment provider adapter contracts", () => {
         previewChangePlan: async () => ({
           immediate_charge: {
             line_items: [],
-            summary: { total_amount: 12, settlement_amount: 10, settlement_currency: "USD" },
+            summary: {
+              total_amount: 12,
+              settlement_amount: 10,
+              settlement_currency: "USD",
+            },
             effective_at: "2026-01-01T00:00:00Z",
           },
         }),
@@ -181,7 +198,10 @@ describe("payment provider adapter contracts", () => {
         metadata: { bursar_account_id: "untrusted" },
         idempotencyKey: "idem_1",
       }),
-    ).resolves.toEqual({ url: "https://checkout.test", providerSessionId: "sess_1" });
+    ).resolves.toEqual({
+      url: "https://checkout.test",
+      providerSessionId: "sess_1",
+    });
     await expect(
       provider.createCheckoutSession({
         accountId: "user-1",
@@ -208,7 +228,10 @@ describe("payment provider adapter contracts", () => {
       paymentStatus: "paid",
     });
     await expect(
-      provider.createCustomerPortalSession({ customerId: "cus_1", returnUrl: "https://return" }),
+      provider.createCustomerPortalSession({
+        customerId: "cus_1",
+        returnUrl: "https://return",
+      }),
     ).resolves.toEqual({ url: "https://portal.test" });
     await expect(
       provider.createUpdatePaymentMethodSession({
@@ -254,7 +277,10 @@ describe("payment provider adapter contracts", () => {
         metadata: { purpose: "credit_topup" },
         idempotencyKey: "auto_1",
       }),
-    ).resolves.toMatchObject({ providerPaymentId: "pay_auto", status: "succeeded" });
+    ).resolves.toMatchObject({
+      providerPaymentId: "pay_auto",
+      status: "succeeded",
+    });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({
       url: "https://invoice.test/document.pdf",
     });
@@ -300,11 +326,25 @@ describe("payment provider adapter contracts", () => {
       cancelUrl: "https://cancel.test",
       metadata: { checkout_intent_id: "intent-1" },
       idempotencyKey: "guest-checkout:1",
+      trial: { unit: "week", count: 2 },
     });
 
+    await expect(
+      provider.createCheckoutSession({
+        accountId: "guest-account-1",
+        productId: "prod_guest",
+        type: "subscription",
+        returnUrl: "https://return.test",
+        cancelUrl: "https://cancel.test",
+        metadata: {},
+        idempotencyKey: "too-long",
+        trial: { unit: "day", count: 10001 },
+      }),
+    ).rejects.toThrow(/10000/);
     expect(create).toHaveBeenCalledWith(
       {
         product_cart: [{ product_id: "prod_guest", quantity: 1 }],
+        subscription_data: { trial_period_days: 14 },
         customer: { email: "guest@example.com" },
         return_url: "https://return.test",
         cancel_url: "https://cancel.test",
@@ -323,7 +363,10 @@ describe("payment provider adapter contracts", () => {
       const body = args[0];
       return isExternalObject(body) && body.confirm === true
         ? { session_id: "sess_charge", payment_id: "pay_charge" }
-        : { checkout_url: "https://checkout.test", session_id: "sess_checkout" };
+        : {
+            checkout_url: "https://checkout.test",
+            session_id: "sess_checkout",
+          };
     });
     const customerCreate = vi.fn(async () => ({ customer_id: "cus_1" }));
     const subscriptionUpdate = vi.fn(async () => undefined);
@@ -352,7 +395,9 @@ describe("payment provider adapter contracts", () => {
       webhookKey: "k",
       eventSink: sink,
     });
-    const requestOptions = (key: string) => ({ headers: { "Idempotency-Key": key } });
+    const requestOptions = (key: string) => ({
+      headers: { "Idempotency-Key": key },
+    });
 
     await provider.createCheckoutSession({
       accountId: "user-1",
@@ -471,11 +516,21 @@ describe("payment provider adapter contracts", () => {
           data: [
             {
               id: "pm_1",
-              card: { last4: "4242", brand: "visa", exp_month: 1, exp_year: 2030 },
+              card: {
+                last4: "4242",
+                brand: "visa",
+                exp_month: 1,
+                exp_year: 2030,
+              },
             },
             {
               id: "pm_1_duplicate",
-              card: { last4: "4242", brand: "visa", exp_month: 1, exp_year: 2030 },
+              card: {
+                last4: "4242",
+                brand: "visa",
+                exp_month: 1,
+                exp_year: 2030,
+              },
             },
           ],
         }),
@@ -489,16 +544,27 @@ describe("payment provider adapter contracts", () => {
           retrieve: async () => ({ status: "expired" }),
         },
       },
-      billingPortal: { sessions: { create: async () => ({ url: "https://portal.test" }) } },
+      billingPortal: {
+        sessions: { create: async () => ({ url: "https://portal.test" }) },
+      },
       prices: { retrieve: async () => ({ unit_amount: 500, currency: "usd" }) },
       paymentIntents: {
         create: async (...args: ExternalValue[]) => {
           paymentIntentCalls.push(args);
-          return { id: "pi_auto", status: "succeeded", amount: 500, currency: "usd" };
+          return {
+            id: "pi_auto",
+            status: "succeeded",
+            amount: 500,
+            currency: "usd",
+          };
         },
       },
-      invoices: { retrieve: async () => ({ hosted_invoice_url: "https://invoice.test" }) },
-      subscriptions: { update: async (...args: ExternalValue[]) => calls.push({ args }) },
+      invoices: {
+        retrieve: async () => ({ hosted_invoice_url: "https://invoice.test" }),
+      },
+      subscriptions: {
+        update: async (...args: ExternalValue[]) => calls.push({ args }),
+      },
       webhooks: { constructEvent: () => ({}) },
     };
     const typedStripe = testStripeClient(stripe);
@@ -516,20 +582,26 @@ describe("payment provider adapter contracts", () => {
         cancelUrl: "https://cancel",
         metadata: {},
         idempotencyKey: "idem_1",
+        trial: { unit: "week", count: 2 },
       }),
     ).resolves.toEqual({
       url: "https://checkout.test",
       customerId: "cus_1",
       providerSessionId: "cs_1",
     });
-    expect(customerCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1:customer" });
+    expect(customerCalls[0]?.[1]).toEqual({
+      idempotencyKey: "idem_1:customer",
+    });
     expect(customerCalls[0]?.[0]).toMatchObject({
       metadata: { bursar_account_id: "u1" },
     });
     expect(checkoutCalls[0]?.[0]).toMatchObject({
       line_items: [{ price: "price_1", quantity: 1 }],
       metadata: { bursar_account_id: "u1" },
-      subscription_data: { metadata: { bursar_account_id: "u1" } },
+      subscription_data: {
+        metadata: { bursar_account_id: "u1" },
+        trial_period_days: 14,
+      },
     });
     expect(checkoutCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1" });
     await expect(
@@ -540,7 +612,9 @@ describe("payment provider adapter contracts", () => {
         idempotencyKey: "customer:user-1",
       }),
     ).resolves.toEqual({ customerId: "cus_1" });
-    expect(customerCalls.at(-1)?.[1]).toEqual({ idempotencyKey: "customer:user-1" });
+    expect(customerCalls.at(-1)?.[1]).toEqual({
+      idempotencyKey: "customer:user-1",
+    });
     const longKeyPrefix = "operation:" + "x".repeat(244);
     for (const suffix of ["a", "b"]) {
       await provider.createCheckoutSession({
@@ -561,7 +635,9 @@ describe("payment provider adapter contracts", () => {
     await expect(provider.getCheckoutSessionStatus("sess_1")).resolves.toEqual({
       paymentStatus: "cancelled",
     });
-    await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({ url: "https://invoice.test" });
+    await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({
+      url: "https://invoice.test",
+    });
     await expect(provider.listPaymentMethods("cus_1")).resolves.toHaveLength(1);
     await expect(
       provider.chargeSavedPaymentMethod({
@@ -572,7 +648,10 @@ describe("payment provider adapter contracts", () => {
         metadata: { purpose: "credit_topup" },
         idempotencyKey: "auto_1",
       }),
-    ).resolves.toMatchObject({ providerPaymentId: "pi_auto", status: "succeeded" });
+    ).resolves.toMatchObject({
+      providerPaymentId: "pi_auto",
+      status: "succeeded",
+    });
     expect(paymentIntentCalls[0]?.[0]).toMatchObject({
       metadata: { purpose: "credit_topup", price_id: "price_topup" },
     });
@@ -753,7 +832,10 @@ describe("payment provider adapter contracts", () => {
       }),
     ).resolves.toEqual({ url: "https://return" });
     await expect(
-      provider.createCustomerPortalSession({ customerId: "cus_1", returnUrl: "https://portal" }),
+      provider.createCustomerPortalSession({
+        customerId: "cus_1",
+        returnUrl: "https://portal",
+      }),
     ).resolves.toEqual({ url: "https://portal" });
     await expect(
       provider.createUpdatePaymentMethodSession({
@@ -791,7 +873,10 @@ describe("payment provider adapter contracts", () => {
         metadata: {},
         idempotencyKey: "topup_1",
       }),
-    ).resolves.toMatchObject({ providerPaymentId: "mock_pay_topup_1", status: "succeeded" });
+    ).resolves.toMatchObject({
+      providerPaymentId: "mock_pay_topup_1",
+      status: "succeeded",
+    });
     await expect(
       provider.createCustomer({
         email: "u1@example.com",
@@ -799,7 +884,9 @@ describe("payment provider adapter contracts", () => {
         metadata: {},
         idempotencyKey: "customer:user-1",
       }),
-    ).resolves.toMatchObject({ customerId: expect.stringMatching(/^mock_cus_/) });
+    ).resolves.toMatchObject({
+      customerId: expect.stringMatching(/^mock_cus_/),
+    });
     await expect(
       provider.changePlan({
         providerSubscriptionId: "sub_1",
@@ -814,7 +901,11 @@ describe("payment provider adapter contracts", () => {
         productId: "prod_2",
         prorationBillingMode: "prorated_immediately",
       }),
-    ).resolves.toMatchObject({ totalAmount: 0, settlementAmount: 0, currency: "USD" });
+    ).resolves.toMatchObject({
+      totalAmount: 0,
+      settlementAmount: 0,
+      currency: "USD",
+    });
     await expect(provider.cancelSubscription("sub_1", "cancel_1")).resolves.toBeUndefined();
     await expect(provider.reactivateSubscription("sub_1", "reactivate_1")).resolves.toBeUndefined();
     await expect(

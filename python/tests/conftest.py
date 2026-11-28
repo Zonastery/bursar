@@ -167,7 +167,7 @@ def pg_database_url(migrated_pg_database_url: str) -> Iterator[str]:
         # intentionally receives no direct EXECUTE grant on operator RPCs.
         cursor.execute("SET LOCAL ROLE bursar_operator")
         cursor.execute(
-            "SELECT bursar.create_tenant(%s, %s, %s)",
+            "SELECT bursar.create_tenant(%s, %s, %s, 'test')",
             (TEST_TENANT_ID, TEST_TENANT_SLUG, "Bursar tests"),
         )
     try:

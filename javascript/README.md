@@ -41,7 +41,19 @@ export BURSAR_MIGRATION_DATABASE_URL=postgresql://bursar_migrator@db.example.com
 bursar migrate
 ```
 
-The Python-only CLI is intentional. Install the same Bursar release as the
+For local configuration authoring, run `npx bursar-config init bursar.yaml`, then `npx bursar-config validate bursar.yaml`. To load a validated publishable catalog in Node:
+
+```typescript
+import { loadConfigFile } from "@zonastery/bursar/node";
+const catalog = await loadConfigFile("bursar.yaml", "test");
+await bursar.catalog.publishAndActivate(catalog);
+```
+
+Mapped provider IDs remain in the tenant-wide catalog for all specified environments. Bare IDs are scoped to the explicit environment at loading or publication, so a test-only ID cannot be relabeled live. Publishing a single-environment catalog replaces the active catalog and leaves other environments without that offer.
+
+`bursar.catalog.publicView()` includes offers bound in the current environment and, when commerce is configured, to a registered provider. Use unscoped `projectPublicCatalog(config)` to inspect every configured offer.
+
+The Python operator CLI also handles migrations and publication. The Python migration CLI is intentional. Install the same Bursar release as the
 TypeScript SDK, run migrations with a dedicated migration principal, and use a
 separate least-privilege `DATABASE_URL` in the application.
 

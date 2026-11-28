@@ -27,26 +27,29 @@
       "starter": {
         "display_name": "Starter",
         "rank": 0,
-        "allowed_operations": [],
+        "allowed_operations": "none",
         "features": {},
         "quotas": {},
-        "credit_policy": "prepaid"
+        "credit_policy": "prepaid",
+        "tier": 0
       },
       "peer": {
         "display_name": "Peer",
         "rank": 0,
-        "allowed_operations": [],
+        "allowed_operations": "none",
         "features": {},
         "quotas": {},
-        "credit_policy": "prepaid"
+        "credit_policy": "prepaid",
+        "tier": 0
       },
       "pro": {
         "display_name": "Pro",
         "rank": 1,
-        "allowed_operations": [],
+        "allowed_operations": "none",
         "features": {},
         "quotas": {},
-        "credit_policy": "prepaid"
+        "credit_policy": "prepaid",
+        "tier": 1
       }
     },
     "commerce": {

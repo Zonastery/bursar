@@ -2,7 +2,9 @@ package bursar
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -353,5 +355,38 @@ func TestBillingPayloadOutboxHandlerArchivesAndRecordsPointer(t *testing.T) {
 	}
 	if repository.archivedID != "" {
 		t.Fatal("already archived event was archived again")
+	}
+}
+
+func TestUsageOutboxPreservesJSONPrecisionAndMicroseconds(t *testing.T) {
+	raw := fmt.Sprintf(`{"tenant_id":%q,"charge_id":%q,"account_id":%q,"subject_id":%q,
+      "operation":"generate","measures":{"large":99999999999999.123456,"nested":{"n":9007199254740993}},
+      "dimensions":{},"metadata":{},"requested":"1","charged":"1",
+      "allowance_requested":"0","allowance_covered":"0","billing_disposition":"billable",
+      "pricing_snapshot":{},"idempotency_key":"one","request_digest":"digest",
+      "event_at":"2026-08-19T01:02:03.123456+05:30","created_at":"2026-08-19T01:02:03.654321+05:30"}`,
+		storageTestTenant, storageTestCharge, storageTestAccount, storageTestSubject)
+	payload, err := jsonMap([]byte(raw), "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &usageSinkStub{}
+	handler, err := NewUsageChargeOutboxHandler(&projectionRepositoryStub{}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Handle(context.Background(), OutboxEvent{EventID: "17", TenantID: storageTestTenant,
+		AggregateID: storageTestCharge, PayloadVersion: 1, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(sink.event.Measures)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "99999999999999.123456") || !strings.Contains(string(encoded), "9007199254740993") {
+		t.Fatalf("rounded payload: %s", encoded)
+	}
+	if got := sink.event.EventAt.UTC().Format(time.RFC3339Nano); got != "2026-08-18T19:32:03.123456Z" {
+		t.Fatalf("event time: %s", got)
 	}
 }

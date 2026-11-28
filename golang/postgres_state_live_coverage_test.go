@@ -113,7 +113,7 @@ func TestPostgresStateGraceExpiryAndTenantIsolation(t *testing.T) {
 	if err != nil || claim.State != BillingEventClaimed || claim.BillingEventID == "" {
 		t.Fatalf("claim manual entitlement event = %+v, error = %v", claim, err)
 	}
-	outcome, err := store.reconcileSubscriptionEntitlement(ctx, manualAccountID, manualSubscriptionID, claim.BillingEventID, "active", now, &now, true, "", "subscription_created")
+	outcome, err := store.reconcileSubscriptionEntitlement(ctx, manualAccountID, manualSubscriptionID, claim.BillingEventID, "active", now, &now, true, "subscription_created")
 	if err != nil || outcome != subscriptionEntitlementApplied {
 		t.Fatalf("bind subscription plan source = %q, error = %v", outcome, err)
 	}

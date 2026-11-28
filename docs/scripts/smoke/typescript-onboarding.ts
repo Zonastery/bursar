@@ -7,6 +7,7 @@ import {
 } from "../../../javascript/src/index.js";
 import { StripeProvider } from "../../../javascript/src/providers/stripe/index.js";
 import Stripe from "stripe";
+import { loadConfigFile } from "../../../javascript/src/node.js";
 
 const stripe = new Stripe("sk_test_docs_smoke");
 const stripeFactory: CommerceProviderFactory = (context) =>
@@ -67,6 +68,20 @@ export async function verifiedWebhookHandler(
   });
   const status = result.received ? 200 : result.retryable ? 503 : 400;
   return Response.json({ received: result.received }, { status });
+}
+
+export async function starterFlow(): Promise<void> {
+  const config = await loadConfigFile("bursar.yaml", "test");
+  await bursar.catalog.publishAndActivate(config);
+  await bursar.accounts.onAccountCreated({
+    accountId,
+    eventKey: "signup:docs-smoke",
+  });
+  await bursar.credits.deduct(
+    accountId,
+    { operation: "export_report", measures: {}, dimensions: {} },
+    { idempotencyKey: "export:docs-smoke" },
+  );
 }
 
 void BillingEventType.SUBSCRIPTION_CREATED;

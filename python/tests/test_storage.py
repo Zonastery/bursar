@@ -158,7 +158,7 @@ class FinancialAnalyticsClickHouseClient(FakeClickHouseClient):
                     "feature": "chat",
                     "model": "gpt-5",
                     "region": "in",
-                    "event_at": f"2026-07-2{index} 12:00:00.000000",
+                    "usage_event_at": f"2026-07-2{index} 12:00:00.000000",
                     "idempotency_key": f"usage:{index}",
                     "metadata": {"trace_id": f"trace-{index}"},
                     "created_at": f"2026-07-2{index} 12:00:01.000000",
@@ -187,8 +187,40 @@ class FakePool:
         self.closeall = Mock()
 
     def getconn(self) -> Any:
-        msg = "PostgreSQL should not be queried in this test"
-        raise AssertionError(msg)
+        class Cursor:
+            description = None
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_args: Any) -> None:
+                pass
+
+            def execute(self, query: str, _params: Any = None) -> None:
+                if not any(
+                    part in query
+                    for part in (
+                        "SET LOCAL ROLE",
+                        "bind_tenant_context",
+                        "SET LOCAL search_path",
+                        "check_usage_backend",
+                    )
+                ):
+                    raise AssertionError(f"unexpected PostgreSQL query: {query}")
+
+        class Connection:
+            autocommit = False
+
+            def cursor(self, **_kwargs: Any) -> Any:
+                return Cursor()
+
+            def commit(self) -> None:
+                pass
+
+            def rollback(self) -> None:
+                pass
+
+        return Connection()
 
     def putconn(self, conn: Any = None, key: Any = None, close: bool = False) -> None:
         del conn, key, close
@@ -419,7 +451,7 @@ def test_clickhouse_serves_usage_history_with_a_cursor() -> None:
             "feature": "chat",
             "model": "gpt",
             "region": None,
-            "event_at": "2026-07-29 12:00:00.000000",
+            "usage_event_at": "2026-07-29 12:00:00.000000",
             "idempotency_key": "job:42",
             "metadata": '{"trace_id":"trace-42"}',
             "created_at": "2026-07-29 12:00:00.000000",
@@ -669,7 +701,7 @@ def test_runtime_routes_usage_history_through_clickhouse() -> None:
             "feature": "chat",
             "model": "gpt",
             "region": None,
-            "event_at": "2026-07-29 12:00:00.000000",
+            "usage_event_at": "2026-07-29 12:00:00.000000",
             "idempotency_key": "job:42",
             "metadata": '{"trace_id":"trace-42"}',
             "created_at": "2026-07-29 12:00:00.000000",

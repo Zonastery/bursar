@@ -193,10 +193,10 @@ def test_fixed_accounting_is_not_user_configurable() -> None:
         load_config_from_dict(data)
 
 
-def test_canonicalizes_credit_decimals_to_six_places() -> None:
+def test_canonicalizes_credit_decimals_without_losing_precision() -> None:
     canonical = canonical_bursar_config_dict(base_config())
-    assert canonical["credits"]["policies"]["invoice"]["limit"] == "500.000000"
-    assert canonical["plans"]["pro"]["credit_allowance"]["amount"] == "10.000000"
+    assert canonical["credits"]["policies"]["invoice"]["limit"] == "500"
+    assert canonical["plans"]["pro"]["credit_allowance"]["amount"] == "10"
 
 
 def test_canonicalizer_accepts_an_already_validated_config() -> None:
@@ -494,3 +494,21 @@ def test_missing_version_is_rejected() -> None:
     data.pop("version")
     with pytest.raises(ConfigError):
         load_config_from_dict(data)
+
+
+def test_null_rate_card_matches_omitted_default() -> None:
+    from bursar.config import canonical_bursar_config_dict
+
+    base = {
+        "version": 1,
+        "catalog": {"default_plan": "free"},
+        "plans": {"free": {"display_name": "Free"}},
+        "pricing": {
+            "operations": {"report": {"charge": {"type": "flat", "amount": "2"}}},
+            "rate_cards": {"custom": {"operations": {}}},
+        },
+    }
+    omitted = canonical_bursar_config_dict(base)
+    explicit = canonical_bursar_config_dict({**base, "plans": {"free": {"display_name": "Free", "rate_card": None}}})
+    assert omitted == explicit
+    assert omitted["plans"]["free"]["rate_card"] == "custom"

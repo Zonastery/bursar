@@ -9,6 +9,7 @@ import {
 } from "../src/config.js";
 import { projectPublicCatalog } from "../src/catalog.js";
 import { ConfigError } from "../src/errors.js";
+import type { JsonObject } from "../src/shared/json.js";
 
 type BaseConfig = ReturnType<typeof baseConfig>;
 
@@ -51,7 +52,7 @@ export const baseConfig = () =>
         completion: {
           measures: {
             input_tokens: { unit: "token" },
-            output_tokens: { unit: "token" },
+            output_tokens: { unit: "token", required: false },
           },
           dimensions: { model: { type: "string" } },
         },
@@ -112,7 +113,7 @@ export const baseConfig = () =>
       default_bucket: "purchased",
       policies: {
         prepaid: { type: "prepaid" },
-        invoice: { type: "credit_line", limit: "500.000000" },
+        invoice: { type: "credit_line", limit: "500" },
       },
     },
     entitlements: {
@@ -181,7 +182,7 @@ describe("typed v1 config", () => {
       catalog: { activation: { mode: "on_publish" } },
     };
 
-    expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
+    expect(() => loadConfigFromDict(config)).toThrow(/unknown field/);
   });
 
   it("accepts and canonicalizes the typed catalog", () => {
@@ -191,7 +192,7 @@ describe("typed v1 config", () => {
     expect(parsed.plans.pro!.evolution.defaultRollout).toBe("immediate");
     const canonical = canonicalBursarConfigDict(baseConfig());
     expect(canonical).toMatchObject({
-      credits: { policies: { invoice: { type: "credit_line", limit: "500.000000" } } },
+      credits: { policies: { invoice: { type: "credit_line", limit: "500" } } },
     });
   });
 
@@ -218,7 +219,9 @@ describe("typed v1 config", () => {
     expect(() =>
       validateCatalogRollout(
         parsed,
-        loadCatalogRollout({ plans: { enterprise: { effective: "immediate" } } }),
+        loadCatalogRollout({
+          plans: { enterprise: { effective: "immediate" } },
+        }),
       ),
     ).toThrow(/unknown plan/);
   });
@@ -240,12 +243,35 @@ describe("typed v1 config", () => {
         rounding: "half_up",
       },
     });
-    expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
+    expect(() => loadConfigFromDict(config)).toThrow(/unknown field/);
 
     const missingDefault = baseConfig();
     // SAFETY: Removing catalog is the invalid input this test is designed to exercise.
     delete (missingDefault as Partial<typeof missingDefault>).catalog;
     expect(() => loadConfigFromDict(missingDefault)).toThrow(/default_plan is required/);
+  });
+
+  it("reports selected union errors for multiple offers independently", () => {
+    const invalid = {
+      version: 1,
+      unexpected: true,
+      commerce: {
+        offers: {
+          sub: { type: "subscription", credits_per_unit: "10" },
+          pack: { type: "topup", plan: "free" },
+        },
+      },
+    };
+    try {
+      loadConfigFromDict(invalid);
+      throw new Error("expected failure");
+    } catch (error) {
+      expect(String(error)).toContain("/commerce/offers/sub.plan is required");
+      expect(String(error)).toContain("/commerce/offers/pack.credits_per_unit is required");
+      expect(String(error)).toContain("unknown field 'unexpected'");
+      expect(String(error)).not.toContain("/commerce/offers/sub.credits_per_unit is required");
+      expect(String(error)).not.toContain("/commerce/offers/pack.plan is required");
+    }
   });
 
   it("projects public plans and prices without provider identifiers", () => {
@@ -277,13 +303,69 @@ describe("typed v1 config", () => {
     const projected = projectPublicCatalog(loadConfigFromDict(config));
 
     expect(projected.defaultPlan).toBe("pro");
-    expect(projected.creditDisplay).toEqual({ currency: "USD", unitsPerMajor: "1000" });
+    expect(projected.creditDisplay).toEqual({
+      currency: "USD",
+      unitsPerMajor: "1000",
+    });
     expect(projected.plans[0]?.allowance?.priority).toBe(15);
     expect(projected.plans[0]?.offers[0]).toMatchObject({
       key: "pro_monthly",
       price: { amountMinor: 1900, currency: "USD" },
     });
     expect(JSON.stringify(projected)).not.toContain("price_secret");
+  });
+
+  it("scopes sorted offers and topups to registered providers and environment", () => {
+    const base = baseConfig();
+    const subscription = (id: JsonObject, sortOrder: number) => ({
+      type: "subscription",
+      display_name: "Pro",
+      plan: "pro",
+      sort_order: sortOrder,
+      billing_interval: { unit: "month", count: 1 },
+      price: { amount_minor: 1000, currency: "USD" },
+      providers: id,
+    });
+    const topup = (id: JsonObject, sortOrder: number) => ({
+      type: "topup",
+      display_name: "Pack",
+      sort_order: sortOrder,
+      price: { amount_minor: 500, currency: "USD" },
+      providers: id,
+      credits_per_unit: "10",
+      bucket: "purchased",
+    });
+    const config = loadConfigFromDict({
+      ...base,
+      plans: { ...base.plans, pro: { ...base.plans.pro, rank: 4, tier: 2 } },
+      commerce: {
+        providers: { dodo: { type: "dodo" }, stripe: { type: "stripe" } },
+        offers: {
+          a_test: subscription({ dodo: { product_id: { test: "test_sub" } } }, 0),
+          b_live: subscription({ dodo: { product_id: { live: "live_sub" } } }, 1),
+          c_other: subscription({ stripe: { price_id: { live: "stripe_sub" } } }, 2),
+          a_pack_test: topup({ dodo: { product_id: { test: "test_pack" } } }, 0),
+          b_pack_live: topup({ dodo: { product_id: { live: "live_pack" } } }, 1),
+        },
+      },
+    });
+    const live = projectPublicCatalog(config, {
+      providers: ["dodo"],
+      providerEnvironment: "live",
+    });
+    expect(live.plans[0]).toMatchObject({ rank: 4, tier: 2 });
+    expect(live.plans[0]?.offers.map((offer) => offer.key)).toEqual(["b_live"]);
+    expect(live.topups.map((offer) => offer.key)).toEqual(["b_pack_live"]);
+    const test = projectPublicCatalog(config, {
+      providers: ["dodo"],
+      providerEnvironment: "test",
+    });
+    expect(test.plans[0]?.offers.map((offer) => offer.key)).toEqual(["a_test"]);
+    expect(test.topups.map((offer) => offer.key)).toEqual(["a_pack_test"]);
+    const all = projectPublicCatalog(config);
+    expect(all.plans[0]?.offers.map((offer) => offer.key)).toEqual(["a_test", "b_live", "c_other"]);
+    expect(all.topups.map((offer) => offer.key)).toEqual(["a_pack_test", "b_pack_live"]);
+    expect(JSON.stringify(live)).not.toContain("live_sub");
   });
 
   it("allows partial rate cards for unused operations", () => {
@@ -359,7 +441,11 @@ describe("typed v1 config", () => {
 
     const missingPriority = baseConfig();
     // SAFETY: Removing priority is the invalid input this test is designed to exercise.
-    delete (missingPriority.plans.pro.credit_allowance as Partial<{ priority: number }>).priority;
+    delete (
+      missingPriority.plans.pro.credit_allowance as Partial<{
+        priority: number;
+      }>
+    ).priority;
     expect(() => loadConfigFromDict(missingPriority)).toThrow(/priority/);
   });
 

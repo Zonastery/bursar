@@ -36,6 +36,7 @@ from referencing another tenant's rows even if privileged code has a bug.
 
 ```bash title="Terminal"
 export BURSAR_OPERATOR_DATABASE_URL=postgresql://bursar_ops@db.example.com/bursar
+export BURSAR_PROVIDER_ENVIRONMENT=test
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
@@ -113,16 +114,26 @@ const runtime = await createBursarRuntime({
   </TabItem>
 </Tabs>
 
-Each SDK checks out one pooled connection, starts a transaction, sets
-`bursar.tenant_id` with transaction-local scope, performs the RPC, then
-commits or rolls back before releasing the connection. Never set a
-session-scoped tenant value on a pooled connection — it would leak into the
-next caller.
+Each tenant has one immutable provider environment, chosen at provisioning.
+Use separate tenants for `test`, `sandbox`, and `live`; the same YAML can be
+published in each. Each SDK binds and validates both values in the same
+transaction before any read or write. For direct SQL, use the supported
+entry point before calling tenant RPCs:
+
+```sql
+BEGIN;
+SELECT bursar.bind_tenant_context('<tenant-uuid>'::uuid, 'test');
+-- Call tenant-scoped Bursar RPCs here.
+COMMIT;
+```
+
+A mismatched environment or suspended tenant fails at binding. Binding is
+transaction-local, so pooled connections cannot carry it to the next caller.
 
 ## Database enforcement
 
 Business tables use forced row-level security. Server SDKs supply the tenant
-only through transaction-local `bursar.tenant_id` on the same checked-out
+through the validated transaction-local tenant and environment on the same checked-out
 connection as the RPC. Bursar does not derive the tenant from PostgREST JWT
 metadata, and a privileged connection is not an isolation boundary.
 

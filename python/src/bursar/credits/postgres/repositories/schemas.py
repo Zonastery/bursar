@@ -347,6 +347,7 @@ class UserPlanRow(BaseModel):
     plan_label: str = Field(min_length=1)
     rate_card: str | None
     allowed_operations: list[str]
+    operation_access: Literal["all", "none", "listed"]
     credit_allowance_amount: str | Decimal | None
     credit_allowance_priority: int | None = Field(ge=0)
     credit_allowance_reset_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"] | None

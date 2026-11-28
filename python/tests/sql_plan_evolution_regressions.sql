@@ -6,7 +6,8 @@ SELECT bursar.create_tenant(
     '00000000-0000-0000-0000-000000000777'::uuid,
     'plan-evolution-regression',
     'Plan evolution regression'
-);
+,
+    'test');
 SELECT set_config(
     'bursar.tenant_id',
     '00000000-0000-0000-0000-000000000777',
@@ -226,6 +227,10 @@ BEGIN
         '{plans,seeker,quotas,requests,limit}',
         '"6"'::jsonb
     );
+
+    -- Exercise next-renewal adoption of an actual plan change, not just a
+    -- change to rollout timing for an otherwise identical plan.
+    v_doc_2 := jsonb_set(v_doc_2, '{plans,monk,rank}', '2'::jsonb);
 
     SELECT revision_id
     INTO v_revision_2

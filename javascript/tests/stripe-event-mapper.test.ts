@@ -126,7 +126,12 @@ describe("Stripe webhook mapper", () => {
   it("maps current subscription periods and invoice parent references", async () => {
     const target = sink();
     const subscription = subscriptionFixture();
-    const stripe = fakeStripe();
+    const stripe = fakeStripe({
+      subscriptionRetrieve: async () => ({
+        ...subscription,
+        metadata: { ...subscription.metadata, checkout_intent_id: "intent-from-subscription" },
+      }),
+    });
 
     await handleStripeWebhook(event("customer.subscription.updated", subscription), target, stripe);
     await handleStripeWebhook(
@@ -176,6 +181,7 @@ describe("Stripe webhook mapper", () => {
         bursar_account_id: "u1",
         source: "subscription",
         invoice_key: "invoice_value",
+        checkout_intent_id: "intent-from-subscription",
       },
       invoice: { providerInvoiceId: "in_1", currency: "USD" },
     });
@@ -285,7 +291,7 @@ describe("Stripe webhook mapper", () => {
         providerSubscriptionId: "sub_1",
         periodStart: new Date(1_764_547_200 * 1000).toISOString(),
         periodEnd: new Date(1_767_225_600 * 1000).toISOString(),
-        refs: { lookupKey: "pro" },
+        refs: { priceId: "price_pro", productId: "prod_pro" },
       },
     });
     expect(target.events[1]).toMatchObject({

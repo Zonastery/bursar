@@ -123,7 +123,14 @@ async def test_official_subscription_lifecycle_event_set(sink: MagicMock) -> Non
 @pytest.mark.asyncio
 async def test_current_subscription_periods_and_invoice_parent_references(sink: MagicMock) -> None:
     subscription = subscription_fixture()
-    stripe = stripe_client()
+    stripe = stripe_client(
+        subscription_retrieve=AsyncMock(
+            return_value={
+                **subscription,
+                "metadata": {**subscription["metadata"], "checkout_intent_id": "intent-from-subscription"},
+            }
+        )
+    )
 
     await emit("customer.subscription.updated", subscription, sink, stripe)
     await emit(
@@ -170,6 +177,7 @@ async def test_current_subscription_periods_and_invoice_parent_references(sink: 
         "bursar_account_id": "u1",
         "source": "subscription",
         "invoice_key": "invoice_value",
+        "checkout_intent_id": "intent-from-subscription",
     }
     assert events[2].invoice.provider_invoice_id == "in_1"
     assert events[2].invoice.currency == "USD"
@@ -274,7 +282,8 @@ async def test_subscription_checkout_and_expiration_use_current_shapes(sink: Mag
     assert completed.subscription.provider_subscription_id == "sub_1"
     assert completed.subscription.period_start == "2025-12-01T00:00:00+00:00"
     assert completed.subscription.period_end == "2026-01-01T00:00:00+00:00"
-    assert completed.subscription.refs.lookup_key == "pro"
+    assert completed.subscription.refs.price_id == "price_pro"
+    assert completed.subscription.refs.product_id == "prod_pro"
     assert completed.metadata["checkout_intent_id"] == "intent_sub"
     assert expired.event_type == "checkout.expired"
     assert expired.metadata == {"checkout_intent_id": "intent_expired"}

@@ -129,6 +129,10 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, request bursar.Che
 	if err := validateCheckoutRequest(request); err != nil {
 		return bursar.CheckoutSession{}, err
 	}
+	trialDays, err := bursar.CheckoutTrialDays(request, 10000)
+	if err != nil {
+		return bursar.CheckoutSession{}, err
+	}
 	metadata := make(dodopayments.MetadataParam, len(request.Metadata)+1)
 	for key, value := range request.Metadata {
 		metadata[key] = shared.UnionString(value)
@@ -144,6 +148,9 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, request bursar.Che
 			Metadata:  dodopayments.F(metadata),
 			ReturnURL: dodopayments.F(request.SuccessURL),
 		},
+	}
+	if trialDays > 0 {
+		params.CheckoutSessionRequest.SubscriptionData = dodopayments.F(dodopayments.SubscriptionDataParam{TrialPeriodDays: dodopayments.F(trialDays)})
 	}
 	if customerID := strings.TrimSpace(request.CustomerID); customerID != "" {
 		params.CheckoutSessionRequest.Customer = dodopayments.F[dodopayments.CustomerRequestUnionParam](dodopayments.AttachExistingCustomerParam{

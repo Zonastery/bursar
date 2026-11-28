@@ -218,6 +218,10 @@ export class PostgresStore extends CreditStore {
     return this.postgres.query(text, params);
   }
 
+  withUsageBackend<T>(expected: "postgres" | "clickhouse", action: () => Promise<T>): Promise<T> {
+    return this.postgres.withUsageBackend(expected, action);
+  }
+
   async close(): Promise<void> {
     await this.postgres.close();
   }
@@ -581,8 +585,8 @@ export class PostgresStore extends CreditStore {
     label?: string | null,
     rollout?: CatalogRollout | null,
   ): Promise<string> {
-    const canonical = canonicalBursarConfigDict(config);
-    const parsed = loadConfigFromDict(canonical);
+    const canonical = canonicalBursarConfigDict(config, this.providerEnvironment);
+    const parsed = loadConfigFromDict(canonical, this.providerEnvironment);
     const rolloutDocument = canonicalCatalogRolloutDict(
       validateCatalogRollout(parsed, loadCatalogRollout(rollout ?? {})),
     );
@@ -598,7 +602,7 @@ export class PostgresStore extends CreditStore {
     config: BursarConfigData | JsonObject,
     label?: string | null,
   ): Promise<string> {
-    const canonical = canonicalBursarConfigDict(config);
+    const canonical = canonicalBursarConfigDict(config, this.providerEnvironment);
     const row = await this.catalogRepo.publishCatalogDraft(
       JSON.stringify(canonical),
       label ?? null,
@@ -626,7 +630,10 @@ export class PostgresStore extends CreditStore {
     const target = await this.getCatalogRevision(version);
     const parsedRollout = loadCatalogRollout(rollout ?? {});
     if (target != null) {
-      validateCatalogRollout(loadConfigFromDict(target.config), parsedRollout);
+      validateCatalogRollout(
+        loadConfigFromDict(target.config, this.providerEnvironment),
+        parsedRollout,
+      );
     }
     const row = await this.catalogRepo.activateCatalogRevision(
       version,
@@ -649,6 +656,7 @@ export class PostgresStore extends CreditStore {
         creditPolicy: null,
         admission: null,
         allowedOperations: [],
+        operationAccess: null,
         planAssignedAt: null,
         planAssignmentEndsAt: null,
         assignmentSourceType: null,
@@ -711,6 +719,7 @@ export class PostgresStore extends CreditStore {
               operations: admissionOperations,
             },
       allowedOperations: row.allowed_operations,
+      operationAccess: row.operation_access,
       planAssignedAt: row.plan_assigned_at,
       planAssignmentEndsAt: row.plan_assignment_ends_at,
       assignmentSourceType: row.assignment_source_type,

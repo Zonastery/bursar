@@ -824,8 +824,8 @@ class PostgresStore(CreditStore):
             load_config_from_dict,
         )
 
-        canonical = canonical_bursar_config_dict(config)
-        parsed = load_config_from_dict(canonical)
+        canonical = canonical_bursar_config_dict(config, self._provider_environment)
+        parsed = load_config_from_dict(canonical, self.provider_environment)
         rollout_document = canonical_catalog_rollout_dict(rollout, parsed)
         result = self._catalog_repo.publish_and_activate_catalog(
             json.dumps(canonical, cls=DecimalEncoder),
@@ -881,7 +881,7 @@ class PostgresStore(CreditStore):
         )
 
         target = self.get_catalog_revision(version)
-        target_config = load_config_from_dict(target.config) if target is not None else None
+        target_config = load_config_from_dict(target.config, self.provider_environment) if target is not None else None
         rollout_document = canonical_catalog_rollout_dict(
             rollout,
             target_config,
@@ -900,7 +900,7 @@ class PostgresStore(CreditStore):
         """Publish an inactive catalog draft."""
         from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_bursar_config_dict(config)
+        canonical = canonical_bursar_config_dict(config, self._provider_environment)
         result = self._catalog_repo.publish_catalog_draft(json.dumps(canonical, cls=DecimalEncoder), label)
         return result.id
 
@@ -986,6 +986,7 @@ class PostgresStore(CreditStore):
                 else None
             ),
             allowed_operations=result.allowed_operations,
+            operation_access=result.operation_access,
             plan_assigned_at=result.plan_assigned_at,
             plan_assignment_ends_at=result.plan_assignment_ends_at,
             assignment_source_type=result.assignment_source_type,

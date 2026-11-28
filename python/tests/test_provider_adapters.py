@@ -29,6 +29,7 @@ from bursar.providers.types import (
     ChangePlanPreview,
     CheckoutParams,
     CheckoutSessionResult,
+    CheckoutTrial,
     CreateCustomerParams,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
@@ -487,6 +488,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
                 account_id="user-1",
                 product_id="prod_1",
                 type="subscription",
+                trial=CheckoutTrial(unit="week", count=2),
                 return_url="https://return",
                 cancel_url="",
                 quantity=2,
@@ -502,6 +504,7 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
         {
             "product_cart": [{"product_id": "prod_1", "quantity": 2}],
             "return_url": "https://return",
+            "subscription_data": {"trial_period_days": 14},
             "metadata": {"plan": "pro", "bursar_account_id": "user-1"},
             "extra_headers": {"Idempotency-Key": "checkout-1"},
         },
@@ -843,6 +846,7 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
                 account_id="u1",
                 product_id="price_1",
                 type="subscription",
+                trial=CheckoutTrial(unit="week", count=2),
                 return_url="https://ok",
                 cancel_url="https://cancel",
                 metadata={},
@@ -861,6 +865,7 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     assert calls[1][1]["line_items"] == [{"price": "price_1", "quantity": 1}]
     assert calls[1][1]["metadata"]["bursar_account_id"] == "u1"
     assert calls[1][1]["subscription_data"]["metadata"]["bursar_account_id"] == "u1"
+    assert calls[1][1]["subscription_data"]["trial_period_days"] == 14
     assert calls[1][2] == {"idempotency_key": "idem_1"}
     customer = run(
         provider.create_customer(

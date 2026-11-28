@@ -768,6 +768,7 @@ def test_lease_settles_actual_overdraft_above_estimate_within_credit_line(
 ) -> None:
     user_id = "00000000-0000-0000-0000-000000000927"
     config = deepcopy(CONFIG)
+    config["plans"]["pro"]["allowed_operations"] = ["completion"]
     config["credits"]["policies"] = {"line": {"type": "credit_line", "limit": "5"}}
     config["plans"]["pro"]["credit_policy"] = "line"
     service = CreditsService(store=store)
@@ -819,6 +820,7 @@ def test_allowance_is_consumed_before_purchased_bucket_debit(
 ) -> None:
     user_id = "00000000-0000-0000-0000-000000000928"
     config = deepcopy(CONFIG)
+    config["plans"]["pro"]["allowed_operations"] = ["completion"]
     config["plans"]["pro"]["credit_allowance"] = {
         "amount": "5",
         "priority": 5,

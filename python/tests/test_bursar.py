@@ -220,3 +220,52 @@ def test_bursar_public_facade_emits_typed_errors(monkeypatch):
     accounts = AccountService(empty_credits, cast(Any, EmptyCatalog()))
     with pytest.raises(ConfigError):
         accounts.on_account_created("user-1", "signup:user-1")
+
+
+def test_public_view_applies_availability(monkeypatch):
+    from datetime import UTC, datetime
+
+    from bursar.config import load_config_from_dict
+
+    raw = {
+        "version": 1,
+        "commerce": {
+            "providers": {"stripe": {"type": "stripe"}},
+            "offers": {
+                "pack": {
+                    "type": "topup",
+                    "display_name": "Pack",
+                    "price": {"amount_minor": 100, "currency": "USD"},
+                    "providers": {"stripe": {"price_id": {"live": "price_1"}}},
+                    "credits_per_unit": "10",
+                    "bucket": "default",
+                    "availability": {
+                        "starts_at": "2025-01-01T00:00:00Z",
+                        "ends_at": "2025-02-01T00:00:00Z",
+                        "regions": ["IN"],
+                    },
+                }
+            },
+        },
+    }
+    config = load_config_from_dict(raw)
+    catalog = CatalogService(cast(CreditsService, FakeCredits()))
+    monkeypatch.setattr(catalog, "get_config", lambda: config)
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    assert len(catalog.public_view(region="IN", at=start)["topups"]) == 1
+    assert not catalog.public_view(at=start)["topups"]
+    assert not catalog.public_view(region="US", at=start)["topups"]
+    assert not catalog.public_view(region="IN", at=datetime(2025, 2, 1, tzinfo=UTC))["topups"]
+    assert not catalog.public_view(region="IN", at=datetime(2024, 12, 31, tzinfo=UTC))["topups"]
+    assert len(config.commerce.offers) == 1
+    with pytest.raises(ValueError, match="timezone-aware"):
+        catalog.public_view(at=datetime(2025, 1, 1))  # noqa: DTZ001 -- exercises rejection of naive timestamps
+    scoped = CatalogService(cast(CreditsService, FakeCredits()), "live", {"dodo"})
+    monkeypatch.setattr(scoped, "get_config", lambda: config)
+    assert not scoped.public_view(region="IN", at=start)["topups"]
+    scoped = CatalogService(cast(CreditsService, FakeCredits()), "test", {"stripe"})
+    monkeypatch.setattr(scoped, "get_config", lambda: config)
+    assert not scoped.public_view(region="IN", at=start)["topups"]
+    scoped = CatalogService(cast(CreditsService, FakeCredits()), "live", {"stripe"})
+    monkeypatch.setattr(scoped, "get_config", lambda: config)
+    assert len(scoped.public_view(region="IN", at=start)["topups"]) == 1

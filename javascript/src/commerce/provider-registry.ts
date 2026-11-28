@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { hasProviderBinding } from "../config/parse-commerce.js";
 import type { CommerceOffer } from "../config/types.js";
 import type { PaymentProvider } from "../providers/types.js";
 import { ProviderSelectionError } from "./errors.js";
@@ -93,16 +94,21 @@ export class CommerceProviderRegistry {
     offer?: CommerceOffer | null;
   }): Promise<PaymentProvider> {
     const compatible = input.offer
-      ? Object.keys(input.offer.providers).filter((name) =>
-          Object.prototype.hasOwnProperty.call(this.options.providers, name),
-        )
+      ? Object.entries(input.offer.providers)
+          .filter(([name, reference]) => {
+            return (
+              Object.prototype.hasOwnProperty.call(this.options.providers, name) &&
+              hasProviderBinding(reference, this.context.providerEnvironment)
+            );
+          })
+          .map(([name]) => name)
       : this.configuredProviders;
 
     const assertCompatible = (name: string): string => {
       if (!this.options.providers[name]) {
         throw new ProviderSelectionError(`Payment provider '${name}' is not registered`);
       }
-      if (input.offer && !input.offer.providers[name]) {
+      if (input.offer && !compatible.includes(name)) {
         throw new ProviderSelectionError(
           `Offer is not available through payment provider '${name}'`,
         );

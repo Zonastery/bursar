@@ -35,7 +35,7 @@ function catalog() {
       basic: {
         display_name: "Basic",
         rank: 0,
-        allowed_operations: [],
+        allowed_operations: "none",
         features: {},
         quotas: {},
         credit_policy: "prepaid",
@@ -43,7 +43,7 @@ function catalog() {
       peer: {
         display_name: "Peer",
         rank: 0,
-        allowed_operations: [],
+        allowed_operations: "none",
         features: {},
         quotas: {},
         credit_policy: "prepaid",
@@ -51,7 +51,8 @@ function catalog() {
       pro: {
         display_name: "Pro",
         rank: 1,
-        allowed_operations: [],
+        tier: 1,
+        allowed_operations: "none",
         features: {},
         quotas: {},
         credit_policy: "prepaid",
@@ -202,7 +203,9 @@ function provider(name = "alpha"): PaymentProvider {
       url: "https://portal.example/session",
     })),
     listPaymentMethods: vi.fn(async () => []),
-    getInvoiceUrl: vi.fn(async () => ({ url: "https://invoice.example/document" })),
+    getInvoiceUrl: vi.fn(async () => ({
+      url: "https://invoice.example/document",
+    })),
   };
 }
 
@@ -227,6 +230,7 @@ function harness(input?: {
 }) {
   const alpha = input?.alpha ?? provider("alpha");
   const beta = input?.beta ?? provider("beta");
+  const activeDocument = vi.fn(async () => catalog());
   const billingFixture = {
     autoRecharge: {
       getStatus: vi.fn(async () => null),
@@ -235,7 +239,11 @@ function harness(input?: {
       retry: vi.fn(async () => ({ outcome: "above_threshold" })),
       processIfNeeded: vi.fn(async () => ({ outcome: "above_threshold" })),
     },
-    getActiveCatalogDocument: vi.fn(async () => catalog()),
+    getActiveCatalogDocument: activeDocument,
+    getActiveCatalogRevision: vi.fn(async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      config: await activeDocument(),
+    })),
     getUserSubscription: vi.fn(async () => null),
     getActiveSubscription: vi.fn(async () => null),
     getBlockingSubscription: vi.fn(async () => null),
@@ -245,6 +253,7 @@ function harness(input?: {
     ),
     updateCheckoutIntent: vi.fn(async () => undefined),
     getCheckoutIntent: vi.fn(async () => null),
+    findCheckoutIntent: vi.fn(async () => null),
     upsertCustomer: vi.fn(async () => undefined),
     ingestBillingEvent: vi.fn(async () => ({ processed: true })),
     getUserPreferences: vi.fn(async () => null),
@@ -282,7 +291,7 @@ function harness(input?: {
     resolveOffer: vi.fn(async () => null),
     resolveOfferByLookup: vi.fn(async (_providerName, lookupKey) => ({
       offerId: `persisted-${lookupKey}`,
-      offerKey: lookupKey,
+      offerKey: lookupKey.replace(/^alpha-/, "").replaceAll("-", "_"),
     })),
     getAutoRechargeProfile: vi.fn(async () => null),
   };
@@ -359,6 +368,7 @@ function activeSubscription(
     providerSubscriptionId: "subscription-1",
     providerCustomerId: "customer-1",
     plan: "basic",
+    offerKey: "basic_month",
     interval: "month",
     status: "active" as const,
     providerUpdatedAt: "2025-01-01T00:00:00Z",
@@ -368,6 +378,82 @@ function activeSubscription(
 }
 
 describe("CommerceService", () => {
+  it.each(["test", "live"] as const)(
+    "selects only bound checkout providers in %s",
+    async (environment) => {
+      const { service, billing, alpha, beta, alphaFactory, betaFactory } = harness({
+        options: {
+          providerEnvironment: environment,
+          defaultProvider: "alpha",
+        },
+      });
+      const config = catalog();
+      Object.assign(config.commerce.offers.pack.providers, {
+        alpha: {
+          type: "custom_object",
+          object_kind: "one_time",
+          external_id: { live: "alpha-live" },
+        },
+        beta: {
+          type: "custom_object",
+          object_kind: "one_time",
+          external_id: { test: "beta-test" },
+        },
+      });
+      billing.getActiveCatalogDocument.mockResolvedValue(config);
+      const input = {
+        subjectId: "actor",
+        accountId: "account",
+        offerKey: "pack",
+        type: "credit_pack" as const,
+        returnUrl: "https://return.test",
+        cancelUrl: "https://cancel.test",
+        operationKey: "test-binding",
+      };
+      const result = await service.createCheckout(input);
+      expect(result.provider).toBe(environment === "test" ? "beta" : "alpha");
+      const selected = environment === "test" ? beta : alpha;
+      expect(selected.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          productId: environment === "test" ? "beta-test" : "alpha-live",
+        }),
+      );
+      const unavailable = environment === "test" ? "alpha" : "beta";
+      await expect(service.createCheckout({ ...input, provider: unavailable })).rejects.toThrow(
+        /not available/,
+      );
+      expect(environment === "test" ? alphaFactory : betaFactory).not.toHaveBeenCalled();
+    },
+  );
+
+  it("enforces region availability and forwards configured trials", async () => {
+    const { service, billing, alpha } = harness();
+    const config = catalog();
+    Object.assign(config.commerce.offers.basic_month, {
+      availability: { regions: ["IN"] },
+      trial: { unit: "week", count: 2 },
+    });
+    billing.getActiveCatalogDocument.mockResolvedValue(config);
+    const input = {
+      subjectId: "actor-1",
+      accountId: "account-1",
+      offerKey: "basic_month",
+      returnUrl: "https://return.test",
+      cancelUrl: "https://cancel.test",
+      operationKey: "region-trial",
+    };
+    await expect(service.createCheckout({ ...input, region: "in" })).rejects.toThrow(
+      "uppercase ISO",
+    );
+    await service.createCheckout({ ...input, region: "IN" });
+    expect(alpha.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({ trial: { unit: "week", count: 2 } }),
+    );
+    expect(billing.createOrGetCheckoutIntent).toHaveBeenCalledWith(
+      expect.objectContaining({ region: "IN" }),
+    );
+  });
+
   it("validates the active subscription plan when entitlements lag billing state", async () => {
     const { service, billing, credits } = harness();
     billing.getUserSubscription.mockResolvedValue(activeSubscription());
@@ -399,7 +485,11 @@ describe("CommerceService", () => {
       operationKey: "operation-1",
     });
 
-    expect(result).toMatchObject({ provider: "beta", offerKey: "pack", intentId: "intent-1" });
+    expect(result).toMatchObject({
+      provider: "beta",
+      offerKey: "pack",
+      intentId: "intent-1",
+    });
     expect(betaFactory).toHaveBeenCalledOnce();
     expect(betaFactory).toHaveBeenCalledWith(
       expect.objectContaining({ providerEnvironment: "test" }),
@@ -481,15 +571,17 @@ describe("CommerceService", () => {
     };
 
     await expect(service.createCheckout(checkout)).rejects.toThrow("database unavailable");
-    await expect(service.createCheckout(checkout)).resolves.toMatchObject({ intentId: "intent-1" });
+    await expect(service.createCheckout(checkout)).resolves.toMatchObject({
+      intentId: "intent-1",
+    });
     expect(beta.createCheckoutSession).toHaveBeenCalledTimes(2);
     expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ idempotencyKey: "checkout-persistence-retry" }),
+      expect.objectContaining({ idempotencyKey: "bursar:checkout:intent-1" }),
     );
     expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ idempotencyKey: "checkout-persistence-retry" }),
+      expect.objectContaining({ idempotencyKey: "bursar:checkout:intent-1" }),
     );
     expect(billing.updateCheckoutIntent).not.toHaveBeenCalledWith("intent-1", {
       status: "failed",
@@ -512,15 +604,17 @@ describe("CommerceService", () => {
     await expect(service.createCheckout(checkout)).rejects.toThrow("customer database unavailable");
     expect(billing.updateCheckoutIntent).not.toHaveBeenCalled();
 
-    await expect(service.createCheckout(checkout)).resolves.toMatchObject({ intentId: "intent-1" });
+    await expect(service.createCheckout(checkout)).resolves.toMatchObject({
+      intentId: "intent-1",
+    });
     expect(beta.createCheckoutSession).toHaveBeenCalledTimes(2);
     expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ idempotencyKey: "checkout-customer-retry" }),
+      expect.objectContaining({ idempotencyKey: "bursar:checkout:intent-1" }),
     );
     expect(beta.createCheckoutSession).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ idempotencyKey: "checkout-customer-retry" }),
+      expect.objectContaining({ idempotencyKey: "bursar:checkout:intent-1" }),
     );
     expect(billing.updateCheckoutIntent).toHaveBeenCalledOnce();
   });
@@ -563,7 +657,9 @@ describe("CommerceService", () => {
 
   it("does not replay a terminal checkout URL", async () => {
     const beta = provider("beta");
-    beta.getCheckoutSessionStatus = vi.fn(async () => ({ paymentStatus: "succeeded" as const }));
+    beta.getCheckoutSessionStatus = vi.fn(async () => ({
+      paymentStatus: "succeeded" as const,
+    }));
     const { service, billing } = harness({ beta });
     billing.createOrGetCheckoutIntent.mockImplementation(async (value) =>
       intent({
@@ -596,11 +692,17 @@ describe("CommerceService", () => {
       activeSubscription({ status: "canceled", cancelAtPeriodEnd: false }),
     );
     await expect(
-      service.cancelSubscription({ accountId: "user-1", operationKey: "cancel-1" }),
+      service.cancelSubscription({
+        accountId: "user-1",
+        operationKey: "cancel-1",
+      }),
     ).resolves.toEqual({ ok: true });
     billing.getUserSubscription.mockResolvedValue(activeSubscription());
     await expect(
-      service.reactivateSubscription({ accountId: "user-1", operationKey: "reactivate-1" }),
+      service.reactivateSubscription({
+        accountId: "user-1",
+        operationKey: "reactivate-1",
+      }),
     ).resolves.toEqual({ ok: true });
     expect(alphaFactory).not.toHaveBeenCalled();
   });
@@ -612,7 +714,10 @@ describe("CommerceService", () => {
     );
 
     await expect(
-      service.cancelSubscription({ accountId: "user-1", operationKey: "cancel-past-due" }),
+      service.cancelSubscription({
+        accountId: "user-1",
+        operationKey: "cancel-past-due",
+      }),
     ).resolves.toEqual({ ok: true, pending: true });
 
     expect(alpha.cancelSubscription).toHaveBeenCalledWith("subscription-1", "cancel-past-due");
@@ -638,7 +743,10 @@ describe("CommerceService", () => {
       const { service, billing, alpha } = harness();
       billing.getActiveSubscription.mockResolvedValue(activeSubscription());
 
-      const result = await service.previewPlanChange({ accountId: "user-1", offerKey });
+      const result = await service.previewPlanChange({
+        accountId: "user-1",
+        offerKey,
+      });
 
       expect(result.classification).toBe(classification);
       if (result.unchanged) throw new Error("Expected a plan-change quote");
@@ -648,6 +756,115 @@ describe("CommerceService", () => {
       );
     },
   );
+
+  it("switches distinct offers with the same plan and cadence using lateral policy", async () => {
+    const config = catalog();
+    Object.assign(config.commerce.offers, {
+      basic_month_alt: {
+        ...config.commerce.offers.basic_month,
+        providers: {
+          alpha: {
+            type: "custom_object",
+            object_kind: "subscription",
+            external_id: "alpha-basic-month-alt",
+          },
+        },
+      },
+    });
+    const { service, billing, alpha } = harness();
+    billing.getActiveCatalogDocument.mockResolvedValue(config);
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription());
+    const preview = await service.previewPlanChange({
+      accountId: "user-1",
+      offerKey: "basic_month_alt",
+    });
+    expect(preview.classification).toBe("lateral");
+    if (preview.unchanged) throw new Error("Expected a quote");
+    await service.confirmPlanChange({
+      accountId: "user-1",
+      offerKey: "basic_month_alt",
+      operationKey: "switch",
+      quoteFingerprint: preview.quoteFingerprint,
+    });
+    expect(alpha.changePlan).toHaveBeenCalled();
+  });
+
+  it("checks availability and requires a known current offer", async () => {
+    const config = catalog();
+    Object.assign(config.commerce.offers.pro_month, {
+      availability: { regions: ["IN"] },
+    });
+    const { service, billing, alpha } = harness();
+    billing.getActiveCatalogDocument.mockResolvedValue(config);
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription());
+    await expect(
+      service.previewPlanChange({ accountId: "user-1", offerKey: "pro_month" }),
+    ).rejects.toThrow("availability");
+    await expect(
+      service.previewPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        region: "US",
+      }),
+    ).rejects.toThrow("availability");
+    await expect(
+      service.previewPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        region: "in",
+      }),
+    ).rejects.toThrow("uppercase ISO");
+    expect(alpha.previewChangePlan).not.toHaveBeenCalled();
+    await expect(
+      service.previewPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        region: "IN",
+      }),
+    ).resolves.toMatchObject({ classification: "upgrade" });
+    vi.mocked(alpha.previewChangePlan!).mockClear();
+    Object.assign(config.commerce.offers.pro_month, {
+      availability: { starts_at: "2099-01-01T00:00:00Z", regions: [] },
+    });
+    await expect(
+      service.previewPlanChange({ accountId: "user-1", offerKey: "pro_month" }),
+    ).rejects.toThrow("availability");
+    await expect(
+      service.confirmPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        operationKey: "future",
+        quoteFingerprint: "x",
+      }),
+    ).rejects.toThrow("availability");
+    Object.assign(config.commerce.offers.pro_month, {
+      availability: { ends_at: "2000-01-01T00:00:00Z", regions: [] },
+    });
+    await expect(
+      service.previewPlanChange({ accountId: "user-1", offerKey: "pro_month" }),
+    ).rejects.toThrow("availability");
+    await expect(
+      service.confirmPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        operationKey: "past",
+        quoteFingerprint: "x",
+      }),
+    ).rejects.toThrow("availability");
+    expect(alpha.previewChangePlan).not.toHaveBeenCalled();
+    expect(alpha.changePlan).not.toHaveBeenCalled();
+    Object.assign(config.commerce.offers.pro_month, {
+      availability: { regions: ["IN"] },
+    });
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription({ offerKey: null }));
+    await expect(
+      service.previewPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        region: "IN",
+      }),
+    ).rejects.toThrow("Current subscription offer is unknown");
+  });
 
   it("does not misclassify an immediate no-proration change as scheduled", async () => {
     const config = catalog();
@@ -670,10 +887,16 @@ describe("CommerceService", () => {
 
     expect(result.scheduled).toBe(false);
     expect(billing.createBillingSubscriptionChange).toHaveBeenCalledWith(
-      expect.objectContaining({ effective: "immediate", prorationBehavior: "none" }),
+      expect.objectContaining({
+        effective: "immediate",
+        prorationBehavior: "none",
+      }),
     );
     expect(alpha.changePlan).toHaveBeenCalledWith(
-      expect.objectContaining({ effectiveAt: "immediately", prorationBillingMode: "do_not_bill" }),
+      expect.objectContaining({
+        effectiveAt: "immediately",
+        prorationBillingMode: "do_not_bill",
+      }),
     );
   });
 
@@ -972,7 +1195,12 @@ describe("CommerceService", () => {
     expect(overview.credits.effectiveSpendableBalance.toString()).toBe("35");
     expect(overview.credits.spendOrder).toEqual([
       { type: "bucket", key: "general", label: "General", priority: 10 },
-      { type: "allowance", key: "allowance", label: "Plan allowance", priority: 20 },
+      {
+        type: "allowance",
+        key: "allowance",
+        label: "Plan allowance",
+        priority: 20,
+      },
     ]);
     expect(credits.listUsageCharges).toHaveBeenCalledWith("user-1", {
       limit: 100,

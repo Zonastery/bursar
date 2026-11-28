@@ -5,6 +5,7 @@ package bursar
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -446,4 +447,75 @@ func integrationUserID() string {
 
 func integrationKey(suffix string) string {
 	return "go-postgres-integration:" + uuid.NewString() + ":" + suffix
+}
+
+func TestPostgresUsageOutboxRetainsExactJSON(t *testing.T) {
+	config := requirePostgresIntegration(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tenant := uuid.NewString()
+	subject := uuid.NewString()
+	operator, err := NewPostgresClient(ctx, config.databaseURL, PostgresClientOptions{
+		AccessRole: PostgresAccessRoleOperator, ProviderEnvironment: config.providerEnvironment,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operator.Close()
+	if _, err := operator.Query(ctx, "SELECT bursar.create_tenant($1::uuid,$2::text,'Precision',$3::text)", tenant, "precision-"+tenant, string(config.providerEnvironment)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operator.Query(ctx, "SELECT bursar.begin_usage_backend_cutover($1::uuid,'clickhouse',now())", tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operator.Query(ctx, "SELECT bursar.finish_usage_backend_cutover($1::uuid,'clickhouse',0)", tenant); err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := operator.ForTenant(tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scoped.Close()
+	client, err := NewPostgresClient(ctx, config.databaseURL, PostgresClientOptions{
+		TenantID: tenant, AccessRole: PostgresAccessRoleClient, ProviderEnvironment: config.providerEnvironment, UsageBackend: "clickhouse",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	rows, err := client.Query(ctx, `SELECT charge_id FROM bursar.record_usage($1::uuid,'precision',0,'precision-event',
+       p_metadata => '{"fraction":0.123456789012345678901234567890123456789}'::jsonb)`, subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chargeID, err := requiredRowText(rows[0], "charge_id", "record_usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := NewPostgresStorageRepository(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := repository.Claim(ctx, []string{OutboxTopicUsageChargeRecorded}, 1, 60)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("claim = %#v, %v", events, err)
+	}
+	sink := &usageSinkStub{}
+	handler, err := NewUsageChargeOutboxHandler(repository, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Handle(ctx, events[0]); err != nil {
+		t.Fatal(err)
+	}
+	if sink.event.ChargeID != chargeID {
+		t.Fatalf("wrong charge: %s", sink.event.ChargeID)
+	}
+	encoded, err := json.Marshal(sink.event.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "0.123456789012345678901234567890123456789") {
+		t.Fatalf("rounded metadata: %s", encoded)
+	}
 }

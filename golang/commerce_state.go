@@ -90,6 +90,7 @@ type BillingSubscriptionChangeCreate struct {
 	Provider               string
 	ProviderSubscriptionID string
 	ToOfferID              string
+	Region                 *string
 	ToOfferKey             string
 	ToPlanKey              string
 	ToInterval             string
@@ -257,6 +258,7 @@ type PlanChangePreview struct {
 type PreviewPlanChangeInput struct {
 	AccountID string
 	OfferKey  string
+	Region    *string
 }
 
 // PlanChangePreviewResult is discriminated by Unchanged. A confirmation is
@@ -275,6 +277,7 @@ type PlanChangePreviewResult struct {
 // returned from PreviewPlanChange.
 type ConfirmPlanChangeInput struct {
 	AccountID        string
+	Region           *string
 	OfferKey         string
 	QuoteFingerprint string
 	OperationKey     string

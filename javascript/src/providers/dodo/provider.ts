@@ -170,6 +170,15 @@ export class DodoProvider implements PaymentProvider {
   async createCheckoutSession(
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string; providerSessionId?: string }> {
+    const trial = params.trial;
+    if (trial && (params.type !== "subscription" || !["day", "week"].includes(trial.unit)))
+      throw new TypeError("Dodo checkout trials require a subscription and day or week units");
+    const trialDays = trial ? trial.count * (trial.unit === "week" ? 7 : 1) : undefined;
+    if (
+      trialDays !== undefined &&
+      (!Number.isSafeInteger(trialDays) || trialDays < 1 || trialDays > 10000)
+    )
+      throw new TypeError("Dodo checkout trial must be between 1 and 10000 days");
     const requestOptions = dodoIdempotencyOptions(params.idempotencyKey);
     this.logger.info("[DodoProvider] createCheckoutSession", {
       productId: params.productId,
@@ -194,6 +203,7 @@ export class DodoProvider implements PaymentProvider {
       cancel_url: params.cancelUrl,
       metadata: { ...params.metadata, bursar_account_id: params.accountId },
     };
+    if (trialDays !== undefined) body.subscription_data = { trial_period_days: trialDays };
     if (params.email) body.feature_flags = { allow_customer_editing_email: false };
     const session = await client.checkoutSessions.create(body, requestOptions);
     return {
@@ -452,7 +462,10 @@ export class DodoProvider implements PaymentProvider {
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
     const client = this.getClient();
     const requestOptions = dodoIdempotencyOptions(params.idempotencyKey);
-    const body: DodoCustomerCreateParams = { email: params.email, name: params.name };
+    const body: DodoCustomerCreateParams = {
+      email: params.email,
+      name: params.name,
+    };
     if (params.metadata) body.metadata = params.metadata;
     const customer = await client.customers.create(body, requestOptions);
     return {

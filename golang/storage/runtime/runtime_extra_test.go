@@ -523,6 +523,27 @@ func TestRuntimeAddsProjectionWorkerWhenPortsAreConfigured(t *testing.T) {
 	}
 }
 
+func TestRuntimeDependencyFallbackAndMaintenanceWithoutBilling(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]string{
+		"postgres": "postgres_check_failed",
+		"catalog":  "catalog_check_failed",
+		"outbox":   "outbox_check_failed",
+		"worker":   "dependency_check_failed",
+	} {
+		if got := dependencyFailureFallback(name); got != want {
+			t.Errorf("dependencyFailureFallback(%q) = %q, want %q", name, got, want)
+		}
+	}
+	if _, err := newMaintenance(&bursar.PostgresStore{}, &bursar.Bursar{}); err != nil {
+		t.Fatalf("newMaintenance(without billing) error = %v", err)
+	}
+	runtime := &Runtime{tenantSlug: "acme", tenantID: "00000000-0000-0000-0000-000000000001"}
+	if err := runtime.verifyTenantIdentity(context.Background()); err == nil || !strings.Contains(err.Error(), "operator PostgreSQL client") {
+		t.Fatalf("verifyTenantIdentity(without operator) error = %v", err)
+	}
+}
+
 func TestRuntimeDiagnosticsIncludesLocalWorkerAndOutboxSnapshots(t *testing.T) {
 	t.Parallel()
 	const tenantID = "00000000-0000-0000-0000-000000000001"

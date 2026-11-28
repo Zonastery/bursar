@@ -1,6 +1,6 @@
 [project]
 name = "bursar"
-version = "2.0.6"
+version = "2.1.0"
 description = "Open-source PostgreSQL credit ledger, usage metering, and billing SDK for AI SaaS"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -70,6 +70,9 @@ dodo = [
 postgres = [
     "psycopg2-binary>=2.9.12",
 ]
+clickhouse = [
+    "clickhouse-connect>=0.8,<1",
+]
 s3 = [
     "boto3>=1.43.72,<2",
 ]
@@ -100,7 +103,7 @@ test = [
 ]
 
 [tool.setuptools.package-data]
-bursar = ["sql/*.sql"]
+bursar = ["sql/*.sql", "starter.yaml"]
 
 [tool.ruff]
 target-version = "py312"

@@ -96,7 +96,7 @@ func TestCatalogBoundaryErrorsNeverUseStaleFinancialState(t *testing.T) {
 	if _, err := service.GetConfig(ctx); err == nil {
 		t.Fatal("missing active catalog was accepted")
 	}
-	store.active = &CatalogRevision{ID: "invalid", Version: 1, Config: map[string]any{"version": 1}}
+	store.active = &CatalogRevision{ID: "invalid", Version: 1, Config: map[string]any{"version": 2}}
 	if err := service.Load(ctx); err == nil {
 		t.Fatal("invalid active catalog was installed")
 	}
@@ -131,12 +131,12 @@ func TestCatalogBoundaryErrorsNeverUseStaleFinancialState(t *testing.T) {
 		t.Fatalf("historical catalog error = %v", err)
 	}
 	store.revisionErr = nil
-	store.revision = &CatalogRevision{Version: version, Config: map[string]any{"version": 1}}
+	store.revision = &CatalogRevision{Version: version, Config: map[string]any{"version": 2}}
 	if _, err := service.engineForVersion(ctx, &version); err == nil {
 		t.Fatal("invalid historical catalog was cached")
 	}
 
-	if _, err := service.PublishDraft(ctx, map[string]any{"version": 1}, "invalid"); err == nil {
+	if _, err := service.PublishDraft(ctx, map[string]any{"version": 2}, "invalid"); err == nil {
 		t.Fatal("invalid draft reached storage")
 	}
 	store.publishErr = storeError

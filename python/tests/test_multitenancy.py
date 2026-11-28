@@ -21,6 +21,14 @@ SECOND_TENANT_ID = "00000000-0000-0000-0000-000000000002"
 SHARED_SUBJECT_ID = "00000000-0000-0000-0000-000000000099"
 
 OPERATOR_FUNCTIONS = (
+    "bursar.abort_usage_backend_cutover(uuid)",
+    "bursar.begin_usage_backend_cutover(uuid,text,timestamptz)",
+    "bursar.finish_usage_backend_cutover(uuid,text,bigint)",
+    "bursar.get_usage_backend_status(uuid)",
+    "bursar.import_usage_cutover_item(uuid,jsonb)",
+    "bursar.list_usage_cutover_postgres(uuid,timestamptz,uuid,integer)",
+    "bursar.usage_cutover_projection(uuid,uuid)",
+    "bursar.verify_usage_cutover_item(uuid,uuid,timestamptz,text)",
     "bursar.get_storage_settings()",
     (
         "bursar.configure_storage(integer,integer,integer,integer,integer,"
@@ -38,7 +46,8 @@ OPERATOR_FUNCTIONS = (
     "bursar.run_storage_maintenance(timestamptz)",
     "bursar.maybe_run_storage_maintenance(timestamptz)",
     "bursar.secure_tenant_partition(regclass)",
-    "bursar.create_tenant(uuid,text,text)",
+    "bursar.create_tenant(uuid,text,text,text)",
+    "bursar.get_tenant_context_by_slug(text)",
     "bursar.set_tenant_status(uuid,text)",
 )
 
@@ -46,7 +55,7 @@ OPERATOR_FUNCTIONS = (
 def _ensure_second_tenant(pg_database_url: str) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT bursar.create_tenant(%s, %s, %s)",
+            "SELECT bursar.create_tenant(%s, %s, %s, 'test')",
             (SECOND_TENANT_ID, "second-tenant", "Second tenant"),
         )
 
@@ -63,7 +72,7 @@ def test_tenant_provisioning_rejects_slug_reuse_with_another_id(
         ),
     ):
         cursor.execute(
-            "SELECT bursar.create_tenant(%s, %s, %s)",
+            "SELECT bursar.create_tenant(%s, %s, %s, 'test')",
             (SECOND_TENANT_ID, TEST_TENANT_SLUG, "Wrong identity"),
         )
 
@@ -175,14 +184,15 @@ def test_migrations_accept_a_set_only_least_privilege_client(
         with psycopg2.connect(pristine_dsn) as connection, connection.cursor() as cursor:
             cursor.execute("SET LOCAL ROLE bursar_operator")
             cursor.execute(
-                "SELECT bursar.create_tenant(%s, %s, %s)",
+                "SELECT bursar.create_tenant(%s, %s, %s, 'test')",
                 (TEST_TENANT_ID, "role-contract", "Role contract"),
             )
 
         with psycopg2.connect(client_dsn) as connection, connection.cursor() as cursor:
             cursor.execute("SET LOCAL ROLE bursar_client")
             cursor.execute(
-                "SELECT set_config('bursar.tenant_id', %s, true)",
+                "SELECT set_config('bursar.tenant_id', %s, true), "
+                "set_config('bursar.provider_environment', 'test', true)",
                 (TEST_TENANT_ID,),
             )
             cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
@@ -231,9 +241,9 @@ def test_provider_environment_fails_closed_without_transaction_context(
             cursor.execute("SELECT bursar.current_provider_environment()")
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        cursor.execute("SELECT set_config('bursar.provider_environment', 'sandbox', true)")
+        cursor.execute("SELECT bursar.bind_tenant_context(%s::uuid, 'test')", (TEST_TENANT_ID,))
         cursor.execute("SELECT bursar.current_provider_environment()")
-        assert cursor.fetchone() == ("sandbox",)
+        assert cursor.fetchone() == ("test",)
 
 
 def test_tenant_aware_host_trigger_assigns_default_plan_and_signup_grants(
@@ -414,7 +424,8 @@ def test_tenants_isolate_catalog_credit_and_provider_idempotency(
                 "SELECT bursar.set_tenant_status(%s, 'suspended')",
                 (SECOND_TENANT_ID,),
             )
-        assert second.get_balance(SHARED_SUBJECT_ID).balance == Decimal("0")
+        with pytest.raises(StoreError, match="inactive"):
+            second.get_balance(SHARED_SUBJECT_ID)
         with pytest.raises(StoreError):
             second.add_credits(
                 SHARED_SUBJECT_ID,
@@ -495,7 +506,8 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
             (SECOND_TENANT_ID, "second"),
         ):
             cursor.execute(
-                "SELECT set_config('bursar.tenant_id', %s, true)",
+                "SELECT set_config('bursar.tenant_id', %s, true), "
+                "set_config('bursar.provider_environment', 'test', true)",
                 (tenant_id,),
             )
             cursor.execute(
@@ -520,7 +532,7 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
 
         cursor.execute("SET ROLE bursar_operator")
         cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
+            "SELECT set_config('bursar.tenant_id', %s, true), set_config('bursar.provider_environment', 'test', true)",
             (TEST_TENANT_ID,),
         )
         cursor.execute(
@@ -563,7 +575,7 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
         assert error_info.value.pgcode == "42501"
         cursor.execute("ROLLBACK TO SAVEPOINT cross_tenant_claim")
         cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
+            "SELECT set_config('bursar.tenant_id', %s, true), set_config('bursar.provider_environment', 'test', true)",
             (SECOND_TENANT_ID,),
         )
         cursor.execute(
@@ -593,7 +605,7 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
         assert cursor.fetchone() == (True,)
 
         cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
+            "SELECT set_config('bursar.tenant_id', %s, true), set_config('bursar.provider_environment', 'test', true)",
             (TEST_TENANT_ID,),
         )
         cursor.execute(
@@ -653,7 +665,8 @@ def test_only_explicit_bursar_context_selects_a_tenant(
                 (SECOND_TENANT_ID,),
             )
             cursor.execute(
-                "SELECT set_config('bursar.tenant_id', %s, true)",
+                "SELECT set_config('bursar.tenant_id', %s, true), "
+                "set_config('bursar.provider_environment', 'test', true)",
                 (TEST_TENANT_ID,),
             )
             cursor.execute("SELECT bursar.current_tenant_id()")
@@ -667,7 +680,8 @@ def test_only_explicit_bursar_context_selects_a_tenant(
             assert cursor.fetchone() == (Decimal("10"),)
 
             cursor.execute(
-                "SELECT set_config('bursar.tenant_id', %s, true)",
+                "SELECT set_config('bursar.tenant_id', %s, true), "
+                "set_config('bursar.provider_environment', 'test', true)",
                 (SECOND_TENANT_ID,),
             )
             cursor.execute(
@@ -902,15 +916,15 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
         second_connection.cursor() as second_cursor,
     ):
         first_cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
+            "SELECT set_config('bursar.tenant_id', %s, true), set_config('bursar.provider_environment', 'test', true)",
             (TEST_TENANT_ID,),
         )
-        first_cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
+        first_cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
         second_cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
+            "SELECT set_config('bursar.tenant_id', %s, true), set_config('bursar.provider_environment', 'test', true)",
             (SECOND_TENANT_ID,),
         )
-        second_cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
+        second_cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
         second_cursor.execute("SET LOCAL statement_timeout = '2s'")
 
         first_cursor.execute(
@@ -1086,10 +1100,10 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SET LOCAL ROLE bursar_client")
         cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
+            "SELECT set_config('bursar.tenant_id', %s, true), set_config('bursar.provider_environment', 'test', true)",
             (TEST_TENANT_ID,),
         )
-        cursor.execute("SELECT set_config('bursar.provider_environment', 'live', true)")
+        cursor.execute("SELECT set_config('bursar.provider_environment', 'test', true)")
         with pytest.raises(
             psycopg2.errors.InvalidParameterValue,
             match="unknown plan migration",

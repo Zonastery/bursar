@@ -46,9 +46,9 @@ func TestCommerceStateStatusAndLookupBoundaries(t *testing.T) {
 		kind string
 		want string
 	}{
-		{"price", ProviderReference{PriceID: &price, ProductID: &product, ExternalID: &external}, "price_id", "price"},
-		{"product", ProviderReference{ProductID: &product, ExternalID: &external}, "product_id", "prod"},
-		{"external", ProviderReference{ExternalID: &external}, "external_id", "external"},
+		{"price", ProviderReference{PriceID: ScalarProviderID(price), ProductID: ScalarProviderID(product), ExternalID: ScalarProviderID(external)}, "price_id", "price"},
+		{"product", ProviderReference{ProductID: ScalarProviderID(product), ExternalID: ScalarProviderID(external)}, "product_id", "prod"},
+		{"external", ProviderReference{ExternalID: ScalarProviderID(external)}, "external_id", "external"},
 		{"empty", ProviderReference{}, "", ""},
 	} {
 		t.Run("provider/"+tc.name, func(t *testing.T) {
@@ -214,6 +214,19 @@ func TestBillingStateInputAndTransitionValidation(t *testing.T) {
 		state := tc.state
 		if err := store.UpdateBillingSubscriptionChange(ctx, tc.id, BillingSubscriptionChangeUpdate{State: &state}); err == nil {
 			t.Errorf("invalid change update accepted: %#v", tc)
+		}
+	}
+}
+
+func TestExpiredGraceQueriesRejectInvalidLimitsBeforeDatabaseAccess(t *testing.T) {
+	t.Parallel()
+	store := &PostgresStore{}
+	for _, limit := range []int{0, 1001} {
+		if _, err := store.ListExpiredGraceSubscriptions(context.Background(), time.Time{}, limit); err == nil {
+			t.Errorf("ListExpiredGraceSubscriptions(limit=%d) accepted an invalid limit", limit)
+		}
+		if _, err := store.ExpirePastDueGracePeriods(context.Background(), time.Time{}, limit); err == nil {
+			t.Errorf("ExpirePastDueGracePeriods(limit=%d) accepted an invalid limit", limit)
 		}
 	}
 }

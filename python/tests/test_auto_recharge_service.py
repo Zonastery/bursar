@@ -48,6 +48,7 @@ async def test_unknown_attempt_resumes_with_its_original_provider_idempotency_ke
         state="active",
         provider="stripe",
         topup_id="topup-1",
+        topup_key="small_pack",
         quantity=1,
         threshold=Decimal("10"),
         max_charges_per_window=3,
@@ -91,7 +92,7 @@ async def test_unknown_attempt_resumes_with_its_original_provider_idempotency_ke
         window_end="2026-08-02T00:00:00+00:00",
         product_id="price-1",
     )
-    monkeypatch.setattr(service, "_policy", lambda _provider: policy)
+    monkeypatch.setattr(service, "_policy", lambda _provider, _profile=None: policy)
     monkeypatch.setattr(
         service,
         "_payment_method",
@@ -144,3 +145,97 @@ async def test_unknown_attempt_resumes_with_its_original_provider_idempotency_ke
         }
     ]
     assert billing.update_auto_recharge_attempt.call_args.args[0].state == "processing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "availability",
+    [{"regions": ["IN"]}, {"starts_at": "2099-01-01T00:00:00Z"}, {"ends_at": "2000-01-01T00:00:00Z"}],
+)
+async def test_auto_recharge_skips_unavailable_saved_offer(availability: dict[str, object]) -> None:
+    from copy import deepcopy
+
+    from tests.test_commerce_integration import CONFIG
+
+    billing = MagicMock()
+    billing.provider_environment = "test"
+    billing.get_auto_recharge_profile.return_value = BillingAutoRechargeProfile(
+        user_id="user-1",
+        enabled=True,
+        state="active",
+        provider="stripe",
+        topup_id="topup-1",
+        topup_key="standard_topup",
+        quantity=1,
+        threshold=Decimal("1000"),
+        max_charges_per_window=3,
+        window_unit="day",
+        window_count=30,
+        window_anchor="rolling",
+        window_timezone="UTC",
+    )
+    config = deepcopy(CONFIG)
+    config["commerce"]["offers"]["standard_topup"]["availability"] = availability
+    billing.get_active_catalog_document.return_value = config
+    provider = MagicMock()
+    provider.provider = "stripe"
+    result = await AutoRechargeService(billing).process_if_needed("user-1", provider, balance=0, return_url=None)
+    assert result.outcome == "not_configured"
+    billing.claim_auto_recharge_attempt.assert_not_called()
+    billing.resolve_topup.assert_not_called()
+
+
+def test_saved_selection_survives_reordered_defaults() -> None:
+    from copy import deepcopy
+
+    from tests.test_commerce_integration import CONFIG
+
+    billing = MagicMock()
+    billing.provider_environment = "test"
+    config = deepcopy(CONFIG)
+    offers = config["commerce"]["offers"]
+    offers["other_topup"] = deepcopy(offers["standard_topup"])
+    offers["other_topup"]["providers"]["stripe"]["price_id"] = "other_price"
+    guardrails = config["commerce"]["auto_recharge"]
+    guardrails["eligible_topups"] = ["other_topup", "standard_topup"]
+    guardrails["quantity"]["default"] = 2
+    billing.get_active_catalog_document.return_value = config
+    billing.resolve_topup.return_value.topup_id = "new-revision-topup"
+    provider = MagicMock()
+    provider.provider = "stripe"
+    profile = BillingAutoRechargeProfile(
+        user_id="user-1",
+        enabled=True,
+        state="active",
+        provider="stripe",
+        topup_id="old-revision-topup",
+        topup_key="standard_topup",
+        quantity=1,
+        threshold=Decimal("1000"),
+        max_charges_per_window=3,
+        window_unit="day",
+        window_count=30,
+        window_anchor="rolling",
+        window_timezone="UTC",
+    )
+    policy = AutoRechargeService(billing)._policy(provider, profile)
+    assert policy is not None and policy.topup_key == "standard_topup" and policy.quantity == 1
+    billing.resolve_topup.assert_called_once_with("stripe", None, "price_topup_500")
+
+
+@pytest.mark.asyncio
+async def test_auto_recharge_is_unavailable_for_other_environment_binding() -> None:
+    from copy import deepcopy
+
+    from tests.test_commerce_integration import CONFIG
+
+    config = deepcopy(CONFIG)
+    config["commerce"]["offers"]["standard_topup"]["providers"]["stripe"]["price_id"] = {"live": "price_live"}
+    billing = MagicMock()
+    billing.provider_environment = "test"
+    billing.get_active_catalog_document.return_value = config
+    billing.get_auto_recharge_profile.return_value = None
+    provider = MagicMock()
+    provider.provider = "stripe"
+    assert await AutoRechargeService(billing).get_status("user-1", provider) is None
+    billing.resolve_topup.assert_not_called()

@@ -6,6 +6,12 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      recovery_release_tag:
+        description: Existing immutable release tag whose npm publish needs recovery
+        required: false
+        type: string
 
 # Cancel superseded PR/branch runs, but never cancel a release tag: stopping a
 # publish midway can leave the PyPI, npm, and GitHub releases out of sync.
@@ -245,11 +251,19 @@ jobs:
         with:
           go-version: "1.26.11"
           cache-dependency-path: golang/integrations/googleadk/go.sum
-      - name: Verify optional module metadata and formatting
+      # The core SDK and adapter ship from one shared release commit. The
+      # nested core-module tag does not exist until release-preflight passes,
+      # so validate the adapter against the core module in this checkout.
+      - name: Configure the in-tree core module for Go checks
         working-directory: golang/integrations/googleadk
         run: |
+          cp go.mod "${RUNNER_TEMP}/bursar-googleadk-go.mod"
+          cp go.sum "${RUNNER_TEMP}/bursar-googleadk-go.sum"
+          go mod edit -replace=github.com/Zonastery/bursar/golang/v2=../..
           go mod tidy
-          git diff --exit-code -- go.mod go.sum
+      - name: Verify optional module formatting
+        working-directory: golang/integrations/googleadk
+        run: |
           files="$(git ls-files '*.go')"
           if [ -n "$files" ]; then
             test -z "$(gofmt -l $files)"
@@ -265,6 +279,12 @@ jobs:
           go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage/adk.out ./...
           go run github.com/vladopajic/go-test-coverage/v2@v2.19.0 --config=.testcoverage.yml
         working-directory: golang/integrations/googleadk
+      - name: Restore published module metadata
+        if: always()
+        working-directory: golang/integrations/googleadk
+        run: |
+          cp "${RUNNER_TEMP}/bursar-googleadk-go.mod" go.mod
+          cp "${RUNNER_TEMP}/bursar-googleadk-go.sum" go.sum
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-adk-coverage-report
@@ -390,7 +410,7 @@ jobs:
           /tmp/bursar-python-consumer/bin/python -c 'import bursar; assert bursar.Bursar and bursar.PricingEngine'
           wheel=$(find /tmp/bursar-wheel -name '*.whl' -print -quit)
           /tmp/bursar-python-consumer/bin/pip install "${wheel}[postgres,s3,opentelemetry]"
-          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; import bursar.storage; import bursar.telemetry.opentelemetry; assert (files("bursar") / "sql" / "031_catalog_document_shape_schema.sql").is_file()'
+          /tmp/bursar-python-consumer/bin/python -c 'from importlib.resources import files; from pathlib import Path; import bursar.storage; import bursar.telemetry.opentelemetry; source = Path("python/src/bursar/sql"); installed = files("bursar").joinpath("sql"); expected = {p.name: p.read_bytes() for p in source.glob("*.sql")}; actual = {p.name: p.read_bytes() for p in installed.iterdir() if p.name.endswith(".sql")}; assert actual == expected, f"Wheel SQL differs: missing={expected.keys() - actual.keys()}, extra={actual.keys() - expected.keys()}"; assert files("bursar").joinpath("starter.yaml").read_bytes() == Path("python/src/bursar/starter.yaml").read_bytes()'
           /tmp/bursar-python-consumer/bin/bursar migrate
           /tmp/bursar-python-consumer/bin/bursar tenant bootstrap package-smoke \
             .github/package-smoke/pricing.json \
@@ -467,7 +487,9 @@ jobs:
   # release.
 
   release-preflight:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recovery_release_tag != '')
     needs:
       [
         lint,
@@ -485,13 +507,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.15"
       - name: Verify tag and SDK module versions agree
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ inputs.recovery_release_tag || github.ref_name }}
         run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must be a semantic version tag such as v2.1.0" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            git fetch origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            git checkout --detach "$RELEASE_TAG"
+            release_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+            for go_tag in "golang/${RELEASE_TAG}" "golang/integrations/googleadk/${RELEASE_TAG}"; do
+              go_commit="$(git ls-remote --exit-code origin "refs/tags/${go_tag}" | awk 'NR == 1 { print $1 }')"
+              if [ "$go_commit" != "$release_commit" ]; then
+                echo "${go_tag} does not point to ${RELEASE_TAG} commit ${release_commit}" >&2
+                exit 1
+              fi
+            done
+          fi
           python - <<'PY'
           import json
           import os
@@ -615,8 +657,18 @@ jobs:
           uv publish --check-url https://pypi.org/simple
 
   release-npm:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-pypi]
+    if: >-
+      !cancelled() &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recovery_release_tag != '')
+      ) &&
+      needs.release-preflight.result == 'success' &&
+      (
+        needs.release-pypi.result == 'success' ||
+        (github.event_name == 'workflow_dispatch' && needs.release-pypi.result == 'skipped')
+      )
+    needs: [release-preflight, release-pypi]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -624,6 +676,8 @@ jobs:
       id-token: write # npm OIDC trusted publishing + provenance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.recovery_release_tag || github.ref }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
@@ -638,29 +692,53 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-${{ hashFiles('javascript/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-bun-1.4.4-
-      # npm >= 11.5.1 supports OIDC trusted publishing; the npm CLI mints a
-      # short-lived token from the id-token, so no NODE_AUTH_TOKEN is required.
-      - run: npm install -g npm@latest
+      # Pin the first npm release with OIDC trusted publishing support. The CLI
+      # mints a short-lived token from the id-token, so no NODE_AUTH_TOKEN is needed.
+      - run: npm install -g npm@11.5.1
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
           bun run build
           package_name="$(node -p 'require("./package.json").name')"
           package_version="$(node -p 'require("./package.json").version')"
-          published_integrity="$(npm view "${package_name}@${package_version}" dist.integrity 2>/dev/null || true)"
+          if npm view "${package_name}@${package_version}" dist.integrity \
+            >"${RUNNER_TEMP}/published-integrity.txt" \
+            2>"${RUNNER_TEMP}/npm-view-error.txt"; then
+            published_integrity="$(cat "${RUNNER_TEMP}/published-integrity.txt")"
+          elif grep -q 'E404' "${RUNNER_TEMP}/npm-view-error.txt"; then
+            published_integrity=""
+          else
+            cat "${RUNNER_TEMP}/npm-view-error.txt" >&2
+            exit 1
+          fi
+          tarball_dir="${RUNNER_TEMP}/bursar-npm-release"
+          mkdir -p "$tarball_dir"
+          npm pack --ignore-scripts --pack-destination "$tarball_dir"
+          tarball="$(find "$tarball_dir" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          if [ -z "$tarball" ]; then
+            echo "npm pack did not create a package tarball" >&2
+            exit 1
+          fi
+          local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
           if [ -n "$published_integrity" ]; then
-            local_integrity="$(npm pack --dry-run --json | node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => console.log(JSON.parse(s)[0].integrity))')"
             if [ "$local_integrity" != "$published_integrity" ]; then
               echo "npm ${package_name}@${package_version} already exists with different contents" >&2
               exit 1
             fi
             echo "npm ${package_name}@${package_version} already contains this artifact; skipping"
           else
-            npm publish --access public --provenance
+            # The full test matrix and package-smoke job are required upstream.
+            # Skip lifecycle scripts here to avoid rerunning the test suite.
+            npm publish "$tarball" --ignore-scripts --access public --provenance
           fi
 
   release-github:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      !cancelled() &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recovery_release_tag != '')
+      ) && needs.release-npm.result == 'success'
     needs: [release-npm]
     runs-on: ubuntu-latest
     permissions:
@@ -669,7 +747,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.recovery_release_tag || github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "GitHub Release $RELEASE_TAG already exists; skipping"
@@ -682,7 +760,9 @@ jobs:
           fi
 
   refresh-context7:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.recovery_release_tag != '')
     needs: [release-github]
     uses: ./.github/workflows/context7-refresh.yml
     secrets: inherit

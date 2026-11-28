@@ -1,6 +1,6 @@
 {
   "name": "@zonastery/bursar",
-  "version": "2.0.6",
+  "version": "2.1.0",
   "packageManager": "bun@1.4.4",
   "description": "Open-source PostgreSQL credit ledger, usage metering, and billing SDK for AI SaaS",
   "type": "module",
@@ -68,7 +68,8 @@
       "import": "./dist/integrations/better-auth.js",
       "default": "./dist/integrations/better-auth.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./pricing-config.schema.json": "./dist/generated/pricing-config.schema.json"
   },
   "engines": {
     "node": ">=22"
@@ -78,7 +79,7 @@
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "bun run clean && tsc && bun run check:browser",
+    "build": "bun run clean && tsc && node scripts/package-starter.mjs && bun run check:browser",
     "check:browser": "bun build tests/browser-entry-smoke.ts --target=browser --outfile=dist/.browser-entry-smoke.js --reject-unresolved && node -e \"require('node:fs').rmSync('dist/.browser-entry-smoke.js', { force: true })\"",
     "generate:config-types": "json2ts -i src/generated/pricing-config.schema.json -o src/generated/pricing-config.types.ts --unknownAny && oxfmt --config .oxfmtrc.json --write src/generated/pricing-config.types.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
@@ -92,7 +93,8 @@
     "format": "oxfmt --config .oxfmtrc.json --check src/ tests/ scripts/",
     "format:fix": "oxfmt --config .oxfmtrc.json --write src/ tests/ scripts/",
     "knip": "knip --exclude exports,nsExports,types,nsTypes,enumMembers,namespaceMembers",
-    "prepublishOnly": "bun run build && vitest run"
+    "prepublishOnly": "bun run build && vitest run",
+    "test:cli": "vitest run --maxWorkers=1 tests/cli-package.test.ts"
   },
   "keywords": [
     "ai-saas",
@@ -217,5 +219,8 @@
     "ignoreDependencies": [
       "lefthook"
     ]
+  },
+  "bin": {
+    "bursar-config": "./dist/cli.js"
   }
 }

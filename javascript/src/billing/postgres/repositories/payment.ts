@@ -67,6 +67,7 @@ export class BillingPaymentRepository {
     metadata: string | null,
     status: "pending" | "succeeded" | "failed" | "canceled",
     providerUpdatedAt: string,
+    topupId: string | null,
   ): Promise<string> {
     if (!userId) throw new TypeError("billing payment requires a subject");
     if (purpose !== "subscription" && purpose !== "credit_topup") {
@@ -74,7 +75,7 @@ export class BillingPaymentRepository {
     }
     const rows = await this.query(
       `SELECT bursar.upsert_billing_payment(
-         $1::uuid,$2,$3,$4,$5,$6,$7,$8::bursar.billing_payment_status,$9,$10,$11::jsonb
+         $1::uuid,$2,$3,$4,$5,$6,$7,$8::bursar.billing_payment_status,$9,$10,$11::jsonb,$12::uuid
        ) AS id`,
       [
         userId,
@@ -88,6 +89,7 @@ export class BillingPaymentRepository {
         providerUpdatedAt,
         providerInvoiceId,
         metadata ?? "{}",
+        topupId,
       ],
     );
     return requireResultField(rows, "id", postgresUuid, "BillingPaymentRepository.upsert");

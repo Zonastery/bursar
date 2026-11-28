@@ -29,6 +29,7 @@ class BillingPaymentRepository:
         metadata: str | None,
         status: Literal["pending", "succeeded", "failed", "canceled"],
         provider_updated_at: str,
+        topup_id: str | None = None,
     ) -> str:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_payment_id, "provider_payment_id")
@@ -38,7 +39,7 @@ class BillingPaymentRepository:
             raise ValueError("billing payment requires a known purpose")
         rows = self._execute(
             "SELECT bursar.upsert_billing_payment("
-            "%s::uuid,%s,%s,%s,%s,%s,%s,%s::bursar.billing_payment_status,%s,%s,%s::jsonb"
+            "%s::uuid,%s,%s,%s,%s,%s,%s,%s::bursar.billing_payment_status,%s,%s,%s::jsonb,%s::uuid"
             ") AS id",
             [
                 user_id,
@@ -52,6 +53,7 @@ class BillingPaymentRepository:
                 provider_updated_at,
                 provider_invoice_id,
                 metadata or "{}",
+                topup_id,
             ],
         )
         return require_identifier_result(rows, "id", "BillingPaymentRepository.upsert")

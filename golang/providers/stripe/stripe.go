@@ -120,6 +120,10 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, request bursar.Che
 		return bursar.CheckoutSession{}, err
 	}
 
+	trialDays, err := bursar.CheckoutTrialDays(request, 730)
+	if err != nil {
+		return bursar.CheckoutSession{}, err
+	}
 	mode := strings.TrimSpace(request.Mode)
 	if mode == "" {
 		mode = string(stripego.CheckoutSessionModePayment)
@@ -142,6 +146,9 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, request bursar.Che
 	}
 	if mode == string(stripego.CheckoutSessionModeSubscription) {
 		params.SubscriptionData = &stripego.CheckoutSessionCreateSubscriptionDataParams{Metadata: cloneMetadata(metadata)}
+		if trialDays > 0 {
+			params.SubscriptionData.TrialPeriodDays = stripego.Int64(trialDays)
+		}
 	} else if mode == string(stripego.CheckoutSessionModePayment) {
 		params.PaymentIntentData = &stripego.CheckoutSessionCreatePaymentIntentDataParams{Metadata: cloneMetadata(metadata)}
 	}

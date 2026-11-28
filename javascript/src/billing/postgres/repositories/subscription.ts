@@ -363,7 +363,6 @@ export class BillingSubscriptionRepository {
     expectedProviderUpdatedAt: string,
     planAssignedAt: Date | string | null,
     applyEntitlement: boolean,
-    terminalPlanKey: string | null,
     reason: string,
   ): Promise<SubscriptionEntitlementOutcome> {
     const expectedTimestamp = safeParse(
@@ -382,7 +381,7 @@ export class BillingSubscriptionRepository {
     const rows = await this.query(
       `SELECT bursar.reconcile_subscription_entitlement(
          $1::uuid, $2::uuid, $3::uuid, $4::bursar.billing_subscription_status,
-         $5::timestamptz, $6::timestamptz, $7, $8, $9
+         $5::timestamptz, $6::timestamptz, $7, $8
        ) AS outcome`,
       [
         subjectId,
@@ -392,7 +391,6 @@ export class BillingSubscriptionRepository {
         expectedTimestamp,
         assignmentTimestamp,
         applyEntitlement,
-        terminalPlanKey,
         reason,
       ],
     );
@@ -409,11 +407,10 @@ export class BillingSubscriptionRepository {
     subscriptionId: string,
     expectedGraceEndsAt: string,
     expiredAt: string,
-    terminalPlanKey: string | null,
   ): Promise<boolean> {
     const rows = await this.query(
-      `SELECT bursar.expire_subscription_grace_period($1::uuid, $2::uuid, $3, $4, $5) AS expired`,
-      [subjectId, subscriptionId, expectedGraceEndsAt, expiredAt, terminalPlanKey],
+      `SELECT bursar.expire_subscription_grace_period($1::uuid, $2::uuid, $3, $4) AS expired`,
+      [subjectId, subscriptionId, expectedGraceEndsAt, expiredAt],
     );
     return requireResultField(
       rows,

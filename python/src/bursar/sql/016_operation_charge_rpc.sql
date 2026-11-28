@@ -186,6 +186,7 @@ BEGIN
         p.credit_allowance_reset_anchor,
         p.credit_allowance_reset_timezone,
         p.allowed_operations,
+        p.definition->'allowed_operations' AS operation_access,
         p.definition->'credit_allowance' AS credit_allowance_policy
     INTO v_assignment
     FROM bursar.account_plan_assignments AS a
@@ -199,7 +200,7 @@ BEGIN
     v_has_assignment := FOUND;
 
     IF v_has_assignment
-       AND cardinality(v_assignment.allowed_operations) > 0
+       AND COALESCE(v_assignment.operation_access <> '"all"'::jsonb, true)
        AND NOT p_operation = ANY(v_assignment.allowed_operations)
     THEN
         RETURN QUERY

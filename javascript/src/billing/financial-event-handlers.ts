@@ -64,12 +64,26 @@ export class BillingFinancialEventHandlers {
 
     const uid = await this.resolveAccountId(event);
     const refs = event.payment.refs;
+    const intentId =
+      event.payment.purpose === "credit_topup" ? event.metadata?.checkout_intent_id : null;
+    const attemptId =
+      event.payment.purpose === "credit_topup" ? event.metadata?.auto_recharge_attempt_id : null;
+    if (
+      (intentId != null && (typeof intentId !== "string" || !uid)) ||
+      (attemptId != null && (typeof attemptId !== "string" || !uid))
+    ) {
+      return { handled: false, error: "invalid_checkout_intent" };
+    }
     let topupConfig: BillingTopupResult | null = null;
-    if (refs) {
+    if (event.payment.purpose === "credit_topup" && refs) {
       topupConfig = await this.store.resolveCreditTopup(
         event.provider,
         refs.productId ?? null,
         refs.priceId ?? null,
+        typeof intentId === "string" ? intentId : undefined,
+        uid,
+        event.payment.providerPaymentId,
+        typeof attemptId === "string" ? attemptId : undefined,
       );
     }
 
@@ -87,6 +101,7 @@ export class BillingFinancialEventHandlers {
         taxMinor: event.payment.taxMinor,
         currency: event.payment.currency,
         purpose: event.payment.purpose,
+        topupId: topupConfig?.topupId ?? null,
         status: event.payment.status,
         providerUpdatedAt: event.occurredAt,
         metadata: paymentMetadata,
@@ -116,6 +131,9 @@ export class BillingFinancialEventHandlers {
       }
     }
 
+    if ((intentId || attemptId) && !topupConfig) {
+      return { handled: false, error: "topup_reference_unresolved" };
+    }
     if (topupConfig && event.payment.purpose === "credit_topup" && uid) {
       if (
         event.payment.amountMinor < topupConfig.minAmountMinor ||
@@ -141,7 +159,11 @@ export class BillingFinancialEventHandlers {
           configuredCredits: topupConfig.creditsPerUnit,
           quantity,
         });
-        await this.store.grantBillingCredit(grantId, `billing:${event.eventId}:topup`);
+        const posting = await this.store.grantBillingCredit(
+          grantId,
+          `billing:payment:${paymentId}:topup`,
+        );
+        if (posting.errorCode) return { handled: false, error: posting.errorCode };
       }
       await this.store.updateAutoRechargeAttemptByProviderPayment({
         provider: event.provider,

@@ -70,7 +70,7 @@ export class CatalogRuntime {
       this.logger.warn("[CatalogService] no active catalog revision in store");
       throw new CatalogNotLoadedError("No active catalog revision is available");
     }
-    return PricingEngineClass.fromDict(active.config);
+    return PricingEngineClass.fromDict(active.config, this.store.providerEnvironment);
   }
 
   async refreshIfStale(): Promise<void> {
@@ -88,15 +88,18 @@ export class CatalogRuntime {
     rollout?: CatalogRollout | null,
   ): Promise<string> {
     this.logger.info("[CatalogService] publishing and activating catalog", { label });
-    const canonical = canonicalBursarConfigDict(config);
-    const nextEngine = PricingEngineClass.fromDict(canonical);
+    const canonical = canonicalBursarConfigDict(config, this.store.providerEnvironment);
+    const nextEngine = PricingEngineClass.fromDict(canonical, this.store.providerEnvironment);
     const revisionId = await this.store.publishAndActivateCatalog(canonical, label, rollout);
     this.setEngine(nextEngine);
     return revisionId;
   }
 
   async publishDraft(config: BursarConfigData, label?: string | null): Promise<string> {
-    return this.store.publishCatalogDraft(canonicalBursarConfigDict(config), label);
+    return this.store.publishCatalogDraft(
+      canonicalBursarConfigDict(config, this.store.providerEnvironment),
+      label,
+    );
   }
 
   async activateRevision(version: number, rollout?: CatalogRollout | null): Promise<string> {
@@ -166,7 +169,7 @@ export class CatalogRuntime {
       );
     }
 
-    const engine = PricingEngineClass.fromDict(config.config);
+    const engine = PricingEngineClass.fromDict(config.config, this.store.providerEnvironment);
     this.versionEngines.set(catalogVersion, engine);
     return engine;
   }

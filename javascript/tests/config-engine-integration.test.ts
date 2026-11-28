@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { projectPublicCatalog } from "../src/catalog.js";
 import { type BursarConfigData, loadConfigFromDict } from "../src/config.js";
-import { loadConfigFile } from "../src/load-config-file.js";
+import { loadRawConfigFile } from "../src/load-config-file.js";
 import { PricingEngine } from "../src/engine.js";
 
 const tempDir = mkdtempSync(join(tmpdir(), "bursar-config-engine-"));
@@ -20,7 +20,7 @@ function productionConfig(): BursarConfigData {
         completion: {
           measures: {
             input_tokens: { unit: "token" },
-            output_tokens: { unit: "token" },
+            output_tokens: { unit: "token", required: false },
           },
           dimensions: {
             model: { type: "string", required: true },
@@ -49,7 +49,9 @@ function productionConfig(): BursarConfigData {
                   charge: { type: "flat", amount: "3.000000" },
                 },
                 {
-                  when: { model: { op: "not_in", values: ["other", "claude-3"] } },
+                  when: {
+                    model: { op: "not_in", values: ["other", "claude-3"] },
+                  },
                   charge: {
                     type: "package",
                     measure: "input_tokens",
@@ -90,8 +92,16 @@ function productionConfig(): BursarConfigData {
                 charge: {
                   type: "sum",
                   components: [
-                    { type: "per_unit", measure: "input_tokens", rate: "1.000000" },
-                    { type: "per_unit", measure: "output_tokens", rate: "0.500000" },
+                    {
+                      type: "per_unit",
+                      measure: "input_tokens",
+                      rate: "1.000000",
+                    },
+                    {
+                      type: "per_unit",
+                      measure: "output_tokens",
+                      rate: "0.500000",
+                    },
                   ],
                 },
               },
@@ -118,10 +128,15 @@ function productionConfig(): BursarConfigData {
       grant_programs: {},
       display: { currency: "USD", units_per_major: "1000" },
     },
-    entitlements: { features: { premium: { type: "boolean", default: false } } },
+    entitlements: {
+      features: { premium: { type: "boolean", default: false } },
+    },
     admission: {
       policies: {
-        interactive: { max_in_flight: 4, operations: { completion: { max_in_flight: 2 } } },
+        interactive: {
+          max_in_flight: 4,
+          operations: { completion: { max_in_flight: 2 } },
+        },
       },
     },
     plans: {
@@ -147,8 +162,14 @@ function productionConfig(): BursarConfigData {
           display_name: "Pro monthly",
           description: "Production learning plan",
           sort_order: 1,
-          price: { amount_minor: 1900, currency: "USD", tax_behavior: "exclusive" },
-          providers: { stripe: { type: "stripe_price", price_id: "price_pro" } },
+          price: {
+            amount_minor: 1900,
+            currency: "USD",
+            tax_behavior: "exclusive",
+          },
+          providers: {
+            stripe: { type: "stripe_price", price_id: "price_pro" },
+          },
           plan: "pro",
           billing_interval: { unit: "month" },
           trial: { unit: "day", count: 14 },
@@ -162,9 +183,14 @@ function productionConfig(): BursarConfigData {
         credit_pack: {
           type: "topup",
           display_name: "Credit pack",
-          availability: { starts_at: "2026-01-01T00:00:00Z", regions: ["IN", "US"] },
+          availability: {
+            starts_at: "2026-01-01T00:00:00Z",
+            regions: ["IN", "US"],
+          },
           price: { amount_minor: 500, currency: "USD" },
-          providers: { dodo: { type: "dodo_product", product_id: "prod_pack" } },
+          providers: {
+            dodo: { type: "dodo_product", product_id: "prod_pack" },
+          },
           credits_per_unit: "50",
           quantity: { minimum: 1, maximum: 3, default: 1 },
           bucket: "purchased",
@@ -191,7 +217,11 @@ function productionConfig(): BursarConfigData {
       },
       subscription_changes: {
         upgrade: { effective: "immediate", proration: "prorated" },
-        downgrade: { effective: "renewal", proration: "none", payment_failure: "apply_change" },
+        downgrade: {
+          effective: "renewal",
+          proration: "none",
+          payment_failure: "apply_change",
+        },
       },
       auto_recharge: {
         eligible_topups: ["credit_pack"],
@@ -215,7 +245,7 @@ describe("configuration and pricing public workflow", () => {
     const path = join(tempDir, "production.json");
     writeFileSync(path, JSON.stringify(productionConfig()));
 
-    const raw = await loadConfigFile(path);
+    const raw = await loadRawConfigFile(path);
     const parsed = loadConfigFromDict(raw);
     const pricing = PricingEngine.fromDict(raw);
 

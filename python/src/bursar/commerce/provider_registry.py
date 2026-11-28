@@ -5,6 +5,7 @@ import inspect
 
 from bursar.commerce.errors import ProviderSelectionError
 from bursar.commerce.types import CommerceOptions, CommerceProviderFactoryContext
+from bursar.config.parse_commerce import has_provider_binding
 from bursar.config.types import CommerceOffer
 from bursar.providers.types import PaymentProvider
 
@@ -71,8 +72,14 @@ class CommerceProviderRegistry:
         current: str | None = None,
         offer: CommerceOffer | None = None,
     ) -> PaymentProvider:
+        def available(name: str) -> bool:
+            if offer is None:
+                return True
+            reference = offer.providers.get(name)
+            return reference is not None and has_provider_binding(reference, self._context.provider_environment)
+
         compatible = (
-            [name for name in offer.providers if name in self._options.providers]
+            [name for name in offer.providers if name in self._options.providers and available(name)]
             if offer is not None
             else list(self._options.providers)
         )
@@ -82,7 +89,7 @@ class CommerceProviderRegistry:
                 continue
             if selected not in self._options.providers:
                 raise ProviderSelectionError(f"Payment provider {selected!r} is not registered")
-            if offer is not None and selected not in offer.providers:
+            if not available(selected):
                 raise ProviderSelectionError(f"Offer is unavailable from payment provider {selected!r}")
             return await self.get(selected)
 

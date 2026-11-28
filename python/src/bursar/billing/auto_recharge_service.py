@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
     AutoRechargeAttemptUpdate,
+    AutoRechargeOperationalWindow,
 )
 from bursar.billing.policy_window import resolve_auto_recharge_window
 from bursar.billing.types import (
@@ -28,7 +29,10 @@ from bursar.config import (
     StripePriceReference,
     TopupOffer,
     load_config_from_dict,
+    resolve_provider_id,
 )
+from bursar.config.availability import offer_is_available
+from bursar.config.parse_commerce import has_provider_binding
 from bursar.errors import (
     AutoRechargeDisabledError,
     AutoRechargeNotConfiguredError,
@@ -112,6 +116,12 @@ class AutoRechargeBillingPort(Protocol):
         input: AutoRechargeAttemptUpdate,
     ) -> None: ...
 
+    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool:
+        raise NotImplementedError
+
+    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None:
+        raise NotImplementedError
+
     def count_auto_recharge_attempts(
         self,
         user_id: str,
@@ -139,32 +149,52 @@ class AutoRechargeService:
     def __init__(self, billing: AutoRechargeBillingPort) -> None:
         self._billing = billing
 
-    def _policy(self, provider: PaymentProvider) -> _ResolvedAutoRechargePolicy | None:
+    def _policy(
+        self, provider: PaymentProvider, profile: BillingAutoRechargeProfile | None = None
+    ) -> _ResolvedAutoRechargePolicy | None:
         raw = self._billing.get_active_catalog_document()
         if raw is None:
             return None
-        config = load_config_from_dict(raw)
+        config = load_config_from_dict(raw, getattr(self._billing, "provider_environment", None))
         policy = config.commerce.auto_recharge
         if policy is None:
             return None
 
-        topup_key = policy.eligible_topups[0]
+        topup_key = profile.topup_key if profile is not None and profile.enabled else policy.eligible_topups[0]
+        if not topup_key or topup_key not in policy.eligible_topups:
+            return None
+        quantity = profile.quantity if profile is not None and profile.enabled else policy.quantity.default
+        if not policy.quantity.minimum <= quantity <= policy.quantity.maximum:
+            return None
         topup = config.commerce.offers.get(topup_key)
-        if not isinstance(topup, TopupOffer):
+        if not isinstance(topup, TopupOffer) or not offer_is_available(topup.availability):
+            return None
+        if (
+            profile is not None
+            and profile.enabled
+            and not policy.balance_below.minimum <= profile.threshold <= policy.balance_below.maximum
+        ):
+            return None
+        if topup.price.amount_minor * quantity > policy.limits.max_charge_minor:
             return None
         reference = topup.providers.get(provider.provider)
         if reference is None:
             return None
 
+        if not has_provider_binding(reference, getattr(self._billing, "provider_environment", None) or ""):
+            return None
+
         resolved_topup: BillingTopupResult | None
         if isinstance(reference, StripePriceReference):
-            product_id = reference.price_id
+            product_id = resolve_provider_id(reference.price_id, getattr(self._billing, "provider_environment", None))
             resolved_topup = self._billing.resolve_topup(provider.provider, None, product_id)
         elif isinstance(reference, DodoProductReference):
-            product_id = reference.product_id
+            product_id = resolve_provider_id(reference.product_id, getattr(self._billing, "provider_environment", None))
             resolved_topup = self._billing.resolve_topup(provider.provider, product_id, None)
         elif isinstance(reference, CustomObjectReference):
-            product_id = reference.external_id
+            product_id = resolve_provider_id(
+                reference.external_id, getattr(self._billing, "provider_environment", None)
+            )
             resolved_topup = self._billing.resolve_topup_by_lookup(provider.provider, product_id)
         else:
             return None
@@ -173,10 +203,12 @@ class AutoRechargeService:
 
         period = resolve_auto_recharge_window(policy.limits.window)
         return _ResolvedAutoRechargePolicy(
-            threshold=Decimal(policy.balance_below.default),
+            threshold=profile.threshold
+            if profile is not None and profile.enabled
+            else Decimal(policy.balance_below.default),
             topup_key=topup_key,
             topup_id=resolved_topup.topup_id,
-            quantity=policy.quantity.default,
+            quantity=quantity,
             max_charges_per_window=policy.limits.max_purchases,
             window_unit=period.unit,
             window_count=period.count,
@@ -241,10 +273,13 @@ class AutoRechargeService:
         user_id: str,
         provider: PaymentProvider,
     ) -> BillingAutoRechargeStatus | None:
-        policy = self._policy(provider)
+        profile = self._billing.get_auto_recharge_profile(user_id)
+        policy = self._policy(provider, profile)
         if policy is None:
             return None
-        profile = self._billing.get_auto_recharge_profile(user_id)
+        window = self._billing.get_auto_recharge_operational_window(user_id)
+        if window is None:
+            return None
         payment = await self._payment_method(user_id, provider) if profile is not None and profile.enabled else None
         quote = await self._preview(policy, payment, provider) if payment is not None else None
         method = payment[1] if payment is not None else None
@@ -254,13 +289,10 @@ class AutoRechargeService:
             threshold_credits=policy.threshold,
             topup_key=policy.topup_key,
             quantity=policy.quantity,
-            max_recharges=policy.max_charges_per_window,
-            window_start=policy.window_start,
-            window_end=policy.window_end,
-            recharges_in_window=self._billing.count_auto_recharge_attempts(
-                user_id,
-                policy.window_start,
-            ),
+            max_recharges=window.max_recharges,
+            window_start=window.window_start.isoformat(),
+            window_end=window.window_end.isoformat(),
+            recharges_in_window=window.attempt_count,
             payment_method_id=method.id if method is not None else None,
             payment_method_last4=method.last4 if method is not None else None,
             payment_method_brand=method.brand if method is not None else None,
@@ -293,6 +325,7 @@ class AutoRechargeService:
                 armed=True,
                 provider=provider.provider,
                 topup_id=policy.topup_id,
+                topup_key=policy.topup_key,
                 quantity=policy.quantity,
                 threshold=policy.threshold,
                 max_charges_per_window=policy.max_charges_per_window,
@@ -335,10 +368,10 @@ class AutoRechargeService:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled:
             raise AutoRechargeDisabledError
-        self._billing.upsert_auto_recharge_profile(
-            profile.model_copy(update={"state": "active", "armed": True}),
-            reset_cooldown=True,
-        )
+        if self._policy(provider, profile) is None or profile.provider != provider.provider:
+            return AutoRechargeProcessResult(outcome="not_configured")
+        if not self._billing.resume_auto_recharge_profile(profile):
+            return AutoRechargeProcessResult(outcome="not_configured")
         return await self.process_if_needed(
             user_id,
             provider,
@@ -354,12 +387,14 @@ class AutoRechargeService:
         balance: Decimal | int,
         return_url: str | None,
     ) -> AutoRechargeProcessResult:
-        policy = self._policy(provider)
-        if policy is None:
-            return AutoRechargeProcessResult(outcome="not_configured")
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled or profile.state != "active":
             return AutoRechargeProcessResult(outcome="disabled")
+        policy = self._policy(provider, profile)
+        if policy is None:
+            return AutoRechargeProcessResult(outcome="not_configured")
+        if profile.provider != provider.provider:
+            return AutoRechargeProcessResult(outcome="not_configured")
         if Decimal(balance) >= policy.threshold:
             return AutoRechargeProcessResult(outcome="above_threshold")
         if not isinstance(provider, SavedPaymentChargeProvider):
@@ -374,6 +409,9 @@ class AutoRechargeService:
             AutoRechargeAttemptClaim(
                 user_id=user_id,
                 idempotency_key=idempotency_key,
+                expected_product_id=policy.product_id,
+                expected_quantity=policy.quantity,
+                expected_topup_key=policy.topup_key,
             )
         )
         if attempt is None:

@@ -172,6 +172,7 @@ function productId(data: ExternalObject): string | undefined {
 function subscriptionRefs(data: ExternalObject, metadata: Record<string, string>) {
   const providerProductId = productId(data);
   if (providerProductId) return { productId: providerProductId };
+  if (metadata.checkout_intent_id !== undefined) return undefined;
   const lookupKey = metadata.plan_slug?.trim();
   return lookupKey ? { lookupKey } : undefined;
 }
@@ -444,6 +445,7 @@ export async function handleDodoBillingEvent<TData>(
           ),
           periodEnd: optionalDate(data.next_billing_date, "Dodo payment.next_billing_date"),
         };
+        if (providerProductId) event.subscription.refs = { productId: providerProductId };
       }
       event.payment = payment;
       await callBillingEventSink(sink, event);

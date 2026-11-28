@@ -9,7 +9,6 @@ export interface BillingServiceOptions {
   /** Access grace after a failed subscription payment. Defaults to seven days. */
   pastDueGracePeriodMs?: number;
   /** Plan assigned when a paid subscription reaches terminal state. */
-  terminalPlanKey?: string | null;
   logger?: Logger | null;
 }
 

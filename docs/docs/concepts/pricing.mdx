@@ -43,6 +43,8 @@ dimension must be present on every event for the operation.
 
 ## Rate cards
 
+When exactly one rate card is configured, omitting a plan’s `rate_card` or setting it to `null` selects that card. With multiple cards, specify the card explicitly when the plan needs usage pricing.
+
 A **rate card** is a named pricing table keyed by operation. Cards can inherit
 unpriced operations from a parent card via `extends`, and each plan references
 exactly one card (`plan.rate_card`). When a plan selects the card, callers

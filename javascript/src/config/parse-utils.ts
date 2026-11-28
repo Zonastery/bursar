@@ -66,7 +66,9 @@ export function asDecimal(value: ConfigValue, path = "value"): Decimal {
     semanticError(`${path} must be a decimal string or number`);
   }
   try {
-    return new Decimal(parsed.data);
+    const result = new Decimal(parsed.data);
+    if (!result.isFinite()) semanticError(`${path} must be a finite decimal`);
+    return result;
   } catch {
     semanticError(`${path} must be a valid decimal`);
   }
@@ -195,4 +197,16 @@ export function parseExpiry(value: ConfigValue, path: string): ExpiryPolicy {
     default:
       return { type: "never" };
   }
+}
+
+export function nonNegativeDecimal(value: ConfigValue, path: string): Decimal {
+  const result = asDecimal(value, path);
+  if (result.lt(0)) semanticError(`${path} must be non-negative`);
+  return result;
+}
+
+export function positiveDecimal(value: ConfigValue, path: string): Decimal {
+  const result = asDecimal(value, path);
+  if (result.lte(0)) semanticError(`${path} must be greater than zero`);
+  return result;
 }

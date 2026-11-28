@@ -9,6 +9,7 @@ import type { JsonObject } from "../shared/json.js";
 
 /** Narrow billing capability required by AutoRechargeService. */
 export interface AutoRechargeBillingPort {
+  readonly providerEnvironment?: import("../providers/environment.js").ProviderEnvironment;
   getActiveCatalogDocument(): Promise<JsonObject | null>;
   resolveTopup(
     provider: string,
@@ -25,9 +26,13 @@ export interface AutoRechargeBillingPort {
     profile: BillingAutoRechargeProfile,
     options?: { resetCooldown?: boolean },
   ): Promise<void>;
+  resumeAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<boolean>;
   claimAutoRechargeAttempt(input: {
     userId: string;
     idempotencyKey: string;
+    expectedProductId: string;
+    expectedQuantity: number;
+    expectedTopupKey: string;
   }): Promise<BillingAutoRechargeAttempt | null>;
   updateAutoRechargeAttempt(input: {
     id: string;
@@ -37,6 +42,12 @@ export interface AutoRechargeBillingPort {
     failureMessage?: string | null;
     metadata?: JsonObject;
   }): Promise<void>;
+  getAutoRechargeOperationalWindow(userId: string): Promise<{
+    maxRecharges: number;
+    windowStart: string;
+    windowEnd: string;
+    count: number;
+  } | null>;
   /** Count attempts since an exact instant. */
   countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number>;
 }

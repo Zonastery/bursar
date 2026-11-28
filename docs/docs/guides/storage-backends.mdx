@@ -136,6 +136,13 @@ bucket policy, replication, backups, exporters, or service topology.
 
 ### Adapter initialization and ownership
 
+Every tenant starts with PostgreSQL usage storage. Creating and configuring a
+ClickHouse adapter does not change tenant routing. After provisioning its
+projection table, use the [usage cutover CLI](../cli.mdx#moving-a-tenants-usage-backend)
+to activate ClickHouse for a new, empty tenant or move retained usage for an
+existing tenant. Configure the runtime for ClickHouse after the cutover succeeds;
+stale backend configurations are rejected.
+
 `ClickHouseUsageStore` does not create tables by default. Either create the
 projection through the host's schema workflow and call
 `checkSchemaCompatibility()` / `check_schema_compatibility()`, or explicitly

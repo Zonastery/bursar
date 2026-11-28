@@ -14,6 +14,7 @@ import type {
 } from "../../credits/types/index.js";
 import type { UsageChargeExport, UsageEventSink } from "../ports.js";
 import { normalizeTenantId } from "../../shared/postgres-client.js";
+import { utcTimestamp } from "../../shared/timestamp.js";
 import type { JsonObject } from "../../shared/json.js";
 
 export interface ClickHouseQueryResult {
@@ -130,11 +131,13 @@ function quoteTable(table: string): string {
 }
 
 function clickHouseDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime()) || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) {
+  try {
+    const normalized = utcTimestamp(value).replace("T", " ").replace("Z", "");
+    const [seconds, fraction = ""] = normalized.split(".");
+    return `${seconds}.${fraction.padEnd(6, "0")}`;
+  } catch {
     throw new Error(`Invalid usage timestamp: ${value}`);
   }
-  return parsed.toISOString().replace("T", " ").replace("Z", "");
 }
 
 function readClickHouseDate(value: string): string {
@@ -321,8 +324,8 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
        FROM ${this.quotedTable} FINAL
        WHERE tenant_id = {tenantId:UUID}
          AND billing_disposition = 'billable'
-         AND event_at >= parseDateTime64BestEffort({start:String})
-         AND event_at < parseDateTime64BestEffort({end:String})
+         AND event_at >= parseDateTime64BestEffort({start:String}, 6)
+         AND event_at < parseDateTime64BestEffort({end:String}, 6)
        GROUP BY key
        ORDER BY key`,
       this.analyticsParams(start, end),
@@ -344,8 +347,8 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          FROM ${this.quotedTable} FINAL
          WHERE tenant_id = {tenantId:UUID}
            AND billing_disposition = 'billable'
-           AND event_at >= parseDateTime64BestEffort({start:String})
-           AND event_at < parseDateTime64BestEffort({end:String})`,
+           AND event_at >= parseDateTime64BestEffort({start:String}, 6)
+           AND event_at < parseDateTime64BestEffort({end:String}, 6)`,
         this.analyticsParams(start, end),
       ),
       this.spendRows("coalesce(model, 'unknown')", start, end, 1),
@@ -374,11 +377,11 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     const predicates = ["tenant_id = {tenantId:UUID}", "subject_id = {subjectId:UUID}"];
     const params: ClickHouseRow = { tenantId: this.tenantId, subjectId: userId };
     if (options.fromDate) {
-      predicates.push("event_at >= parseDateTime64BestEffort({fromDate:String})");
+      predicates.push("event_at >= parseDateTime64BestEffort({fromDate:String}, 6)");
       params.fromDate = options.fromDate.toISOString();
     }
     if (options.toDate) {
-      predicates.push("event_at < parseDateTime64BestEffort({toDate:String})");
+      predicates.push("event_at < parseDateTime64BestEffort({toDate:String}, 6)");
       params.toDate = options.toDate.toISOString();
     }
     if (options.includeRecordOnly === false) {
@@ -387,7 +390,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     if (options.cursor) {
       predicates.push(
         "(event_at, charge_id) < " +
-          "(parseDateTime64BestEffort({cursorEventAt:String}), {cursorUsageId:UUID})",
+          "(parseDateTime64BestEffort({cursorEventAt:String}, 6), {cursorUsageId:UUID})",
       );
       params.cursorEventAt = options.cursor.eventAt;
       params.cursorUsageId = options.cursor.usageId;
@@ -405,10 +408,10 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          feature,
          model,
          region,
-         toString(event_at) AS event_at,
+         toString(event_at) AS event_at_text,
          idempotency_key,
          metadata,
-         toString(created_at) AS created_at
+         toString(created_at) AS created_at_text
        FROM ${this.quotedTable} FINAL
        WHERE ${predicates.join(" AND ")}
        ORDER BY event_at DESC, charge_id DESC
@@ -428,10 +431,10 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       feature: row.feature ?? null,
       model: row.model ?? null,
       region: row.region ?? null,
-      eventAt: readClickHouseDate(row.event_at),
+      eventAt: readClickHouseDate(row.event_at_text),
       idempotencyKey: row.idempotency_key,
       metadata: parseJsonObject(row.metadata),
-      createdAt: readClickHouseDate(row.created_at),
+      createdAt: readClickHouseDate(row.created_at_text),
     })) satisfies UsageCharge[];
     const last = items.at(-1);
     return {
@@ -497,9 +500,9 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       feature: event.feature,
       model: event.model,
       region: event.region,
-      measures: JSON.stringify(event.measures),
-      dimensions: JSON.stringify(event.dimensions),
-      metadata: JSON.stringify(event.metadata),
+      measures: event.rawJson?.measures ?? JSON.stringify(event.measures),
+      dimensions: event.rawJson?.dimensions ?? JSON.stringify(event.dimensions),
+      metadata: event.rawJson?.metadata ?? JSON.stringify(event.metadata),
       requested: event.requested,
       charged: event.charged,
       allowance_requested: event.allowanceRequested,
@@ -508,7 +511,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       catalog_revision_id: event.catalogRevisionId,
       plan_id: event.planId,
       rate_card_key: event.rateCardKey,
-      pricing_snapshot: JSON.stringify(event.pricingSnapshot),
+      pricing_snapshot: event.rawJson?.pricing_snapshot ?? JSON.stringify(event.pricingSnapshot),
       ledger_entry_id: event.ledgerEntryId,
       correction_of_charge_id: event.correctionOfChargeId,
       idempotency_key: event.idempotencyKey,
@@ -534,8 +537,8 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
        FROM ${this.quotedTable} FINAL
        WHERE tenant_id = {tenantId:UUID}
          AND billing_disposition = 'billable'
-         AND event_at >= parseDateTime64BestEffort({start:String})
-         AND event_at < parseDateTime64BestEffort({end:String})
+         AND event_at >= parseDateTime64BestEffort({start:String}, 6)
+         AND event_at < parseDateTime64BestEffort({end:String}, 6)
        GROUP BY key
        ORDER BY sum(charged) DESC, key${limitSql}`,
       this.analyticsParams(start, end),
@@ -573,10 +576,10 @@ interface UsageRow {
   feature: string | null;
   model: string | null;
   region: string | null;
-  event_at: string;
+  event_at_text: string;
   idempotency_key: string;
   metadata: string | JsonObject | null;
-  created_at: string;
+  created_at_text: string;
 }
 
 function parseJsonObject(value: string | JsonObject | null): JsonObject | null {

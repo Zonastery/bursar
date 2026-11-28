@@ -17,7 +17,7 @@ import type { CommerceOptions } from "./commerce/types.js";
 import { loadConfigFromDict } from "./config.js";
 import type { BursarConfigData, CatalogRollout, ParsedBursarConfig } from "./config/types.js";
 import { CapabilityNotConfiguredError, ConfigError, CatalogNotLoadedError } from "./errors.js";
-import { projectPublicCatalog, type PublicCatalog } from "./catalog.js";
+import { projectPublicCatalog, type PublicCatalog, type PublicCatalogScope } from "./catalog.js";
 import type { CreditMetadata, GrantProgramAwardResult } from "./credits/types/index.js";
 import { retryBursarOperation } from "./retry.js";
 import { z } from "zod";
@@ -75,6 +75,7 @@ export type CreditsService = Pick<
 
 type CatalogCreditsService = Pick<
   CreditsServiceImpl,
+  | "providerEnvironment"
   | "getActiveCatalog"
   | "loadCatalogFromStore"
   | "refreshCatalogIfStale"
@@ -112,7 +113,10 @@ export type BursarOptions = CreditsOnlyBursarOptions | BillingBursarOptions;
 
 /** Catalog operations. Configuration writes live here, never in BillingService. */
 export class CatalogService {
-  constructor(private readonly credits: CatalogCreditsService) {}
+  constructor(
+    private readonly credits: CatalogCreditsService,
+    private readonly storefrontScope?: PublicCatalogScope,
+  ) {}
 
   /** Return the active persisted catalog revision, if one exists. */
   getActive() {
@@ -142,11 +146,11 @@ export class CatalogService {
   async getConfig(): Promise<ParsedBursarConfig> {
     const active = await this.getActive();
     if (!active) throw new CatalogNotLoadedError("No active Bursar catalog is available");
-    return loadConfigFromDict(active.config);
+    return loadConfigFromDict(active.config, this.credits.providerEnvironment);
   }
 
-  async publicView(): Promise<PublicCatalog> {
-    return projectPublicCatalog(await this.getConfig());
+  async publicView(options: { region?: string; at?: Date } = {}): Promise<PublicCatalog> {
+    return projectPublicCatalog(await this.getConfig(), this.storefrontScope, options);
   }
 
   publishDraft(config: BursarConfigData, label?: string | null): Promise<string> {
@@ -301,7 +305,16 @@ export class Bursar implements BillingEventSink {
       options.creditsOptions ?? undefined,
     );
     this.credits = credits;
-    this.catalog = new CatalogService(credits);
+    const providerEnvironment =
+      options.commerceOptions?.providerEnvironment ?? credits.providerEnvironment;
+    let storefrontScope: PublicCatalogScope | undefined;
+    if (providerEnvironment !== undefined) {
+      storefrontScope = { providerEnvironment };
+      if (options.commerceOptions) {
+        storefrontScope.providers = Object.keys(options.commerceOptions.providers);
+      }
+    }
+    this.catalog = new CatalogService(credits, storefrontScope);
     this.accounts = new AccountService(credits, this.catalog);
 
     this.billing = options.billingStore
@@ -316,7 +329,9 @@ export class Bursar implements BillingEventSink {
         : null;
     if (this.commerce) {
       credits.addPostDeductionHook(async ({ userId }) => {
-        await this.commerce!.autoRecharge.processIfNeeded({ accountId: userId });
+        await this.commerce!.autoRecharge.processIfNeeded({
+          accountId: userId,
+        });
       });
     }
   }

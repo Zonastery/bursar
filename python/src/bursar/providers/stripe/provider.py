@@ -35,6 +35,7 @@ from bursar.providers.types import (
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
+    checkout_trial_days,
     deduplicate_payment_methods,
     normalize_provider_logger,
 )
@@ -231,6 +232,7 @@ class StripeProvider:
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         if not params.account_id:
             raise ValueError("Authentication required for checkout")
+        trial_days = checkout_trial_days(params, 730)
         stripe = self._get_stripe()
 
         customer_id = params.customer_id
@@ -263,6 +265,8 @@ class StripeProvider:
                     "metadata": metadata,
                 },
             )
+            if trial_days is not None:
+                common["subscription_data"]["trial_period_days"] = trial_days
         else:
             common.update(
                 mode="payment",
