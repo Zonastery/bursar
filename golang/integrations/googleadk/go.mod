@@ -5,7 +5,7 @@ go 1.26.11
 require (
 	github.com/Zonastery/bursar/golang/v2 v2.1.0
 	google.golang.org/adk/v2 v2.8.0
-	google.golang.org/genai v1.77.0
+	google.golang.org/genai v1.79.1
 )
 
 require (
