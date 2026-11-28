@@ -19,7 +19,6 @@ export function normalizeConfig(data: JsonObject, environment?: ProviderEnvironm
     if (!("default_bucket" in credits)) credits.default_bucket = "default";
   }
   if (hasSignup && signup != null) {
-    if (signup === undefined) throw new ConfigError("credits.on_signup is required");
     if (typeof credits.default_bucket !== "string")
       throw new ConfigError("credits.on_signup requires credits.default_bucket");
     const programs = (credits.grant_programs ??= {});

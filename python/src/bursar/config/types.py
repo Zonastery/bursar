@@ -54,7 +54,7 @@ def _canonical_decimal(value: Decimal) -> str:
 DecimalValue = Annotated[
     Decimal,
     BeforeValidator(_parse_decimal_string),
-    PlainSerializer(lambda value: _canonical_decimal(value), return_type=str),
+    PlainSerializer(_canonical_decimal, return_type=str),
     WithJsonSchema({"type": "string", "pattern": DECIMAL_RE.pattern, "examples": ["10.500000"]}),
 ]
 FeatureValue = bool | SafeInteger | str

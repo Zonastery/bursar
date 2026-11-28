@@ -367,7 +367,8 @@ class BillingCapability(BillingEventSink, Protocol):
 
     def find_checkout_intent(
         self, subject_id: str, operation_key: str, provider: str | None = None
-    ) -> tuple[CheckoutIntent, dict[str, Any]] | None: ...
+    ) -> tuple[CheckoutIntent, dict[str, Any]] | None:
+        raise NotImplementedError
 
     def get_user_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
 
@@ -383,7 +384,8 @@ class BillingCapability(BillingEventSink, Protocol):
 
     def get_active_catalog_document(self) -> dict[str, Any] | None: ...
 
-    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None: ...
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None:
+        raise NotImplementedError
 
     def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceRecord]: ...
 

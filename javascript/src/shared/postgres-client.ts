@@ -471,7 +471,6 @@ export class PostgresClient {
       }
       const result = await action();
       await client.query("COMMIT");
-      started = false;
       return result;
     } catch (cause) {
       if (started) {

@@ -42,7 +42,9 @@ class BillingStore(ABC):
     def get_active_catalog_document(self) -> dict[str, Any] | None: ...
 
     @abstractmethod
-    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None: ...
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None:
+        raise NotImplementedError
+
     @abstractmethod
     def create_or_get_checkout_intent(
         self,
@@ -261,7 +263,8 @@ class BillingStore(ABC):
     @abstractmethod
     def find_checkout_intent(
         self, subject_id: str, operation_key: str, provider: str | None = None
-    ) -> tuple[CheckoutIntent, dict] | None: ...
+    ) -> tuple[CheckoutIntent, dict] | None:
+        raise NotImplementedError
 
     @abstractmethod
     def list_expired_grace_subscriptions(

@@ -189,7 +189,8 @@ class _CommerceBillingPort(BillingEventSink, Protocol):
 
     def get_active_catalog_document(self) -> dict[str, Any] | None: ...
 
-    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None: ...
+    def get_active_catalog_revision(self) -> tuple[str, dict[str, Any]] | None:
+        raise NotImplementedError
 
     def get_user_subscription(self, account_id: str, /) -> BillingSubscriptionState | None: ...
 
@@ -214,7 +215,8 @@ class _CommerceBillingPort(BillingEventSink, Protocol):
 
     def find_checkout_intent(
         self, subject_id: str, operation_key: str, provider: str | None = None, /
-    ) -> tuple[CheckoutIntent, dict] | None: ...
+    ) -> tuple[CheckoutIntent, dict] | None:
+        raise NotImplementedError
 
     def upsert_customer(
         self,
