@@ -85,8 +85,8 @@ def _normalize_plans(result: dict[str, Any]) -> None:
             plan.setdefault("tier", 0)
             if isinstance(pricing, dict) and isinstance(pricing.get("rate_cards"), dict):
                 cards = pricing["rate_cards"]
-                if len(cards) == 1:
-                    plan.setdefault("rate_card", next(iter(cards)))
+                if len(cards) == 1 and plan.get("rate_card") is None:
+                    plan["rate_card"] = next(iter(cards))
 
 
 def _infer_provider_types(result: dict[str, Any]) -> None:

@@ -251,6 +251,29 @@ describe("typed v1 config", () => {
     expect(() => loadConfigFromDict(missingDefault)).toThrow(/default_plan is required/);
   });
 
+  it("reports selected union errors for multiple offers independently", () => {
+    const invalid = {
+      version: 1,
+      unexpected: true,
+      commerce: {
+        offers: {
+          sub: { type: "subscription", credits_per_unit: "10" },
+          pack: { type: "topup", plan: "free" },
+        },
+      },
+    };
+    try {
+      loadConfigFromDict(invalid);
+      throw new Error("expected failure");
+    } catch (error) {
+      expect(String(error)).toContain("/commerce/offers/sub.plan is required");
+      expect(String(error)).toContain("/commerce/offers/pack.credits_per_unit is required");
+      expect(String(error)).toContain("unknown field 'unexpected'");
+      expect(String(error)).not.toContain("/commerce/offers/sub.credits_per_unit is required");
+      expect(String(error)).not.toContain("/commerce/offers/pack.plan is required");
+    }
+  });
+
   it("projects public plans and prices without provider identifiers", () => {
     const base = baseConfig();
     const config = {

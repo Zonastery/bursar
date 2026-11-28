@@ -70,6 +70,11 @@ func New(options Options) (*Bursar, error) {
 		return nil, err
 	}
 	catalog := credits.Catalog()
+	if options.CommerceOptions != nil && options.CommerceOptions.Providers != nil {
+		catalog.storefrontEnvironment = options.CommerceOptions.Providers.Environment()
+		catalog.storefrontProviders = options.CommerceOptions.Providers.Configured()
+		catalog.storefrontProvidersConfigured = true
+	}
 	accounts, err := NewAccountService(credits, catalog)
 	if err != nil {
 		return nil, err

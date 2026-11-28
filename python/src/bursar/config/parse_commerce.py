@@ -8,10 +8,22 @@ from bursar.config.types import (
     CustomProvider,
     DodoProductReference,
     DodoProvider,
+    ProviderReference,
     StripePriceReference,
     StripeProvider,
     _validate_map_keys,
 )
+
+
+def has_provider_binding(reference: ProviderReference, environment: str) -> bool:
+    """Return whether a reference has an ID in the selected environment."""
+    if isinstance(reference, StripePriceReference):
+        value = reference.price_id
+    elif isinstance(reference, DodoProductReference):
+        value = reference.product_id
+    else:
+        value = reference.external_id
+    return isinstance(value, str) or environment in value
 
 
 def _validate_commerce(commerce: CommerceConfig) -> CommerceConfig:

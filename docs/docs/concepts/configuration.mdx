@@ -125,7 +125,7 @@ Subscription-backed plans default to `next_renewal`; other plans default to `imm
 
 The active configuration remains the internal policy document. Catalog projection methods expose only the product fields needed by a client application and keep provider identifiers, internal policies, and private configuration out of public responses.
 
-In the JavaScript SDK, `await bursar.catalog.publicView()` scopes storefront offers to the runtime provider environment and registered commerce providers. An offer needs a binding for at least one provider in that scope. Plans remain visible even when no eligible subscription offer is available; top-ups are filtered by the same provider binding rule. This projection does not replace checkout's availability and trusted-region checks.
+The catalog public view (`publicView`, `public_view`, or `PublicView`) scopes storefront offers to the runtime provider environment and registered commerce providers when configured. An offer needs a binding for at least one provider in that scope. Plans remain visible even when no eligible subscription offer is available; top-ups are filtered by the same provider binding rule. The public view also applies offer availability at the current time: start is inclusive, end is exclusive, and region-restricted offers are hidden unless a matching trusted region is supplied. Pass `{ region, at }` to `publicView` (Python: `region=`, `at=`; Go: `PublicCatalogOptions`) for a trusted region or an explicit evaluation time. Checkout independently enforces the same rules. Use `getConfig` / `get_config` / `GetConfig` for unscoped administrative inspection.
 
 For offline inspection of every configured offer, call the standalone projection without a scope:
 

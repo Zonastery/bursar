@@ -466,3 +466,82 @@ func TestProjectPublicCatalogWindowAndCloneBoundaries(t *testing.T) {
 		t.Fatal("nil string pointer cloned")
 	}
 }
+
+func TestCatalogPublicViewAvailability(t *testing.T) {
+	config := checkoutTestConfig(t)
+	offers := config["commerce"].(map[string]any)["offers"].(map[string]any)
+	starter := offers["starter_month"].(map[string]any)
+	starter["providers"] = map[string]any{
+		"stripe": map[string]any{"type": "custom_object", "object_kind": "subscription", "external_id": map[string]any{"test": "test-id"}},
+		"dodo":   map[string]any{"type": "custom_object", "object_kind": "subscription", "external_id": map[string]any{"live": "live-id"}},
+	}
+	starter["availability"] = map[string]any{"starts_at": "2025-01-01T00:00:00Z", "ends_at": "2025-02-01T00:00:00Z", "regions": []any{"IN"}}
+	service, err := NewCatalogService(&catalogWaveStore{active: &CatalogRevision{ID: "1", Version: 1, Config: config}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PublicView(context.Background(), PublicCatalogOptions{}, PublicCatalogOptions{}); err == nil {
+		t.Fatal("multiple options accepted")
+	}
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		region string
+		at     time.Time
+		want   bool
+	}{{"IN", start, true}, {"", start, false}, {"US", start, false}, {"IN", start.Add(-time.Second), false}, {"IN", start.AddDate(0, 1, 0), false}} {
+		view, err := service.PublicView(context.Background(), PublicCatalogOptions{Region: tc.region, At: tc.at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, plan := range view.Plans {
+			for _, offer := range plan.Offers {
+				if offer.Key == "starter_month" {
+					found = true
+				}
+			}
+		}
+		if found != tc.want {
+			t.Fatalf("region %q at %v: got %v want %v", tc.region, tc.at, found, tc.want)
+		}
+	}
+	service.storefrontEnvironment = ProviderEnvironmentLive
+	service.storefrontProvidersConfigured = true
+	service.storefrontProviders = []string{"missing"}
+	view, err := service.PublicView(context.Background(), PublicCatalogOptions{Region: "IN", At: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range view.Plans {
+		if len(plan.Offers) != 0 {
+			t.Fatal("unregistered provider offer visible")
+		}
+	}
+	service.storefrontProviders = []string{"stripe"}
+	view, err = service.PublicView(context.Background(), PublicCatalogOptions{Region: "IN", At: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range view.Plans {
+		if len(plan.Offers) != 0 {
+			t.Fatal("wrong environment offer visible")
+		}
+	}
+	service.storefrontProviders = []string{"dodo"}
+	view, err = service.PublicView(context.Background(), PublicCatalogOptions{Region: "IN", At: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, plan := range view.Plans {
+		for _, offer := range plan.Offers {
+			if offer.Key == "starter_month" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("registered provider offer missing")
+	}
+
+}

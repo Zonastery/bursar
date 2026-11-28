@@ -19,6 +19,7 @@ from bursar.billing.billing_store import BillingStore
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
     AutoRechargeAttemptUpdate,
+    AutoRechargeOperationalWindow,
     AutoRechargeProviderPaymentUpdate,
     BillingCreditGrantCreate,
     BillingDisputeUpsert,
@@ -353,7 +354,7 @@ class PostgresBillingStore(BillingStore):
             raise ValueError("request_digest must be a 32-byte hex string")
         rows = self._execute(
             """SELECT bursar.create_checkout_intent(
-                   %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz, NULL, NULL, %s, %s::uuid
+                   %s::uuid, %s, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz, NULL, NULL, %s, %s::uuid, %s::uuid
                ) AS id""",
             [
                 input.subject_id,
@@ -365,6 +366,7 @@ class PostgresBillingStore(BillingStore):
                 input.expires_at,
                 input.region,
                 input.expected_revision_id,
+                input.account_id or input.subject_id,
             ],
         )
         intent_id = require_identifier_result(
@@ -412,6 +414,9 @@ class PostgresBillingStore(BillingStore):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
+        account_id: str | None = None,
+        intent_id: str | None = None,
+        lookup_key: str | None = None,
     ) -> BillingOfferResult | None:
         """Resolve a billing offer by provider and product/price IDs.
 
@@ -423,7 +428,7 @@ class PostgresBillingStore(BillingStore):
         Returns:
             BillingOfferResult if found, None otherwise.
         """
-        result = self._offer_repo.resolve_by_price(provider, price_id, product_id)
+        result = self._offer_repo.resolve_by_price(provider, price_id, product_id, account_id, intent_id, lookup_key)
         return self._row_to_offer(result)
 
     def claim_billing_event(
@@ -1135,6 +1140,13 @@ class PostgresBillingStore(BillingStore):
         input: AutoRechargeProviderPaymentUpdate,
     ) -> None:
         self._auto_recharge_repo.update_attempt_by_provider_payment(input)
+
+    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool:
+        return self._auto_recharge_repo.resume_profile(profile)
+
+    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None:
+        rows = self._execute("SELECT * FROM bursar.get_auto_recharge_operational_window(%s::uuid)", [user_id])
+        return AutoRechargeOperationalWindow.model_validate(rows[0]) if rows else None
 
     def count_auto_recharge_attempts(
         self,

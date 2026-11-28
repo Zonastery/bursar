@@ -362,6 +362,7 @@ describe("event type routing", () => {
         }),
         subscription: expect.objectContaining({
           providerSubscriptionId: DODO_PAYMENT_SUCCEEDED.subscription_id,
+          refs: { productId: "prod_monk" },
           periodStart: null,
           periodEnd: null,
         }),

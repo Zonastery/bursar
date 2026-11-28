@@ -19,6 +19,12 @@ describe("configuration shortcuts", () => {
   it("infers the sole named card and treats null signup as omitted", () => {
     const config = canonicalBursarConfigDict(starter);
     expect(config.plans?.free?.rate_card).toBe("custom");
+    expect(
+      canonicalBursarConfigDict({
+        ...starter,
+        plans: { free: { ...starter.plans.free, rate_card: null } },
+      }),
+    ).toEqual(config);
     expect(config.credits?.grant_programs).toEqual({});
     expect(canonicalBursarConfigDict(config)).toEqual(config);
   });

@@ -14,6 +14,7 @@ from bursar.billing.billing_store import BillingStore
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
     AutoRechargeAttemptUpdate,
+    AutoRechargeOperationalWindow,
     AutoRechargeProviderPaymentUpdate,
     BillingCreditGrantCreate,
     BillingDisputeUpsert,
@@ -464,6 +465,12 @@ class BillingService:
     ) -> None:
         self._store.update_auto_recharge_attempt_by_provider_payment(input)
 
+    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool:
+        return self._store.resume_auto_recharge_profile(profile)
+
+    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None:
+        return self._store.get_auto_recharge_operational_window(user_id)
+
     def count_auto_recharge_attempts(
         self,
         user_id: str,
@@ -693,18 +700,34 @@ class BillingService:
         return None
 
     def _offer_for_event(
-        self, event: BillingEvent
+        self, event: BillingEvent, initial: bool = False, account_id: str | None = None
     ) -> tuple[BillingOfferResult | None, str | None, str | None, str | None]:
         if not event.subscription:
             return None, None, None, None
         refs = event.subscription.refs
+        has_intent = initial and event.metadata is not None and "checkout_intent_id" in event.metadata
+        intent_id = event.metadata.get("checkout_intent_id") if has_intent and event.metadata else None
+        if has_intent and (not isinstance(intent_id, str) or not intent_id.strip()):
+            raise StoreError("invalid checkout intent")
         if not refs:
+            if has_intent:
+                raise StoreError("checkout offer reference is missing")
             return None, None, None, None
-        offer = self._store.resolve_billing_offer(
-            event.provider,
-            product_id=refs.product_id,
-            price_id=refs.price_id,
-        )
+        if intent_id:
+            offer = self._store.resolve_billing_offer(
+                event.provider,
+                product_id=refs.product_id,
+                price_id=refs.price_id,
+                account_id=account_id or self._resolve_account_id(event),
+                intent_id=intent_id,
+                lookup_key=refs.lookup_key,
+            )
+        else:
+            offer = self._store.resolve_billing_offer(
+                event.provider,
+                product_id=refs.product_id,
+                price_id=refs.price_id,
+            )
         if not offer and refs.lookup_key:
             offer = self._resolve_offer_by_lookup(event.provider, refs.lookup_key)
         if not offer:
@@ -820,7 +843,7 @@ class BillingService:
         plan_key = None
         offer_id = None
         if resolve_offers:
-            offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
+            offer, offer_key, plan_key, offer_id = self._offer_for_event(event, existing is None, uid)
 
         preserved_allowance_anchor = None
         if action == "plan_changed" and self._provisioning is not None:
@@ -949,7 +972,7 @@ class BillingService:
             )
             return BillingEventResult(handled=False, error="subscription_conflict")
 
-        _, offer_key, plan_key, offer_id = self._offer_for_event(event)
+        _, offer_key, plan_key, offer_id = self._offer_for_event(event, existing is None, uid)
         st = event.subscription.status.value if event.subscription.status else None
         subscription_state = self._subscription_state(
             event,
@@ -1023,13 +1046,18 @@ class BillingService:
         )
 
     def _handle_subscription_renewed(self, event: BillingEvent) -> BillingEventResult:
+        existing = (
+            self._store.get_billing_subscription(event.provider, event.subscription.provider_subscription_id)
+            if event.subscription
+            else None
+        )
         result = self._apply_subscription_event(
             event,
             status="active",
             action="subscription_renewed",
         )
         if result.handled and result.action != "stale_subscription_event":
-            offer, _, _, _ = self._offer_for_event(event)
+            offer, _, _, _ = self._offer_for_event(event, existing is None)
             self._grant_subscription_cycle(event, offer)
         return result
 
@@ -1071,7 +1099,7 @@ class BillingService:
         plan_key = None
         offer_id = None
         if existing is None:
-            offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
+            offer, offer_key, plan_key, offer_id = self._offer_for_event(event, True, uid)
             if not offer_id:
                 raise StoreError(
                     "cannot persist cancellation for unknown subscription "

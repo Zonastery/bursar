@@ -145,6 +145,10 @@ export class BillingService {
     await this.management.upsertAutoRechargeProfile(profile, options);
   }
 
+  async resumeAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<boolean> {
+    return this.management.resumeAutoRechargeProfile(profile);
+  }
+
   async claimAutoRechargeAttempt(input: {
     userId: string;
     idempotencyKey: string;
@@ -174,6 +178,15 @@ export class BillingService {
     failureMessage?: string | null;
   }): Promise<void> {
     await this.management.updateAutoRechargeAttemptByProviderPayment(input);
+  }
+
+  async getAutoRechargeOperationalWindow(userId: string): Promise<{
+    maxRecharges: number;
+    windowStart: string;
+    windowEnd: string;
+    count: number;
+  } | null> {
+    return this.management.getAutoRechargeOperationalWindow(userId);
   }
 
   async countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number> {

@@ -4,6 +4,7 @@
 package bursar
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 	ctx, cancel, config := financialContext(t)
 	defer cancel()
-	_, store := newFinancialSDK(t, ctx, config, &financialProvider{name: "alpha"})
+	sdk, store := newFinancialSDK(t, ctx, config, &financialProvider{name: "alpha"})
 	accountID := uuid.NewString()
 	providerCustomerID := "state-customer-" + uuid.NewString()
 
@@ -58,12 +59,54 @@ func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 		Provider: "alpha", TopupID: topup.TopupID, Quantity: 1, Threshold: MustAmount("100"),
 		MaxChargesPerWindow: 3, WindowUnit: "day", WindowCount: 30, WindowAnchor: "rolling", WindowTimezone: "UTC",
 	}
-	if err := store.UpsertAutoRechargeProfile(ctx, profile, AutoRechargeProfileUpsertOptions{ResetCooldown: true}); err != nil {
+	if err := store.UpsertAutoRechargeProfile(ctx, profile, AutoRechargeProfileUpsertOptions{}); err != nil {
 		t.Fatalf("persist enabled auto-recharge profile: %v", err)
 	}
 	gotProfile, err := store.GetAutoRechargeProfile(ctx, accountID)
 	if err != nil || gotProfile == nil || gotProfile.Provider != "alpha" || gotProfile.State != AutoRechargeStateActive {
 		t.Fatalf("enabled auto-recharge profile = %+v, error = %v", gotProfile, err)
+	}
+
+	// The exported compatibility option must use the same guarded resume path.
+	if err := store.UpsertAutoRechargeProfile(ctx, profile, AutoRechargeProfileUpsertOptions{ResetCooldown: true}); err != nil {
+		t.Fatalf("compatibility resume failed: %v", err)
+	}
+	invalidTopup := profile
+	invalidTopup.TopupID = "not-a-uuid"
+	if err := store.UpsertAutoRechargeProfile(ctx, invalidTopup, AutoRechargeProfileUpsertOptions{}); err == nil {
+		t.Fatal("invalid enrollment top-up was accepted")
+	}
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	if err := store.UpsertAutoRechargeProfile(canceled, profile, AutoRechargeProfileUpsertOptions{ResetCooldown: true}); err == nil {
+		t.Fatal("compatibility resume ignored cancellation")
+	}
+	if _, err := store.GetAutoRechargeOperationalWindow(canceled, accountID); err == nil {
+		t.Fatal("operational window ignored cancellation")
+	}
+	window, err := store.GetAutoRechargeOperationalWindow(ctx, accountID)
+	if err != nil || window == nil || window.MaxRecharges != 3 || window.Count != 0 || !window.End.After(window.Start) {
+		t.Fatalf("initial operational window = %+v, error = %v", window, err)
+	}
+	if _, err := store.GetAutoRechargeOperationalWindow(ctx, "not-a-uuid"); err == nil {
+		t.Fatal("invalid operational window subject was accepted")
+	}
+	if resumed, err := store.ResumeAutoRechargeProfile(ctx, profile); err != nil || !resumed {
+		t.Fatalf("resume enabled profile = %v, error = %v", resumed, err)
+	}
+	wrongProfile := profile
+	wrongProfile.Quantity = 2
+	if resumed, err := store.ResumeAutoRechargeProfile(ctx, wrongProfile); err != nil || resumed {
+		t.Fatalf("resume changed preferences = %v, error = %v", resumed, err)
+	}
+	wrongProfile.UserID = "bad"
+	if _, err := store.ResumeAutoRechargeProfile(ctx, wrongProfile); err == nil {
+		t.Fatal("invalid resume subject was accepted")
+	}
+	wrongProfile = profile
+	wrongProfile.TopupID = "bad"
+	if _, err := store.ResumeAutoRechargeProfile(ctx, wrongProfile); err == nil {
+		t.Fatal("invalid resume topup was accepted")
 	}
 
 	attempt, err := store.ClaimAutoRechargeAttempt(ctx, AutoRechargeAttemptClaim{UserID: accountID, IdempotencyKey: "state-attempt-" + uuid.NewString(), ExpectedProductID: priceID, ExpectedQuantity: 1, ExpectedTopupKey: "credit_pack"})
@@ -76,6 +119,10 @@ func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 	if count, err := store.CountAutoRechargeAttempts(ctx, accountID, time.Now().UTC().Add(-time.Hour)); err != nil || count != 1 {
 		t.Fatalf("auto-recharge attempt count = %d, error = %v", count, err)
 	}
+	window, err = store.GetAutoRechargeOperationalWindow(ctx, accountID)
+	if err != nil || window == nil || window.Count != 1 {
+		t.Fatalf("operational window after charge = %+v, error = %v", window, err)
+	}
 	if err := store.UpdateAutoRechargeAttemptByProviderPayment(ctx, AutoRechargeProviderPaymentUpdate{Provider: "alpha", ProviderPaymentID: "missing-payment-" + uuid.NewString(), State: AutoRechargeAttemptSucceeded}); err != nil {
 		t.Fatalf("missing provider payment reconciliation: %v", err)
 	}
@@ -86,6 +133,13 @@ func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 	disabled, err := store.GetAutoRechargeProfile(ctx, accountID)
 	if err != nil || disabled == nil || disabled.Enabled || disabled.State != AutoRechargeStateDisabled {
 		t.Fatalf("disabled auto-recharge profile = %+v, error = %v", disabled, err)
+	}
+
+	if resumed, err := store.ResumeAutoRechargeProfile(ctx, profile); err != nil || resumed {
+		t.Fatalf("resume disabled profile = %v, error = %v", resumed, err)
+	}
+	if err := store.UpsertAutoRechargeProfile(ctx, profile, AutoRechargeProfileUpsertOptions{ResetCooldown: true}); err == nil {
+		t.Fatal("compatibility resume accepted a disabled profile")
 	}
 
 	if missingOffer, err := store.ResolveBillingOffer(ctx, "alpha", "", "missing-price-"+uuid.NewString(), ""); err != nil || missingOffer != nil {
@@ -132,6 +186,15 @@ func TestPostgresCommerceStateAutoRechargeAndEmptyLookups(t *testing.T) {
 	}
 	if change, err := store.GetOpenBillingSubscriptionChange(ctx, "alpha", "missing-subscription-"+uuid.NewString()); err != nil || change != nil {
 		t.Fatalf("empty open change lookup = %+v, error = %v", change, err)
+	}
+
+	withoutAutoRecharge := financialCatalogConfig(t)
+	delete(withoutAutoRecharge["commerce"].(map[string]any), "auto_recharge")
+	if _, err := sdk.Catalog.PublishAndActivate(ctx, withoutAutoRecharge, "go-no-recharge-policy", newAssignmentsRollout(withoutAutoRecharge)); err != nil {
+		t.Fatalf("publish catalog without auto-recharge: %v", err)
+	}
+	if window, err := store.GetAutoRechargeOperationalWindow(ctx, accountID); err != nil || window != nil {
+		t.Fatalf("window without policy = %+v, error = %v", window, err)
 	}
 }
 

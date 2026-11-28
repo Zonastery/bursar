@@ -484,8 +484,12 @@ class BillingCapability(BillingEventSink, Protocol):
 class CatalogService:
     """Catalog operations; billing never owns configuration writes."""
 
-    def __init__(self, credits: CreditsServiceImpl) -> None:
+    def __init__(
+        self, credits: CreditsServiceImpl, provider_environment: str | None = None, providers: set[str] | None = None
+    ) -> None:
         self._credits = credits
+        self._provider_environment = provider_environment
+        self._providers = providers
 
     def get_active(self) -> CatalogRevision | None:
         """Return the active persisted catalog revision, if one exists."""
@@ -514,8 +518,15 @@ class CatalogService:
             raise CatalogNotLoadedError("No active Bursar catalog is available")
         return load_config_from_dict(active.config, getattr(self._credits._store, "provider_environment", None))
 
-    def public_view(self) -> PublicCatalog:
-        return project_public_catalog(self.get_config())
+    def public_view(self, *, region: str | None = None, at: datetime | None = None) -> PublicCatalog:
+        return project_public_catalog(
+            self.get_config(),
+            region=region,
+            at=at,
+            available_only=True,
+            provider_environment=self._provider_environment,
+            providers=self._providers,
+        )
 
     def publish_draft(self, config: BursarConfigData, label: str | None = None) -> str:
         return self._credits.publish_catalog_draft(config, label)
@@ -661,7 +672,13 @@ class Bursar:
             options=credits_options,
         )
         self.credits = credits
-        self.catalog = CatalogService(credits)
+        self.catalog = CatalogService(
+            credits,
+            commerce_options.provider_environment
+            if commerce_options is not None
+            else getattr(credit_store, "provider_environment", None),
+            set(commerce_options.providers) if commerce_options is not None else None,
+        )
         self.accounts = AccountService(credits, self.catalog)
         self.billing = (
             BillingEventService(

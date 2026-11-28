@@ -494,3 +494,21 @@ def test_missing_version_is_rejected() -> None:
     data.pop("version")
     with pytest.raises(ConfigError):
         load_config_from_dict(data)
+
+
+def test_null_rate_card_matches_omitted_default() -> None:
+    from bursar.config import canonical_bursar_config_dict
+
+    base = {
+        "version": 1,
+        "catalog": {"default_plan": "free"},
+        "plans": {"free": {"display_name": "Free"}},
+        "pricing": {
+            "operations": {"report": {"charge": {"type": "flat", "amount": "2"}}},
+            "rate_cards": {"custom": {"operations": {}}},
+        },
+    }
+    omitted = canonical_bursar_config_dict(base)
+    explicit = canonical_bursar_config_dict({**base, "plans": {"free": {"display_name": "Free", "rate_card": None}}})
+    assert omitted == explicit
+    assert omitted["plans"]["free"]["rate_card"] == "custom"

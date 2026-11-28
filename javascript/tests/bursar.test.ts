@@ -120,6 +120,11 @@ describe("Bursar facade", () => {
           live_offer: {
             type: "subscription",
             display_name: "Live",
+            availability: {
+              starts_at: "2025-01-01T00:00:00Z",
+              ends_at: "2025-02-01T00:00:00Z",
+              regions: ["IN"],
+            },
             plan: "free",
             billing_interval: { unit: "month" },
             price: { amount_minor: 200, currency: "USD" },
@@ -153,13 +158,29 @@ describe("Bursar facade", () => {
         },
       },
     });
-    expect((await bursar.catalog.publicView()).plans[0]?.offers.map((offer) => offer.key)).toEqual([
-      "live_offer",
-    ]);
+    expect(
+      (
+        await bursar.catalog.publicView({ region: "IN", at: new Date("2025-01-01T00:00:00Z") })
+      ).plans[0]?.offers.map((offer) => offer.key),
+    ).toEqual(["live_offer"]);
     const marketing = new Bursar({ creditStore });
     expect(
-      (await marketing.catalog.publicView()).plans[0]?.offers.map((offer) => offer.key),
+      (
+        await marketing.catalog.publicView({ region: "IN", at: new Date("2025-01-01T00:00:00Z") })
+      ).plans[0]?.offers.map((offer) => offer.key),
     ).toEqual(["live_offer", "other_offer"]);
+    expect(
+      (await bursar.catalog.publicView({ region: "IN", at: new Date("2025-02-01T00:00:00Z") }))
+        .plans[0]?.offers,
+    ).toHaveLength(0);
+    expect(
+      (await bursar.catalog.publicView({ at: new Date("2025-01-01T00:00:00Z") })).plans[0]?.offers,
+    ).toHaveLength(0);
+    expect(
+      (await bursar.catalog.publicView({ region: "IN", at: new Date("2024-12-31T23:59:59Z") }))
+        .plans[0]?.offers,
+    ).toHaveLength(0);
+    await expect(bursar.catalog.publicView({ at: new Date(NaN) })).rejects.toThrow("valid date");
     expect(Object.keys((await marketing.catalog.getConfig()).commerce.offers)).toHaveLength(3);
   });
 

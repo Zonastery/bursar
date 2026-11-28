@@ -1686,6 +1686,11 @@ ADD CONSTRAINT billing_checkout_intents_tenant_id_subject_id_subjects_fkey
 FOREIGN KEY (tenant_id, subject_id)
 REFERENCES bursar.subjects (tenant_id, id);
 
+ALTER TABLE bursar.billing_checkout_intents
+ADD CONSTRAINT billing_checkout_intents_account_fkey
+FOREIGN KEY (tenant_id, account_id)
+REFERENCES bursar.subjects (tenant_id, id);
+
 ALTER TABLE bursar.billing_credit_grants
 ADD CONSTRAINT billing_credit_grants_tenant_id_billing_event_id_billi_379dbd55
 FOREIGN KEY (tenant_id, billing_event_id)

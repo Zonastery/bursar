@@ -234,7 +234,7 @@ func (p postgresBillingLifecycle) applySubscription(ctx context.Context, event B
 	if err != nil {
 		return BillingEventResult{}, err
 	}
-	offer, err := p.offerForEvent(ctx, event)
+	offer, err := p.offerForEvent(ctx, event, accountID, existing == nil)
 	if err != nil {
 		return BillingEventResult{}, err
 	}
@@ -373,11 +373,23 @@ func (p postgresBillingLifecycle) applySubscription(ctx context.Context, event B
 	return result, nil
 }
 
-func (p postgresBillingLifecycle) offerForEvent(ctx context.Context, event BillingEvent) (*BillingOffer, error) {
+func (p postgresBillingLifecycle) offerForEvent(ctx context.Context, event BillingEvent, accountID string, initial bool) (*BillingOffer, error) {
 	if event.Subscription == nil || event.Subscription.Refs == nil {
+		if _, present := event.Metadata["checkout_intent_id"]; initial && present {
+			return nil, NewStoreError("checkout offer reference is missing", ErrorOptions{})
+		}
 		return nil, nil
 	}
 	refs := event.Subscription.Refs
+	if initial {
+		if raw, present := event.Metadata["checkout_intent_id"]; present {
+			intentID, ok := raw.(string)
+			if !ok || strings.TrimSpace(intentID) == "" {
+				return nil, NewStoreError("invalid checkout intent", ErrorOptions{})
+			}
+			return p.store.resolveBillingOfferForCheckout(ctx, event.Provider, refs.ProductID, refs.PriceID, refs.LookupKey, accountID, intentID)
+		}
+	}
 	return p.store.ResolveBillingOffer(ctx, event.Provider, refs.ProductID, refs.PriceID, refs.LookupKey)
 }
 

@@ -21,7 +21,10 @@ type CatalogServiceOptions struct {
 // the database-authoritative catalog revision. Catalog writes remain atomic
 // database RPCs exposed through CreditStore.
 type CatalogService struct {
-	store CreditStore
+	store                         CreditStore
+	storefrontProviders           []string
+	storefrontProvidersConfigured bool
+	storefrontEnvironment         ProviderEnvironment
 
 	mu             sync.RWMutex
 	refreshMu      sync.Mutex
@@ -48,10 +51,12 @@ func NewCatalogServiceWithOptions(store CreditStore, options CatalogServiceOptio
 	if options.CacheTTL < 0 {
 		return nil, NewError("catalog cache TTL must not be negative", ErrorOptions{Code: ErrorCodeConfig, Category: ErrorCategoryInvalidRequest})
 	}
-	return &CatalogService{
+	service := &CatalogService{
 		store: store, versionEngines: make(map[int]*PricingEngine),
 		cacheTTL: options.CacheTTL, now: time.Now,
-	}, nil
+	}
+	service.storefrontEnvironment = ProviderEnvironment(service.providerEnvironment())
+	return service, nil
 }
 
 // GetActive returns the currently active persisted catalog revision, if any.
@@ -162,12 +167,22 @@ func (s *CatalogService) GetConfig(ctx context.Context) (*BursarConfig, error) {
 }
 
 // PublicView projects the active catalog into a provider-safe product surface.
-func (s *CatalogService) PublicView(ctx context.Context) (PublicCatalog, error) {
+func (s *CatalogService) PublicView(ctx context.Context, options ...PublicCatalogOptions) (PublicCatalog, error) {
+	if len(options) > 1 {
+		return PublicCatalog{}, newConfigError("public view accepts at most one options value", nil)
+	}
 	config, err := s.GetConfig(ctx)
 	if err != nil {
 		return PublicCatalog{}, err
 	}
-	return ProjectPublicCatalog(config), nil
+	scope := PublicCatalogOptions{At: time.Now()}
+	if len(options) > 0 {
+		scope = options[0]
+		if scope.At.IsZero() {
+			scope.At = time.Now()
+		}
+	}
+	return projectPublicCatalog(config, &scope, s.storefrontEnvironment, s.storefrontProviders, s.storefrontProvidersConfigured), nil
 }
 
 // Engine returns the current exact pricing engine after Load or Refresh.

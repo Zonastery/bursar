@@ -270,8 +270,7 @@ async def _handle_checkout_event(
 
     if _value(session, "mode") == "subscription" and subscription_id:
         sub = await stripe.v1.subscriptions.retrieve_async(subscription_id)
-        plan_slug = metadata.get("plan_slug")
-        refs = ProviderRef(lookup_key=plan_slug) if plan_slug else _subscription_refs(sub)
+        refs = _subscription_refs(sub)
         call_billing_event_sink(
             sink,
             BillingEvent(
@@ -443,8 +442,8 @@ async def _handle_invoice_paid(
         logger.debug("invoice.paid: no subscription reference", {"invoiceId": _value(data, "id")})
         return
 
-    metadata = {**event_metadata, **_invoice_metadata(data)}
     sub = await stripe.v1.subscriptions.retrieve_async(subscription_id)
+    metadata = {**_metadata(_value(sub, "metadata")), **event_metadata, **_invoice_metadata(data)}
     period_start = _build_start(sub) or _build_start_from_invoice(data)
     period_end = _build_end(sub) or _build_end_from_invoice(data)
     customer_id = _expandable_id(_value(data, "customer"))
@@ -493,8 +492,8 @@ async def _handle_invoice_payment_failed(
             {"invoiceId": _value(data, "id")},
         )
         return
-    metadata = {**event_metadata, **_invoice_metadata(data)}
     sub = await stripe.v1.subscriptions.retrieve_async(subscription_id)
+    metadata = {**_metadata(_value(sub, "metadata")), **event_metadata, **_invoice_metadata(data)}
     customer_id = _expandable_id(_value(data, "customer"))
     call_billing_event_sink(
         sink,

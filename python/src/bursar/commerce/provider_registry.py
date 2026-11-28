@@ -5,7 +5,8 @@ import inspect
 
 from bursar.commerce.errors import ProviderSelectionError
 from bursar.commerce.types import CommerceOptions, CommerceProviderFactoryContext
-from bursar.config.types import CommerceOffer, CustomObjectReference, DodoProductReference, StripePriceReference
+from bursar.config.parse_commerce import has_provider_binding
+from bursar.config.types import CommerceOffer
 from bursar.providers.types import PaymentProvider
 
 
@@ -75,15 +76,7 @@ class CommerceProviderRegistry:
             if offer is None:
                 return True
             reference = offer.providers.get(name)
-            if isinstance(reference, StripePriceReference):
-                value = reference.price_id
-            elif isinstance(reference, DodoProductReference):
-                value = reference.product_id
-            elif isinstance(reference, CustomObjectReference):
-                value = reference.external_id
-            else:
-                return False
-            return isinstance(value, str) or self._context.provider_environment in value
+            return reference is not None and has_provider_binding(reference, self._context.provider_environment)
 
         compatible = (
             [name for name in offer.providers if name in self._options.providers and available(name)]

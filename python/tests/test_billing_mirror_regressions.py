@@ -704,7 +704,12 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
     store.upsert_auto_recharge_profile(profile)
 
     assert "bursar.upsert_auto_recharge_profile" in execute.call_args.args[0]
-    assert execute.call_args.args[1][-3:] == [True, "active", False]
+    assert execute.call_args.args[1][-2:] == [True, "active"]
+    assert store.resume_auto_recharge_profile(profile) is True
+    assert "bursar.resume_auto_recharge_profile" in execute.call_args.args[0]
+    assert execute.call_args.args[1] == [profile.user_id, profile.provider, profile.topup_id, 2, Decimal("10")]
+    execute.return_value = [{"updated": False}]
+    assert store.resume_auto_recharge_profile(profile) is False
     attempt_row = {
         "id": "00000000-0000-0000-0000-000000000003",
         "subject_id": "00000000-0000-0000-0000-000000000001",

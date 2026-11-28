@@ -55,6 +55,14 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 	if err != nil {
 		return intent, err
 	}
+	accountID := input.AccountID
+	if accountID == "" {
+		accountID = input.SubjectID
+	}
+	typedAccountID, err := postgresUUID(accountID, "checkout account ID")
+	if err != nil {
+		return intent, err
+	}
 	digest, err := checkoutRequestDigest(input)
 	if err != nil {
 		return intent, err
@@ -81,6 +89,7 @@ func (s *PostgresStore) CreateOrGetCheckoutIntent(ctx context.Context, input Che
 			nil,
 			nullableText(strings.ToUpper(strings.TrimSpace(input.Region))),
 			expectedRevision,
+			typedAccountID,
 		)
 		if callErr != nil {
 			return callErr

@@ -69,6 +69,13 @@ type AutoRechargeWindow struct {
 	DurationDays float64
 }
 
+// AutoRechargeOperationalWindow is the active database policy window and usage.
+type AutoRechargeOperationalWindow struct {
+	MaxRecharges int
+	Start, End   time.Time
+	Count        int
+}
+
 // AutoRechargePolicy is the provider-specific active policy resolved from a
 // parsed Bursar catalog. ProductID is provider-internal and is never accepted
 // from a browser or other untrusted client request.
@@ -84,9 +91,8 @@ type AutoRechargePolicy struct {
 	Window              AutoRechargeWindow
 }
 
-// AutoRechargeProfile is a persisted account preference and guardrail
-// snapshot. Its policy fields are written from the active catalog by Enable;
-// a durable store must reject a profile that no longer matches its catalog.
+// AutoRechargeProfile is a persisted account preference. Its policy fields
+// describe the enrollment revision; status uses the active operational policy.
 type AutoRechargeProfile struct {
 	UserID              string
 	Enabled             bool
@@ -191,9 +197,11 @@ type AutoRechargeStore interface {
 	GetAutoRechargeCustomer(context.Context, string, string) (*AutoRechargeCustomer, error)
 	GetAutoRechargeProfile(context.Context, string) (*AutoRechargeProfile, error)
 	UpsertAutoRechargeProfile(context.Context, AutoRechargeProfile, AutoRechargeProfileUpsertOptions) error
+	ResumeAutoRechargeProfile(context.Context, AutoRechargeProfile) (bool, error)
 	ClaimAutoRechargeAttempt(context.Context, AutoRechargeAttemptClaim) (*AutoRechargeAttempt, error)
 	UpdateAutoRechargeAttempt(context.Context, AutoRechargeAttemptUpdate) error
 	CountAutoRechargeAttempts(context.Context, string, time.Time) (int, error)
+	GetAutoRechargeOperationalWindow(context.Context, string) (*AutoRechargeOperationalWindow, error)
 }
 
 // AutoRechargeCatalogSource is satisfied by CatalogService. It is deliberately
@@ -478,10 +486,13 @@ func (s *AutoRechargeService) GetStatus(ctx context.Context, userID string, prov
 		}
 	}
 
-	count, err := s.store.CountAutoRechargeAttempts(ctx, userID, policy.Window.Start)
-	if err != nil {
+	window, err := s.store.GetAutoRechargeOperationalWindow(ctx, userID)
+	if err != nil || window == nil {
 		return nil, err
 	}
+	policy.MaxChargesPerWindow = window.MaxRecharges
+	policy.Window.Start, policy.Window.End = window.Start, window.End
+	count := window.Count
 	status := &AutoRechargeStatus{
 		Enabled:           profile != nil && profile.Enabled,
 		State:             AutoRechargeStateDisabled,
@@ -603,11 +614,19 @@ func (s *AutoRechargeService) Retry(ctx context.Context, provider PaymentProvide
 	if err := autoRechargeProfileProviderMatches(profile, providerName); err != nil {
 		return AutoRechargeProcessResult{}, err
 	}
-	profile = cloneAutoRechargeProfile(profile)
-	profile.State = AutoRechargeStateActive
-	profile.Armed = true
-	if err := s.store.UpsertAutoRechargeProfile(ctx, *profile, AutoRechargeProfileUpsertOptions{ResetCooldown: true}); err != nil {
+	policy, err := s.resolvePolicy(ctx, providerName, profile)
+	if err != nil {
 		return AutoRechargeProcessResult{}, err
+	}
+	if policy == nil {
+		return AutoRechargeProcessResult{Outcome: AutoRechargeOutcomeNotConfigured}, nil
+	}
+	resumed, err := s.store.ResumeAutoRechargeProfile(ctx, *profile)
+	if err != nil {
+		return AutoRechargeProcessResult{}, err
+	}
+	if !resumed {
+		return AutoRechargeProcessResult{Outcome: AutoRechargeOutcomeNotConfigured}, nil
 	}
 	input.UserID = userID
 	return s.ProcessIfNeeded(ctx, provider, input)
@@ -818,6 +837,13 @@ func (s *AutoRechargeService) resolvePolicy(ctx context.Context, providerName st
 		return nil, autoRechargeConfigError("provider environment is required")
 	}
 	if ok {
+		for _, id := range []ProviderID{reference.PriceID, reference.ProductID, reference.ExternalID} {
+			if bindings, isBound := id.value.(map[string]string); isBound {
+				if _, exists := bindings[string(bound.ProviderEnvironment())]; !exists {
+					return nil, nil
+				}
+			}
+		}
 		reference, err = ResolveProviderReference(reference, bound.ProviderEnvironment())
 		if err != nil {
 			return nil, err

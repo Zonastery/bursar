@@ -25,6 +25,7 @@ export type * from "./config/types.js";
 
 const ajv = new Ajv2020({
   allErrors: true,
+  discriminator: true,
   strict: false,
   // Configs loaded from files cannot contain these values, so reject them at
   // the programmatic dictionary boundary as well. Decimal accepts Infinity
@@ -32,24 +33,27 @@ const ajv = new Ajv2020({
   strictNumbers: true,
 });
 addFormats(ajv, { mode: "full" });
-const validateStructure = ajv.compile<BursarConfigData>(schema);
+// Pydantic's mapping annotations are redundant with the branch const values;
+// AJV supports discriminators but rejects the mapping keyword. Keep the public
+// schema intact and omit only that annotation in the compiled copy.
+function compilerCompatible(value: JsonValue, discriminator = false): JsonValue {
+  if (Array.isArray(value)) return value.map((child) => compilerCompatible(child));
+  // The boundary parse guarantees JsonValue; this narrows its scalar variants.
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !(discriminator && key === "mapping"))
+      .map(([key, child]) => [key, compilerCompatible(child, key === "discriminator")]),
+  );
+}
+const compilerSchema = asObject(compilerCompatible(z.json().parse(schema)), "schema");
+const validateStructure = ajv.compile<BursarConfigData>(compilerSchema);
 
 function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
   if (!errors?.length) return "configuration does not match the Bursar schema";
   const useful = errors.filter((error) => !["oneOf", "anyOf"].includes(error.keyword));
-  // A discriminated union reports failures from every alternative. Discard branches
-  // whose discriminator mismatched, leaving diagnostics for the chosen variant.
-  const rejectedBranches = new Set(
-    useful
-      .filter(
-        (error) => error.keyword === "const" && /\/(type|action|op)$/.test(error.instancePath),
-      )
-      .map((error) => error.schemaPath.replace(/\/properties\/(type|action|op)\/const$/, "")),
-  );
-  const selected = useful.filter(
-    (error) => ![...rejectedBranches].some((branch) => error.schemaPath.startsWith(`${branch}/`)),
-  );
-  const candidates = selected.length ? selected : errors;
+  const candidates = useful.length ? useful : errors;
   return [
     ...new Set(
       candidates.map((error) => {
@@ -65,9 +69,7 @@ function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
         return `${path} ${error.message ?? error.keyword}`;
       }),
     ),
-  ]
-    .slice(0, 8)
-    .join("; ");
+  ].join("; ");
 }
 
 export function loadConfigFromDict<T extends object>(

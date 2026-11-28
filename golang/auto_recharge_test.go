@@ -299,6 +299,13 @@ func (s *autoRechargeStoreStub) UpsertAutoRechargeProfile(_ context.Context, pro
 	return nil
 }
 
+func (s *autoRechargeStoreStub) ResumeAutoRechargeProfile(_ context.Context, profile AutoRechargeProfile) (bool, error) {
+	profile.State = AutoRechargeStateActive
+	profile.Armed = true
+	s.profile = cloneAutoRechargeProfile(&profile)
+	return true, nil
+}
+
 func (s *autoRechargeStoreStub) ClaimAutoRechargeAttempt(_ context.Context, claim AutoRechargeAttemptClaim) (*AutoRechargeAttempt, error) {
 	s.claim = claim
 	if s.claimNil {
@@ -313,6 +320,11 @@ func (s *autoRechargeStoreStub) ClaimAutoRechargeAttempt(_ context.Context, clai
 func (s *autoRechargeStoreStub) UpdateAutoRechargeAttempt(_ context.Context, update AutoRechargeAttemptUpdate) error {
 	s.updates = append(s.updates, update)
 	return nil
+}
+
+func (s *autoRechargeStoreStub) GetAutoRechargeOperationalWindow(context.Context, string) (*AutoRechargeOperationalWindow, error) {
+	now := time.Now().UTC()
+	return &AutoRechargeOperationalWindow{MaxRecharges: 3, Start: now.Add(-24 * time.Hour), End: now, Count: s.count}, nil
 }
 
 func (s *autoRechargeStoreStub) CountAutoRechargeAttempts(context.Context, string, time.Time) (int, error) {

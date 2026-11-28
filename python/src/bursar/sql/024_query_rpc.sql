@@ -734,10 +734,13 @@ RETURNS TABLE (
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT profile.subject_id, profile.enabled, profile.armed, profile.state,
         profile.provider, profile.topup_id, topup.topup_key, profile.quantity,
-        profile.threshold, profile.max_charges_per_window, profile.window_unit,
-        profile.window_count, profile.window_anchor, profile.window_timezone,
+        profile.threshold, policy.max_purchases, policy.period_unit,
+        policy.period_count, policy.period_anchor, policy.period_timezone,
         profile.updated_at
  FROM bursar.billing_auto_recharge_profiles AS profile
+ LEFT JOIN bursar.catalog_auto_recharge_policies AS policy
+   ON policy.tenant_id = profile.tenant_id
+  AND policy.catalog_revision_id = profile.catalog_revision_id
  LEFT JOIN bursar.catalog_topups AS topup
    ON topup.id = profile.topup_id
   AND topup.catalog_revision_id = profile.catalog_revision_id
@@ -761,29 +764,44 @@ $$;
 CREATE FUNCTION bursar.resolve_catalog_offer(
     p_provider text,
     p_lookup_type text,
-    p_lookup_value text
+    p_lookup_value text,
+    p_account_id uuid DEFAULT NULL,
+    p_intent_id uuid DEFAULT NULL
 )
 RETURNS SETOF bursar.catalog_offers
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE v_revision uuid; v_key text;
+BEGIN
+ IF p_intent_id IS NOT NULL THEN
+   SELECT i.catalog_revision_id, i.product_key INTO v_revision, v_key
+   FROM bursar.billing_checkout_intents i
+   WHERE i.id = p_intent_id AND i.account_id = p_account_id
+     AND i.provider = p_provider AND i.checkout_kind = 'subscription'
+     AND i.provider_environment = bursar.current_provider_environment();
+   IF NOT FOUND THEN
+     RAISE EXCEPTION 'invalid checkout intent' USING ERRCODE = '22023';
+   END IF;
+ END IF;
+ RETURN QUERY
  SELECT o.*
  FROM bursar.catalog_provider_refs r
- JOIN bursar.catalog_revisions cr
- ON cr.id=r.catalog_revision_id
- JOIN bursar.catalog_offers o
- ON o.catalog_revision_id=r.catalog_revision_id
- AND o.offer_key=r.object_key
+ JOIN bursar.catalog_revisions cr ON cr.id = r.catalog_revision_id
+ JOIN bursar.catalog_offers o ON o.catalog_revision_id = r.catalog_revision_id
+   AND o.offer_key = r.object_key
  WHERE bursar.is_nonempty_bounded_text(p_provider, 100)
- AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
- AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
- AND r.provider=p_provider
- AND cr.status='active'
- AND r.provider_environment=bursar.current_provider_environment()
- AND r.lookup_type=p_lookup_type
- AND r.lookup_value=p_lookup_value
- AND r.object_type='offer'
- ORDER BY cr.revision_no DESC
- LIMIT 1
-$$;
+   AND bursar.is_nonempty_bounded_text(p_lookup_type, 64)
+   AND bursar.is_nonempty_bounded_text(p_lookup_value, 255)
+   AND r.provider = p_provider
+   AND r.provider_environment = bursar.current_provider_environment()
+   AND r.lookup_type = p_lookup_type AND r.lookup_value = p_lookup_value
+   AND r.object_type = 'offer'
+   AND CASE WHEN p_intent_id IS NULL THEN cr.status = 'active'
+     ELSE o.catalog_revision_id = v_revision AND o.offer_key = v_key END
+ ORDER BY cr.revision_no DESC LIMIT 1;
+ IF NOT FOUND AND p_intent_id IS NOT NULL THEN
+   RAISE EXCEPTION 'checkout offer reference mismatch' USING ERRCODE = '22023';
+ END IF;
+END $$;
 
 -- Resolve an active top-up through one environment-specific provider reference.
 CREATE FUNCTION bursar.resolve_catalog_topup(
@@ -840,7 +858,7 @@ BEGIN
  IF p_intent_id IS NOT NULL THEN
    SELECT intent.catalog_revision_id, intent.product_key INTO v_intent_revision, v_intent_key
    FROM bursar.billing_checkout_intents AS intent
-   WHERE intent.id = p_intent_id AND intent.subject_id = p_subject_id
+   WHERE intent.id = p_intent_id AND intent.account_id = p_subject_id
      AND intent.provider = p_provider AND intent.checkout_kind = 'credit_topup'
      AND intent.provider_environment = bursar.current_provider_environment();
    IF NOT FOUND THEN RAISE EXCEPTION 'invalid checkout intent' USING ERRCODE='22023'; END IF;

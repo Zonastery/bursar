@@ -103,11 +103,7 @@ func mapStripeEvent(ctx context.Context, event stripego.Event, raw []byte, resou
 				if err != nil {
 					return nil, stripeWebhookResourceError("retrieve Stripe checkout subscription", err)
 				}
-				var refs *bursar.ProviderRef
-				if planSlug := strings.TrimSpace(metadata["plan_slug"]); planSlug != "" {
-					refs = &bursar.ProviderRef{LookupKey: planSlug}
-				}
-				subscription, err := stripeSubscriptionInfo(providerSubscription, accountID, refs)
+				subscription, err := stripeSubscriptionInfo(providerSubscription, accountID, nil)
 				if err != nil {
 					return nil, err
 				}
@@ -269,7 +265,15 @@ func mapStripeEvent(ctx context.Context, event stripego.Event, raw []byte, resou
 		if err != nil {
 			return nil, stripeWebhookResourceError("retrieve Stripe invoice subscription", err)
 		}
-		metadata := stripeInvoiceMetadata(&invoice)
+		metadata := make(map[string]string)
+		if providerSubscription != nil {
+			for key, value := range providerSubscription.Metadata {
+				metadata[key] = value
+			}
+		}
+		for key, value := range stripeInvoiceMetadata(&invoice) {
+			metadata[key] = value
+		}
 		accountID := strings.TrimSpace(metadata["bursar_account_id"])
 		if accountID == "" && providerSubscription != nil {
 			accountID = strings.TrimSpace(providerSubscription.Metadata["bursar_account_id"])

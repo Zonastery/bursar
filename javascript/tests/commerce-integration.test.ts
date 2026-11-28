@@ -32,6 +32,7 @@ import type {
   WebhookResult,
 } from "../src/providers/types.js";
 import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
+import { mapDodoEvent } from "./helpers/dodo-fixtures.js";
 
 const DATABASE_URL = inject("DATABASE_URL");
 
@@ -176,7 +177,7 @@ const CONFIG = {
 } satisfies BursarConfigData;
 
 class IntegrationProvider implements PaymentProvider {
-  readonly provider = "stripe";
+  readonly provider: string = "stripe";
   readonly checkoutParams: CheckoutParams[] = [];
   readonly charges: SavedPaymentChargeResult[] = [
     {
@@ -1996,13 +1997,19 @@ describe.runIf(DATABASE_URL)("checkout settlement terms", () => {
       await truncateBursarTables(pool);
       const { bursar } = await makeBursar(pool);
       const checkout = await bursar.commerce!.createCheckout({
-        subjectId: USER_ID,
+        subjectId: USER_ID2,
         accountId: USER_ID,
         offerKey: "standard_topup",
         returnUrl: "https://return.test",
         cancelUrl: "https://cancel.test",
         operationKey: "pinned-terms",
       });
+      await expect(
+        bursar.commerce!.getCheckoutStatus({ intentId: checkout.intentId, subjectId: USER_ID2 }),
+      ).resolves.toMatchObject({ intentId: checkout.intentId });
+      await expect(
+        bursar.commerce!.getCheckoutStatus({ intentId: checkout.intentId, subjectId: USER_ID }),
+      ).rejects.toBeInstanceOf(CommerceResourceNotFoundError);
       const next = structuredClone(CONFIG);
       next.commerce.offers.standard_topup.credits_per_unit = "200";
       await bursar.catalog.publishAndActivate(next);
@@ -2025,6 +2032,174 @@ describe.runIf(DATABASE_URL)("checkout settlement terms", () => {
       });
       expect(result.handled).toBe(true);
       expect((await bursar.credits.getBalance(USER_ID)).balance.toString()).toBe("100");
+    } finally {
+      await pool.end();
+    }
+  }, 120000);
+  it.each(["subscription.created", "payment.succeeded"] as const)(
+    "provisions a first %s event from its removed checkout offer",
+    async (eventType) => {
+      const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 2 });
+      try {
+        await applyMigrations(pool);
+        await truncateBursarTables(pool);
+        const { bursar } = await makeBursar(pool);
+        const checkout = await bursar.commerce!.createCheckout({
+          subjectId: USER_ID2,
+          accountId: USER_ID,
+          offerKey: "pro_month",
+          returnUrl: "https://return.test",
+          cancelUrl: "https://cancel.test",
+          operationKey: "pinned-subscription",
+        });
+        const next = structuredClone(CONFIG);
+        Reflect.deleteProperty(next.commerce.offers, "pro_month");
+        await bursar.catalog.publishAndActivate(next);
+        for (const [suffix, accountId, priceId] of [
+          ["wrong-account", USER_ID3, "price_pro_month"],
+          ["wrong-price", USER_ID, "price_starter_month"],
+        ] as const) {
+          const rejected = await bursar.ingestBillingEvent({
+            provider: "stripe",
+            eventId: `rejected-${eventType}-${suffix}`,
+            eventType: "subscription.created",
+            occurredAt: new Date().toISOString(),
+            accountId,
+            metadata: { checkout_intent_id: checkout.intentId },
+            subscription: {
+              providerSubscriptionId: `rejected-${suffix}`,
+              status: "active",
+              refs: { priceId },
+            },
+          });
+          expect(rejected.handled).toBe(false);
+        }
+        const result = await bursar.ingestBillingEvent({
+          provider: "stripe",
+          eventId: "pinned-subscription-event",
+          eventType,
+          occurredAt: new Date().toISOString(),
+          accountId: USER_ID,
+          metadata: { checkout_intent_id: checkout.intentId },
+          subscription: {
+            providerSubscriptionId: "pinned-subscription-id",
+            status: "active",
+            refs: { priceId: "price_pro_month" },
+          },
+          ...(eventType === "payment.succeeded"
+            ? {
+                payment: {
+                  providerPaymentId: "subscription-payment",
+                  amountMinor: 2000,
+                  taxMinor: 0,
+                  currency: "USD",
+                  purpose: "subscription" as const,
+                  status: "succeeded" as const,
+                },
+              }
+            : undefined),
+        });
+        expect(result.handled).toBe(true);
+        const rows = await pool.query(
+          "SELECT o.offer_key, o.plan_key FROM bursar.billing_subscriptions s JOIN bursar.catalog_offers o ON o.id = s.offer_id WHERE s.provider_subscription_id = $1",
+          ["pinned-subscription-id"],
+        );
+        expect(rows.rows[0]).toMatchObject({ offer_key: "pro_month", plan_key: "pro" });
+        expect((await bursar.credits.getUserPlan(USER_ID)).planKey).toBe("pro");
+        await bursar.ingestBillingEvent({
+          provider: "stripe",
+          eventId: "subsequent-plan-change",
+          eventType: "subscription.plan_changed",
+          occurredAt: new Date(Date.now() + 1000).toISOString(),
+          accountId: USER_ID,
+          metadata: { checkout_intent_id: checkout.intentId },
+          subscription: {
+            providerSubscriptionId: "pinned-subscription-id",
+            status: "active",
+            refs: { priceId: "price_starter_month" },
+          },
+        });
+        const changed = await pool.query(
+          "SELECT o.offer_key FROM bursar.billing_subscriptions s JOIN bursar.catalog_offers o ON o.id = s.offer_id WHERE s.provider_subscription_id = $1",
+          ["pinned-subscription-id"],
+        );
+        expect(changed.rows[0]?.offer_key).toBe("starter_month");
+      } finally {
+        await pool.end();
+      }
+    },
+    120000,
+  );
+  it("provisions a Dodo payment-first checkout through the provider mapper", async () => {
+    const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 2 });
+    try {
+      await applyMigrations(pool);
+      await truncateBursarTables(pool);
+      const config = structuredClone(CONFIG);
+      Object.assign(config.commerce.providers, { dodo: { type: "dodo" } });
+      Object.assign(config.commerce.offers.pro_month.providers, {
+        dodo: { type: "dodo_product", product_id: "prod_pinned" },
+      });
+      class DodoFixtureProvider extends IntegrationProvider {
+        override readonly provider = "dodo";
+      }
+      const provider = new DodoFixtureProvider();
+      const billingStore = new PostgresBillingStore({
+        postgres: pool,
+        tenantId: TEST_TENANT_ID,
+        providerEnvironment: "test",
+      });
+      const creditStore = new PostgresStore({
+        postgres: pool,
+        tenantId: TEST_TENANT_ID,
+        providerEnvironment: "test",
+      });
+      const bursar = new Bursar({
+        creditStore,
+        billingStore,
+        commerceOptions: { providerEnvironment: "test", providers: { dodo: () => provider } },
+      });
+      await bursar.catalog.publishAndActivate(config);
+      const checkout = await bursar.commerce!.createCheckout({
+        subjectId: USER_ID2,
+        accountId: USER_ID,
+        provider: "dodo",
+        offerKey: "pro_month",
+        operationKey: "dodo-pinned",
+        returnUrl: "https://return.test",
+        cancelUrl: "https://cancel.test",
+      });
+      Reflect.deleteProperty(config.commerce.offers, "pro_month");
+      await bursar.catalog.publishAndActivate(config);
+      const outcomes: boolean[] = [];
+      const sink = {
+        ingestBillingEvent: async (event: Parameters<Bursar["ingestBillingEvent"]>[0]) => {
+          const result = await bursar.ingestBillingEvent(event);
+          outcomes.push(result.handled);
+          return result;
+        },
+      };
+      const metadata = { checkout_intent_id: checkout.intentId, plan_slug: "pro" };
+      const payment = {
+        payment_id: "dodo-no-product",
+        subscription_id: "dodo-sub",
+        settlement_amount: 2000,
+        settlement_currency: "USD",
+      };
+      await expect(
+        mapDodoEvent("payment.succeeded", payment, USER_ID, metadata, sink),
+      ).rejects.toThrow();
+      expect(outcomes.every((handled) => !handled)).toBe(true);
+      outcomes.length = 0;
+      await mapDodoEvent(
+        "payment.succeeded",
+        { ...payment, payment_id: "dodo-with-product", product_id: "prod_pinned" },
+        USER_ID,
+        metadata,
+        sink,
+      );
+      expect(outcomes).toEqual([true]);
+      expect((await bursar.credits.getUserPlan(USER_ID)).planKey).toBe("pro");
     } finally {
       await pool.end();
     }
@@ -2187,6 +2362,86 @@ describe.runIf(DATABASE_URL)("checkout catalog reservation races", () => {
       ).rejects.toBeInstanceOf(CheckoutConflictError);
       spy.mockRestore();
     } finally {
+      await pool.end();
+    }
+  }, 120000);
+  it("uses the winning catalog when a stale concurrent request reaches its intent", async () => {
+    const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 4 });
+    let releaseStale = () => {};
+    let releaseWinner = () => {};
+    let releaseReservation = () => {};
+    try {
+      await applyMigrations(pool);
+      await truncateBursarTables(pool);
+      const { bursar, billingStore, provider } = await makeBursar(pool);
+      let reachedStale!: () => void;
+      const waitStale = new Promise<void>((resolve) => {
+        releaseStale = resolve;
+      });
+      const arrivedStale = new Promise<void>((resolve) => {
+        reachedStale = resolve;
+      });
+      let reachedReservation!: () => void;
+      const reservationArrived = new Promise<void>((resolve) => {
+        reachedReservation = resolve;
+      });
+      const reservationGate = new Promise<void>((resolve) => {
+        releaseReservation = resolve;
+      });
+      const original = billingStore.createOrGetCheckoutIntent.bind(billingStore);
+      vi.spyOn(billingStore, "createOrGetCheckoutIntent").mockImplementationOnce(async (input) => {
+        reachedStale();
+        await waitStale;
+        try {
+          return await original(input);
+        } finally {
+          reachedReservation();
+          await reservationGate;
+        }
+      });
+      let reachedWinner!: () => void;
+      const waitWinner = new Promise<void>((resolve) => {
+        releaseWinner = resolve;
+      });
+      const arrivedWinner = new Promise<void>((resolve) => {
+        reachedWinner = resolve;
+      });
+      const createSession = provider.createCheckoutSession.bind(provider);
+      vi.spyOn(provider, "createCheckoutSession").mockImplementationOnce(async (params) => {
+        reachedWinner();
+        await waitWinner;
+        return createSession(params);
+      });
+      const input = {
+        subjectId: USER_ID,
+        accountId: USER_ID,
+        offerKey: "standard_topup",
+        returnUrl: "https://return.test",
+        cancelUrl: "https://cancel.test",
+        operationKey: "revision-winner",
+      };
+      const stale = bursar.commerce!.createCheckout(input);
+      await arrivedStale;
+      const next = structuredClone(CONFIG);
+      next.commerce.offers.standard_topup.providers.stripe.price_id = "price_new_topup";
+      await bursar.catalog.publishAndActivate(next);
+      const winner = bursar.commerce!.createCheckout(input);
+      await arrivedWinner;
+      releaseStale();
+      await reservationArrived;
+      releaseWinner();
+      const winnerResult = await winner;
+      releaseReservation();
+      const staleResult = await stale;
+      expect(staleResult.intentId).toBe(winnerResult.intentId);
+      expect(provider.checkoutParams.length).toBeGreaterThan(0);
+      expect(
+        provider.checkoutParams.every((params) => params.productId === "price_new_topup"),
+      ).toBe(true);
+    } finally {
+      releaseStale();
+      releaseWinner();
+      releaseReservation();
       await pool.end();
     }
   }, 120000);

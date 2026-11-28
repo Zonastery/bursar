@@ -530,23 +530,10 @@ CREATE TABLE bursar.billing_auto_recharge_profiles (
     CHECK (threshold >= 0),
     rearm_above bursar.credit_numeric NOT NULL DEFAULT 0
     CHECK (rearm_above >= 0),
-    max_charges_per_window integer
-    CHECK (max_charges_per_window IS NULL OR max_charges_per_window > 0),
-    max_charge_minor bigint CHECK (
-        max_charge_minor IS NULL
-        OR bursar.is_positive_safe_integer(max_charge_minor)
-    ),
-    cooldown_seconds integer NOT NULL DEFAULT 0 CHECK (cooldown_seconds >= 0),
     max_consecutive_failures integer NOT NULL DEFAULT 3
     CHECK (max_consecutive_failures > 0),
     consecutive_failures integer NOT NULL DEFAULT 0
     CHECK (consecutive_failures >= 0),
-    window_unit text NOT NULL DEFAULT 'day'
-    CHECK (window_unit IN ('second', 'minute', 'hour', 'day', 'week', 'month', 'year')),
-    window_count integer NOT NULL DEFAULT 1 CHECK (window_count > 0),
-    window_anchor text NOT NULL DEFAULT 'calendar'
-    CHECK (window_anchor IN ('calendar', 'rolling')),
-    window_timezone text NOT NULL DEFAULT 'UTC',
     last_attempt_at timestamptz CHECK (last_attempt_at IS NULL OR bursar.is_finite_timestamptz(last_attempt_at)),
     updated_at timestamptz NOT NULL DEFAULT now()
     CHECK (bursar.is_finite_timestamptz(updated_at)),
@@ -678,6 +665,7 @@ CREATE TABLE bursar.billing_checkout_intents (
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL,
+    account_id uuid NOT NULL,
     provider text NOT NULL
     CHECK (bursar.is_nonempty_bounded_text(provider, 100)),
     provider_environment text NOT NULL

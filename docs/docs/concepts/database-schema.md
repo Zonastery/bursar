@@ -101,15 +101,8 @@ erDiagram
         integer quantity
         bursar_credit_numeric threshold
         bursar_credit_numeric rearm_above
-        integer max_charges_per_window
-        bigint max_charge_minor
-        integer cooldown_seconds
         integer max_consecutive_failures
         integer consecutive_failures
-        text window_unit
-        integer window_count
-        text window_anchor
-        text window_timezone
         timestamp_with_time_zone last_attempt_at
         timestamp_with_time_zone updated_at
     }
@@ -117,6 +110,7 @@ erDiagram
         uuid tenant_id FK
         uuid id PK
         uuid subject_id FK
+        uuid account_id FK
         text provider
         text provider_environment
         text checkout_kind
@@ -1000,6 +994,7 @@ erDiagram
     tenants ||--o{ billing_auto_recharge_profiles : "tenant_id to id"
     subjects ||--o{ billing_auto_recharge_profiles : "tenant_id, subject_id to tenant_id, id"
     catalog_topups |o--o{ billing_auto_recharge_profiles : "tenant_id, topup_id, catalog_revision_id to tenant_id, id, catalog_revision_id"
+    subjects ||--o{ billing_checkout_intents : "tenant_id, account_id to tenant_id, id"
     catalog_revisions ||--o{ billing_checkout_intents : "tenant_id, catalog_revision_id to tenant_id, id"
     tenants ||--o{ billing_checkout_intents : "tenant_id to id"
     subjects ||--o{ billing_checkout_intents : "tenant_id, subject_id to tenant_id, id"

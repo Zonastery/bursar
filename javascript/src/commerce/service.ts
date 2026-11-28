@@ -325,12 +325,13 @@ class CommerceAutoRechargeService implements CommerceAutoRecharge {
       this.commerce.providerForAccount(input.accountId),
       this.commerce.credits.getBalance(input.accountId),
     ]);
-    await this.commerce.billing.autoRecharge.retry({
+    const result = await this.commerce.billing.autoRecharge.retry({
       userId: input.accountId,
       provider,
       balance: balance.balance,
       returnUrl: input.returnUrl,
     });
+    if (result.outcome === "not_configured") return null;
     return this.commerce.billing.autoRecharge.getStatus({
       userId: input.accountId,
       provider,
@@ -573,6 +574,7 @@ export class CommerceService {
     const createIntent = () => {
       const request: Parameters<BillingCapability["createOrGetCheckoutIntent"]>[0] = {
         subjectId: input.subjectId,
+        accountId: input.accountId,
         provider: provider.provider,
         operationKey: input.operationKey,
         checkoutKind: resolved.offer.type === "subscription" ? "subscription" : "credit_topup",

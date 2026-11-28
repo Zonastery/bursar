@@ -259,10 +259,22 @@ class BillingAutoRechargeRepository:
         row = optional_mapping_row(rows, "BillingAutoRechargeRepository.get_profile")
         return None if row is None else _profile_from_row(row)
 
+    def resume_profile(self, profile: BillingAutoRechargeProfile) -> bool:
+        rows = self._execute(
+            "SELECT bursar.resume_auto_recharge_profile(%s::uuid,%s,%s::uuid,%s,%s) AS updated",
+            [profile.user_id, profile.provider, profile.topup_id, profile.quantity, profile.threshold],
+        )
+        return require_boolean_result(rows, "updated", "BillingAutoRechargeRepository.resume_profile")
+
     def upsert_profile(self, profile: BillingAutoRechargeProfile, *, reset_cooldown: bool = False) -> None:
+        # The public compatibility option forwards to the same resume operation.
+        if reset_cooldown:
+            if not self.resume_profile(profile):
+                raise StoreError(f"auto-recharge profile update rejected: {profile.user_id}")
+            return
         rows = self._execute(
             """SELECT bursar.upsert_auto_recharge_profile(
-                   %s::uuid,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                   %s::uuid,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s
                ) AS updated""",
             [
                 profile.user_id,
@@ -278,7 +290,6 @@ class BillingAutoRechargeRepository:
                 profile.window_timezone,
                 profile.armed,
                 profile.state,
-                reset_cooldown,
             ],
         )
         if not require_boolean_result(rows, "updated", "BillingAutoRechargeRepository.upsert_profile"):

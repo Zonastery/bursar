@@ -16,6 +16,10 @@ func TestAuthoringRateCardDefaultsAndInlineBase(t *testing.T) {
 	if _, err := LoadConfigFromMap(CanonicalParsedBursarConfigDict(parsed)); err != nil {
 		t.Fatal(err)
 	}
+	raw["plans"].(map[string]any)["free"].(map[string]any)["rate_card"] = nil
+	if got, err := LoadConfigFromMap(raw); err != nil || got.Plans["free"].RateCard == nil || *got.Plans["free"].RateCard != "custom" {
+		t.Fatalf("null card not inferred: %v", err)
+	}
 	cards := raw["pricing"].(map[string]any)["rate_cards"].(map[string]any)
 	cards["other"] = map[string]any{"operations": map[string]any{}}
 	if _, err := LoadConfigFromMap(raw); err == nil {

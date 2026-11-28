@@ -24,6 +24,7 @@ import type {
 
 export interface CheckoutIntentCreate {
   subjectId: string;
+  accountId?: string;
   provider: string;
   operationKey: string;
   checkoutKind: "subscription" | "credit_topup";

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal, NotRequired, TypedDict
 
+from bursar.config.availability import offer_is_available
+from bursar.config.parse_commerce import has_provider_binding
 from bursar.config.types import BursarConfig, FeatureValue, SubscriptionOffer, TopupOffer
 
 
@@ -132,10 +135,36 @@ def _offer(key: str, value: SubscriptionOffer | TopupOffer) -> PublicCatalogOffe
     return result
 
 
-def project_public_catalog(config: BursarConfig) -> PublicCatalog:
+def project_public_catalog(
+    config: BursarConfig,
+    *,
+    region: str | None = None,
+    at: datetime | None = None,
+    available_only: bool = False,
+    provider_environment: str | None = None,
+    providers: set[str] | None = None,
+) -> PublicCatalog:
     """Return a JSON-safe catalog without provider product identifiers."""
 
-    offer_items = list(config.commerce.offers.items())
+    if at is not None and (at.tzinfo is None or at.utcoffset() is None):
+        raise ValueError("at must be timezone-aware")
+    at = at if at is not None else datetime.now(UTC)
+
+    def bound(offer: SubscriptionOffer | TopupOffer) -> bool:
+        if provider_environment is None:
+            return True
+        for name, ref in offer.providers.items():
+            if providers is not None and name not in providers:
+                continue
+            if has_provider_binding(ref, provider_environment):
+                return True
+        return False
+
+    offer_items = [
+        (key, offer)
+        for key, offer in config.commerce.offers.items()
+        if (not available_only or offer_is_available(offer.availability, region, at)) and bound(offer)
+    ]
     plans: list[PublicCatalogPlan] = []
     for key, plan in sorted(config.plans.items(), key=lambda item: (item[1].rank, item[0])):
         plan_offers = [

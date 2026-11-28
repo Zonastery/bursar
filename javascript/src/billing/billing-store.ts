@@ -60,6 +60,7 @@ export abstract class BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
+    checkout?: { accountId: string; intentId: string; lookupKey?: string | null },
   ): Promise<BillingOfferResult | null>;
 
   abstract claimBillingEvent(
@@ -208,6 +209,7 @@ export abstract class BillingStore {
     profile: BillingAutoRechargeProfile,
     options?: { resetCooldown?: boolean },
   ): Promise<void>;
+  abstract resumeAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<boolean>;
   abstract claimAutoRechargeAttempt(
     input: AutoRechargeAttemptClaim,
   ): Promise<BillingAutoRechargeAttempt | null>;
@@ -215,6 +217,12 @@ export abstract class BillingStore {
   abstract updateAutoRechargeAttemptByProviderPayment(
     input: AutoRechargeProviderPaymentUpdate,
   ): Promise<void>;
+  abstract getAutoRechargeOperationalWindow(userId: string): Promise<{
+    maxRecharges: number;
+    windowStart: string;
+    windowEnd: string;
+    count: number;
+  } | null>;
   abstract countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number>;
 
   abstract getBillingCustomerByUserId(

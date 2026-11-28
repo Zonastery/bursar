@@ -117,6 +117,13 @@ it("resubmits an unknown auto-recharge outcome with its original provider key", 
       updatedAt: "2026-08-01T00:00:01.000Z",
     }),
     updateAutoRechargeAttempt,
+    getAutoRechargeOperationalWindow: vi.fn().mockResolvedValue({
+      maxRecharges: 3,
+      windowStart: "2026-01-01T00:00:00.000Z",
+      windowEnd: "2026-01-31T00:00:00.000Z",
+      count: 1,
+    }),
+    resumeAutoRechargeProfile: vi.fn().mockResolvedValue(true),
     countAutoRechargeAttempts: vi.fn().mockResolvedValue(1),
   };
 
@@ -138,7 +145,10 @@ it("resubmits an unknown auto-recharge outcome with its original provider key", 
     }),
   );
   expect(updateAutoRechargeAttempt).toHaveBeenCalledWith(
-    expect.objectContaining({ state: "processing", providerAttemptId: "payment-1" }),
+    expect.objectContaining({
+      state: "processing",
+      providerAttemptId: "payment-1",
+    }),
   );
   const reordered = structuredClone(catalog);
   const other = structuredClone(reordered.commerce.offers.small_pack);

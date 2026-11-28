@@ -221,3 +221,21 @@ def test_saved_selection_survives_reordered_defaults() -> None:
     policy = AutoRechargeService(billing)._policy(provider, profile)
     assert policy is not None and policy.topup_key == "standard_topup" and policy.quantity == 1
     billing.resolve_topup.assert_called_once_with("stripe", None, "price_topup_500")
+
+
+@pytest.mark.asyncio
+async def test_auto_recharge_is_unavailable_for_other_environment_binding() -> None:
+    from copy import deepcopy
+
+    from tests.test_commerce_integration import CONFIG
+
+    config = deepcopy(CONFIG)
+    config["commerce"]["offers"]["standard_topup"]["providers"]["stripe"]["price_id"] = {"live": "price_live"}
+    billing = MagicMock()
+    billing.provider_environment = "test"
+    billing.get_active_catalog_document.return_value = config
+    billing.get_auto_recharge_profile.return_value = None
+    provider = MagicMock()
+    provider.provider = "stripe"
+    assert await AutoRechargeService(billing).get_status("user-1", provider) is None
+    billing.resolve_topup.assert_not_called()

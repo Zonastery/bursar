@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -330,6 +331,62 @@ async def test_commerce_checkout_persists_intent_and_topup_payment_grants_credit
         overview = await bursar.commerce.get_account_overview(USER_ID)
         assert overview.credits.ledger_balance == Decimal("100")
         assert overview.transactions[0].entry_type == "purchase"
+    finally:
+        billing_store.close()
+
+
+@pytest.mark.asyncio
+async def test_payment_first_subscription_uses_retired_checkout_offer(
+    pg_database_url: str,
+    pg_store: object,
+) -> None:
+    bursar, billing_store, _provider = _bursar(pg_database_url, pg_store)
+    try:
+        assert bursar.commerce is not None
+        checkout = await bursar.commerce.create_checkout(
+            CreateCheckoutInput(
+                subject_id=USER_ID2,
+                account_id=USER_ID,
+                offer_key="pro_month",
+                type="subscription",
+                return_url="https://app.example/return?intent={intentId}",
+                cancel_url="https://app.example/cancel?intent={intentId}",
+                operation_key="retired-subscription-checkout",
+            )
+        )
+        assert bursar.commerce.get_checkout_status(checkout.intent_id, USER_ID2).status == "pending"
+        retired = deepcopy(CONFIG)
+        del retired["commerce"]["offers"]["pro_month"]
+        bursar.catalog.publish_and_activate(retired)
+
+        def payment_event(event_id: str, account_id: str) -> BillingEvent:
+            return BillingEvent(
+                provider="stripe",
+                event_id=event_id,
+                event_type=BillingEventType.payment_succeeded,
+                occurred_at=_now(),
+                account_id=account_id,
+                metadata={"checkout_intent_id": checkout.intent_id},
+                payment=BillingPaymentInfo(
+                    provider_payment_id=f"payment-{event_id}",
+                    amount_minor=2000,
+                    tax_minor=0,
+                    currency="USD",
+                    purpose="subscription",
+                    status="succeeded",
+                ),
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="retired-subscription",
+                    status=BillingSubscriptionStatus.active,
+                    refs=ProviderRef(price_id="price_pro_month"),
+                ),
+            )
+
+        rejected = bursar.ingest_billing_event(payment_event("wrong-checkout-account", USER_ID3))
+        assert rejected.handled is False
+        paid = bursar.ingest_billing_event(payment_event("pinned-subscription-payment", USER_ID))
+        assert paid.handled is True
+        assert bursar.credits.get_user_plan(USER_ID).plan_key == "pro"
     finally:
         billing_store.close()
 

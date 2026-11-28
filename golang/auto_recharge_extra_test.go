@@ -197,3 +197,25 @@ func cloneAutoRechargeGuardrailsForTest(value *AutoRechargeGuardrails) *AutoRech
 	copy.EligibleTopups = append([]string(nil), value.EligibleTopups...)
 	return &copy
 }
+
+type autoRechargeEnvironmentStore struct{ *autoRechargeStoreStub }
+
+func (*autoRechargeEnvironmentStore) ProviderEnvironment() ProviderEnvironment {
+	return ProviderEnvironmentTest
+}
+
+func TestAutoRechargeMissingEnvironmentBindingIsUnavailable(t *testing.T) {
+	config := autoRechargeTestConfig()
+	ref := config.Commerce.Offers["credits_100"].Providers["stripe"]
+	ref.PriceID = BoundProviderID(map[ProviderEnvironment]string{ProviderEnvironmentLive: "price_live"})
+	config.Commerce.Offers["credits_100"].Providers["stripe"] = ref
+	store := &autoRechargeEnvironmentStore{&autoRechargeStoreStub{topup: &AutoRechargeTopup{ID: "topup-1"}}}
+	service, err := NewAutoRechargeService(&autoRechargeCatalogStub{config: config}, store, AutoRechargeServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := service.ResolvePolicy(context.Background(), &autoRechargeProviderBase{name: "stripe"})
+	if err != nil || policy != nil {
+		t.Fatalf("policy = %#v, error = %v; want unavailable", policy, err)
+	}
+}

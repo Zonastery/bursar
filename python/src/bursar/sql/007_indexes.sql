@@ -978,3 +978,6 @@ ON bursar.billing_payments (tenant_id, topup_id);
 
 CREATE INDEX usage_rollup_contributions_event_at_idx
 ON bursar.usage_rollup_contributions (event_at, tenant_id, charge_id);
+
+CREATE INDEX billing_checkout_intents_account_fk_idx
+ON bursar.billing_checkout_intents (tenant_id, account_id);

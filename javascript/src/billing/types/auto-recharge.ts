@@ -13,6 +13,7 @@ export type BillingAutoRechargeAttemptState =
   | "failed"
   | "action_required";
 
+/** Policy fields describe the enrollment revision; status uses the active policy. */
 export interface BillingAutoRechargeProfile {
   userId: string;
   enabled: boolean;

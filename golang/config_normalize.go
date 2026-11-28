@@ -94,7 +94,7 @@ func normalizeCatalog(raw map[string]any, environment string) error {
 				if plans, ok := raw["plans"].(map[string]any); ok {
 					for _, value := range plans {
 						if plan, ok := value.(map[string]any); ok {
-							if _, exists := plan["rate_card"]; !exists {
+							if plan["rate_card"] == nil {
 								plan["rate_card"] = cardKey
 							}
 						}

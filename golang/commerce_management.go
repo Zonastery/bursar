@@ -981,10 +981,13 @@ func buildSubscriptionSummary(accountID string, subscription *CommerceSubscripti
 }
 
 func offerIsAvailable(a *Availability, region string) bool {
+	return offerIsAvailableAt(a, region, time.Now())
+}
+
+func offerIsAvailableAt(a *Availability, region string, now time.Time) bool {
 	if a == nil {
 		return true
 	}
-	now := time.Now()
 	if a.StartsAt != nil {
 		start, err := time.Parse(time.RFC3339Nano, *a.StartsAt)
 		if err != nil || start.After(now) {

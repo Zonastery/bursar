@@ -266,6 +266,7 @@ async def test_payment_succeeded(sink):
     assert call[0][0].event_type == BillingEventType.payment_succeeded
     assert call[0][0].payment.provider_payment_id == "pay_dodo_success_001"
     assert call[0][0].payment.amount_minor == 2999
+    assert call[0][0].subscription.refs.product_id == "prod_monk"
 
 
 @pytest.mark.asyncio

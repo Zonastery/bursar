@@ -373,12 +373,14 @@ class CommerceAutoRecharge:
     async def retry(self, input: AutoRechargeInput) -> BillingAutoRechargeStatus | None:
         provider = await self._commerce.provider_for_account(input.account_id)
         balance = self._commerce.credits.get_balance(input.account_id)
-        await self._commerce.billing.auto_recharge.retry(
+        result = await self._commerce.billing.auto_recharge.retry(
             input.account_id,
             provider,
             balance=balance.balance,
             return_url=input.return_url,
         )
+        if result.outcome == "not_configured":
+            return None
         return await self._commerce.billing.auto_recharge.get_status(
             input.account_id,
             provider,
@@ -669,6 +671,7 @@ class CommerceService:
             return self.billing.create_or_get_checkout_intent(
                 CheckoutIntentCreate(
                     subject_id=input.subject_id,
+                    account_id=input.account_id,
                     provider=provider.provider,
                     operation_key=input.operation_key,
                     checkout_kind=checkout_kind,

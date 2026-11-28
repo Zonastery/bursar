@@ -269,7 +269,7 @@ export class PostgresBillingStore extends BillingStore {
     }
     const rows = await this.queryFn(
       `SELECT bursar.create_checkout_intent(
-         $1::uuid, $2, $3, $4, $5, decode($6, 'hex'), $7::timestamptz, NULL, NULL, $8, $9::uuid
+         $1::uuid, $2, $3, $4, $5, decode($6, 'hex'), $7::timestamptz, NULL, NULL, $8, $9::uuid, $10::uuid
        ) AS id`,
       [
         input.subjectId,
@@ -281,6 +281,7 @@ export class PostgresBillingStore extends BillingStore {
         input.expiresAt,
         input.region ?? null,
         input.expectedRevisionId ?? null,
+        input.accountId ?? input.subjectId,
       ],
     );
     const id = requireResultField(
@@ -411,8 +412,14 @@ export class PostgresBillingStore extends BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
+    checkout?: { accountId: string; intentId: string; lookupKey?: string | null },
   ): Promise<BillingOfferResult | null> {
-    const r = await this.billingOffer.resolveByPrice(provider, priceId ?? null, productId ?? null);
+    const r = await this.billingOffer.resolveByPrice(
+      provider,
+      priceId ?? null,
+      productId ?? null,
+      checkout,
+    );
     return this.rowToOffer(r);
   }
 
@@ -936,6 +943,10 @@ export class PostgresBillingStore extends BillingStore {
     return this.billingAutoRecharge.upsertProfile(profile, options);
   }
 
+  async resumeAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<boolean> {
+    return this.billingAutoRecharge.resumeProfile(profile);
+  }
+
   async claimAutoRechargeAttempt(
     input: AutoRechargeAttemptClaim,
   ): Promise<BillingAutoRechargeAttempt | null> {
@@ -950,6 +961,15 @@ export class PostgresBillingStore extends BillingStore {
     input: AutoRechargeProviderPaymentUpdate,
   ): Promise<void> {
     return this.billingAutoRecharge.updateAttemptByProviderPayment(input);
+  }
+
+  async getAutoRechargeOperationalWindow(userId: string): Promise<{
+    maxRecharges: number;
+    windowStart: string;
+    windowEnd: string;
+    count: number;
+  } | null> {
+    return this.billingAutoRecharge.operationalWindow(userId);
   }
 
   async countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number> {

@@ -197,7 +197,7 @@ deduction. Processing outcomes are `not_configured`, `disabled`,
 quantity, window counts, and payment method, so recharges are idempotent and
 bounded even across process restarts.
 
-A new enrollment uses the first top-up in `eligible_topups` and the configured default quantity.
+A new enrollment uses the first top-up in `eligible_topups` and the configured default quantity. If that top-up has no provider binding for the current environment, auto-recharge is unavailable; later entries are not used as fallback defaults.
 An enabled profile keeps its saved top-up and quantity when the catalog is
 republished or those defaults change. Before each automatic charge, the active
 catalog must still authorize that selection, its provider product, quantity, and

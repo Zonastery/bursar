@@ -415,8 +415,7 @@ CREATE FUNCTION bursar.upsert_auto_recharge_profile(
     p_window_anchor text,
     p_window_timezone text,
     p_armed boolean DEFAULT TRUE,
-    p_state text DEFAULT 'active',
-    p_reset_cooldown boolean DEFAULT FALSE
+    p_state text DEFAULT 'active'
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
@@ -457,7 +456,6 @@ BEGIN
     IF p_armed IS NULL
        OR p_state IS NULL
        OR p_state NOT IN ('active', 'paused')
-       OR p_reset_cooldown IS NULL
        OR NOT bursar.is_nonempty_bounded_text(p_provider, 100)
        OR p_topup_id IS NULL
        OR p_quantity IS NULL
@@ -478,6 +476,8 @@ BEGIN
             USING ERRCODE='22023';
     END IF;
 
+    -- Retry is a state transition, not a new enrollment. Keep the original
+    -- catalog identity and all financial/failure history for pending attempts.
     SELECT t.catalog_revision_id,t.topup_key,t.amount_minor
     INTO v_revision,v_topup_key,v_amount_minor
     FROM bursar.catalog_topups t
@@ -539,19 +539,13 @@ BEGIN
     INSERT INTO bursar.billing_auto_recharge_profiles(
         subject_id,enabled,armed,state,provider,provider_environment,
         catalog_revision_id,topup_id,quantity,threshold,rearm_above,
-        max_charges_per_window,max_charge_minor,cooldown_seconds,
-        max_consecutive_failures,window_unit,window_count,window_anchor,
-        window_timezone
+        max_consecutive_failures
     )
     VALUES (
         p_subject_id,true,p_armed,p_state,
         p_provider,v_environment,v_revision,p_topup_id,p_quantity,v_threshold,
         v_policy.rearm_above,
-        p_max_charges_per_window,
-        v_policy.max_charge_minor,
-        v_policy.cooldown_seconds,
-        v_policy.max_consecutive_failures,
-        p_window_unit,p_window_count,p_window_anchor,p_window_timezone
+        v_policy.max_consecutive_failures
     )
     ON CONFLICT (tenant_id, subject_id, provider_environment) DO UPDATE
     SET enabled=EXCLUDED.enabled,
@@ -563,22 +557,40 @@ BEGIN
         quantity=EXCLUDED.quantity,
         threshold=EXCLUDED.threshold,
         rearm_above=EXCLUDED.rearm_above,
-        max_charges_per_window=EXCLUDED.max_charges_per_window,
-        max_charge_minor=EXCLUDED.max_charge_minor,
-        cooldown_seconds=EXCLUDED.cooldown_seconds,
         max_consecutive_failures=EXCLUDED.max_consecutive_failures,
-        window_unit=EXCLUDED.window_unit,
-        window_count=EXCLUDED.window_count,
-        window_anchor=EXCLUDED.window_anchor,
-        window_timezone=EXCLUDED.window_timezone,
-        state=EXCLUDED.state,
-        last_attempt_at=CASE
-            WHEN p_reset_cooldown THEN NULL
-            ELSE billing_auto_recharge_profiles.last_attempt_at
-        END;
+        state=EXCLUDED.state;
 
     RETURN true;
 
+END $$;
+
+-- Resume a saved enrollment only while its terms remain eligible.
+CREATE FUNCTION bursar.resume_auto_recharge_profile(
+    p_subject_id uuid, p_provider text, p_topup_id uuid, p_quantity integer, p_threshold numeric
+)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_environment text := bursar.current_provider_environment();
+    v_profile bursar.billing_auto_recharge_profiles;
+    v_threshold numeric := round(p_threshold, 6);
+BEGIN
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(
+        'bursar.tenant:' || bursar.require_tenant_id()::text || ':catalog.active', 0
+    ));
+    SELECT * INTO v_profile FROM bursar.billing_auto_recharge_profiles
+    WHERE subject_id = p_subject_id AND provider_environment = v_environment
+    FOR UPDATE;
+    IF NOT FOUND OR NOT v_profile.enabled
+       OR ROW(v_profile.provider, v_profile.topup_id, v_profile.quantity, v_profile.threshold)
+          IS DISTINCT FROM ROW(p_provider, p_topup_id, p_quantity, v_threshold)
+       OR NOT EXISTS (SELECT 1 FROM bursar.auto_recharge_eligible_policy(v_profile))
+    THEN
+        RETURN false;
+    END IF;
+    UPDATE bursar.billing_auto_recharge_profiles
+    SET state = 'active', armed = true, last_attempt_at = NULL
+    WHERE subject_id = p_subject_id AND provider_environment = v_environment;
+    RETURN true;
 END $$;
 
 -- === Billing preferences ===

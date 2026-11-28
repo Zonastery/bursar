@@ -131,6 +131,10 @@ export class BillingManagement {
     return this.store.upsertAutoRechargeProfile(profile, options);
   }
 
+  async resumeAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<boolean> {
+    return this.store.resumeAutoRechargeProfile(profile);
+  }
+
   async claimAutoRechargeAttempt(input: {
     userId: string;
     idempotencyKey: string;
@@ -160,6 +164,15 @@ export class BillingManagement {
     failureMessage?: string | null;
   }): Promise<void> {
     return this.store.updateAutoRechargeAttemptByProviderPayment(input);
+  }
+
+  async getAutoRechargeOperationalWindow(userId: string): Promise<{
+    maxRecharges: number;
+    windowStart: string;
+    windowEnd: string;
+    count: number;
+  } | null> {
+    return this.store.getAutoRechargeOperationalWindow(userId);
   }
 
   async countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number> {

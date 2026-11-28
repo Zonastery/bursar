@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
@@ -21,8 +22,16 @@ class _BillingContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AutoRechargeOperationalWindow(_BillingContract):
+    max_recharges: PositiveSafeInteger
+    window_start: datetime
+    window_end: datetime
+    attempt_count: NonNegativeSafeInteger
+
+
 class CheckoutIntentCreate(_BillingContract):
     subject_id: str
+    account_id: str | None = None
     provider: str
     operation_key: StableKey
     checkout_kind: Literal["subscription", "credit_topup"]

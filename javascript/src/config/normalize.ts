@@ -67,7 +67,7 @@ export function normalizeConfig(data: JsonObject, environment?: ProviderEnvironm
       if (!object(plan)) continue;
       if (object(pricing) && object(pricing.rate_cards)) {
         const keys = Object.keys(pricing.rate_cards);
-        if (keys.length === 1 && keys[0] !== undefined && !("rate_card" in plan))
+        if (keys.length === 1 && keys[0] !== undefined && plan.rate_card == null)
           plan.rate_card = keys[0];
       }
     }

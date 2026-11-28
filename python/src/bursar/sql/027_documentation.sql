@@ -204,11 +204,19 @@ IS
 'Read the immutable catalog revision and rate-card context captured by a '
 'subject-owned lease for deterministic settlement pricing.';
 COMMENT ON FUNCTION bursar.upsert_auto_recharge_profile(
-    uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text, boolean, text, boolean
+    uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text, boolean, text
 )
 IS
 'Enable or revise auto-recharge against active catalog policy, or disable an '
 'existing profile without catalog lookup.';
+COMMENT ON FUNCTION bursar.resume_auto_recharge_profile(uuid, text, uuid, integer, numeric)
+IS
+'Rearm an existing auto-recharge profile only when its saved preferences and '
+'commercial terms remain eligible under the active catalog.';
+COMMENT ON FUNCTION bursar.get_auto_recharge_operational_window(uuid)
+IS
+'Read the active auto-recharge policy limit, window, and counted attempts '
+'using the same database calculation as charge admission.';
 COMMENT ON FUNCTION bursar.record_subscription_conflict(uuid, text, text, text, text, jsonb)
 IS
 'Idempotently record a duplicate provider-subscription admission conflict '
@@ -241,7 +249,7 @@ COMMENT ON FUNCTION bursar.list_billing_invoices(
     integer
 )
 IS 'List one bounded keyset page of invoices for a subject and provider environment.';
-COMMENT ON FUNCTION bursar.resolve_catalog_offer(text, text, text)
+COMMENT ON FUNCTION bursar.resolve_catalog_offer(text, text, text, uuid, uuid)
 IS 'Resolve an active provider reference to its catalog subscription offer.';
 COMMENT ON FUNCTION bursar.resolve_catalog_topup(text, text, text)
 IS 'Resolve an active provider reference to its catalog credit top-up.';
@@ -258,6 +266,7 @@ COMMENT ON FUNCTION bursar.create_checkout_intent(
     text,
     text,
     text,
+    uuid,
     uuid
 )
 IS

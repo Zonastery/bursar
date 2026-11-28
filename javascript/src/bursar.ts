@@ -149,8 +149,8 @@ export class CatalogService {
     return loadConfigFromDict(active.config, this.credits.providerEnvironment);
   }
 
-  async publicView(): Promise<PublicCatalog> {
-    return projectPublicCatalog(await this.getConfig(), this.storefrontScope);
+  async publicView(options: { region?: string; at?: Date } = {}): Promise<PublicCatalog> {
+    return projectPublicCatalog(await this.getConfig(), this.storefrontScope, options);
   }
 
   publishDraft(config: BursarConfigData, label?: string | null): Promise<string> {

@@ -1,3 +1,4 @@
+import { offerIsAvailable } from "./config/availability.js";
 import { hasProviderBinding } from "./config/parse-commerce.js";
 import type { ProviderEnvironment } from "./providers/environment.js";
 import type { CommerceOffer, FeatureValue, ParsedBursarConfig, Window } from "./config/types.js";
@@ -124,15 +125,20 @@ export interface PublicCatalogScope {
 export function projectPublicCatalog(
   config: ParsedBursarConfig,
   scope?: PublicCatalogScope,
+  availability?: { region?: string; at?: Date },
 ): PublicCatalog {
+  const at = availability?.at ?? new Date();
+  if (!Number.isFinite(at.getTime())) throw new RangeError("at must be a valid date");
   const offers = Object.entries(config.commerce.offers).filter(
     ([, offer]) =>
-      scope === undefined ||
-      Object.entries(offer.providers).some(
-        ([name, reference]) =>
-          (scope.providers === undefined || scope.providers.includes(name)) &&
-          hasProviderBinding(reference, scope.providerEnvironment),
-      ),
+      (availability === undefined ||
+        offerIsAvailable(offer.availability, availability.region, at)) &&
+      (scope === undefined ||
+        Object.entries(offer.providers).some(
+          ([name, reference]) =>
+            (scope.providers === undefined || scope.providers.includes(name)) &&
+            hasProviderBinding(reference, scope.providerEnvironment),
+        )),
   );
   const plans = Object.entries(config.plans)
     .map(([key, plan]): PublicCatalogPlan => {

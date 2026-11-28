@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
     AutoRechargeAttemptUpdate,
+    AutoRechargeOperationalWindow,
 )
 from bursar.billing.policy_window import resolve_auto_recharge_window
 from bursar.billing.types import (
@@ -31,6 +32,7 @@ from bursar.config import (
     resolve_provider_id,
 )
 from bursar.config.availability import offer_is_available
+from bursar.config.parse_commerce import has_provider_binding
 from bursar.errors import (
     AutoRechargeDisabledError,
     AutoRechargeNotConfiguredError,
@@ -114,6 +116,10 @@ class AutoRechargeBillingPort(Protocol):
         input: AutoRechargeAttemptUpdate,
     ) -> None: ...
 
+    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool: ...
+
+    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None: ...
+
     def count_auto_recharge_attempts(
         self,
         user_id: str,
@@ -171,6 +177,9 @@ class AutoRechargeService:
             return None
         reference = topup.providers.get(provider.provider)
         if reference is None:
+            return None
+
+        if not has_provider_binding(reference, getattr(self._billing, "provider_environment", None) or ""):
             return None
 
         resolved_topup: BillingTopupResult | None
@@ -266,6 +275,9 @@ class AutoRechargeService:
         policy = self._policy(provider, profile)
         if policy is None:
             return None
+        window = self._billing.get_auto_recharge_operational_window(user_id)
+        if window is None:
+            return None
         payment = await self._payment_method(user_id, provider) if profile is not None and profile.enabled else None
         quote = await self._preview(policy, payment, provider) if payment is not None else None
         method = payment[1] if payment is not None else None
@@ -275,13 +287,10 @@ class AutoRechargeService:
             threshold_credits=policy.threshold,
             topup_key=policy.topup_key,
             quantity=policy.quantity,
-            max_recharges=policy.max_charges_per_window,
-            window_start=policy.window_start,
-            window_end=policy.window_end,
-            recharges_in_window=self._billing.count_auto_recharge_attempts(
-                user_id,
-                policy.window_start,
-            ),
+            max_recharges=window.max_recharges,
+            window_start=window.window_start.isoformat(),
+            window_end=window.window_end.isoformat(),
+            recharges_in_window=window.attempt_count,
             payment_method_id=method.id if method is not None else None,
             payment_method_last4=method.last4 if method is not None else None,
             payment_method_brand=method.brand if method is not None else None,
@@ -357,10 +366,10 @@ class AutoRechargeService:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled:
             raise AutoRechargeDisabledError
-        self._billing.upsert_auto_recharge_profile(
-            profile.model_copy(update={"state": "active", "armed": True}),
-            reset_cooldown=True,
-        )
+        if self._policy(provider, profile) is None or profile.provider != provider.provider:
+            return AutoRechargeProcessResult(outcome="not_configured")
+        if not self._billing.resume_auto_recharge_profile(profile):
+            return AutoRechargeProcessResult(outcome="not_configured")
         return await self.process_if_needed(
             user_id,
             provider,

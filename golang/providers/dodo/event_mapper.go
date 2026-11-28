@@ -285,6 +285,7 @@ func dodoPayment(data map[string]any, metadata map[string]string, accountID stri
 			Metadata:               metadataAny(metadata),
 		}
 		if succeeded {
+			subscription.Refs = payment.Refs
 			subscription.Status = "active"
 			if value, exists := data["subscription_status"]; exists && value != nil {
 				subscription.Status, err = dodoSubscriptionStatus(value)
@@ -450,6 +451,9 @@ func dodoSubscriptionRefs(data map[string]any, metadata map[string]string) (*bur
 	}
 	if productID != "" {
 		return &bursar.ProviderRef{ProductID: productID}, nil
+	}
+	if _, present := metadata["checkout_intent_id"]; present {
+		return nil, nil
 	}
 	if lookupKey := strings.TrimSpace(metadata["plan_slug"]); lookupKey != "" {
 		return &bursar.ProviderRef{LookupKey: lookupKey}, nil

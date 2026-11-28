@@ -86,7 +86,7 @@ BEGIN
 
     UPDATE bursar.billing_checkout_intents
     SET checkout_url = NULL
-    WHERE subject_id = p_subject_id;
+    WHERE subject_id = p_subject_id OR account_id = p_subject_id;
 
     UPDATE bursar.billing_event_payloads AS payload
     SET envelope = jsonb_build_object('pseudonymized', true)
@@ -423,7 +423,8 @@ CREATE FUNCTION bursar.create_checkout_intent(
     p_provider_session_id text DEFAULT NULL,
     p_checkout_url text DEFAULT NULL,
     p_region text DEFAULT NULL,
-    p_expected_revision uuid DEFAULT NULL
+    p_expected_revision uuid DEFAULT NULL,
+    p_account_id uuid DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -433,6 +434,7 @@ AS $$
 DECLARE
     v_id uuid;
     v_revision uuid;
+    v_winner_revision uuid;
     v_environment text := bursar.current_provider_environment();
     v_availability jsonb;
     v_object_type text;
@@ -468,25 +470,33 @@ BEGIN
     END IF;
 
     INSERT INTO bursar.subjects(id)
-    VALUES (p_subject_id)
+    SELECT id FROM (SELECT DISTINCT unnest(ARRAY[p_subject_id, COALESCE(p_account_id, p_subject_id)]) AS id) AS subjects
+    ORDER BY id
     ON CONFLICT (tenant_id, id) DO NOTHING;
 
     PERFORM 1
     FROM bursar.subjects
-    WHERE id = p_subject_id
+    WHERE id IN (p_subject_id, COALESCE(p_account_id, p_subject_id))
+    ORDER BY id
     FOR UPDATE;
 
-    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+    IF bursar.is_subject_pseudonymized(p_subject_id)
+       OR bursar.is_subject_pseudonymized(COALESCE(p_account_id, p_subject_id)) THEN
         RAISE EXCEPTION 'pseudonymized subject cannot create checkout'
             USING ERRCODE = '55000';
     END IF;
 
     -- Return the immutable winner before consulting today's catalog. The
     -- caller compares its stored digest before any provider side effect.
-    SELECT id INTO v_id FROM bursar.billing_checkout_intents
+    SELECT id, catalog_revision_id INTO v_id, v_winner_revision FROM bursar.billing_checkout_intents
     WHERE subject_id = p_subject_id
       AND provider_environment = v_environment AND operation_key = p_operation_key;
-    IF FOUND THEN RETURN v_id; END IF;
+    IF FOUND THEN
+        IF p_expected_revision IS NOT NULL AND v_winner_revision <> p_expected_revision THEN
+            RAISE EXCEPTION 'checkout catalog changed' USING ERRCODE = '40001';
+        END IF;
+        RETURN v_id;
+    END IF;
 
     SELECT id
     INTO v_revision
@@ -545,6 +555,7 @@ BEGIN
 
     INSERT INTO bursar.billing_checkout_intents AS intent(
         subject_id,
+        account_id,
         provider,
         provider_environment,
         operation_key,
@@ -559,6 +570,7 @@ BEGIN
     )
     VALUES (
         p_subject_id,
+        COALESCE(p_account_id, p_subject_id),
         p_provider,
         v_environment,
         p_operation_key,
@@ -586,8 +598,8 @@ BEGIN
         -- digest before any provider side effect and map a mismatch to their
         -- stable checkout-conflict error. Raising a generic uniqueness error
         -- here would bypass that domain contract.
-        SELECT existing.id
-        INTO v_id
+        SELECT existing.id, existing.catalog_revision_id
+        INTO v_id, v_winner_revision
         FROM bursar.billing_checkout_intents AS existing
         WHERE existing.subject_id = p_subject_id
           AND existing.provider_environment = v_environment
@@ -599,6 +611,9 @@ BEGIN
             -- idempotency conflict.
             RAISE EXCEPTION 'checkout intent replay row is missing'
                 USING ERRCODE = '55000';
+        END IF;
+        IF p_expected_revision IS NOT NULL AND v_winner_revision <> p_expected_revision THEN
+            RAISE EXCEPTION 'checkout catalog changed' USING ERRCODE = '40001';
         END IF;
     END IF;
 
@@ -673,13 +688,15 @@ BEGIN
     SET status = COALESCE(p_status, status),
         provider_session_id = COALESCE(
             CASE
-                WHEN bursar.is_subject_pseudonymized(v_intent.subject_id) THEN NULL
+                WHEN bursar.is_subject_pseudonymized(v_intent.subject_id)
+                  OR bursar.is_subject_pseudonymized(v_intent.account_id) THEN NULL
                 ELSE p_provider_session_id
             END,
             provider_session_id
         ),
         checkout_url = CASE
-            WHEN bursar.is_subject_pseudonymized(v_intent.subject_id) THEN NULL
+            WHEN bursar.is_subject_pseudonymized(v_intent.subject_id)
+                  OR bursar.is_subject_pseudonymized(v_intent.account_id) THEN NULL
             ELSE COALESCE(p_checkout_url, checkout_url)
         END,
         updated_at = now()

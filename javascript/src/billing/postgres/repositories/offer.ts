@@ -80,9 +80,17 @@ export class BillingOfferRepository {
     provider: string,
     priceId: string | null,
     productId: string | null,
+    checkout?: { accountId: string; intentId: string; lookupKey?: string | null },
   ): Promise<BillingOfferRow | null> {
-    const lookupType = priceId !== null ? "price_id" : "product_id";
-    return this.resolve(provider, lookupType, priceId ?? productId, "resolveByPrice");
+    const lookupType =
+      priceId !== null ? "price_id" : productId !== null ? "product_id" : "external_id";
+    return this.resolve(
+      provider,
+      lookupType,
+      priceId ?? productId ?? checkout?.lookupKey ?? null,
+      "resolveByPrice",
+      checkout,
+    );
   }
 
   async resolveByLookup(provider: string, lookupKey: string): Promise<BillingOfferRow | null> {
@@ -94,16 +102,16 @@ export class BillingOfferRepository {
     lookupType: "price_id" | "product_id" | "external_id",
     lookupValue: string | null,
     operation: string,
+    checkout?: { accountId: string; intentId: string; lookupKey?: string | null },
   ): Promise<BillingOfferRow | null> {
     if (!provider.trim()) throw new TypeError("provider must not be empty");
     if (!lookupValue?.trim()) return null;
 
     const context = `BillingOfferRepository.${operation}`;
-    const rows = await this.query("SELECT * FROM bursar.resolve_catalog_offer($1, $2, $3)", [
-      provider,
-      lookupType,
-      lookupValue,
-    ]);
+    const rows = await this.query(
+      "SELECT * FROM bursar.resolve_catalog_offer($1, $2, $3, $4::uuid, $5::uuid)",
+      [provider, lookupType, lookupValue, checkout?.accountId ?? null, checkout?.intentId ?? null],
+    );
     if (rows.length > 1) {
       throw new StoreError(`${context}: expected at most one offer`, {
         details: { rowCount: rows.length },

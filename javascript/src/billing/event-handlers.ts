@@ -336,21 +336,40 @@ export class BillingEventHandlers {
     };
   }
 
-  private async resolveOfferAndKeys(event: BillingEvent): Promise<{
+  private async resolveOfferAndKeys(
+    event: BillingEvent,
+    initial = false,
+    accountId?: string | null,
+  ): Promise<{
     offer: BillingOfferResult | null;
     offerId: string | null;
     offerKey: string | null;
     plan: string | null;
   }> {
     const refs = event.subscription?.refs;
-    if (!refs) return { offer: null, offerId: null, offerKey: null, plan: null };
+    const rawIntentId = initial ? event.metadata?.checkout_intent_id : undefined;
+    if (!refs) {
+      if (rawIntentId !== undefined) throw new StoreError("checkout offer reference is missing");
+      return { offer: null, offerId: null, offerKey: null, plan: null };
+    }
 
     // Tier 1: Resolve by price/product ID
-    const offer = await this.resolveBillingOfferCached(
-      event.provider,
-      refs.productId ?? null,
-      refs.priceId ?? null,
-    );
+    const intentId = rawIntentId === undefined ? undefined : z.string().uuid().parse(rawIntentId);
+    const resolvedAccountId = intentId ? (accountId ?? (await this.resolveAccountId(event))) : null;
+    if (intentId && !resolvedAccountId) throw new StoreError("checkout account is missing");
+    const offer =
+      intentId && resolvedAccountId
+        ? await this.store.resolveBillingOffer(
+            event.provider,
+            refs.productId ?? null,
+            refs.priceId ?? null,
+            { accountId: resolvedAccountId, intentId, lookupKey: refs.lookupKey },
+          )
+        : await this.resolveBillingOfferCached(
+            event.provider,
+            refs.productId ?? null,
+            refs.priceId ?? null,
+          );
     if (offer) {
       return {
         offer,
@@ -478,7 +497,7 @@ export class BillingEventHandlers {
     const resolved =
       options.resolveOffers === false
         ? { offer: null, offerId: null, offerKey: null, plan: null }
-        : await this.resolveOfferAndKeys(event);
+        : await this.resolveOfferAndKeys(event, !existing, uid);
     const isPlanChange = options.action === "subscription_plan_changed";
     const preservedAllowanceAnchor =
       isPlanChange && this.provisioning !== null
@@ -564,7 +583,11 @@ export class BillingEventHandlers {
       });
       return { handled: false, error: "subscription_conflict" };
     }
-    const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
+    const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(
+      event,
+      !existing,
+      uid,
+    );
     this.logger.debug("[BillingService] resolveOfferAndKeys", {
       offerKey,
       plan,
@@ -648,12 +671,13 @@ export class BillingEventHandlers {
   }
 
   private async handleSubscriptionRenewed(event: BillingEvent): Promise<BillingEventResult> {
+    const existing = await this.getExistingSubscription(event);
     const result = await this.applySubscriptionEvent(event, {
       action: "subscription_renewed",
       status: "active",
     });
     if (result.handled && result.action !== "stale_subscription_event") {
-      const { offer } = await this.resolveOfferAndKeys(event);
+      const { offer } = await this.resolveOfferAndKeys(event, !existing);
       await this.grantSubscriptionCycle(event, offer);
     }
     return result;
@@ -692,7 +716,7 @@ export class BillingEventHandlers {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const resolved = existing ? null : await this.resolveOfferAndKeys(event);
+    const resolved = existing ? null : await this.resolveOfferAndKeys(event, true, uid);
     if (!existing && !resolved?.offerId) {
       throw new StoreError(
         `cannot persist cancellation for unknown subscription ${event.provider}/${event.subscription.providerSubscriptionId}: offer could not be resolved`,

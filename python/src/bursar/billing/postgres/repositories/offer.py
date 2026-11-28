@@ -69,9 +69,14 @@ class BillingOfferRepository:
         provider: str,
         price_id: str | None,
         product_id: str | None,
+        account_id: str | None = None,
+        intent_id: str | None = None,
+        lookup_key: str | None = None,
     ) -> BillingOfferRow | None:
-        lookup_type = "price_id" if price_id is not None else "product_id"
-        return self._resolve(provider, lookup_type, price_id or product_id, "resolve_by_price")
+        lookup_type = "price_id" if price_id else "product_id" if product_id else "external_id"
+        return self._resolve(
+            provider, lookup_type, price_id or product_id or lookup_key, "resolve_by_price", account_id, intent_id
+        )
 
     def resolve_by_lookup(self, provider: str, lookup_key: str) -> BillingOfferRow | None:
         return self._resolve(provider, "external_id", lookup_key, "resolve_by_lookup")
@@ -82,6 +87,8 @@ class BillingOfferRepository:
         lookup_type: Literal["price_id", "product_id", "external_id"],
         lookup_value: str | None,
         operation: str,
+        account_id: str | None = None,
+        intent_id: str | None = None,
     ) -> BillingOfferRow | None:
         validate_non_empty(provider, "provider")
         if lookup_value is None or not lookup_value.strip():
@@ -89,8 +96,8 @@ class BillingOfferRepository:
 
         context = f"BillingOfferRepository.{operation}"
         rows = self._execute(
-            "SELECT * FROM bursar.resolve_catalog_offer(%s, %s, %s)",
-            [provider, lookup_type, lookup_value],
+            "SELECT * FROM bursar.resolve_catalog_offer(%s, %s, %s, %s::uuid, %s::uuid)",
+            [provider, lookup_type, lookup_value, account_id, intent_id],
         )
         if len(rows) > 1:
             raise StoreError(

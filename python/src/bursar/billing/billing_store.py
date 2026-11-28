@@ -6,6 +6,7 @@ from typing import Any
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
     AutoRechargeAttemptUpdate,
+    AutoRechargeOperationalWindow,
     AutoRechargeProviderPaymentUpdate,
     BillingCreditGrantCreate,
     BillingDisputeUpsert,
@@ -85,6 +86,9 @@ class BillingStore(ABC):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
+        account_id: str | None = None,
+        intent_id: str | None = None,
+        lookup_key: str | None = None,
     ) -> BillingOfferResult | None: ...
 
     @abstractmethod
@@ -312,6 +316,12 @@ class BillingStore(ABC):
         self,
         input: AutoRechargeProviderPaymentUpdate,
     ) -> None: ...
+
+    @abstractmethod
+    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool: ...
+
+    @abstractmethod
+    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None: ...
 
     @abstractmethod
     def count_auto_recharge_attempts(

@@ -54,7 +54,10 @@ const ProfileRowSchema = z
   .strict()
   .superRefine((row, ctx) => {
     if (row.enabled !== (row.state !== "disabled")) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "enabled and state are inconsistent" });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "enabled and state are inconsistent",
+      });
     }
     if (row.enabled && (row.provider === null || row.topup_id === null)) {
       ctx.addIssue({
@@ -282,13 +285,38 @@ export class BillingAutoRechargeRepository {
     return row === null ? null : profileFromRow(row);
   }
 
+  async resumeProfile(profile: BillingAutoRechargeProfile): Promise<boolean> {
+    const rows = await this.query(
+      "SELECT bursar.resume_auto_recharge_profile($1::uuid, $2, $3::uuid, $4, $5) AS updated",
+      [
+        profile.userId,
+        profile.provider,
+        profile.topupId,
+        profile.quantity,
+        profile.threshold.toString(),
+      ],
+    );
+    return requireResultField(
+      rows,
+      "updated",
+      pgBoolean,
+      "BillingAutoRechargeRepository.resumeProfile",
+    );
+  }
+
   async upsertProfile(
     profile: BillingAutoRechargeProfile,
     options: { resetCooldown?: boolean } = {},
   ): Promise<void> {
+    // Keep the exported compatibility option on the same resume transition.
+    if (options.resetCooldown) {
+      if (!(await this.resumeProfile(profile)))
+        throw new StoreError(`auto-recharge profile update rejected: ${profile.userId}`);
+      return;
+    }
     const rows = await this.query(
       `SELECT bursar.upsert_auto_recharge_profile(
-         $1::uuid, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+         $1::uuid, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13
        ) AS updated`,
       [
         profile.userId,
@@ -304,7 +332,6 @@ export class BillingAutoRechargeRepository {
         profile.windowTimezone,
         profile.armed,
         profile.state,
-        options.resetCooldown ?? false,
       ],
     );
     if (
@@ -365,7 +392,11 @@ export class BillingAutoRechargeRepository {
     const path = ATTEMPT_TRANSITION_PATHS.get(current)?.get(input.state);
     if (!path) {
       throw new StoreError(`auto-recharge attempt transition rejected: ${input.id}`, {
-        details: { attemptId: input.id, currentState: current, requestedState: input.state },
+        details: {
+          attemptId: input.id,
+          currentState: current,
+          requestedState: input.state,
+        },
       });
     }
     for (const state of path) {
@@ -437,6 +468,26 @@ export class BillingAutoRechargeRepository {
       failureCode: input.failureCode,
       failureMessage: input.failureMessage,
     });
+  }
+
+  async operationalWindow(userId: string): Promise<{
+    maxRecharges: number;
+    windowStart: string;
+    windowEnd: string;
+    count: number;
+  } | null> {
+    const rows = await this.query(
+      "SELECT * FROM bursar.get_auto_recharge_operational_window($1::uuid)",
+      [userId],
+    );
+    const row = optionalRecordRow(rows, "BillingAutoRechargeRepository.operationalWindow");
+    if (!row) return null;
+    return {
+      maxRecharges: safeParse(positiveInteger, row.max_recharges, "auto-recharge max"),
+      windowStart: safeParse(timestamp, row.window_start, "auto-recharge window start"),
+      windowEnd: safeParse(timestamp, row.window_end, "auto-recharge window end"),
+      count: safeParse(safeNonnegativeInteger, row.attempt_count, "auto-recharge attempt count"),
+    };
   }
 
   async countAttempts(userId: string, since: string | Date): Promise<number> {

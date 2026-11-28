@@ -1,6 +1,9 @@
 package bursar
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // PublicCatalogWindow is the provider-safe window description exposed to
 // product surfaces. Rolling and plan-assignment windows are normalized to the
@@ -63,6 +66,33 @@ type PublicCatalog struct {
 // browser, mobile client, or product API response. The returned values are
 // detached from the source configuration.
 func ProjectPublicCatalog(config *BursarConfig) PublicCatalog {
+	return projectPublicCatalog(config, nil, "", nil, false)
+}
+
+// PublicCatalogOptions controls storefront availability using a trusted region and evaluation time.
+type PublicCatalogOptions struct {
+	Region string
+	At     time.Time
+}
+
+func projectPublicCatalog(config *BursarConfig, options *PublicCatalogOptions, environment ProviderEnvironment, providers []string, providersConfigured bool) PublicCatalog {
+	available := func(offer CommerceOffer) bool {
+		if options != nil && !offerIsAvailableAt(offer.Availability, options.Region, options.At) {
+			return false
+		}
+		if environment == "" {
+			return true
+		}
+		for name, ref := range offer.Providers {
+			if providersConfigured && !containsText(providers, name) {
+				continue
+			}
+			if _, err := ResolveProviderReference(ref, environment); err == nil {
+				return true
+			}
+		}
+		return false
+	}
 	result := PublicCatalog{Version: 1, Plans: []PublicCatalogPlan{}, Topups: []PublicCatalogOffer{}}
 	if config == nil {
 		return result
@@ -91,7 +121,7 @@ func ProjectPublicCatalog(config *BursarConfig) PublicCatalog {
 			}
 		}
 		for offerKey, offer := range config.Commerce.Offers {
-			if offer.Type == "subscription" && offer.Plan != nil && *offer.Plan == key {
+			if available(offer) && offer.Type == "subscription" && offer.Plan != nil && *offer.Plan == key {
 				projected.Offers = append(projected.Offers, projectPublicOffer(offerKey, offer))
 			}
 		}
@@ -99,7 +129,7 @@ func ProjectPublicCatalog(config *BursarConfig) PublicCatalog {
 		result.Plans = append(result.Plans, projected)
 	}
 	for key, offer := range config.Commerce.Offers {
-		if offer.Type == "topup" {
+		if available(offer) && offer.Type == "topup" {
 			result.Topups = append(result.Topups, projectPublicOffer(key, offer))
 		}
 	}

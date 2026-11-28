@@ -401,6 +401,10 @@ func commerceStateOfferContext(ctx context.Context, tx *PostgresTransaction, off
 // mapping; the supplied identifiers are used only to select its stable lookup
 // type and to retain the provider's exact product reference for a later call.
 func (s *PostgresStore) ResolveBillingOffer(ctx context.Context, provider, productID, priceID, lookupKey string) (result *BillingOffer, err error) {
+	return s.resolveBillingOfferForCheckout(ctx, provider, productID, priceID, lookupKey, "", "")
+}
+
+func (s *PostgresStore) resolveBillingOfferForCheckout(ctx context.Context, provider, productID, priceID, lookupKey, accountID, intentID string) (result *BillingOffer, err error) {
 	provider, err = requireText(provider, "billing offer provider")
 	if err != nil {
 		return nil, err
@@ -409,8 +413,16 @@ func (s *PostgresStore) ResolveBillingOffer(ctx context.Context, provider, produ
 	if lookupType == "" {
 		return nil, nil
 	}
+	typedAccount, err := nullablePostgresUUID(accountID, "checkout account ID")
+	if err != nil {
+		return nil, err
+	}
+	typedIntent, err := nullablePostgresUUID(intentID, "checkout intent ID")
+	if err != nil {
+		return nil, err
+	}
 	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
-		rows, callErr := tx.Call(ctx, "resolve_catalog_offer", provider, lookupType, lookupValue)
+		rows, callErr := tx.Call(ctx, "resolve_catalog_offer", provider, lookupType, lookupValue, typedAccount, typedIntent)
 		if callErr != nil {
 			return callErr
 		}
@@ -1284,6 +1296,17 @@ func (s *PostgresStore) UpsertAutoRechargeProfile(ctx context.Context, profile A
 	if err != nil {
 		return err
 	}
+	// Preserve the public compatibility option via the same resume operation.
+	if options.ResetCooldown {
+		resumed, resumeErr := s.ResumeAutoRechargeProfile(ctx, profile)
+		if resumeErr != nil {
+			return resumeErr
+		}
+		if !resumed {
+			return NewStoreError("auto-recharge profile update was rejected", ErrorOptions{Details: map[string]any{"user_id": profile.UserID}})
+		}
+		return nil
+	}
 	return s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
 		var provider, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state any
 		var topupID any = typedTopupID
@@ -1302,7 +1325,7 @@ func (s *PostgresStore) UpsertAutoRechargeProfile(ctx context.Context, profile A
 			armed = true
 			state = string(AutoRechargeStateDisabled)
 		}
-		rows, callErr := tx.Call(ctx, "upsert_auto_recharge_profile", typedUserID, profile.Enabled, provider, topupID, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state, options.ResetCooldown)
+		rows, callErr := tx.Call(ctx, "upsert_auto_recharge_profile", typedUserID, profile.Enabled, provider, topupID, quantity, threshold, maxCharges, windowUnit, windowCount, windowAnchor, windowTimezone, armed, state)
 		if callErr != nil {
 			return callErr
 		}
@@ -1315,6 +1338,26 @@ func (s *PostgresStore) UpsertAutoRechargeProfile(ctx context.Context, profile A
 		}
 		return nil
 	})
+}
+
+func (s *PostgresStore) ResumeAutoRechargeProfile(ctx context.Context, profile AutoRechargeProfile) (result bool, err error) {
+	userID, err := postgresUUID(profile.UserID, "auto-recharge user ID")
+	if err != nil {
+		return false, err
+	}
+	topupID, err := postgresUUID(profile.TopupID, "auto-recharge top-up ID")
+	if err != nil {
+		return false, err
+	}
+	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		rows, e := tx.Call(ctx, "resume_auto_recharge_profile", userID, profile.Provider, topupID, profile.Quantity, amountArgument(profile.Threshold))
+		if e != nil {
+			return e
+		}
+		result, e = commerceStateRequiredBoolResult(rows, "resume_auto_recharge_profile")
+		return e
+	})
+	return result, err
 }
 
 func (s *PostgresStore) ClaimAutoRechargeAttempt(ctx context.Context, claim AutoRechargeAttemptClaim) (result *AutoRechargeAttempt, err error) {
@@ -1578,6 +1621,45 @@ func commerceStateAutoRechargeTransitionPath(current, target AutoRechargeAttempt
 		return path, nil
 	}
 	return nil, NewStoreError("auto-recharge attempt transition was rejected", ErrorOptions{Details: map[string]any{"current_state": current, "requested_state": target}})
+}
+
+func (s *PostgresStore) GetAutoRechargeOperationalWindow(ctx context.Context, userID string) (result *AutoRechargeOperationalWindow, err error) {
+	typedUserID, err := postgresUUID(userID, "auto-recharge user ID")
+	if err != nil {
+		return nil, err
+	}
+	err = s.withTx(ctx, func(ctx context.Context, tx *PostgresTransaction) error {
+		rows, e := tx.Call(ctx, "get_auto_recharge_operational_window", typedUserID)
+		if e != nil {
+			return e
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		const op = "get_auto_recharge_operational_window"
+		max, e := commerceStateOptionalRowInt(rows[0], "max_recharges", op)
+		if e != nil {
+			return e
+		}
+		count, e := commerceStateOptionalRowInt(rows[0], "attempt_count", op)
+		if e != nil {
+			return e
+		}
+		start, e := rowTime(rows[0], "window_start", op)
+		if e != nil {
+			return e
+		}
+		end, e := rowTime(rows[0], "window_end", op)
+		if e != nil {
+			return e
+		}
+		if max < 1 || count < 0 || !end.After(start) {
+			return NewStoreError(op+" returned an invalid policy window", ErrorOptions{})
+		}
+		result = &AutoRechargeOperationalWindow{MaxRecharges: max, Count: count, Start: start, End: end}
+		return nil
+	})
+	return result, err
 }
 
 func (s *PostgresStore) CountAutoRechargeAttempts(ctx context.Context, userID string, since time.Time) (result int, err error) {
