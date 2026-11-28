@@ -810,7 +810,7 @@ def test_runtime_worker_delivers_real_outbox_event_in_background(
     pg_database_url: str,
 ) -> None:
     _select_clickhouse(pg_database_url)
-    _charge_id, _subject_id = _seed_usage_row(pg_database_url, clickhouse=True, record_only=True)
+    charge_id, subject_id = _seed_usage_row(pg_database_url, clickhouse=True, record_only=True)
     clickhouse = ExpiringClaimUsageSink(pg_database_url)
     outcomes: list[OutboxEventOutcome] = []
     runtime = create_bursar_runtime(
@@ -837,7 +837,8 @@ def test_runtime_worker_delivers_real_outbox_event_in_background(
             sleep(0.02)
         assert runtime.health().started is True
         assert len(clickhouse.writes) == 1
-        assert clickhouse.writes[0][0].charge_id
+        assert clickhouse.writes[0][0].charge_id == charge_id
+        assert clickhouse.writes[0][0].subject_id == subject_id
         assert clickhouse.writes[0][0].billing_disposition == "record_only"
         assert {outcome.status for outcome in outcomes} == {"claim_lost", "delivered"}
     finally:
