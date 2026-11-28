@@ -318,10 +318,12 @@ class BillingStore(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool: ...
+    def resume_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> bool:
+        raise NotImplementedError
 
     @abstractmethod
-    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None: ...
+    def get_auto_recharge_operational_window(self, user_id: str) -> AutoRechargeOperationalWindow | None:
+        raise NotImplementedError
 
     @abstractmethod
     def count_auto_recharge_attempts(

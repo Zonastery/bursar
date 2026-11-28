@@ -815,3 +815,52 @@ func TestPostgresCheckoutSubscriptionPinsFirstPayment(t *testing.T) {
 		t.Fatalf("pinned subscription = %+v, %v", stored, err)
 	}
 }
+
+func TestPostgresCheckoutIntentReplayAndTransitions(t *testing.T) {
+	ctx, cancel, config := financialContext(t)
+	defer cancel()
+	_, store := newFinancialSDK(t, ctx, config, &financialProvider{name: "alpha"})
+	actor, account, key := uuid.NewString(), uuid.NewString(), "intent-replay-"+uuid.NewString()
+	input := CheckoutIntentCreate{SubjectID: actor, AccountID: account, Provider: "alpha", CheckoutKind: "credit_topup", ProductKey: "credit_pack", Quantity: 1, IdempotencyKey: key}
+	intent, err := store.CreateOrGetCheckoutIntent(ctx, input)
+	if err != nil {
+		t.Fatalf("create intent: %v", err)
+	}
+	replay, err := store.CreateOrGetCheckoutIntent(ctx, input)
+	if err != nil || replay.ID != intent.ID {
+		t.Fatalf("replay = %+v, %v", replay, err)
+	}
+	found, catalog, err := store.FindCheckoutIntent(ctx, actor, key, "alpha")
+	if err != nil || found == nil || found.ID != intent.ID || catalog == nil {
+		t.Fatalf("find = %+v, %v, %v", found, catalog, err)
+	}
+	otherProvider, _, err := store.FindCheckoutIntent(ctx, actor, key, "other-provider")
+	if err != nil || otherProvider == nil || otherProvider.ID != intent.ID {
+		t.Fatalf("wrong-provider replay winner = %+v, %v", otherProvider, err)
+	}
+	missing, _, err := store.FindCheckoutIntent(ctx, actor, key+"-missing", "alpha")
+	if err != nil || missing != nil {
+		t.Fatalf("missing checkout = %+v, %v", missing, err)
+	}
+	if _, _, err := store.FindCheckoutIntent(ctx, "bad-actor", key, "alpha"); err == nil {
+		t.Fatal("invalid actor accepted")
+	}
+	if err := store.UpdateCheckoutIntent(ctx, intent.ID, account, CheckoutIntentUpdate{Status: "completed"}); err == nil {
+		t.Fatal("billed account changed actor-owned checkout")
+	}
+	if err := store.UpdateCheckoutIntent(ctx, intent.ID, actor, CheckoutIntentUpdate{Status: "completed"}); err != nil {
+		t.Fatalf("complete intent: %v", err)
+	}
+	if err := store.UpdateCheckoutIntent(ctx, intent.ID, actor, CheckoutIntentUpdate{Status: "open"}); err == nil {
+		t.Fatal("terminal checkout reopened")
+	}
+	input.Quantity = 2
+	if _, err := store.CreateOrGetCheckoutIntent(ctx, input); err == nil {
+		t.Fatal("different checkout request replayed")
+	}
+	input.IdempotencyKey = key + "-missing-product"
+	input.ProductKey = "missing-product"
+	if _, err := store.CreateOrGetCheckoutIntent(ctx, input); err == nil {
+		t.Fatal("missing catalog product accepted")
+	}
+}
